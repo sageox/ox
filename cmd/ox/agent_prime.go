@@ -347,6 +347,12 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// anti-entropy: ensure Claude Code hooks are installed
 	hooksInstalled := ensureClaudeHooks(projectRoot)
 
+	// anti-entropy: retry plan commits/pushes a review session could not land
+	// (detached; a no-op ReadDir when nothing is pending — plan_push_pending.go)
+	if config.IsInitialized(projectRoot) {
+		kickPendingPlanPushes(projectRoot)
+	}
+
 	// get project-specific endpoint (single source of truth)
 	projectEndpoint := endpoint.GetForProject(projectRoot)
 

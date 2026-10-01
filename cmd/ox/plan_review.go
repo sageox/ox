@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -180,9 +181,10 @@ func runPlanReview(cmd *cobra.Command, slug string, noServe bool, idleTimeout ti
 	bc := newBroadcaster()
 	rounds := make(chan int, 16)
 	approved := make(chan struct{}, 1)
+	activity := make(chan struct{}, 1)
 
 	start := time.Now()
-	srv := &http.Server{Handler: liveReviewHandler(gitRoot, slug, info.Dir, base, token, bc, rounds, approved)}
+	srv := &http.Server{Handler: liveReviewHandlerWithActivity(gitRoot, slug, info.Dir, base, token, bc, rounds, approved, activity)}
 	go func() { _ = srv.Serve(ln) }()
 	defer func() { _ = srv.Shutdown(context.Background()) }()
 
@@ -208,6 +210,10 @@ func runPlanReview(cmd *cobra.Command, slug string, noServe bool, idleTimeout ti
 				cli.PrintHint("could not read review state: " + derr.Error())
 			}
 			idle.Reset(idleTimeout) // idle, not total: a live session can run long
+		case <-activity:
+			// any accepted POST (accept/reopen too, not just rounds) is a
+			// reviewer at work — never close the loop under them
+			idle.Reset(idleTimeout)
 		case <-approved:
 			fmt.Fprintln(out, "\n"+cli.StyleSuccess.Render("✓")+" Plan approved by reviewer.")
 			reportReviewSession(info.Dir, start, "approved")
@@ -261,6 +267,27 @@ func reportReviewSession(planDir string, since time.Time, ending string) {
 // GET, so reloads show the latest state) and the round/accept/reopen/approve
 // endpoints, plus an SSE stream that pushes reloads.
 func liveReviewHandler(gitRoot, slug, planDir, base, token string, bc *broadcaster, rounds chan<- int, approved chan<- struct{}) http.Handler {
+	return liveReviewHandlerWithActivity(gitRoot, slug, planDir, base, token, bc, rounds, approved, nil)
+}
+
+// reviewBodyLimit caps a POST body. A round is a few KB of marks and notes;
+// 1 MiB is far beyond any real round while still bounding a hostile local
+// caller. Over-limit bodies are REJECTED (413) rather than truncated — a
+// truncated round would fail to parse and surface as a misleading 400.
+const reviewBodyLimit = 1 << 20
+
+// saveReviewFeedback and notifyReviewFeedback are the persistence and agent
+// notification legs of /feedback, as variables so tests can drive the
+// duplicate-round and no-renotify paths without a real task queue.
+var (
+	saveReviewFeedback   = plan.SaveFeedback
+	notifyReviewFeedback = enqueuePlanFeedbackTask
+)
+
+// liveReviewHandlerWithActivity is liveReviewHandler plus an activity signal:
+// every successfully handled POST does a non-blocking send on activity (when
+// non-nil) so the review loop resets its idle timer.
+func liveReviewHandlerWithActivity(gitRoot, slug, planDir, base, token string, bc *broadcaster, rounds chan<- int, approved chan<- struct{}, activity chan<- struct{}) http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -371,7 +398,7 @@ func liveReviewHandler(gitRoot, slug, planDir, base, token string, bc *broadcast
 		}
 	})
 
-	post := func(path string, fn func(body []byte) (map[string]any, int, error)) {
+	post := func(path string, fn func(ctx context.Context, body []byte) (map[string]any, int, error)) {
 		mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodPost {
 				http.Error(w, "POST only", http.StatusMethodNotAllowed)
@@ -381,12 +408,20 @@ func liveReviewHandler(gitRoot, slug, planDir, base, token string, bc *broadcast
 				http.Error(w, "bad token", http.StatusForbidden)
 				return
 			}
-			body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+			body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, reviewBodyLimit))
 			if err != nil {
+				var tooBig *http.MaxBytesError
+				if errors.As(err, &tooBig) {
+					http.Error(w, fmt.Sprintf("request body exceeds %d bytes", tooBig.Limit), http.StatusRequestEntityTooLarge)
+					return
+				}
 				http.Error(w, "read error", http.StatusBadRequest)
 				return
 			}
-			extra, code, err := fn(body)
+			// WithoutCancel: a reviewer closing the tab mid-request must not
+			// kill a git add/commit/pull-rebase halfway through — the write is
+			// already on disk and its commit should finish either way.
+			extra, code, err := fn(context.WithoutCancel(r.Context()), body)
 			if err != nil {
 				http.Error(w, err.Error(), code)
 				return
@@ -397,6 +432,12 @@ func liveReviewHandler(gitRoot, slug, planDir, base, token string, bc *broadcast
 				resp[k] = v
 			}
 			_ = json.NewEncoder(w).Encode(resp)
+			if activity != nil {
+				select {
+				case activity <- struct{}{}:
+				default:
+				}
+			}
 			// Broadcast the reload AFTER the response is written: the submitter's
 			// own tab reloads on this same SSE push, and a reload racing ahead of
 			// the fetch callback could wipe a notified:false toast before it ever
@@ -405,25 +446,47 @@ func liveReviewHandler(gitRoot, slug, planDir, base, token string, bc *broadcast
 		})
 	}
 
-	post("/feedback", func(body []byte) (map[string]any, int, error) {
+	// /feedback response: {"saved","round_id","duplicate","committed","pushed","notified"}.
+	// A duplicate is a client retry of a round already stored (same id): it is
+	// still a success (saved=true) and still attempts the commit — the first
+	// attempt's commit or push may be what failed — but it never re-notifies the
+	// agent or re-signals a round, so notified=false there by construction and
+	// clients must read duplicate before notified.
+	post("/feedback", func(ctx context.Context, body []byte) (map[string]any, int, error) {
 		set, err := plan.ParseFeedback(body)
 		if err != nil {
 			return nil, http.StatusBadRequest, err
 		}
-		set.Slug = slug
-		if _, err := plan.SaveFeedback(planDir, set, time.Now()); err != nil {
-			return nil, http.StatusInternalServerError, err
+		// TEMPORARY until FeedbackSet carries ID: read the client round id
+		// straight from the body. ParseFeedback already proved it is JSON.
+		var roundID struct {
+			ID string `json:"id"`
 		}
-		commitPlanBestEffort(gitRoot, planDir)
-		notifyErr := enqueuePlanFeedbackTask(gitRoot, planDir, slug, len(set.Items))
+		_ = json.Unmarshal(body, &roundID)
+		set.Slug = slug
+		duplicate := false
+		if _, err := saveReviewFeedback(planDir, set, time.Now()); err != nil {
+			if !errors.Is(err, plan.ErrDuplicateRound) {
+				return nil, http.StatusInternalServerError, err
+			}
+			duplicate = true
+		}
+		resp := planCommitFields(commitPlanForReview(ctx, gitRoot, planDir))
+		resp["round_id"] = roundID.ID
+		resp["duplicate"] = duplicate
+		resp["notified"] = false
+		if duplicate {
+			return resp, 0, nil
+		}
+		resp["notified"] = notifyReviewFeedback(gitRoot, planDir, slug, len(set.Items)) == nil
 		select {
 		case rounds <- len(set.Items):
 		default:
 		}
-		return map[string]any{"notified": notifyErr == nil}, 0, nil
+		return resp, 0, nil
 	})
 
-	post("/accept", func(body []byte) (map[string]any, int, error) {
+	post("/accept", func(ctx context.Context, body []byte) (map[string]any, int, error) {
 		anchor, err := anchorFromBody(body)
 		if err != nil {
 			return nil, http.StatusBadRequest, err
@@ -432,11 +495,10 @@ func liveReviewHandler(gitRoot, slug, planDir, base, token string, bc *broadcast
 		if err := plan.AppendResolution(planDir, r, time.Now()); err != nil {
 			return nil, http.StatusInternalServerError, err
 		}
-		commitPlanBestEffort(gitRoot, planDir)
-		return nil, 0, nil
+		return planCommitFields(commitPlanForReview(ctx, gitRoot, planDir)), 0, nil
 	})
 
-	post("/reopen", func(body []byte) (map[string]any, int, error) {
+	post("/reopen", func(ctx context.Context, body []byte) (map[string]any, int, error) {
 		var in struct {
 			Anchor string `json:"anchor"`
 			Note   string `json:"note"`
@@ -464,18 +526,18 @@ func liveReviewHandler(gitRoot, slug, planDir, base, token string, bc *broadcast
 		if _, err := plan.SaveFeedback(planDir, set, time.Now()); err != nil {
 			return nil, http.StatusInternalServerError, err
 		}
-		commitPlanBestEffort(gitRoot, planDir)
+		resp := planCommitFields(commitPlanForReview(ctx, gitRoot, planDir))
 		// a reopen is a fresh open item — re-notify, so feedback isn't stranded if
 		// the authoring coworker's session already ended between rounds.
-		notifyErr := enqueuePlanFeedbackTask(gitRoot, planDir, slug, 1)
+		resp["notified"] = notifyReviewFeedback(gitRoot, planDir, slug, 1) == nil
 		select {
 		case rounds <- 1:
 		default:
 		}
-		return map[string]any{"notified": notifyErr == nil}, 0, nil
+		return resp, 0, nil
 	})
 
-	post("/approve", func(body []byte) (map[string]any, int, error) {
+	post("/approve", func(ctx context.Context, body []byte) (map[string]any, int, error) {
 		// Same engine `ox plan approve` uses (internal/plan/lifecycle.go) — a
 		// browser Approve click and the CLI verb are one mechanism, never two.
 		// changed is only used to gate the best-effort activity notify below;
@@ -484,9 +546,9 @@ func liveReviewHandler(gitRoot, slug, planDir, base, token string, bc *broadcast
 		// must still report success, matching SetStatus's prior
 		// always-succeeds contract.
 		fields := planEventFieldsFromProvenance(gitRoot)
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		eventCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
-		changed, err := plan.AppendPlanEvent(ctx, planDir, plan.EventApproved, fields)
+		changed, err := plan.AppendPlanEvent(eventCtx, planDir, plan.EventApproved, fields)
 		if err != nil {
 			return nil, http.StatusInternalServerError, err
 		}
@@ -497,12 +559,12 @@ func liveReviewHandler(gitRoot, slug, planDir, base, token string, bc *broadcast
 			// unreachable activity-index endpoint.
 			go postPlanActivityBestEffort(gitRoot, planDir, plan.EventApproved)
 		}
-		commitPlanBestEffort(gitRoot, planDir)
+		resp := planCommitFields(commitPlanForReview(ctx, gitRoot, planDir))
 		select {
 		case approved <- struct{}{}:
 		default:
 		}
-		return nil, 0, nil
+		return resp, 0, nil
 	})
 
 	return mux
@@ -559,13 +621,22 @@ func anchorFromBody(body []byte) (string, error) {
 	return in.Anchor, nil
 }
 
-func commitPlanBestEffort(gitRoot, planDir string) {
-	if err := commitPlanToLedger(gitRoot, planDir); err != nil {
-		// non-fatal: the round/resolution is saved locally and the next push /
-		// `ox doctor` reconciles it — but log loudly so the deferred-commit state
-		// isn't silent (a reviewer/agent shouldn't assume Git already has it).
-		slog.Warn("plan review: feedback saved locally, ledger commit deferred", "error", err, "dir", planDir)
+// commitPlanForReview commits + pushes after a review write and returns the
+// outcome for the response. Non-fatal by design: the round/resolution is
+// already on disk, a failure leaves a pending marker that `ox agent prime`
+// retries, and the page is told committed/pushed=false instead of a silent 200.
+func commitPlanForReview(ctx context.Context, gitRoot, planDir string) planCommitStatus {
+	st := commitPlanToLedgerStatus(ctx, gitRoot, planDir)
+	if !st.Pushed {
+		slog.WarnContext(ctx, "plan review: feedback saved locally, ledger commit/push deferred",
+			"dir", planDir, "committed", st.Committed, "error", st.Err)
 	}
+	return st
+}
+
+// planCommitFields is the durability half of every review POST response.
+func planCommitFields(st planCommitStatus) map[string]any {
+	return map[string]any{"saved": true, "committed": st.Committed, "pushed": st.Pushed}
 }
 
 // watchPlanDir broadcasts a reload whenever the plan dir (or its feedback/
