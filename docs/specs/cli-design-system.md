@@ -24,10 +24,13 @@ that choose JSON automatically for AI coworkers still need to distinguish an
 omitted flag from `--json=false`.
 
 The stdout color-stripping proxy must finish flushing before the command reports
-success. If the output destination fails, report the write error on stderr and
-change an otherwise successful exit to 1. Preserve an existing nonzero command
-exit code. A failed destination must also unblock commands writing more output
-than the color-stripping pipe can buffer.
+success. If copying returns a write error, report it on stderr and change an
+otherwise successful exit to 1. Preserve an existing nonzero command exit code.
+A failed destination must also unblock commands writing more output than the
+color-stripping pipe can buffer. Keep Go's default Unix `SIGPIPE` termination
+when a downstream reader closes stdout (for example,
+`ox release-notes --raw | head`); that case already exits nonzero without a
+diagnostic.
 
 ## Spinner Cancellation
 

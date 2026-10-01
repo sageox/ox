@@ -80,6 +80,8 @@ func init() {
 
 			stdoutDone = make(chan error, 1)
 			go func() {
+				// Keep Go's default SIGPIPE behavior for early-closing consumers
+				// such as head; other write errors are reported by main.
 				_, err := io.Copy(&ansiStripper{realStdout}, pr)
 				// Unblock a producer still writing after the destination failed.
 				_ = pr.Close()

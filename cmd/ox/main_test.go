@@ -7,7 +7,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -126,30 +128,47 @@ func TestCLIOutputWriteFailures(t *testing.T) {
 		{"large output", []string{"release-notes", "--raw"}, releaseNotes + "\n", 0},
 		{"existing failure", []string{"sync", "--read-only", "--json", "unexpected"}, `"invalid_arguments"`, 2},
 	} {
-		for _, unwritable := range []bool{false, true} {
-			name := "writable"
-			if unwritable {
-				name = "unwritable"
-			}
-			t.Run(command.name+"/"+name, func(t *testing.T) {
+		for _, destination := range []string{"writable", "unwritable", "closed_pipe"} {
+			t.Run(command.name+"/"+destination, func(t *testing.T) {
+				if destination == "closed_pipe" && runtime.GOOS == "windows" {
+					t.Skip("Windows does not use Unix SIGPIPE semantics")
+				}
 				env := append(noInputCLIEnv(t), "FEATURE_CLOUD=false", "FEATURE_AUTH=false", "CLICOLOR_FORCE=0")
 				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 				defer cancel()
 				cmd := testguard.OxCmdContext(t, ctx, oxBin, t.TempDir(), env, command.args...)
 				var stdout, stderr bytes.Buffer
 				cmd.Stdout, cmd.Stderr = &stdout, &stderr
-				if unwritable {
+				switch destination {
+				case "unwritable":
 					path := filepath.Join(t.TempDir(), "output")
 					require.NoError(t, os.WriteFile(path, nil, 0o600))
 					file, err := os.Open(path)
 					require.NoError(t, err)
 					t.Cleanup(func() { _ = file.Close() })
 					cmd.Stdout = file
+				case "closed_pipe":
+					reader, writer, err := os.Pipe()
+					require.NoError(t, err)
+					t.Cleanup(func() { _ = writer.Close() })
+					require.NoError(t, reader.Close())
+					cmd.Stdout = writer
 				}
 				err := cmd.Run()
 				require.NoError(t, ctx.Err(), "output failure left the command blocked: %s", stderr.String())
+				if destination == "closed_pipe" {
+					// Consumers such as head may close stdout early. Keep Go's
+					// quiet Unix pipeline termination instead of printing an error.
+					var exitErr *exec.ExitError
+					require.ErrorAs(t, err, &exitErr)
+					status, ok := exitErr.Sys().(syscall.WaitStatus)
+					require.True(t, ok)
+					assert.Equal(t, syscall.SIGPIPE, status.Signal())
+					assert.Empty(t, stderr.String())
+					return
+				}
 				exitCode := command.exitCode
-				if unwritable && exitCode == 0 {
+				if destination == "unwritable" && exitCode == 0 {
 					exitCode = 1
 				}
 				if exitCode == 0 {
@@ -159,7 +178,7 @@ func TestCLIOutputWriteFailures(t *testing.T) {
 					require.ErrorAs(t, err, &exitErr, "stdout: %s; stderr: %s", stdout.String(), stderr.String())
 					assert.Equal(t, exitCode, exitErr.ExitCode())
 				}
-				if unwritable {
+				if destination == "unwritable" {
 					assert.Contains(t, stderr.String(), "write")
 					assert.Equal(t, 1, strings.Count(stderr.String(), "Error:"), "report the output error once")
 				} else {
