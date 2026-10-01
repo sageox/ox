@@ -149,7 +149,7 @@ func TestOxCapabilitiesClassInvariants(t *testing.T) {
 
 // TestOxCapabilitiesCountsByClass pins the expected entry counts so the table
 // stays in sync with the documented surface inventory (5 floor, 0 command,
-// 18 skill = 23 total). Update deliberately when surfaces change.
+// 19 skill = 24 total). Update deliberately when surfaces change.
 func TestOxCapabilitiesCountsByClass(t *testing.T) {
 	counts := map[MechanismClass]int{}
 	for _, c := range OxCapabilities() {
@@ -161,17 +161,17 @@ func TestOxCapabilitiesCountsByClass(t *testing.T) {
 		// Claude-only .claude/commands surface became skills, so the same
 		// lifecycle affordances now reach every adapter with a skills root.
 		MechanismCommand: 0,
-		// 4 auto-activating playbooks + the committed `sageox` on-ramp
+		// 5 auto-activating playbooks + the committed `sageox` on-ramp
 		// + 13 slash-only lifecycle surfaces folded in from commands.
-		MechanismSkill: 18,
+		MechanismSkill: 19,
 	}
 	for class, n := range want {
 		if counts[class] != n {
 			t.Errorf("mechanism_class %q: got %d entries, want %d", class, counts[class], n)
 		}
 	}
-	if total := len(OxCapabilities()); total != 23 {
-		t.Errorf("total capabilities: got %d, want 23", total)
+	if total := len(OxCapabilities()); total != 24 {
+		t.Errorf("total capabilities: got %d, want 24", total)
 	}
 }
 
