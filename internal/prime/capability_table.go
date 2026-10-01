@@ -103,6 +103,10 @@ func OxCapabilities() []Capability {
 					Command: "`ox query \"<question>\"` (semantic; default `--source=team` covers discussions, docs, and session history). Add `--source=all` to include code.",
 				},
 				{
+					Cue:     `Who/when in a recorded conversation`,
+					Command: "`ox conversation search --participant NAME --since DATE`",
+				},
+				{
 					Cue:     `"Who or what touched this code?"`,
 					Command: "`ox code search \"<pattern>\"` / `ox code insights`.",
 				},

@@ -245,6 +245,34 @@ func OpenSQLOnly(root string) (*Store, error) {
 	}, nil
 }
 
+// OpenSQLReadOnly opens the SQLite half of a Store for queries only, through
+// the same read-only open used for read-only media (openSQLiteReadOnly). It
+// never runs PRAGMA integrity_check, never migrates, and never deletes.
+//
+// For advisory read paths that open the index on a latency-sensitive command.
+// integrity_check is O(database size): on a large team index it cost ~22s per
+// open, and `ox plan enrich` opened the index twice (collision + expert
+// detectors), which is most of why `ox plan save` took ~55s. Integrity is
+// still verified by every writable open (the daemon, `ox index`), which is
+// the only path whose remedy — delete and rebuild — is appropriate anyway.
+//
+// Tradeoff: when no WAL sidecar exists the open is `immutable=1`, so a writer
+// that starts mid-read can make a query fail or read slightly stale rows.
+// Callers must treat errors as "no signal" (fail-open), never as corruption.
+func OpenSQLReadOnly(root string) (*Store, error) {
+	db, err := openSQLiteReadOnly(filepath.Join(root, MetadataDBFile))
+	if err != nil {
+		return nil, err
+	}
+	return &Store{
+		db:               db,
+		queries:          codedbsqlc.New(db),
+		Root:             root,
+		ReadOnly:         true,
+		dirtyCodeIndexes: make(map[string]bleve.Index),
+	}, nil
+}
+
 // openSQLite handles the SQLite half of store construction. Shared by Open
 // and OpenSQLOnly so the SQLite pragma string and integrity check live in one
 // place. The bool reports whether the store had to be opened read-only.

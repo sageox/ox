@@ -56,25 +56,44 @@ func commitPlanToLedger(gitRoot, planDir string) error {
 		return fmt.Errorf("ledger not safe for plan commit (%s): %w", ledgerPath, err)
 	}
 
-	// ensure .gitignore is in place before any commit to prevent cache leakage
-	gitserver.EnsureGitignoreBeforeCommit(ledgerPath)
-
-	// --sparse: ledger repos use sparse-checkout (cone mode).
-	addArgs := []string{"-C", ledgerPath, "add", "--sparse", planDir}
-	if out, err := exec.Command("git", addArgs...).CombinedOutput(); err != nil {
-		return fmt.Errorf("git add failed: %s: %w", string(out), err)
-	}
-
-	commitMsg := fmt.Sprintf("plan: %s", filepath.Base(planDir))
-	commitCmd := exec.Command("git", "-C", ledgerPath, "commit", "--no-verify", "-m", commitMsg)
-	if out, err := commitCmd.CombinedOutput(); err != nil {
-		if strings.Contains(string(out), "nothing to commit") {
-			return nil // idempotent: re-save with no change
-		}
-		return fmt.Errorf("%s: %w", wrapCommitError(string(out), err), err)
+	if err := commitPlanLocal(ledgerPath, planDir, ""); err != nil {
+		return err
 	}
 
 	return pushLedger(context.Background(), ledgerPath)
+}
+
+// commitPlanLocal stages one plan dir and commits it to the ledger WITHOUT
+// pushing, through the canonical gitutil.CommitLedgerSnapshot under ADR-030's
+// repo lock. msgPrefix defaults to "plan: ". "Nothing to commit" is success
+// (an idempotent re-save).
+//
+// Path-scoped on purpose: the ledger index can hold unrelated staged files
+// (the daemon's data/github imports were observed staged in the field), and
+// the previous bare `git commit` swept them into a "plan:" commit.
+func commitPlanLocal(ledgerPath, planDir, msgPrefix string) error {
+	// ensure .gitignore is in place before any commit to prevent cache leakage
+	gitserver.EnsureGitignoreBeforeCommit(ledgerPath)
+
+	rel, err := filepath.Rel(ledgerPath, planDir)
+	if err != nil {
+		return fmt.Errorf("relativize plan dir %q: %w", planDir, err)
+	}
+	rel = filepath.ToSlash(rel)
+	if msgPrefix == "" {
+		msgPrefix = "plan: "
+	}
+	ctx := context.Background()
+	return gitutil.WithRepoLock(ctx, ledgerPath, func() error {
+		// --sparse: ledger repos use sparse-checkout (cone mode).
+		if out, err := gitutil.RunGit(ctx, ledgerPath, "add", "--sparse", "--", rel); err != nil {
+			return fmt.Errorf("git add failed: %s: %w", out, err)
+		}
+		if _, err := gitutil.CommitLedgerSnapshot(ctx, ledgerPath, msgPrefix+filepath.Base(planDir), rel); err != nil {
+			return fmt.Errorf("commit plan %s: %w", rel, err)
+		}
+		return nil
+	})
 }
 
 // commitPlanBackfillToLedger stages every backfilled plan rename, in-place

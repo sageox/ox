@@ -953,6 +953,7 @@ func runDoctorChecksWithState(parent context.Context, opts doctorOptions, state 
 		checkGitRepoState(),
 		checkMergeConflicts(),
 		checkGitLockFiles(), // check for stale lock files
+		checkLedgerGitLockFiles(),
 	}
 	// slow checks only run with --fix
 	if opts.fix {

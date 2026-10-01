@@ -206,7 +206,9 @@ func parseMediaOffset(raw string) (time.Duration, error) {
 }
 
 // renderConversationTranscriptText prints the pinning header dim, then one
-// line per cue: a dim cue locator, an accent speaker id, and the text.
+// line per cue: a dim cue locator, an accent speaker (the resolved display
+// name, else the raw voice tag — both sanitized, as names are untrusted team
+// content), and the text.
 // Cue-number alignment is computed from the served window before styling.
 func renderConversationTranscriptText(w io.Writer, env *read.Envelope) {
 	data, ok := env.Data.(*read.TranscriptData)
@@ -230,8 +232,11 @@ func renderConversationTranscriptText(w io.Writer, env *read.Envelope) {
 	for _, c := range data.Cues {
 		locator := fmt.Sprintf("[%*d] %s", nWidth, c.N, c.Start)
 		line := cli.StyleDim.Render(locator)
-		if c.Speaker != "" {
-			line += "  " + cli.StyleAccent.Render(c.Speaker)
+		if who := c.SpeakerName; who != "" || c.Speaker != "" {
+			if who == "" {
+				who = c.Speaker
+			}
+			line += "  " + cli.StyleAccent.Render(cli.SanitizeTerminalText(who))
 		}
 		fmt.Fprintf(w, "%s  %s\n", line, c.Text)
 		renderTranscriptScreenLines(w, c)

@@ -557,3 +557,49 @@ func TestConversationWalkthroughUsageErrors(t *testing.T) {
 		})
 	}
 }
+
+// TestParseConversationUntil_DateIncludesWholeDay: a person saying "until
+// Sep 14" means through the 14th. Failure prevented: a bare-date --until
+// silently drops every conversation on the named day.
+func TestParseConversationUntil_DateIncludesWholeDay(t *testing.T) {
+	got, err := parseConversationUntil("2026-09-14")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := time.Date(2026, 9, 15, 0, 0, 0, 0, time.UTC); !got.Equal(want) {
+		t.Errorf("until = %v, want %v (exclusive bound after the whole day)", got, want)
+	}
+	exact, err := parseConversationUntil("2026-09-14T12:00:00Z")
+	if err != nil || !exact.Equal(time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)) {
+		t.Errorf("RFC3339 until = %v, %v; want the instant itself", exact, err)
+	}
+	if _, err := parseConversationUntil("last tuesday"); err == nil {
+		t.Error("an unparseable --until must be a usage error")
+	}
+}
+
+// TestTranscriptTextShowsSanitizedSpeakerNames: a human or agent reading the
+// text transcript sees who spoke. Failure prevented: the renderer keeps
+// printing opaque usr_ ids when a name was resolved, or writes a
+// team-controlled name raw so its escape sequences repaint the terminal.
+func TestTranscriptTextShowsSanitizedSpeakerNames(t *testing.T) {
+	env := &read.Envelope{Success: true, Data: &read.TranscriptData{
+		Pinning: read.PinningUnpinned,
+		Cues: []read.TranscriptCue{
+			{N: 1, Start: "00:00:01.000", Speaker: "usr_ryan000000000000000000000", SpeakerName: "Ryan \x1b[2JSnodgrass", Text: "named"},
+			{N: 2, Start: "00:00:05.000", Speaker: "usr_emory00000000000000000000", Text: "unnamed"},
+		},
+	}}
+	var buf bytes.Buffer
+	renderConversationTranscriptText(&buf, env)
+	out := buf.String()
+	if !strings.Contains(out, "Ryan Snodgrass") || strings.Contains(out, "usr_ryan") {
+		t.Errorf("resolved cue must show the name, not the id:\n%s", out)
+	}
+	if strings.Contains(out, "\x1b[2J") {
+		t.Errorf("speaker name reached the terminal unsanitized:\n%q", out)
+	}
+	if !strings.Contains(out, "usr_emory00000000000000000000") {
+		t.Errorf("unresolved cue must fall back to the raw tag:\n%s", out)
+	}
+}

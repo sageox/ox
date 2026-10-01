@@ -542,7 +542,7 @@ func handlePrompt(ctx *HookContext) error {
 	// The plan nudge above only fires when `ox plan enrich` armed it. An agent
 	// that authored a page without ever running enrich arms nothing, so the
 	// artifact itself is the second, independent signal.
-	emitUnsavedArtifactNudge(os.Stdout, ctx.ProjectRoot, agentID)
+	emitUnsavedArtifactNudge(os.Stdout, ctx.ProjectRoot, agentID, ctx.Marker.PrimedAt)
 
 	// Steer the agent toward `ox plan enrich`/`ox plan render` at the planning
 	// moment — fired when the agent is in plan mode (permission_mode == "plan")
@@ -553,6 +553,14 @@ func handlePrompt(ctx *HookContext) error {
 		rawPrompt = ctx.Input.RawBytes
 	}
 	emitPlanHint(os.Stdout, ctx.ProjectRoot, agentID, rawPrompt)
+	// Codex never runs `ox plan enrich` on its own and has no ExitPlanMode, so
+	// the enrich-armed unsaved-plan stamp is never set for it. Arm it from the
+	// planning prompt itself; the Stop-hook capture clears it if the plan is
+	// saved. Armed AFTER emitUnsavedPlanNudge above, so it speaks on a later
+	// prompt — once the plan exists — never on the request that armed it.
+	if ctx.AgentType == "codex" {
+		armUnsavedPlanFromPrompt(ctx.ProjectRoot, agentID, rawPrompt)
+	}
 
 	emitWhispers(os.Stdout, agentID)
 
@@ -623,8 +631,17 @@ func handleAfterTool(ctx *HookContext) error {
 		handlePlanExit(ctx, agentID)
 	}
 
-	// emit pending whispers (fallback — primary delivery is handlePrompt)
-	emitWhispers(os.Stdout, agentID)
+	// Same-turn nudge for an authored page the agent just wrote. Claude Code
+	// only: it is the agent whose PostToolUse honors the JSON additionalContext
+	// envelope. When it fires, stdout must be that JSON alone, so the plain-text
+	// whisper fallback is skipped for this call — for Claude Code that fallback
+	// is discarded anyway, and handlePrompt remains its primary delivery.
+	pageNudged := ctx.AgentType == "claude-code" && ctx.Input != nil &&
+		emitWrittenPageNudge(os.Stdout, ctx.ProjectRoot, agentID, ctx.Input.ToolName, ctx.Input.ToolInput)
+	if !pageNudged {
+		// emit pending whispers (fallback — primary delivery is handlePrompt)
+		emitWhispers(os.Stdout, agentID)
+	}
 
 	state, err := session.LoadRecordingStateForAgent(ctx.ProjectRoot, agentID)
 	if err != nil || state == nil {
@@ -876,6 +893,10 @@ func handleStop(ctx *HookContext) error {
 	// Best-effort by contract — it never returns an error and never fails the
 	// turn.
 	maybePublishSessionDraft(ctx)
+	// Codex's only plan-exit signal is a <proposed_plan> block at turn end.
+	if ctx.AgentType == "codex" && ctx.Marker != nil {
+		maybeCaptureCodexPlan(ctx, ctx.Marker.AgentID)
+	}
 	return nil
 }
 

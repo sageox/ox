@@ -51,6 +51,9 @@ func TestMain(m *testing.M) {
 	// m.Run aliases stderr to stdout in JSON mode; retain both original pipes.
 	stdout, stderr := os.Stdout, os.Stderr
 	slogquiet.Silence()
+	// Never probe a real daemon socket from unit tests: the answer depends on
+	// the developer's machine and a stale socket costs a 2s ping timeout.
+	daemonRunningFn = func() bool { return true }
 
 	wd, err := os.Getwd()
 	if err != nil {

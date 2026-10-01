@@ -18,16 +18,44 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/plan"
 	"github.com/spf13/cobra"
 )
+
+// initPlanTestLedger makes the repo's default ledger a real git repo, as it
+// always is in the field. A revision refuses to overwrite a prior revision it
+// cannot first commit, and a plain directory has no history to commit into.
+func initPlanTestLedger(t *testing.T, gitRoot string) string {
+	t.Helper()
+	ctx, err := config.LoadProjectContext(gitRoot)
+	if err != nil || ctx == nil || ctx.DefaultLedgerPath() == "" {
+		t.Fatalf("resolve default ledger: ctx=%v err=%v", ctx, err)
+	}
+	ledger := ctx.DefaultLedgerPath()
+	if err := os.MkdirAll(ledger, 0o755); err != nil {
+		t.Fatalf("mkdir ledger: %v", err)
+	}
+	t.Setenv("GIT_AUTHOR_NAME", "Person A")
+	t.Setenv("GIT_AUTHOR_EMAIL", "person@test.sageox.ai")
+	t.Setenv("GIT_COMMITTER_NAME", "Person A")
+	t.Setenv("GIT_COMMITTER_EMAIL", "person@test.sageox.ai")
+	cmd := exec.Command("git", "init", "-q")
+	cmd.Dir = ledger
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init ledger: %v\n%s", err, out)
+	}
+	return ledger
+}
 
 // newPlanSaveCmdForTest builds an isolated cobra command wired to runPlanSave
 // with the full real flag set INCLUDING --kind (the flag the legacy route never
@@ -104,7 +132,7 @@ func writeAuthoredPage(t *testing.T, path, title string) {
 	fmt.Fprintf(&body, "</head><body>\n<h1>%s</h1>\n", title)
 	body.WriteString("<h2>Decision</h2><p>Ship the narrower change.</p>\n")
 	body.WriteString("<h2>Risk</h2><p>The ledger grows a duplicate directory.</p>\n")
-	// Pad past artifactMinBytes (20 KiB) so findUnsavedArtifacts considers it
+	// Pad past artifactMinBytes so findUnsavedArtifacts considers it
 	// an authored page rather than a fragment.
 	body.WriteString("<!-- ")
 	body.WriteString(strings.Repeat("padding to clear the authored-page size floor. ", 600))
@@ -125,6 +153,7 @@ func writeAuthoredPage(t *testing.T, path, title string) {
 // savePlanArtifacts and this fails with 2 plans.
 func TestPlanSaveFile_RetitledResaveRevisesTheSamePlan(t *testing.T) {
 	root := newPlanCaptureTestRepo(t)
+	initPlanTestLedger(t, root)
 	t.Setenv("SAGEOX_AGENT_ID", "")
 
 	page := filepath.Join(root, ".context", "plan.html")
@@ -379,4 +408,227 @@ func TestPlanList_EmptyLedgerStillSurfacesUnsavedArtifact(t *testing.T) {
 			t.Errorf("hint text leaked into the --json path: writer=%q stdout=%q", out, hints)
 		}
 	})
+}
+
+// TestPlanSaveFile_RevisionNeverOverwritesAnUnsnapshottedPrior pins the
+// Sacred-tier rule for revise-in-place: a prior revision that exists only in
+// the working tree (its commit failed) is committed before it is overwritten,
+// and when that commit is impossible the save is REFUSED rather than
+// destroying the only copy. Red-first: restore the old warn-and-continue and
+// the "locked ledger" case overwrites the hand-marked prior plan.md.
+func TestPlanSaveFile_RevisionNeverOverwritesAnUnsnapshottedPrior(t *testing.T) {
+	tests := []struct {
+		name         string
+		lockLedger   bool
+		wantErr      bool
+		wantSnapshot bool // prior revision reachable in ledger history
+	}{
+		{name: "uncommitted prior is committed, then revised", wantSnapshot: true},
+		{name: "locked ledger refuses the revision", lockLedger: true, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := newPlanCaptureTestRepo(t)
+			ledger := initPlanTestLedger(t, root)
+			t.Setenv("SAGEOX_AGENT_ID", "")
+
+			page := filepath.Join(root, ".context", "plan.html")
+			writeAuthoredPage(t, page, "Ledger Clone Hardening")
+			if _, err := runPlanSaveCLI(t, "--file", page); err != nil {
+				t.Fatalf("first save: %v", err)
+			}
+			plans, err := plan.List(root)
+			if err != nil || len(plans) != 1 {
+				t.Fatalf("plan.List = %d plans, err=%v; want 1", len(plans), err)
+			}
+			priorMD := filepath.Join(plans[0].Dir, "plan.md")
+
+			// Simulate an earlier revision whose commit failed: the only copy
+			// of this content is the working tree.
+			const marker = "\n<!-- prior revision only in the working tree -->\n"
+			f, err := os.OpenFile(priorMD, os.O_APPEND|os.O_WRONLY, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.WriteString(marker); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if tt.lockLedger {
+				lock := filepath.Join(ledger, ".git", "index.lock")
+				if err := os.WriteFile(lock, nil, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			writeAuthoredPage(t, page, "Ledger Clone Hardening And Repair")
+			_, err = runPlanSaveCLI(t, "--file", page)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("second save err = %v, wantErr %v", err, tt.wantErr)
+			}
+
+			got, rerr := os.ReadFile(priorMD)
+			if rerr != nil {
+				t.Fatal(rerr)
+			}
+			if tt.wantErr {
+				if !strings.Contains(string(got), strings.TrimSpace(marker)) {
+					t.Fatal("refused save still overwrote the uncommitted prior revision")
+				}
+				if !strings.Contains(err.Error(), "NOT overwritten") {
+					t.Errorf("error does not tell the user the prior revision is intact: %v", err)
+				}
+				return
+			}
+			out, gerr := exec.Command("git", "-C", ledger, "log", "-p", "--", plans[0].Dir).CombinedOutput()
+			if gerr != nil {
+				t.Fatalf("git log: %v\n%s", gerr, out)
+			}
+			if tt.wantSnapshot && !strings.Contains(string(out), strings.TrimSpace(marker)) {
+				t.Fatal("uncommitted prior revision was overwritten without first being committed to ledger history")
+			}
+		})
+	}
+}
+
+// TestPlanSave_RoutesReportTheirOutcome drives each save route to a real ledger
+// write and checks the one line a coworker reads. Failure prevented: the legacy
+// --plan route or an unreadable --annotations silently skipping the save, or a
+// failed save surfacing as a generic message with no cause.
+func TestPlanSave_RoutesReportTheirOutcome(t *testing.T) {
+	tests := []struct {
+		name     string
+		args     func(dir string) []string
+		wantOut  string
+		wantKind plan.ArtifactKind
+	}{
+		{
+			name: "legacy --plan + --annotations saves",
+			args: func(dir string) []string {
+				md := filepath.Join(dir, "plan.md")
+				ann := filepath.Join(dir, "annotations.json")
+				mustWrite(t, md, "# Legacy Route\n\n1. do it\n")
+				mustWrite(t, ann, `{"annotations":[]}`)
+				return []string{"--plan", md, "--annotations", ann}
+			},
+			wantOut:  "Saved plan to ledger",
+			wantKind: plan.KindPlan,
+		},
+		{
+			name: "unreadable --annotations falls back to enrichment",
+			args: func(dir string) []string {
+				md := filepath.Join(dir, "quick.md")
+				mustWrite(t, md, "# Quick Route\n\n1. do it\n")
+				return []string{"--file", md, "--annotations", filepath.Join(dir, "missing.json"), "--kind", "evidence"}
+			},
+			wantOut:  "computing deterministic enrichment instead",
+			wantKind: plan.KindEvidence,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := newPlanCaptureTestRepo(t)
+			initPlanTestLedger(t, root)
+			t.Setenv("SAGEOX_AGENT_ID", "")
+
+			out, err := runPlanSaveCLI(t, tt.args(t.TempDir())...)
+			if err != nil {
+				t.Fatalf("save: %v\n%s", err, out)
+			}
+			if !strings.Contains(out, tt.wantOut) {
+				t.Errorf("output missing %q:\n%s", tt.wantOut, out)
+			}
+			plans, err := plan.List(root)
+			if err != nil || len(plans) != 1 {
+				t.Fatalf("plan.List = %d plans, err=%v; want 1", len(plans), err)
+			}
+			if plans[0].Kind != tt.wantKind {
+				t.Errorf("kind = %q, want %q", plans[0].Kind, tt.wantKind)
+			}
+		})
+	}
+}
+
+// TestPlanSaveFailure_NamesTheCause pins the command error for a failed save.
+// Failure prevented: an ambiguous slug or refused revision reported as the
+// generic "no ledger configured", sending the user to fix the wrong thing.
+func TestPlanSaveFailure_NamesTheCause(t *testing.T) {
+	t.Parallel()
+	cause := &plan.AmbiguousSlugError{Slug: "dup", Candidates: []string{"a", "b"}}
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "known cause is wrapped", err: cause, want: "save plan: plan slug \"dup\" is ambiguous"},
+		{name: "unknown cause keeps the historical message", err: nil, want: "save plan: no ledger configured for \"/r\" or write failed"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := planSaveFailure("/r", tt.err)
+			if !strings.HasPrefix(got.Error(), tt.want) {
+				t.Errorf("err = %q, want prefix %q", got, tt.want)
+			}
+			if tt.err != nil && !errors.Is(got, tt.err) {
+				t.Error("the cause must stay reachable with errors.Is/As")
+			}
+		})
+	}
+}
+
+func mustWrite(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+// TestPlanStatus_AfterAbandonAndResaveNamesTheLivePlan drives the lifecycle a
+// team actually runs: save a page, abandon it, save a replacement under the
+// same authored slug the same day, then `ox plan status <slug>`. Failure
+// prevented: the replacement overwriting the abandoned plan's dir, or every
+// lookup on the slug refused as ambiguous afterwards.
+func TestPlanStatus_AfterAbandonAndResaveNamesTheLivePlan(t *testing.T) {
+	root := newPlanCaptureTestRepo(t)
+	initPlanTestLedger(t, root)
+	t.Setenv("SAGEOX_AGENT_ID", "")
+
+	page := filepath.Join(t.TempDir(), "rollout.html")
+	body := func(h1 string) string {
+		return `<!doctype html><html><head><meta name="ox-plan-slug" content="rollout"><style>b{}</style></head><body><h1>` +
+			h1 + `</h1><h2>Plan</h2><p>Ship it.</p></body></html>`
+	}
+	mustWrite(t, page, body("Rollout v1"))
+	if _, err := runPlanSaveCLI(t, "--file", page); err != nil {
+		t.Fatalf("first save: %v", err)
+	}
+	first, err := plan.List(root)
+	if err != nil || len(first) != 1 {
+		t.Fatalf("plan.List = %d, err=%v", len(first), err)
+	}
+	if _, err := plan.AppendPlanEvent(context.Background(), first[0].Dir, plan.EventAbandoned, plan.PlanEventFields{Reason: "replaced"}); err != nil {
+		t.Fatal(err)
+	}
+
+	mustWrite(t, page, body("Rollout v2"))
+	if _, err := runPlanSaveCLI(t, "--file", page); err != nil {
+		t.Fatalf("replacement save: %v", err)
+	}
+	plans, err := plan.List(root)
+	if err != nil || len(plans) != 2 {
+		t.Fatalf("want the abandoned plan AND a fresh replacement, got %d (err %v)", len(plans), err)
+	}
+
+	var out bytes.Buffer
+	planStatusCmd.SetOut(&out)
+	t.Cleanup(func() { planStatusCmd.SetOut(nil) })
+	if err := planStatusCmd.RunE(planStatusCmd, []string{"rollout"}); err != nil {
+		t.Fatalf("ox plan status rollout: %v", err)
+	}
+	if !strings.Contains(out.String(), "Rollout v2") || !strings.Contains(out.String(), "status: draft") {
+		t.Errorf("status did not resolve to the live replacement:\n%s", out.String())
+	}
 }
