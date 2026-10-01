@@ -317,7 +317,7 @@ func summarizeImport(ctx context.Context, env *importEnv, c *importCandidate, st
 		}
 		result, err := runner.Run(ctx, req)
 		if err == nil && result.ExitCode != 0 {
-			err = fmt.Errorf("%s exited with code %d", c.Summarizer, result.ExitCode)
+			err = fmt.Errorf("%s exited with code %d%s", c.Summarizer, result.ExitCode, cliMessage(result.Output))
 		}
 		if err != nil {
 			runnerErr = err
@@ -333,6 +333,16 @@ func summarizeImport(ctx context.Context, env *importEnv, c *importCandidate, st
 		return sessionsummary.ImportFallbackSummary(entries, importLabel(c.Session.Agent), rejected), nil
 	}
 	return nil, heldf("summary: %v", runnerErr)
+}
+
+// cliMessage is the first line a failed summarizer CLI printed, such as
+// "Not logged in · Please run /login", so the report names the real cause.
+func cliMessage(output string) string {
+	line, _, _ := strings.Cut(strings.TrimSpace(output), "\n")
+	if line == "" {
+		return ""
+	}
+	return ": " + clipImportText(line, 160)
 }
 
 func importLabel(agent nativeimport.Agent) string {

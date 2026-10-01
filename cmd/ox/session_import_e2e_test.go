@@ -147,8 +147,9 @@ func (s *fakeLFSStore) count() int {
 
 // fakeSummarizer stands in for the claude or codex CLI.
 type fakeSummarizer struct {
-	unavailable bool // the CLI is not installed
-	exitCode    int  // a non-zero exit fails every call
+	unavailable bool   // the CLI is not installed
+	exitCode    int    // a non-zero exit fails every call
+	exitOutput  string // what the CLI printed when it failed
 
 	mu       sync.Mutex
 	prompts  []string
@@ -175,7 +176,7 @@ func (s *fakeSummarizer) Run(_ context.Context, req agentwork.RunRequest) (*agen
 		}
 	}
 	if s.exitCode != 0 {
-		return &agentwork.RunResult{ExitCode: s.exitCode}, nil
+		return &agentwork.RunResult{ExitCode: s.exitCode, Output: s.exitOutput}, nil
 	}
 	if reply != nil {
 		if out := reply(req.Prompt); out != "" {
@@ -1298,6 +1299,9 @@ func TestImportE2E_EachFailureHoldsOnlyItsSession(t *testing.T) {
 		{"the summarizer keeps exiting with an error", func(_ *testing.T, f *importFixture, _ *pastSession) {
 			f.summarizer.exitCode = 1
 		}, "failed", "summary: claude exited with code 1"},
+		{"the summarizer CLI is not logged in", func(_ *testing.T, f *importFixture, _ *pastSession) {
+			f.summarizer.exitCode, f.summarizer.exitOutput = 1, "Not logged in · Please run /login"
+		}, "failed", "summary: claude exited with code 1: Not logged in · Please run /login"},
 		{"the transcript is deleted while it is summarized", func(t *testing.T, f *importFixture, _ *pastSession) {
 			f.summarizer.before = func(string) {
 				for path := range f.native {
