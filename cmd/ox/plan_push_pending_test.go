@@ -41,9 +41,9 @@ func TestRecordPlanPushOutcome_RepeatedFailureThenSuccess(t *testing.T) {
 		t.Fatalf("want one marker, got %+v err=%v", first, err)
 	}
 	recordPlanPushOutcome(ctx, ledger, planDir, errors.New("still unreachable"))
-	second, _ := listPlanPushPending(ledger)
-	if len(second) != 1 {
-		t.Fatalf("want one marker after second failure, got %d", len(second))
+	second, err := listPlanPushPending(ledger)
+	if err != nil || len(second) != 1 {
+		t.Fatalf("want one marker after second failure, got %d (err %v)", len(second), err)
 	}
 	got := second[0]
 	if got.PlanDir != "data/plans/p1" || got.FailedAttempts != 2 || got.LastError != "still unreachable" {
@@ -54,8 +54,8 @@ func TestRecordPlanPushOutcome_RepeatedFailureThenSuccess(t *testing.T) {
 	}
 
 	recordPlanPushOutcome(ctx, ledger, planDir, nil)
-	if left, _ := listPlanPushPending(ledger); len(left) != 0 {
-		t.Fatalf("success must clear the marker, %d left", len(left))
+	if left, err := listPlanPushPending(ledger); err != nil || len(left) != 0 {
+		t.Fatalf("success must clear the marker, %d left (err %v)", len(left), err)
 	}
 	// clearing when nothing is pending is a no-op, not an error
 	recordPlanPushOutcome(ctx, ledger, planDir, nil)
@@ -125,8 +125,8 @@ func TestFlushPendingPlanPushes_DropsMarkerForMissingPlanDir(t *testing.T) {
 	if err != nil || ok != 0 || failed != 0 {
 		t.Fatalf("ok=%d failed=%d err=%v", ok, failed, err)
 	}
-	if left, _ := listPlanPushPending(ledger); len(left) != 0 {
-		t.Fatalf("marker for a missing plan dir must be dropped, %d left", len(left))
+	if left, err := listPlanPushPending(ledger); err != nil || len(left) != 0 {
+		t.Fatalf("marker for a missing plan dir must be dropped, %d left (err %v)", len(left), err)
 	}
 }
 
@@ -141,9 +141,9 @@ func TestFlushPendingPlanPushes_StillFailingKeepsMarkerAndCounts(t *testing.T) {
 	if err != nil || ok != 0 || failed != 1 {
 		t.Fatalf("ok=%d failed=%d err=%v", ok, failed, err)
 	}
-	left, _ := listPlanPushPending(f.ledger)
-	if len(left) != 1 || left[0].FailedAttempts != 2 {
-		t.Fatalf("a failed retry must keep the marker and count it: %+v", left)
+	left, err := listPlanPushPending(f.ledger)
+	if err != nil || len(left) != 1 || left[0].FailedAttempts != 2 {
+		t.Fatalf("a failed retry must keep the marker and count it: %+v (err %v)", left, err)
 	}
 }
 
@@ -214,7 +214,7 @@ func TestKickPendingPlanPushes_EarlyReturnsLeaveMarkers(t *testing.T) {
 	writePlanPushMarkerFile(t, ledger, "data__plans__p.json", `{"plan_dir":"data/plans/p"}`)
 	planLedgerPathFor = func(string) (string, error) { return ledger, nil }
 	kickPendingPlanPushes(t.TempDir())
-	if left, _ := listPlanPushPending(ledger); len(left) != 1 {
-		t.Fatalf("marker must survive a kick that could not start, %d left", len(left))
+	if left, err := listPlanPushPending(ledger); err != nil || len(left) != 1 {
+		t.Fatalf("marker must survive a kick that could not start, %d left (err %v)", len(left), err)
 	}
 }

@@ -193,8 +193,8 @@ func TestPlanReviewDurability_PushFailureMarksPendingAndFlushRecovers(t *testing
 	if err != nil || ok != 1 || failed != 0 {
 		t.Fatalf("flush: ok=%d failed=%d err=%v", ok, failed, err)
 	}
-	if left, _ := listPlanPushPending(f.ledger); len(left) != 0 {
-		t.Fatalf("flush must clear the marker, %d left", len(left))
+	if left, err := listPlanPushPending(f.ledger); err != nil || len(left) != 0 {
+		t.Fatalf("flush must clear the marker, %d left (err %v)", len(left), err)
 	}
 	if n := feedbackRoundsOnRemote(t, f.origin); n != 1 {
 		t.Fatalf("recovered round should be on the remote, got %d", n)
