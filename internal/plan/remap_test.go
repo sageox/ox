@@ -104,6 +104,45 @@ func TestRemapFeedback_DeletedContent_StaysOpenNeverDropped(t *testing.T) {
 	}
 }
 
+// TestRemapFeedback_LeavesHighlightsOnTheirWords verifies a plan update never
+// re-keys an item on a highlight's anchor onto an element — whether or not the
+// item carries the words itself (a reopen round, or a hand-edited export, may
+// not). A highlight's anchor hashes its words, so it never matches an element
+// anchor, and its label is those words — which can equal a bullet's full text
+// exactly, the label-exact rebind's trigger.
+// Failure prevented: a save turns a comment on a phrase into a comment on the
+// whole bullet, and the page stops highlighting the words it was about.
+func TestRemapFeedback_LeavesHighlightsOnTheirWords(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		quote string
+	}{
+		{"highlight with its words", "Ship the CLI first"},
+		{"item on a highlight's anchor without them", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			saveRound(t, dir, time.Now(), FeedbackItem{
+				Anchor: "q5e1f00ba", Section: "Rollout", Label: "Ship the CLI first", Quote: tc.quote,
+				Status: FeedbackRequestChange, Note: "daemon must go first",
+			})
+
+			v2 := renderFor(t, "# T\n\n## Rollout Plan\n\n- Ship the CLI first\n- Then the daemon\n")
+			entries, err := RemapFeedback(dir, v2, time.Now())
+			if err != nil {
+				t.Fatalf("remap: %v", err)
+			}
+			if len(entries) != 0 {
+				t.Fatalf("a highlight must never be rebound to an element: %+v", entries)
+			}
+			items, _ := AssembleReview(dir)
+			if len(items) != 1 || !items[0].Open || items[0].Anchor != "q5e1f00ba" || items[0].Quote != tc.quote {
+				t.Fatalf("the highlight must stay open on its own anchor: %+v", items)
+			}
+		})
+	}
+}
+
 // TestRemapChain_ResolutionsFollowAcrossUpdates verifies two successive plan
 // updates chain remaps (A→B→C) and that a resolution recorded at ANY hop
 // closes the item at the final address. Failure prevented: multi-update plans

@@ -176,6 +176,8 @@ func awaitSnapshot(planDir string) (awaitResult, bool) {
 }
 
 func emitAwait(cmd *cobra.Command, slug string, res awaitResult) error {
+	// the command exits 0 on all three, so its usage event says which
+	cliCtx.SetOutcome("await_status", res.Status)
 	res.Slug = slug
 	if res.Open == nil {
 		res.Open = []plan.MergedItem{}

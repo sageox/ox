@@ -159,6 +159,15 @@ func RemapFeedback(planDir string, htmlBytes []byte, now time.Time) ([]RemapEntr
 		if it.Anchor == "" || live[it.Anchor] {
 			continue // still anchored — nothing to do
 		}
+		if strings.HasPrefix(it.Anchor, "q") {
+			// a highlight's anchor hashes its words, not an element, so it is
+			// never in live: review.js finds the words in their section, or
+			// anywhere on the page when they occur exactly once (a renamed
+			// heading). A label rebind would re-key it to a whole element —
+			// keyed on the anchor, since an item on a highlight's anchor need
+			// not carry the words itself.
+			continue
+		}
 		if e, ok := bestRebind(it, targets); ok {
 			e.At = now.UTC()
 			entries = append(entries, e)
