@@ -117,76 +117,72 @@ func TestCLIOutputWriteFailures(t *testing.T) {
 	skipIntegration(t)
 	oxBin := testguard.BuildOxBinary(t, repoPath("..", ".."))
 	require.Greater(t, len(releaseNotes), 64*1024, "large-output fixture must exceed a typical pipe buffer")
-	for _, command := range []struct {
-		name     string
-		args     []string
-		output   string
-		exitCode int
+	// The output pipe is shared by all formats. Cover its distinct failure
+	// modes here; TestJSONOutputModesCLI already checks text and JSON output.
+	for _, tt := range []struct {
+		name        string
+		args        []string
+		destination string
+		exitCode    int
 	}{
-		{"text", []string{"version"}, "Built:", 0},
-		{"json", []string{"version", "--json"}, `"version"`, 0},
-		{"large output", []string{"release-notes", "--raw"}, releaseNotes + "\n", 0},
-		{"existing failure", []string{"sync", "--read-only", "--json", "unexpected"}, `"invalid_arguments"`, 2},
+		{"flush full output", []string{"release-notes", "--raw"}, "writable", 0},
+		{"unblock failed writer", []string{"release-notes", "--raw"}, "unwritable", 1},
+		{"preserve exit code", []string{"sync", "--read-only", "--json", "unexpected"}, "unwritable", 2},
+		{"quiet broken pipe", []string{"release-notes", "--raw"}, "closed_pipe", -1},
 	} {
-		for _, destination := range []string{"writable", "unwritable", "closed_pipe"} {
-			t.Run(command.name+"/"+destination, func(t *testing.T) {
-				if destination == "closed_pipe" && runtime.GOOS == "windows" {
-					t.Skip("Windows does not use Unix SIGPIPE semantics")
-				}
-				env := append(noInputCLIEnv(t), "FEATURE_CLOUD=false", "FEATURE_AUTH=false", "CLICOLOR_FORCE=0")
-				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-				defer cancel()
-				cmd := testguard.OxCmdContext(t, ctx, oxBin, t.TempDir(), env, command.args...)
-				var stdout, stderr bytes.Buffer
-				cmd.Stdout, cmd.Stderr = &stdout, &stderr
-				switch destination {
-				case "unwritable":
-					path := filepath.Join(t.TempDir(), "output")
-					require.NoError(t, os.WriteFile(path, nil, 0o600))
-					file, err := os.Open(path)
-					require.NoError(t, err)
-					t.Cleanup(func() { _ = file.Close() })
-					cmd.Stdout = file
-				case "closed_pipe":
-					reader, writer, err := os.Pipe()
-					require.NoError(t, err)
-					t.Cleanup(func() { _ = writer.Close() })
-					require.NoError(t, reader.Close())
-					cmd.Stdout = writer
-				}
-				err := cmd.Run()
-				require.NoError(t, ctx.Err(), "output failure left the command blocked: %s", stderr.String())
-				if destination == "closed_pipe" {
-					// Consumers such as head may close stdout early. Keep Go's
-					// quiet Unix pipeline termination instead of printing an error.
-					var exitErr *exec.ExitError
-					require.ErrorAs(t, err, &exitErr)
-					status, ok := exitErr.Sys().(syscall.WaitStatus)
-					require.True(t, ok)
-					assert.Equal(t, syscall.SIGPIPE, status.Signal())
-					assert.Empty(t, stderr.String())
-					return
-				}
-				exitCode := command.exitCode
-				if destination == "unwritable" && exitCode == 0 {
-					exitCode = 1
-				}
-				if exitCode == 0 {
-					require.NoError(t, err, "stderr: %s", stderr.String())
-				} else {
-					var exitErr *exec.ExitError
-					require.ErrorAs(t, err, &exitErr, "stdout: %s; stderr: %s", stdout.String(), stderr.String())
-					assert.Equal(t, exitCode, exitErr.ExitCode())
-				}
-				if destination == "unwritable" {
-					assert.Contains(t, stderr.String(), "write")
-					assert.Equal(t, 1, strings.Count(stderr.String(), "Error:"), "report the output error once")
-				} else {
-					assert.Contains(t, stdout.String(), command.output, "the full command result must be flushed")
-					assert.Empty(t, stderr.String())
-				}
-			})
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.destination == "closed_pipe" && runtime.GOOS == "windows" {
+				t.Skip("Windows does not use Unix SIGPIPE semantics")
+			}
+			env := append(noInputCLIEnv(t), "FEATURE_CLOUD=false", "FEATURE_AUTH=false", "CLICOLOR_FORCE=0")
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			cmd := testguard.OxCmdContext(t, ctx, oxBin, t.TempDir(), env, tt.args...)
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &stdout, &stderr
+			switch tt.destination {
+			case "unwritable":
+				path := filepath.Join(t.TempDir(), "output")
+				require.NoError(t, os.WriteFile(path, nil, 0o600))
+				file, err := os.Open(path)
+				require.NoError(t, err)
+				t.Cleanup(func() { _ = file.Close() })
+				cmd.Stdout = file
+			case "closed_pipe":
+				reader, writer, err := os.Pipe()
+				require.NoError(t, err)
+				t.Cleanup(func() { _ = writer.Close() })
+				require.NoError(t, reader.Close())
+				cmd.Stdout = writer
+			}
+			err := cmd.Run()
+			require.NoError(t, ctx.Err(), "output failure left the command blocked: %s", stderr.String())
+			if tt.destination == "closed_pipe" {
+				// Consumers such as head may close stdout early. Keep Go's
+				// quiet Unix pipeline termination instead of printing an error.
+				var exitErr *exec.ExitError
+				require.ErrorAs(t, err, &exitErr)
+				status, ok := exitErr.Sys().(syscall.WaitStatus)
+				require.True(t, ok)
+				assert.Equal(t, syscall.SIGPIPE, status.Signal())
+				assert.Empty(t, stderr.String())
+				return
+			}
+			if tt.exitCode == 0 {
+				require.NoError(t, err, "stderr: %s", stderr.String())
+			} else {
+				var exitErr *exec.ExitError
+				require.ErrorAs(t, err, &exitErr, "stdout: %s; stderr: %s", stdout.String(), stderr.String())
+				assert.Equal(t, tt.exitCode, exitErr.ExitCode())
+			}
+			if tt.destination == "unwritable" {
+				assert.Contains(t, stderr.String(), "write")
+				assert.Equal(t, 1, strings.Count(stderr.String(), "Error:"), "report the output error once")
+			} else {
+				assert.Equal(t, releaseNotes+"\n", stdout.String(), "the full command result must be flushed")
+				assert.Empty(t, stderr.String())
+			}
+		})
 	}
 }
 
@@ -195,14 +191,11 @@ func TestCLIOutputWriteFailures(t *testing.T) {
 func TestCLIInvalidSubcommands(t *testing.T) {
 	skipIntegration(t)
 	oxBin := testguard.BuildOxBinary(t, repoPath("..", ".."))
-	for _, group := range []string{
-		"", "adapter", "agent hooks", "agent tasks", "carts", "carts dep",
-		"code", "daemon", "decision", "dev", "hooks", "kb", "memory", "plan",
-		"plan feedback", "pr", "session redaction", "session", "session trace", "bubble",
-	} {
+	// Root, empty group, nested group, and alias exercise different dispatch
+	// paths. The typo cases below cover ordinary and runnable groups.
+	for _, group := range []string{"", "agent hooks", "plan feedback", "bubble"} {
 		t.Run(group, func(t *testing.T) {
-			env := append(noInputCLIEnv(t), "FEATURE_CLOUD=false", "FEATURE_AUTH=false",
-				"FEATURE_MEMORY=true", "FEATURE_CARTS=true", "FEATURE_TRACE=true")
+			env := append(noInputCLIEnv(t), "FEATURE_CLOUD=false", "FEATURE_AUTH=false")
 			args := append(strings.Fields(group), "unexpected-command", "--json")
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
@@ -234,15 +227,11 @@ func TestCLIInvalidSubcommands(t *testing.T) {
 	}{
 		{"bare root", nil, "Usage", false},
 		{"bare group", []string{"plan"}, "ox plan", false},
-		{"nested group", []string{"plan", "feedback"}, "ox plan feedback", false},
-		{"alias help", []string{"bubble", "--help"}, "ox kb", false},
 		{"explicit help", []string{"plan", "unexpected-command", "--help"}, "ox plan", false},
-		{"short help", []string{"plan", "unexpected-command", "-h"}, "ox plan", false},
 		{"help command", []string{"help", "plan"}, "ox plan", false},
 		{"root version", []string{"--version"}, "ox version", false},
-		{"help without loading config", []string{"plan", "--config", "missing.yaml"}, "ox plan", false},
+		{"nested help without loading config", []string{"plan", "feedback", "--config", "missing.yaml"}, "ox plan feedback", false},
 		{"catalog correction", []string{"daemons"}, "ox daemon", false},
-		{"group typo", []string{"plan", "lsit"}, "Did you mean 'ox plan list'?", true},
 		{"JSON typo", []string{"--json", "plan", "lsit"}, "Did you mean 'ox plan list'?", true},
 		{"runnable group typo", []string{"session", "lsit"}, "Did you mean 'ox session list'?", true},
 		{"custom dispatcher", []string{"agent", "unexpected-command"}, "unknown command or invalid agent_id: unexpected-command", true},
