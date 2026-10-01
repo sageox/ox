@@ -1,6 +1,7 @@
 # Makefile for ox CLI tool
 
 .PHONY: check-no-git-lfs-shell check-raw-writer-chokepoint check-session-meta-rmw check-codedb-guarded-open check-test-tiers test-tiers
+.PHONY: test-all-split warm-test-cache coverage-integration-profile coverage-merge
 .PHONY: help build build-ox build-adapters build-acceptance install install-adapters clean dev run test test-cover test-timings test-all test-slow test-fuzz test-browser test-integration test-acceptance test-acceptance-cover test-acceptance-run test-release test-release-coverage release-stages test-agents test-preflight test-digital-twin test-digital-twin-cover test-cloud-api-twin test-ledger-twin eval eval-smoke eval-no-bash eval-scaffold-check test-sequential test-profile test-watch coverage coverage-report coverage-func coverage-baseline coverage-diff coverage-check coverage-ratchet coverage-ratchet-diff coverage-ratchet-test build-cover coverage-integration smoke-test lint lint-test-env format release release-snapshot dist install-hooks docs docs-check docs-publish refresh-friction-catalog bump-version verify-version check-release-drift beads-setup
 
 # Variables
@@ -306,6 +307,38 @@ test-all: check-test-tiers test-sessionprovenance ## Run all unit tests includin
 	@tail -n +2 $(SESSIONPROVENANCE_COVER) >> coverage.out
 	@python3 scripts/coverage_ratchet.py coverage.out --write-provenance coverage.out.provenance.json
 
+# Same tests, flags, and coverage as test-all, but cmd/ox — about 3,600 tests
+# that mostly run one at a time — is split across TEST_SPLIT_SHARDS `go test`
+# processes next to one process for every other package. On a 4-core CI runner
+# test-all spent its last 3.5 minutes on cmd/ox alone with three cores idle.
+# See scripts/test_split.py; refresh .config/test-split-weights.json from a CI
+# test-timing-events artifact with `scripts/test_split.py update-weights`.
+TEST_SPLIT_SHARDS ?= 4
+test-all-split: check-test-tiers test-sessionprovenance ## Full tier (same as test-all) with cmd/ox fanned out across TEST_SPLIT_SHARDS processes
+	$(call say,"Running all tests with cmd/ox split $(TEST_SPLIT_SHARDS) ways...")
+	@$(TEST_GIT_ISOLATION) $(TIME_CMD) python3 scripts/test_split.py run \
+		--go "$(GO)" \
+		--gotestsum "$(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN)" \
+		--split ./cmd/ox=$(TEST_SPLIT_SHARDS) \
+		--weights .config/test-split-weights.json \
+		--work-dir tmp/test-split \
+		--coverprofile coverage.out \
+		$(if $(strip $(TEST_JUNIT)),--junit "$(TEST_JUNIT)",) \
+		$(if $(strip $(TEST_TIMINGS)),--timings "$(TEST_TIMINGS)",) \
+		-- $(FULL_TEST_FLAGS) -covermode=atomic
+	@tail -n +2 $(SESSIONPROVENANCE_COVER) >> coverage.out
+	@python3 scripts/coverage_ratchet.py coverage.out --write-provenance coverage.out.provenance.json
+
+# Compile, without running, what the PR jobs compile, so a push to main can
+# save a build cache that PRs restore. A stale cache costs a PR run minutes of
+# race-instrumented recompiling; a drifted flag here only costs cache hits.
+warm-test-cache: build-cover ## Compile the full, acceptance, and twin test binaries into the Go build cache
+	@$(GO) test $(FULL_TEST_FLAGS) -covermode=atomic -run '^$$' ./... >/dev/null
+	@$(GO) test -tags=integration -race -covermode=atomic -run '^$$' ./cmd/ox >/dev/null
+	@$(GO) test -tags=slow -race -covermode=atomic -run '^$$' ./cmd/ox >/dev/null
+	@$(GO) test -tags=ledger_twin -run '^$$' ./tests/ledger_twin/... >/dev/null
+	@$(GO) test -tags=kb_twin -run '^$$' ./tests/kb_twin/... >/dev/null
+
 test-calm: check-test-tiers test-sessionprovenance ## Run the full test tier at reduced concurrency (shared or already-loaded machine)
 	@# The tier contract's -p 8 -parallel 32 assumes the runner owns the machine.
 	@# Locally it runs once per agent session per worktree: two concurrent
@@ -356,11 +389,11 @@ test-acceptance-cover: check-test-tiers build-cover ## Acceptance journeys throu
 # cannot turn the tier green with "no tests to run".
 test-acceptance-run:
 	@test -x "$(ACCEPTANCE_OX_BIN)" || { echo "ERROR: acceptance binary missing: $(ACCEPTANCE_OX_BIN)"; exit 1; }
-	@listed=$$($(GO) test -tags=integration ./cmd/ox -list '.'); \
+	@listed=$$($(GO) test -tags=integration -race ./cmd/ox -list '.'); \
 	 for required in $(ACCEPTANCE_INTEGRATION_TESTS); do \
 	   printf '%s\n' "$$listed" | grep -Fx "$$required" >/dev/null || { echo "ERROR: required acceptance test missing: $$required"; exit 1; }; \
 	 done
-	@listed=$$($(GO) test -tags=slow ./cmd/ox -list '.'); \
+	@listed=$$($(GO) test -tags=slow -race ./cmd/ox -list '.'); \
 	 for required in $(ACCEPTANCE_SLOW_TESTS); do \
 	   printf '%s\n' "$$listed" | grep -Fx "$$required" >/dev/null || { echo "ERROR: required acceptance test missing: $$required"; exit 1; }; \
 	 done
@@ -675,7 +708,7 @@ coverage-ratchet-diff: test-all ## Enforce package + changed-line coverage vs CO
 	@python3 scripts/coverage_ratchet.py coverage.out --require-provenance coverage.out.provenance.json --diff-base $(COVERAGE_BASE)
 
 coverage-ratchet-test: ## Test the coverage ratchet parser and failure semantics
-	@cd scripts && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v coverage_ratchet_test.py test_tiers_test.py test_metrics_test.py
+	@cd scripts && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v coverage_ratchet_test.py test_tiers_test.py test_metrics_test.py test_split_test.py
 
 # The instrumented binary lands in its OWN directory, not shared bin/, because
 # ox discovers adapters as siblings of the running binary. In bin/ it saw every
@@ -695,9 +728,16 @@ build-cover: ## Build ox binary with coverage instrumentation
 
 coverage-integration: ## Run acceptance through instrumented ox and merge full + binary coverage
 	@rm -f coverage-all.out coverage-all.out.provenance.json
-	@$(MAKE) --no-print-directory test-all
+	@$(MAKE) --no-print-directory test-all-split
 	@$(MAKE) --no-print-directory test-acceptance-cover
+	@$(MAKE) --no-print-directory coverage-integration-profile
 	@$(MAKE) --no-print-directory test-digital-twin-cover
+	@$(MAKE) --no-print-directory coverage-merge
+
+# CI runs the three suites as separate jobs and merges in a final one, so the
+# two halves of the merge are targets of their own: the profile conversion
+# needs the acceptance job's raw counters, the merge needs only text profiles.
+coverage-integration-profile: ## Convert the instrumented binary's raw counters to $(COVERDIR)/integration.out
 	@count=$$(find $(COVERDIR)/integration -type f -name 'covcounters.*' | wc -l | tr -d ' '); \
 	 if [ "$$count" -eq 0 ]; then \
 	   echo "ERROR: instrumented ox produced no fresh coverage counters"; exit 1; \
@@ -705,10 +745,17 @@ coverage-integration: ## Run acceptance through instrumented ox and merge full +
 	 echo "Fresh integration coverage fragments: $$count"
 	@echo "Converting integration profile..."
 	@$(GO) tool covdata textfmt -i=$(COVERDIR)/integration -o=$(COVERDIR)/integration.out
+
+COVERAGE_MERGE_INPUTS := coverage.out $(COVERDIR)/integration.out $(COVERDIR)/integration-test.out $(COVERDIR)/slow-test.out \
+	$(COVERDIR)/twins/cloud.out $(COVERDIR)/twins/ledger.out $(COVERDIR)/twins/kb.out
+
+coverage-merge: ## Merge full-tier, acceptance, and twin profiles into coverage-all.out
+	@for profile in $(COVERAGE_MERGE_INPUTS); do \
+	  test -s "$$profile" || { echo "ERROR: missing coverage profile $$profile"; exit 1; }; \
+	 done
 	@echo "Merging profiles..."
 	@awk 'FNR == 1 { next } /\/kb_twin_export\.go:/ { next } { counts[$$1 " " $$2] += $$3 } END { for (block in counts) print block, counts[block] }' \
-	  coverage.out $(COVERDIR)/integration.out $(COVERDIR)/integration-test.out $(COVERDIR)/slow-test.out \
-	  $(COVERDIR)/twins/cloud.out $(COVERDIR)/twins/ledger.out $(COVERDIR)/twins/kb.out \
+	  $(COVERAGE_MERGE_INPUTS) \
 	  | LC_ALL=C sort > $(COVERDIR)/merged-body.out
 	@{ echo 'mode: atomic'; sed -n '1,$$p' $(COVERDIR)/merged-body.out; } > coverage-all.out
 	@python3 scripts/coverage_ratchet.py coverage-all.out --write-provenance coverage-all.out.provenance.json
