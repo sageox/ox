@@ -153,6 +153,12 @@ and to ungrouped review anchors.
 | `<meta name="ox-plan-slug" content="...">` | Explicit slug override | Slug derived from title |
 | H2 headings **or** `data-ox-section="Name"` on view containers | Groups enrichment badges and review anchors by section; gives the derived markdown its H2s | Ungrouped anchors; flat derived markdown |
 
+ox knows the page is HTML by its name: a `--file` ending in `.html` or `.htm` is
+saved as the HTML plan of record even without `<!doctype html>`. Piped input has
+no name, so it must start with `<!doctype html>` or `<html>`. A full document is
+still best: without a doctype browsers use quirks mode, and without a `<head>` ox
+cannot stamp the plan's id into the page.
+
 ## What ox injects — the chrome contract
 
 `ox plan render --file plan.html` serves the authored page with the ox chrome
