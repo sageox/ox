@@ -310,7 +310,7 @@ table.flagm td:first-child{font-family:"Spline Sans Mono",ui-monospace,SFMono-Re
    there never mark up. The li rules outrank the generic li:hover target rule. */
 body.rev-on{cursor:crosshair}
 body.rev-on .rev-bar{border-color:var(--sage)}
-body.rev-on .rev-bar,body.rev-on .rev-rail,body.rev-on .rev-pop,body.rev-on .rev-orphans,body.rev-on .rev-toast,body.rev-on .rev-offline-bar{cursor:auto}
+body.rev-on .rev-bar,body.rev-on .rev-rail,body.rev-on .rev-pop,body.rev-on .rev-orphans,body.rev-on .rev-toast,body.rev-on .rev-sync,body.rev-on .rev-offline-bar{cursor:auto}
 body.rev-on .rev-rail li:hover{outline:none;cursor:pointer}
 body.rev-on .rev-orphans li:hover{outline:none;cursor:auto}
 body.rev-on [data-rev],body.rev-on section[id]:hover,body.rev-on li:hover,body.rev-on tr:hover,body.rev-on .ox-chip:hover,body.rev-on .stat:hover,body.rev-on .bar-row:hover{outline:1px dashed var(--sage);outline-offset:2px;cursor:crosshair}
@@ -595,6 +595,12 @@ body.rev-on [data-rev],body.rev-on section[id]:hover,body.rev-on li:hover,body.r
 .rev-offline-bar .rev-offline-copy:hover{color:var(--ink)}
 body.rev-offline .rev-bar .rev-submit,body.rev-offline .rev-bar .rev-approve{opacity:.45;cursor:not-allowed}
 .rev-toast{position:fixed;left:16px;bottom:64px;z-index:60;background:var(--panel);border:1px solid var(--sage);color:var(--ink);border-radius:9px;padding:8px 12px;font-size:12.5px;box-shadow:var(--shadow)}
+/* sync status: what happened to the reviewer's feedback; sits above the toast so both read */
+.rev-sync{position:fixed;left:16px;bottom:104px;z-index:61;max-width:min(560px,calc(100vw - 32px));display:flex;flex-wrap:wrap;align-items:center;gap:8px;background:var(--panel);border:1px solid var(--hair);border-left-width:3px;color:var(--ink);border-radius:9px;padding:8px 10px 8px 12px;font-size:12.5px;box-shadow:var(--shadow)}
+.rev-sync.ok{border-color:var(--sage)}.rev-sync.warn,.rev-sync.ask{border-color:var(--amber)}.rev-sync.err{border-color:var(--red)}.rev-sync.pending{border-color:var(--hair);color:var(--dim)}
+.rev-sync-msg{flex:1 1 220px}
+.rev-sync button,.rev-sync-input{background:var(--panel2);border:1px solid var(--hair);color:var(--ink);border-radius:6px;padding:3px 9px;font-size:12px;font-family:inherit}
+.rev-sync button{cursor:pointer}.rev-sync button:hover{color:var(--ink)}.rev-sync .rev-sync-x{border:0;background:none;padding:0 4px;font-size:15px;line-height:1}
 
 /* Judgment signal colors (agent-authored, cited): aligns=positive, conflicts=
    blocker, expert view=gold — same one-meaning-per-hue map as above. */

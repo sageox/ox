@@ -27,16 +27,123 @@
   ];
   var SELECTOR = window.OX_REVIEW_SELECTOR || 'section[id], li, tr, .ox-chip, .stat, .bar-row';
 
-  var marks = load();
+  // Storage layout (all per slug, localStorage so every tab on the plan shares it):
+  //   KEY        anchor -> unsent mark, each stamped with updated_at (ms)
+  //   TOMB_KEY   anchor -> ms a mark was deleted or sent; a tab's stale copy
+  //              older than that never brings it back
+  //   OUTBOX_KEY the one submission in flight: {id, items, reviewer,
+  //              created_at, stamps}. Written BEFORE the POST and resent with
+  //              the SAME id until a matching ack, so a reload, a retry, or a
+  //              second tab can never turn one Submit into two rounds.
+  var TOMB_KEY = KEY + ':tombs';
+  var OUTBOX_KEY = KEY + ':outbox';
+  var EXPORT_KEY = KEY + ':export'; // static mode: the id of the last export, reused while its items are unchanged
+  var SYNC_KEY = 'ox-plan-fb-sync:' + slug; // sessionStorage: last send result, re-shown after the reload it triggers
+  // A tombstone only has to outlive a stale tab's copy of the mark. A week
+  // covers a laptop left open over a weekend; a tab stale for longer than
+  // that can resurrect a sent mark as unsent, which the reviewer can delete.
+  var TOMB_TTL = 7 * 24 * 3600 * 1000;
+
+  var stored = readStored();
+  var marks = stored.marks;
+  var tombs = stored.tombs;
   var committed = parseCommitted();
   var reviewer = (localStorage.getItem('ox-plan-reviewer') || '').trim(); // multi-user: who you are
   var on = false;
   var pendingReload = false;
   var offline = false; // live server unreachable — nothing can be saved until it returns
   var probeTimer = null;
+  var posting = 0; // POSTs awaiting a response; an SSE reload waits for them
+  var reloadAfterPost = false;
+  var sending = false; // this tab's /feedback send is in flight
 
-  function load() { try { return JSON.parse(localStorage.getItem(KEY)) || {}; } catch (e) { return {}; } }
-  function save() { try { localStorage.setItem(KEY, JSON.stringify(marks)); } catch (e) {} }
+  // --- pure: begin — no DOM, no storage; review_state_test.go runs this block in node ---
+  function stampOf(m) { return (m && +m.updated_at) || 0; }
+  // mergeState joins two {marks, tombs} views of the same plan per anchor: the
+  // newest write wins, and a tombstone beats a mark stamped at or before it, so
+  // a delete (or a send) in one tab is not undone by another tab's stale copy.
+  function mergeState(x, y) {
+    var out = { marks: {}, tombs: {} }, keys = {};
+    [x, y].forEach(function (s) {
+      Object.keys(s.marks || {}).forEach(function (k) { keys[k] = 1; });
+      Object.keys(s.tombs || {}).forEach(function (k) { keys[k] = 1; });
+    });
+    Object.keys(keys).forEach(function (k) {
+      var best = null;
+      [x, y].forEach(function (s) { var m = (s.marks || {})[k]; if (m && (!best || stampOf(m) > stampOf(best))) best = m; });
+      var tomb = Math.max(+((x.tombs || {})[k]) || 0, +((y.tombs || {})[k]) || 0);
+      // tomb 0 = never deleted, so a mark saved before stamps existed (0) stays
+      if (best && (!tomb || stampOf(best) > tomb)) out.marks[k] = best;
+      else if (tomb) out.tombs[k] = tomb;
+    });
+    return out;
+  }
+  function pruneTombs(t, now, ttl) {
+    var out = {};
+    Object.keys(t).forEach(function (k) { if (now - t[k] < ttl) out[k] = t[k]; });
+    return out;
+  }
+  // ackState clears what a round carried once the server acknowledged it: each
+  // sent anchor is tombstoned at the stamp it was sent with, so an edit made
+  // after Submit (a newer stamp, in any tab) survives as still unsent.
+  function ackState(s, box) {
+    var out = { marks: {}, tombs: {} };
+    Object.keys(s.marks).forEach(function (k) { out.marks[k] = s.marks[k]; });
+    Object.keys(s.tombs).forEach(function (k) { out.tombs[k] = s.tombs[k]; });
+    (box.items || []).forEach(function (it) {
+      // a mark from before stamps existed is sent at 0; tomb it at 1 so it still beats a stale 0
+      var at = Math.max(+((box.stamps || {})[it.anchor]) || 0, 1);
+      if (out.marks[it.anchor] && stampOf(out.marks[it.anchor]) <= at) delete out.marks[it.anchor];
+      if (!out.marks[it.anchor]) out.tombs[it.anchor] = Math.max(out.tombs[it.anchor] || 0, at);
+    });
+    return out;
+  }
+  // roundAcked: whether a 2xx acknowledges this outbox. A server from before
+  // round ids answers without round_id — saved, but which round is unknown.
+  function roundAcked(box, data) { return !data || data.round_id === undefined || data.round_id === box.id; }
+  // syncMessage words a 2xx truthfully: "synced" only when the server says the
+  // ledger was pushed. An older server reports nothing about sync, so the page
+  // claims no more than that the author's machine has it.
+  function syncMessage(verb, data) {
+    data = data || {};
+    var m;
+    if (data.saved === undefined) m = { kind: 'ok', text: verb + ' · received by the author’s machine' };
+    else if (data.saved === false) m = { kind: 'err', text: 'Not saved — the author’s machine could not store it' };
+    else if (data.pushed) m = { kind: 'ok', text: verb + ' · synced to your team' };
+    else m = { kind: 'warn', text: 'Saved on the author’s machine · not yet synced (will retry)' };
+    if (data.notified === false) m.text += ' · the plan’s authoring coworker was not notified automatically — tell them directly';
+    return m;
+  }
+  function sameItems(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
+  // newRoundId: the server accepts ^[A-Za-z0-9_-]{8,64}$.
+  function newRoundId() {
+    var c = (typeof crypto !== 'undefined') ? crypto : null;
+    if (c && c.randomUUID) return c.randomUUID();
+    var b = new Uint8Array(16), s = '';
+    if (c && c.getRandomValues) c.getRandomValues(b);
+    else for (var i = 0; i < 16; i++) b[i] = Math.floor(Math.random() * 256); // no Web Crypto: still unique enough to dedupe one reviewer's retries
+    for (var j = 0; j < 16; j++) s += ('0' + b[j].toString(16)).slice(-2);
+    return s;
+  }
+  // --- pure: end ---
+
+  var lastStamp = 0;
+  function nextStamp() { var n = Date.now(); lastStamp = n > lastStamp ? n : lastStamp + 1; return lastStamp; }
+  function readJSON(k) { try { return JSON.parse(localStorage.getItem(k)) || null; } catch (e) { return null; } }
+  function readStored() { return { marks: readJSON(KEY) || {}, tombs: readJSON(TOMB_KEY) || {} }; }
+  // save merges with what other tabs wrote rather than overwriting it: each
+  // tab saves its whole map, so a plain write would drop the other tab's marks.
+  function save() {
+    var m = mergeState({ marks: marks, tombs: tombs }, readStored());
+    marks = m.marks; tombs = pruneTombs(m.tombs, Date.now(), TOMB_TTL);
+    try { localStorage.setItem(KEY, JSON.stringify(marks)); localStorage.setItem(TOMB_KEY, JSON.stringify(tombs)); } catch (e) {}
+  }
+  function removeMark(a) { delete marks[a]; tombs[a] = nextStamp(); }
+  function readOutbox() { var o = readJSON(OUTBOX_KEY); return o && o.id && o.items ? o : null; }
+  function writeOutbox(o) {
+    try { if (o) localStorage.setItem(OUTBOX_KEY, JSON.stringify(o)); else localStorage.removeItem(OUTBOX_KEY); return true; }
+    catch (e) { return false; }
+  }
   function parseCommitted() {
     // anchor -> [mark, …]: multi-user, so several reviewers on one anchor all show.
     var el = document.getElementById('ox-review-state');
@@ -54,11 +161,19 @@
     for (var k = 0; k < arr.length; k++) { if (arr[k].state === 'addressed' || arr[k].state === 'verified') return arr[k]; }
     return arr[0];
   }
-  function post(path, payload, ok) {
-    if (offline) { offlineNotice(); return; }
+  // post never uses alert/confirm/prompt: browsers block them in the iframe
+  // the web app embeds plans in, so every outcome is reported inline. fail(msg,
+  // isOffline) runs on any failure; without it an HTTP error shows inline.
+  function post(path, payload, ok, fail) {
+    if (offline) { offlineNotice(); if (fail) fail('offline', true); return; }
+    posting++;
     fetch(base + path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Review-Token': token }, body: JSON.stringify(payload) })
       .then(function (r) {
-        if (!r.ok) throw new Error('HTTP ' + r.status);
+        if (!r.ok) {
+          return r.text().catch(function () { return ''; }).then(function (t) {
+            throw new Error('HTTP ' + r.status + (t.trim() ? ' — ' + clip(t.trim(), 120) : ''));
+          });
+        }
         return r.json().catch(function () { return {}; });
       })
       .then(function (data) { if (ok) ok(data || {}); })
@@ -66,8 +181,13 @@
         // a network-level failure means the server is gone — flip to
         // disconnected mode (marks stay in localStorage; nothing is lost)
         // rather than surfacing a raw fetch error.
-        if (e instanceof TypeError) { setOffline(true); offlineNotice(); return; }
-        alert('Request failed: ' + e.message);
+        if (e instanceof TypeError) { setOffline(true); offlineNotice(); if (fail) fail('offline', true); return; }
+        if (fail) fail(e.message, false);
+        else showSync('err', 'Request failed: ' + e.message);
+      })
+      .then(function () {
+        posting--;
+        if (!posting && reloadAfterPost) { reloadAfterPost = false; reloadWhenIdle(); }
       });
   }
 
@@ -278,11 +398,12 @@
         '<textarea class="rev-note" placeholder="reopen note (optional)"></textarea>' +
         '<div class="rev-row"><button class="rev-accept">Accept</button><button class="rev-reopen">Reopen</button></div>';
       placePop(t, ev);
-      pop.querySelector('.rev-accept').onclick = function () { post('/accept', { anchor: a }, function () { closePop(); }); };
+      pop.querySelector('.rev-accept').onclick = function () {
+        post('/accept', { anchor: a }, function (data) { closePop(); reportSync(syncMessage('Accepted', data)); });
+      };
       pop.querySelector('.rev-reopen').onclick = function () {
         post('/reopen', { anchor: a, note: pop.querySelector('.rev-note').value.trim() }, function (data) {
-          closePop();
-          if (data.notified === false) toast('Reopened — but the plan’s authoring coworker could not be notified automatically. Tell them directly.');
+          closePop(); reportSync(syncMessage('Reopened', data));
         });
       };
       if (ev) ev.stopPropagation();
@@ -301,11 +422,11 @@
       b.onclick = function () { status = b.getAttribute('data-s'); pop.querySelectorAll('.rev-s').forEach(function (x) { x.classList.remove('on'); }); b.classList.add('on'); };
     });
     pop.querySelector('.rev-save').onclick = function () {
-      marks[a] = { anchor: a, section: t.section, label: t.label, status: status, note: pop.querySelector('.rev-note').value.trim() };
+      marks[a] = { anchor: a, section: t.section, label: t.label, status: status, note: pop.querySelector('.rev-note').value.trim(), updated_at: nextStamp() };
       if (t.quote) marks[a].quote = t.quote;
       save(); paint(); closePop();
     };
-    pop.querySelector('.rev-del').onclick = function () { delete marks[a]; save(); paint(); closePop(); };
+    pop.querySelector('.rev-del').onclick = function () { removeMark(a); save(); paint(); closePop(); };
     if (ev) ev.stopPropagation();
   }
   // The note opens just below where the reviewer acted — under a new highlight's
@@ -321,7 +442,7 @@
 
   // Review chrome is never a mark-up target. The rail and orphan list are <li>s
   // and would otherwise match SELECTOR, hijacking their own click handlers.
-  var CHROME = '.rev-bar, .rev-rail, .rev-orphans, .rev-toast, .rev-offline-bar';
+  var CHROME = '.rev-bar, .rev-rail, .rev-orphans, .rev-toast, .rev-sync, .rev-offline-bar';
 
   // --- highlights: a text selection comments on exactly the words selected.
   // The click that ends a drag or double-click carries a non-empty selection;
@@ -541,42 +662,144 @@
     openPop(t, ev);
   }
 
-  function ensureReviewer() {
-    if (!reviewer) {
-      var n = (prompt('Your name (shown to teammates reviewing this plan):', '') || '').trim();
-      if (n) { reviewer = n; try { localStorage.setItem('ox-plan-reviewer', reviewer); } catch (e) {} if (typeof updateWho === 'function') updateWho(); }
-    }
-    return reviewer;
-  }
+  // Submit snapshots the unsent marks into the outbox BEFORE sending, then
+  // sends that outbox; a Submit (or page load) that finds one already there
+  // resends it as-is, so its id — the server's dedupe key — never changes.
   function submit() {
-    var items = Object.keys(marks).map(function (k) { return marks[k]; });
-    if (!items.length) { alert('No marks yet. Toggle Review, click a section, leave a note.'); return; }
-    var who = ensureReviewer();
-    if (!who) { alert('Set your name first (the "Set name" button in the bar) — feedback is attributed per reviewer.'); return; }
-    var p = { slug: slug, reviewer: who, items: items };
-    if (live) {
-      post('/feedback', p, function (data) {
-        marks = {}; save(); /* SSE reload will repaint */
-        if (data.notified === false) toast('Sent — but the plan’s authoring coworker could not be notified automatically. Tell them directly.');
-      });
-      return;
+    if (sending) return;
+    var box = live ? readOutbox() : null;
+    if (!box) {
+      var items = Object.keys(marks).map(function (k) { return wireItem(marks[k]); });
+      if (!items.length) { showSync('info', 'No marks yet. Toggle Review, click a section, leave a note.'); return; }
+      if (!reviewer) { askName('Your name, so teammates know whose feedback this is:', submit); return; }
+      var stamps = {};
+      Object.keys(marks).forEach(function (k) { stamps[k] = stampOf(marks[k]); });
+      box = { id: newRoundId(), items: items, reviewer: reviewer, created_at: new Date().toISOString(), stamps: stamps };
+      if (!live) { exportJSON(box); return; }
+      writeOutbox(box); // a full storage still sends; only a reload mid-flight would lose the id
     }
-    exportJSON(p);
+    send(box);
+  }
+  function wireItem(m) {
+    var o = {};
+    Object.keys(m).forEach(function (k) { if (k !== 'updated_at') o[k] = m[k]; });
+    return o;
+  }
+  function send(box) {
+    sending = true; paintSubmit();
+    showSync('pending', 'Sending…');
+    post('/feedback', { id: box.id, slug: slug, reviewer: box.reviewer, items: box.items }, function (data) {
+      sending = false;
+      if (!roundAcked(box, data)) {
+        paintSubmit();
+        showSync('err', 'Not confirmed — the server acknowledged a different round. Your marks are kept.', [{ label: 'Retry', fn: submit }]);
+        return;
+      }
+      // marks first, outbox second: a crash between them leaves an outbox
+      // whose resend the server reports as a duplicate, never lost marks
+      var acked = ackState(mergeState({ marks: marks, tombs: tombs }, readStored()), box);
+      marks = acked.marks; tombs = acked.tombs; save();
+      var cur = readOutbox();
+      if (cur && cur.id === box.id) writeOutbox(null);
+      paint(); paintSubmit();
+      reportSync(syncMessage('Sent', data));
+    }, function (msg, isOffline) {
+      sending = false; paintSubmit();
+      if (isOffline) showSync('warn', 'Review server offline — your feedback is queued in this browser and sends when the server is back.');
+      else showSync('err', 'Not sent (' + msg + '). Your marks are kept.', [{ label: 'Retry', fn: submit }]);
+    });
   }
   function approve() {
-    if (!live) { alert('Approve is available in the live `ox plan review` loop.'); return; }
-    if (!confirm('Approve this plan? This stamps it approved and closes the review loop.')) return;
-    post('/approve', {}, function () { alert('Plan approved ✓ — you can close this tab.'); });
+    if (!live) { showSync('info', 'Approve is available in the live `ox plan review` loop.'); return; }
+    showSync('ask', 'Approve this plan? This stamps it approved and closes the review loop.', [
+      { label: 'Approve', fn: function () {
+        showSync('pending', 'Approving…');
+        post('/approve', {}, function (data) {
+          var m = syncMessage('Approved', data);
+          if (m.kind !== 'err') m.text += ' — you can close this tab.';
+          reportSync(m);
+        });
+      } },
+      { label: 'Cancel', fn: hideSync }
+    ]);
   }
 
-  function exportJSON(p) {
-    var json = JSON.stringify(p, null, 2);
+  function exportJSON(box) {
+    // a re-export of unchanged marks keeps its id, so `ox plan feedback apply`
+    // run twice on the same feedback lands one round
+    var prev = readJSON(EXPORT_KEY);
+    var id = prev && prev.id && sameItems(prev.items, box.items) ? prev.id : box.id;
+    try { localStorage.setItem(EXPORT_KEY, JSON.stringify({ id: id, items: box.items })); } catch (e) {}
+    var json = JSON.stringify({ id: id, slug: slug, reviewer: box.reviewer, items: box.items }, null, 2);
     var blob = new Blob([json], { type: 'application/json' });
     var url = URL.createObjectURL(blob);
     var a = document.createElement('a'); a.href = url; a.download = slug + '-feedback.json'; a.click();
     URL.revokeObjectURL(url);
     if (navigator.clipboard) navigator.clipboard.writeText(json).catch(function () {});
-    alert('Saved ' + slug + '-feedback.json (and copied to clipboard).\nHand it to the agent, or run:\n  ox plan feedback apply ' + slug + ' --from ' + slug + '-feedback.json');
+    showSync('ok', 'Saved ' + slug + '-feedback.json (and copied to clipboard). Hand it to the agent, or run: ox plan feedback apply ' + slug + ' --from ' + slug + '-feedback.json');
+  }
+
+  // --- sync status: one inline, non-modal line that says what actually
+  // happened to the reviewer's feedback. Never alert/confirm/prompt — those
+  // are blocked inside the iframe the web app embeds plans in. ---
+  var syncEl = null, syncTimer = null;
+  function hideSync() { if (syncTimer) { clearTimeout(syncTimer); syncTimer = null; } if (syncEl) { syncEl.remove(); syncEl = null; } }
+  // kind: ok | warn | err | info | pending | ask. actions: [{label, fn(inputValue)}];
+  // input: initial text for a one-line field (asking for a name).
+  function showSync(kind, text, actions, input) {
+    hideSync();
+    var el = syncEl = document.createElement('div');
+    el.className = 'rev-sync ' + kind;
+    el.setAttribute('role', kind === 'err' ? 'alert' : 'status');
+    var msg = document.createElement('span'); msg.className = 'rev-sync-msg'; msg.textContent = text; el.appendChild(msg);
+    var field = null;
+    if (input !== undefined) {
+      field = document.createElement('input'); field.className = 'rev-sync-input'; field.value = input; el.appendChild(field);
+    }
+    (actions || []).forEach(function (a) {
+      var b = document.createElement('button'); b.className = 'rev-sync-act'; b.textContent = a.label;
+      b.onclick = function () { a.fn(field ? field.value.trim() : undefined); };
+      el.appendChild(b);
+    });
+    if (kind !== 'pending' && kind !== 'ask') {
+      var x = document.createElement('button'); x.className = 'rev-sync-x'; x.textContent = '×'; x.title = 'Dismiss'; x.onclick = hideSync;
+      el.appendChild(x);
+    }
+    document.body.appendChild(el);
+    if (field) {
+      field.focus();
+      field.onkeydown = function (e) { if (e.key === 'Enter' && actions && actions[0]) { e.preventDefault(); actions[0].fn(field.value.trim()); } };
+    }
+    // good news fades; a warning lingers; an error or a question waits for the reviewer
+    var ttl = { ok: 10000, info: 8000, warn: 20000 }[kind];
+    if (ttl) syncTimer = setTimeout(function () { if (syncEl === el) hideSync(); }, ttl);
+  }
+  // reportSync shows a send result and keeps it for one reload: the server's
+  // SSE reload usually lands right after the response, and would wipe it.
+  function reportSync(m) {
+    showSync(m.kind, m.text);
+    try { sessionStorage.setItem(SYNC_KEY, JSON.stringify({ kind: m.kind, text: m.text, at: Date.now() })); } catch (e) {}
+  }
+  function restoreSync() {
+    try {
+      var s = JSON.parse(sessionStorage.getItem(SYNC_KEY) || 'null');
+      sessionStorage.removeItem(SYNC_KEY);
+      // 30s: long enough to span a slow reload, short enough that an old
+      // result never reads as the outcome of something newer
+      if (s && Date.now() - s.at < 30000) showSync(s.kind, s.text);
+    } catch (e) {}
+  }
+  function askName(q, then) {
+    showSync('ask', q, [
+      { label: 'Save', fn: function (n) {
+        if (!n) return;
+        reviewer = n;
+        try { localStorage.setItem('ox-plan-reviewer', reviewer); } catch (e) {}
+        hideSync(); updateWho(); paint();
+        if (then) then();
+      } },
+      { label: 'Cancel', fn: hideSync }
+    ], reviewer);
   }
 
   // --- connection state (live mode): the page must never LOOK live when the
@@ -616,9 +839,9 @@
   function hideOfflineBar() { if (offlineBar) { offlineBar.remove(); offlineBar = null; } }
   function offlineNotice() {
     var n = Object.keys(marks).length;
-    alert('The review server is offline — feedback can NOT be saved right now.\n' +
-      (n ? 'Your ' + n + ' unsent mark(s) stay in this browser and will be restored.\n' : '') +
-      'Restart the loop with:\n  ' + restartCmd());
+    showSync('err', 'The review server is offline — feedback can NOT be saved right now. ' +
+      (n ? 'Your ' + n + ' unsent mark(s) stay in this browser and will be restored. ' : '') +
+      'Restart the loop with: ' + restartCmd());
   }
   function toast(msg) {
     if (toastEl) toastEl.remove();
@@ -660,7 +883,13 @@
   var whoEl = bar.querySelector('.rev-who');
   function updateWho() { if (whoEl) whoEl.textContent = reviewer ? ('You: ' + reviewer) : 'Set name'; }
   updateWho();
-  if (whoEl) whoEl.onclick = function () { var n = (prompt('Your name (shown to teammates on this plan):', reviewer) || '').trim(); if (n) { reviewer = n; try { localStorage.setItem('ox-plan-reviewer', reviewer); } catch (e) {} updateWho(); paint(); } };
+  if (whoEl) whoEl.onclick = function () { askName('Your name (shown to teammates on this plan):'); };
+  var submitEl = bar.querySelector('.rev-submit');
+  function paintSubmit() {
+    if (!live) return;
+    submitEl.disabled = sending; // a second click while one send is in flight would race it
+    submitEl.textContent = sending ? 'Sending…' : 'Submit';
+  }
   // Review is a mode: while on, clicks mark up instead of navigating. A mode has
   // to announce itself on entry and keep its exit in view — otherwise the only
   // signal is a green button and nothing visibly changes until a hover.
@@ -677,7 +906,7 @@
     renderRail();
   }
   toggleEl.onclick = function () { setReview(!on); };
-  bar.querySelector('.rev-submit').onclick = submit;
+  submitEl.onclick = submit;
   if (live) bar.querySelector('.rev-approve').onclick = approve;
   document.addEventListener('click', onClick, true);
   // Keyboard, here rather than scaffold.js so authored HTML plans (chrome.js
@@ -722,6 +951,9 @@
       };
       es.onerror = function () { setOffline(true); };
       es.onmessage = function () {
+        // a reload mid-POST would drop its result (the server writes the file,
+        // and the watcher fires, before a slow commit+push answers): wait for it
+        if (posting) { reloadAfterPost = true; return; }
         // don't yank the page while the reviewer is mid-note; reload on close
         if (pop) { pendingReload = true; return; }
         location.reload();
@@ -736,12 +968,29 @@
     try { navigator.serviceWorker.register('/sw.js').catch(function () {}); } catch (e) {}
   }
 
+  // Another tab on this plan saved, deleted, or sent marks: fold its writes in
+  // (save() already merged ours into storage) and repaint. e.key is null when
+  // storage was cleared wholesale.
+  window.addEventListener('storage', function (e) {
+    if (e.key === null || e.key === KEY || e.key === TOMB_KEY) {
+      var m = mergeState({ marks: marks, tombs: tombs }, readStored());
+      marks = m.marks; tombs = m.tombs;
+      paint();
+    }
+  });
+
   // unsent marks that survived a server restart or reload — tell the reviewer.
-  if (live && Object.keys(marks).length) {
+  var pendingBox = live ? readOutbox() : null;
+  if (live && Object.keys(marks).length && !pendingBox) {
     toast(Object.keys(marks).length + ' unsent mark(s) restored — Submit to send them.');
   }
 
   paint();
+  restoreSync();
+  // A submission this page never saw acknowledged — a reload, a crash, or the
+  // server dropping mid-send — is resent with its original id; the server
+  // answers a round it already has as a duplicate, so this can't double-post.
+  if (pendingBox) send(pendingBox);
   // A live reload — the agent addressed an item, or the server came back — must
   // not drop a reviewer mid-review back to reading mode. Restored silently: the
   // reviewer did not just enter, so no entry toast.
