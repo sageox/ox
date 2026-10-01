@@ -437,6 +437,32 @@ func TestSnippetCentersOnTheMatch(t *testing.T) {
 	}
 }
 
+// TestSnippetWithoutWhitespaceKeepsTheHardCut: Failure prevented: a long
+// run with no whitespace (CJK text, a pasted URL or log line) walks the
+// word-boundary snap past the window end and panics, crashing search.
+func TestSnippetWithoutWhitespaceKeepsTheHardCut(t *testing.T) {
+	for _, tc := range []struct{ name, fill, term string }{
+		{"ascii", "x", "needle"},
+		{"cjk", "漢", "検索"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			text := strings.Repeat(tc.fill, 300) + tc.term + strings.Repeat(tc.fill, 300)
+			s := snippet(text, []string{tc.term})
+			if !strings.Contains(s, tc.term) || !strings.HasPrefix(s, "…") || !strings.HasSuffix(s, "…") {
+				t.Fatalf("snippet = %q, want the match inside ellipses", s)
+			}
+			if n := len([]rune(s)); n > snippetRunes+2 {
+				t.Errorf("snippet is %d runes, want <= %d", n, snippetRunes+2)
+			}
+		})
+	}
+	// A single space past the window end must not become the cut point.
+	text := strings.Repeat("x", 300) + "needle" + strings.Repeat("x", 300) + " tail"
+	if s := snippet(text, []string{"needle"}); !strings.Contains(s, "needle") {
+		t.Fatalf("snippet = %q, want the match", s)
+	}
+}
+
 // TestSearchPersonInQueryIsAFilterNotAKeyword: Failure prevented: "what did I
 // talk to Ajit about search --participant Ajit" ranks cues that merely say
 // "Ajit" above cues about search.

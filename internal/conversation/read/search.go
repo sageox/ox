@@ -792,11 +792,25 @@ func snippet(text string, terms []string) string {
 	from := max(0, at-snippetRunes/3)
 	to := min(len(rs), from+snippetRunes)
 	from = max(0, to-snippetRunes)
-	for from > 0 && !unicode.IsSpace(rs[from-1]) {
-		from++
+	// Snap to word boundaries only inside the window: text with no
+	// whitespace there (CJK, a long URL or log line) keeps the hard cut.
+	if from > 0 {
+		f := from
+		for f < to && !unicode.IsSpace(rs[f-1]) {
+			f++
+		}
+		if f < to {
+			from = f
+		}
 	}
-	for to < len(rs) && to > from && !unicode.IsSpace(rs[to]) {
-		to--
+	if to < len(rs) {
+		t := to
+		for t > from && !unicode.IsSpace(rs[t]) {
+			t--
+		}
+		if t > from {
+			to = t
+		}
 	}
 	out := strings.TrimSpace(string(rs[from:to]))
 	if from > 0 {
