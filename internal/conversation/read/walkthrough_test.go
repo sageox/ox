@@ -392,6 +392,22 @@ func TestWalkthroughWithoutTranscript(t *testing.T) {
 	}
 }
 
+// TestWalkthroughUnreadableTranscript: a transcript that exists but does
+// not parse is reported as unreadable, never as "no transcript yet".
+func TestWalkthroughUnreadableTranscript(t *testing.T) {
+	root := stageDesktopWalkthrough(t)
+	if err := os.WriteFile(filepath.Join(root, desktopWalkFolder, "transcript.vtt"), []byte("not webvtt"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	env, d := readWalkthrough(t, root, desktopWalkCnv, WalkthroughOptions{})
+	if hasNote(d, "No transcript yet") || !hasNote(d, "could not be read") {
+		t.Errorf("unreadable transcript notes = %q", d.Notes)
+	}
+	if len(env.Warnings) == 0 {
+		t.Errorf("unreadable transcript left no warning")
+	}
+}
+
 // TestWalkthroughOnAudioDiscussion: an ordinary discussion is not an
 // error — it says it has no screen data and points at the transcript.
 func TestWalkthroughOnAudioDiscussion(t *testing.T) {

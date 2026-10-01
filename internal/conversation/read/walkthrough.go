@@ -180,10 +180,15 @@ func (r *Reader) Walkthrough(rawID string, opts WalkthroughOptions) *Envelope {
 	// Transcript cues give every moment its cue number. A walkthrough whose
 	// transcript has not landed is still readable by time; a cue range on
 	// one is not.
-	cues, cueErr := loadCues(droot)
+	cues, transcriptAbsent, cueErr := loadCues(droot)
 	opts = applyCitationWindow(opts, id, cues, manifest, &warnings)
 	if cueErr != nil && opts.CueFirst != 0 {
 		return r.finishError(start, cueErr, warnings)
+	}
+	// A transcript that is there but unreadable is not "no transcript yet":
+	// say we could not look, so the reader never takes it for absence.
+	if cueErr != nil && !transcriptAbsent {
+		warnings = append(warnings, cueErr.Message)
 	}
 
 	// Screen layers on disk.
@@ -290,7 +295,7 @@ func (r *Reader) Walkthrough(rawID string, opts WalkthroughOptions) *Envelope {
 		data.PointerGaps = pointerGaps(droot, pointerLayer, manifest, cues, opts)
 	}
 
-	data.Notes = walkthroughNotes(data, hasFrames, pointerLayer != nil, axLayer != nil, cueErr != nil)
+	data.Notes = walkthroughNotes(data, hasFrames, pointerLayer != nil, axLayer != nil, transcriptAbsent, cueErr != nil && !transcriptAbsent)
 	return r.finishSuccess(start, data, walkthroughGuidance(id.ConversationID, data), warnings)
 }
 
@@ -346,19 +351,19 @@ func (r *Reader) conversationTitle(rw row, droot *os.Root) string {
 
 // loadCues parses the folder's transcript. Errors are typed so a caller
 // that needs cues can return them as-is.
-func loadCues(droot *os.Root) ([]vtt.Cue, *Error) {
+func loadCues(droot *os.Root) (cues []vtt.Cue, absent bool, _ *Error) {
 	raw, err := readDiscussionFile(droot, format.TranscriptFileName)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return nil, newError(ErrCodeTranscriptNotAvailable, fmt.Sprintf("no %s yet; a cue range needs the transcript (use --from/--to instead)", format.TranscriptFileName))
+			return nil, true, newError(ErrCodeTranscriptNotAvailable, fmt.Sprintf("no %s yet; a cue range needs the transcript (use --from/--to instead)", format.TranscriptFileName))
 		}
-		return nil, newError(ErrCodeReadError, fmt.Sprintf("read %s: %v", format.TranscriptFileName, err))
+		return nil, false, newError(ErrCodeReadError, fmt.Sprintf("read %s: %v", format.TranscriptFileName, err))
 	}
 	cues, perr := vtt.Parse(raw)
 	if perr != nil {
-		return nil, newError(ErrCodeTranscriptNotAvailable, fmt.Sprintf("%s is not a readable WebVTT file: %v", format.TranscriptFileName, perr))
+		return nil, false, newError(ErrCodeTranscriptNotAvailable, fmt.Sprintf("%s is not a readable WebVTT file: %v", format.TranscriptFileName, perr))
 	}
-	return cues, nil
+	return cues, false, nil
 }
 
 // walkthroughTarget reads the recorded window from the first screen layer
@@ -444,7 +449,7 @@ func utcOffset(s string, t0 time.Time) (time.Duration, bool) {
 
 // walkthroughNotes states every gap in the screen data and what it costs
 // the reader, in the order it matters.
-func walkthroughNotes(d *WalkthroughData, hasFrames, hasPointer, hasAX, noTranscript bool) []string {
+func walkthroughNotes(d *WalkthroughData, hasFrames, hasPointer, hasAX, noTranscript, badTranscript bool) []string {
 	if !d.ScreenRecording {
 		return []string{"Not a screen walkthrough: this recording has no keyframes and no screen layers. What was said is in the transcript."}
 	}
@@ -464,8 +469,11 @@ func walkthroughNotes(d *WalkthroughData, hasFrames, hasPointer, hasAX, noTransc
 	case !hasAX:
 		notes = append(notes, "No accessibility layer on disk: clicked and pointed-at elements cannot be named, and page changes are unknown.")
 	}
-	if noTranscript {
+	switch {
+	case noTranscript:
 		notes = append(notes, "No transcript yet, so moments carry no cue numbers.")
+	case badTranscript:
+		notes = append(notes, "The transcript is on disk but could not be read (see warnings), so moments carry no cue numbers.")
 	}
 	return notes
 }
