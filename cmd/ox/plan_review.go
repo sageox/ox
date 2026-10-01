@@ -139,6 +139,7 @@ func runPlanReview(cmd *cobra.Command, slug string, noServe bool, idleTimeout ti
 			if oerr := cli.OpenInBrowser(url); oerr != nil {
 				cli.PrintHint("open this URL to review: " + url)
 			}
+			cliCtx.SetOutcome("review_outcome", "reused")
 			return nil
 		}
 	}
@@ -180,6 +181,7 @@ func runPlanReview(cmd *cobra.Command, slug string, noServe bool, idleTimeout ti
 	rounds := make(chan int, 16)
 	approved := make(chan struct{}, 1)
 
+	start := time.Now()
 	srv := &http.Server{Handler: liveReviewHandler(gitRoot, slug, info.Dir, base, token, bc, rounds, approved)}
 	go func() { _ = srv.Serve(ln) }()
 	defer func() { _ = srv.Shutdown(context.Background()) }()
@@ -208,19 +210,51 @@ func runPlanReview(cmd *cobra.Command, slug string, noServe bool, idleTimeout ti
 			idle.Reset(idleTimeout) // idle, not total: a live session can run long
 		case <-approved:
 			fmt.Fprintln(out, "\n"+cli.StyleSuccess.Render("✓")+" Plan approved by reviewer.")
+			reportReviewSession(info.Dir, start, "approved")
 			return nil
 		case <-idle.C:
 			fmt.Fprintln(out, "\nReview session idle — closing.")
 			cli.PrintHint("Everything submitted is saved in the ledger. The open page flips to disconnected mode; " +
 				"unsent marks stay in the browser. Re-open anytime: `ox plan review " + slug + "` (same address — the page reconnects and restores them).")
+			reportReviewSession(info.Dir, start, "idle")
 			return nil
 		case <-ctx.Done():
 			fmt.Fprintln(out, "\nReview session closed.")
 			cli.PrintHint("Everything submitted is saved in the ledger. The open page flips to disconnected mode; " +
 				"unsent marks stay in the browser. Re-open anytime: `ox plan review " + slug + "` (same address — the page reconnects and restores them).")
+			reportReviewSession(info.Dir, start, "closed")
 			return nil
 		}
 	}
+}
+
+// reportReviewSession records, for this command's usage event, how the review
+// session ended and what reviewers submitted during it: the command exits 0
+// whether the plan was approved or the page was abandoned. Rounds are counted
+// from the ledger, where each is saved with its time; when the feedback dir
+// cannot be read the counts are left out rather than reported as zero.
+func reportReviewSession(planDir string, since time.Time, ending string) {
+	cliCtx.SetOutcome("review_outcome", ending)
+	sets, err := plan.LoadAllFeedback(planDir)
+	if err != nil {
+		return
+	}
+	rounds, items, highlights := 0, 0, 0
+	for _, set := range sets {
+		if set.CreatedAt.Before(since) {
+			continue
+		}
+		rounds++
+		items += len(set.Items)
+		for _, it := range set.Items {
+			if it.Quote != "" {
+				highlights++
+			}
+		}
+	}
+	cliCtx.SetOutcome("rounds", rounds)
+	cliCtx.SetOutcome("items", items)
+	cliCtx.SetOutcome("highlights", highlights)
 }
 
 // liveReviewHandler serves the plan (re-rendered live from the ledger on every
@@ -602,6 +636,7 @@ func (b *broadcaster) broadcast() {
 // reviewStaticFallback renders to a file and prints the clipboard-export path for
 // environments with no browser/server.
 func reviewStaticFallback(cmd *cobra.Command, gitRoot, slug, planDir string, in plan.Input, res plan.Result, review []plan.MergedItem) error {
+	cliCtx.SetOutcome("review_outcome", "static")
 	companions := savedCompanionFiles(planDir)
 	html, err := renderSavedReviewPage(gitRoot, slug, planDir, in, res, review, plan.RenderOptions{})
 	if err != nil {
