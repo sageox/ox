@@ -324,7 +324,7 @@ func TestAddPlanReviewWatches(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer w.Close()
+		defer func() { _ = w.Close() }()
 		if err := addPlanReviewWatches(w, planDir); err != nil {
 			t.Fatalf("addPlanReviewWatches: %v", err)
 		}
@@ -352,7 +352,7 @@ func TestAddPlanReviewWatches(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer w.Close()
+		defer func() { _ = w.Close() }()
 		if err := addPlanReviewWatches(w, planDir); err == nil {
 			t.Fatal("want an error when the resolutions dir cannot be created")
 		}
