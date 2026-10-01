@@ -633,6 +633,25 @@ func planCommitFields(st planCommitStatus) map[string]any {
 	return map[string]any{"saved": true, "committed": st.Committed, "pushed": st.Pushed}
 }
 
+// addPlanReviewWatches registers every directory a review change can land in.
+// fsnotify is not recursive, and resolutions are one file per entry under
+// feedback/resolutions/, so that subdir is created up front and watched
+// explicitly — otherwise only the first resolve (which creates it) would fire.
+// A registration failure is returned, never swallowed: a watcher missing a dir
+// leaves the live page stale and `await` waiting until its timeout.
+func addPlanReviewWatches(w *fsnotify.Watcher, planDir string) error {
+	resDir := filepath.Join(planDir, "feedback", "resolutions")
+	if err := os.MkdirAll(resDir, 0o755); err != nil {
+		return fmt.Errorf("create resolutions dir: %w", err)
+	}
+	for _, dir := range []string{planDir, filepath.Join(planDir, "feedback"), resDir} {
+		if err := w.Add(dir); err != nil {
+			return fmt.Errorf("watch %s: %w", dir, err)
+		}
+	}
+	return nil
+}
+
 // watchPlanDir broadcasts a reload whenever the plan dir (or its feedback/
 // subdir) changes — so an agent's external render/resolve updates the live page.
 func watchPlanDir(ctx context.Context, planDir string, bc *broadcaster) {
@@ -641,14 +660,12 @@ func watchPlanDir(ctx context.Context, planDir string, bc *broadcaster) {
 		return
 	}
 	defer w.Close()
-	// Resolutions are one file per entry under feedback/resolutions/, and
-	// fsnotify is not recursive: without watching that subdir only the first
-	// resolve (which creates it) would reload the live page.
-	resDir := filepath.Join(planDir, "feedback", "resolutions")
-	_ = os.MkdirAll(resDir, 0o755) // best effort; a non-dir feedback path is surfaced by the handlers
-	_ = w.Add(planDir)
-	_ = w.Add(filepath.Join(planDir, "feedback"))
-	_ = w.Add(resDir)
+	if err := addPlanReviewWatches(w, planDir); err != nil {
+		// Serving continues: the page still works and a manual reload shows
+		// new state; only the automatic reload is degraded.
+		slog.WarnContext(ctx, "plan review: live reload degraded, feedback changes will not auto-refresh the page",
+			"dir", planDir, "error", err)
+	}
 	var debounce *time.Timer
 	for {
 		select {

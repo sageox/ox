@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/fsnotify/fsnotify"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -311,4 +312,49 @@ func TestPlanReviewDurability_OversizeBodyRejected413(t *testing.T) {
 	if resp.StatusCode != http.StatusRequestEntityTooLarge {
 		t.Fatalf("want 413, got %d", resp.StatusCode)
 	}
+}
+
+// Every review dir must be watched, and a dir that cannot be watched must be
+// an error: a silently partial watch set leaves the live page stale and
+// `await` waiting until its timeout.
+func TestAddPlanReviewWatches(t *testing.T) {
+	t.Run("watches plan, feedback and resolutions", func(t *testing.T) {
+		planDir := t.TempDir()
+		w, err := fsnotify.NewWatcher()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer w.Close()
+		if err := addPlanReviewWatches(w, planDir); err != nil {
+			t.Fatalf("addPlanReviewWatches: %v", err)
+		}
+		want := map[string]bool{
+			planDir:                            true,
+			filepath.Join(planDir, "feedback"): true,
+			filepath.Join(planDir, "feedback", "resolutions"): true,
+		}
+		got := w.WatchList()
+		if len(got) != len(want) {
+			t.Fatalf("watch list = %v", got)
+		}
+		for _, p := range got {
+			if !want[p] {
+				t.Fatalf("unexpected watch %q in %v", p, got)
+			}
+		}
+	})
+	t.Run("feedback path is a file", func(t *testing.T) {
+		planDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(planDir, "feedback"), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		w, err := fsnotify.NewWatcher()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer w.Close()
+		if err := addPlanReviewWatches(w, planDir); err == nil {
+			t.Fatal("want an error when the resolutions dir cannot be created")
+		}
+	})
 }
