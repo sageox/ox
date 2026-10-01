@@ -2,11 +2,12 @@
 """Run the full test tier with long serial packages fanned out across processes.
 
 cmd/ox runs about 3,600 top-level tests, most of them one at a time (they use
-t.Setenv or os.Chdir, which forbid t.Parallel). On a 4-core CI runner it ran
-for 7.5 minutes while every other package had finished, leaving three cores
-idle. This runner gives each split package N `go test` processes, each with an
-explicit -run list, and runs them alongside one process for every other
-package. Every test still runs exactly once, with the same flags:
+t.Setenv or os.Chdir, which forbid t.Parallel), so one 7.5-minute chain set the
+floor for the whole PR job. This runner cuts the tier into slots: each split
+package becomes N `go test` processes with explicit -run lists, groups of
+packages get one process each, and everything else is the `rest` slot.
+Locally all slots run at once; CI runs each slot on its own runner. Every test
+still runs exactly once, with the same flags:
 
   * the shard lists come from `go test -list` on the package itself, so a new
     test is always assigned to a shard, and plan() refuses a partition that
@@ -210,44 +211,94 @@ def gotestsum_command(gotestsum: list[str], job_paths: Job, go_flags: list[str],
     ]
 
 
+class Layout:
+    """The slots one full-tier run is cut into.
+
+    `rest` is every package not named below. A group (NAME=PKG,PKG) runs its
+    packages in one process. A split (PKG=N) runs PKG as N contiguous slices of
+    its test order. Locally every slot runs at once; CI gives each slot its own
+    runner, because on a 4-vCPU runner the tests are CPU-bound and processes
+    sharing it only slow each other down.
+    """
+
+    def __init__(self, splits: list[str], groups: list[str]):
+        self.splits: list[tuple[str, int]] = []
+        for spec in splits:
+            package, _, count = spec.partition("=")
+            if not package or int(count) < 1:
+                raise ValueError(f"bad --split {spec!r}; want PKG=N")
+            self.splits.append((package, int(count)))
+        self.groups: list[tuple[str, list[str]]] = []
+        for spec in groups:
+            name, _, packages = spec.partition("=")
+            if not name or not packages:
+                raise ValueError(f"bad --group {spec!r}; want NAME=PKG,PKG")
+            self.groups.append((name, packages.split(",")))
+
+    @staticmethod
+    def split_slot(package: str, index: int) -> str:
+        return f"{package.rstrip('/').rsplit('/', 1)[-1]}-{index + 1}"
+
+    def slots(self) -> list[str]:
+        names = ["rest", *(name for name, _ in self.groups)]
+        for package, count in self.splits:
+            names.extend(self.split_slot(package, index) for index in range(count))
+        if len(set(names)) != len(names):
+            raise ValueError(f"slot names collide: {names}")
+        return names
+
+
+def build_jobs(layout: Layout, only: str | None, go: list[str], gotestsum: list[str], go_flags: list[str], packages: list[str], weights: dict[str, dict[str, float]], work_dir: Path) -> list[Job]:
+    if only is not None and only not in layout.slots():
+        raise SystemExit(f"unknown slot {only!r}; slots are {layout.slots()}")
+    wanted = lambda slot: only is None or only == slot  # noqa: E731
+    jobs: list[Job] = []
+
+    named = [package for package, _ in layout.splits] + [package for _, group in layout.groups for package in group]
+    if wanted("rest"):
+        excluded = set(go_list(go, named)) if named else set()
+        rest = [package for package in go_list(go, packages) if package not in excluded]
+        job = Job(f"rest ({len(rest)} packages)", work_dir, "rest")
+        job.command = gotestsum_command(gotestsum, job, go_flags, [], rest)
+        jobs.append(job)
+    for name, group in layout.groups:
+        if wanted(name):
+            job = Job(f"{name} ({', '.join(group)})", work_dir, name)
+            job.command = gotestsum_command(gotestsum, job, go_flags, [], group)
+            jobs.append(job)
+
+    # List a split package before starting anything: the listing compiles the
+    # race-instrumented dependency graph once, and every process reuses it from
+    # the build cache instead of compiling it concurrently.
+    for package, count in layout.splits:
+        slots = [index for index in range(count) if wanted(layout.split_slot(package, index))]
+        if not slots:
+            continue
+        import_path = go_list(go, [package])[0]
+        shards = plan(list_tests(go, go_flags, package), weights.get(import_path, {}), count)
+        for index in slots:
+            slot = layout.split_slot(package, index)
+            if index >= len(shards):
+                print(f"test-split: {slot} has no tests in this plan", flush=True)
+                continue
+            job = Job(f"{slot} ({package} slice {index + 1}/{len(shards)}, {len(shards[index])} tests)", work_dir, slot)
+            job.command = gotestsum_command(gotestsum, job, go_flags, ["-run", run_pattern(shards[index])], [package])
+            jobs.append(job)
+    return jobs
+
+
 def run(args: argparse.Namespace) -> int:
     go = shlex.split(args.go)
     gotestsum = shlex.split(args.gotestsum)
-    go_flags = list(args.go_flags)
     work_dir = Path(args.work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
     for stale in work_dir.iterdir():
         if stale.is_file():
             stale.unlink()
 
-    splits: list[tuple[str, int]] = []
-    for spec in args.split:
-        package, _, count = spec.partition("=")
-        splits.append((package, int(count)))
-    split_paths = go_list(go, [package for package, _ in splits])
-    everything = go_list(go, args.packages)
-    rest = [package for package in everything if package not in split_paths]
+    layout = Layout(args.split, args.group)
     weights = load_weights(Path(args.weights) if args.weights else None)
-
-    # List the split packages before starting anything: the listing compiles the
-    # race-instrumented dependency graph once, and every process below reuses
-    # it from the build cache instead of compiling it concurrently.
-    planned = []
-    for (package, count), import_path in zip(splits, split_paths):
-        names = list_tests(go, go_flags, package)
-        planned.append((package, import_path, plan(names, weights.get(import_path, {}), count)))
-
-    jobs: list[Job] = []
-    if rest:
-        job = Job(f"{len(rest)} packages", work_dir, "rest")
-        job.command = gotestsum_command(gotestsum, job, go_flags, [], rest)
-        jobs.append(job)
-    for package, import_path, shards in planned:
-        for index, names_in_shard in enumerate(shards):
-            slug = f"{import_path.rsplit('/', 1)[-1]}-{index}"
-            job = Job(f"{import_path} shard {index + 1}/{len(shards)} ({len(names_in_shard)} tests)", work_dir, slug)
-            job.command = gotestsum_command(gotestsum, job, go_flags, ["-run", run_pattern(names_in_shard)], [package])
-            jobs.append(job)
+    jobs = build_jobs(layout, args.only, go, gotestsum, list(args.go_flags), args.packages, weights, work_dir)
     for job in jobs:
         job.start()
 
@@ -269,9 +320,13 @@ def run(args: argparse.Namespace) -> int:
                 failed.append(job.label)
         time.sleep(0.5)
 
+    destination = Path(args.coverprofile)
+    destination.parent.mkdir(parents=True, exist_ok=True)
     covers = [job.cover for job in jobs if job.cover.is_file() and job.cover.stat().st_size]
     if covers:
-        merge_cover(covers, Path(args.coverprofile))
+        merge_cover(covers, destination)
+    elif not jobs:
+        destination.write_text("mode: atomic\n", encoding="utf-8")
     if args.junit:
         merge_junit([job.junit for job in jobs if job.junit.is_file() and job.junit.stat().st_size], Path(args.junit))
     if args.timings:
@@ -289,10 +344,25 @@ def run(args: argparse.Namespace) -> int:
     return 0
 
 
+def merge_slots(args: argparse.Namespace) -> int:
+    """Merge one coverage part per slot, refusing to merge if a slot is missing."""
+    layout = Layout(args.split, args.group)
+    directory = Path(args.parts)
+    expected = {slot: directory / f"coverage-{slot}.out" for slot in layout.slots()}
+    missing = [slot for slot, path in expected.items() if not path.is_file()]
+    extra = sorted(path.name for path in directory.glob("coverage-*.out") if path not in expected.values())
+    if missing or extra:
+        print(f"test-split: coverage parts missing {missing}, unexpected {extra}", file=sys.stderr)
+        return 1
+    merge_cover(list(expected.values()), Path(args.out))
+    return 0
+
+
 def update_weights(args: argparse.Namespace) -> int:
     """Rebuild the weights file from a CI timing artifact (gotestsum events)."""
     seconds: dict[str, dict[str, float]] = {package: {} for package in args.package}
-    for line in Path(args.timings).read_text(encoding="utf-8").splitlines():
+    lines = [line for path in args.timings for line in Path(path).read_text(encoding="utf-8").splitlines()]
+    for line in lines:
         try:
             event = json.loads(line)
         except json.JSONDecodeError:
@@ -315,10 +385,15 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
 
-    run_parser = sub.add_parser("run", help="run the full tier with split packages")
+    def layout_arguments(command: argparse.ArgumentParser) -> None:
+        command.add_argument("--split", action="append", default=[], metavar="PKG=N")
+        command.add_argument("--group", action="append", default=[], metavar="NAME=PKG,PKG")
+
+    run_parser = sub.add_parser("run", help="run the full tier, or one slot of it")
+    layout_arguments(run_parser)
+    run_parser.add_argument("--only", metavar="SLOT", help="run one slot (see the slots command)")
     run_parser.add_argument("--go", default="go")
     run_parser.add_argument("--gotestsum", required=True, help="gotestsum command plus format flags")
-    run_parser.add_argument("--split", action="append", default=[], metavar="PKG=N")
     run_parser.add_argument("--weights")
     run_parser.add_argument("--work-dir", required=True)
     run_parser.add_argument("--coverprofile", required=True)
@@ -327,8 +402,16 @@ def main() -> int:
     run_parser.add_argument("--packages", nargs="+", default=["./..."])
     run_parser.add_argument("go_flags", nargs=argparse.REMAINDER, help="-- then go test flags")
 
+    slots_parser = sub.add_parser("slots", help="print the slot names as a JSON array (the CI matrix)")
+    layout_arguments(slots_parser)
+
+    merge_parser = sub.add_parser("merge-slots", help="merge coverage-<slot>.out parts, one per slot")
+    layout_arguments(merge_parser)
+    merge_parser.add_argument("--parts", required=True, help="directory holding coverage-<slot>.out")
+    merge_parser.add_argument("--out", required=True)
+
     weights_parser = sub.add_parser("update-weights", help="rebuild the weights file from a timing artifact")
-    weights_parser.add_argument("--timings", required=True)
+    weights_parser.add_argument("--timings", action="append", required=True)
     weights_parser.add_argument("--package", action="append", required=True, metavar="IMPORT_PATH")
     weights_parser.add_argument("--source", required=True, help="where the timings came from, e.g. a CI run id")
     weights_parser.add_argument("--output", required=True)
@@ -338,6 +421,11 @@ def main() -> int:
         if args.go_flags and args.go_flags[0] == "--":
             args.go_flags = args.go_flags[1:]
         return run(args)
+    if args.command == "slots":
+        print(json.dumps(Layout(args.split, args.group).slots()))
+        return 0
+    if args.command == "merge-slots":
+        return merge_slots(args)
     return update_weights(args)
 
 

@@ -91,6 +91,33 @@ class MergeTest(unittest.TestCase):
         self.assertEqual(("5", "1", "3.500"), (root.get("tests"), root.get("failures"), root.get("time")))
 
 
+class LayoutTest(unittest.TestCase):
+    def layout(self):
+        return test_split.Layout(["./cmd/ox=3", "./internal/daemon=2"], ["heavy=./internal/ledger,./internal/daemon/agentwork"])
+
+    def test_slots_cover_rest_groups_and_every_slice(self):
+        self.assertEqual(["rest", "heavy", "ox-1", "ox-2", "ox-3", "daemon-1", "daemon-2"], self.layout().slots())
+
+    def test_rejects_malformed_specs_and_colliding_slots(self):
+        for splits, groups in ((["./cmd/ox"], []), (["./cmd/ox=0"], []), ([], ["heavy"]), (["./a/ox=1", "./b/ox=1"], [])):
+            with self.subTest(splits=splits, groups=groups):
+                with self.assertRaises(ValueError):
+                    test_split.Layout(splits, groups).slots()
+
+    def test_merge_slots_refuses_a_missing_or_unexpected_part(self):
+        with tempfile.TemporaryDirectory() as directory:
+            parts = Path(directory)
+            for slot in ("rest", "ox-1"):
+                (parts / f"coverage-{slot}.out").write_text("mode: atomic\nx.go:1.1,2.2 1 1\n", encoding="utf-8")
+            args = test_split.argparse.Namespace(split=["./cmd/ox=2"], group=[], parts=str(parts), out=str(parts / "all.out"))
+            self.assertEqual(1, test_split.merge_slots(args))
+            (parts / "coverage-ox-2.out").write_text("mode: atomic\nx.go:1.1,2.2 1 2\n", encoding="utf-8")
+            self.assertEqual(0, test_split.merge_slots(args))
+            self.assertEqual("mode: atomic\nx.go:1.1,2.2 1 4\n", (parts / "all.out").read_text(encoding="utf-8"))
+            (parts / "coverage-ox-9.out").write_text("mode: atomic\n", encoding="utf-8")
+            self.assertEqual(1, test_split.merge_slots(args))
+
+
 class WeightsTest(unittest.TestCase):
     def test_repository_weights_file_loads(self):
         path = Path(__file__).resolve().parents[1] / ".config/test-split-weights.json"

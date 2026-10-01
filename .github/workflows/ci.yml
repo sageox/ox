@@ -16,18 +16,37 @@ permissions:
   contents: read
 
 jobs:
-  # The PR gate is three suites on three runners plus a final job that merges
-  # their coverage. They used to run one after another on a single 4-vCPU
-  # runner in ~16 minutes: cmd/ox ran its mostly serial tests for 7.5 minutes
-  # with three cores idle, acceptance and twins waited for it, and a build cache
-  # keyed on go.sum (fixed since the last dependency bump) left every run
-  # recompiling weeks of changes under -race. Same tests, same flags, same
-  # merged profile, same ratchets — only the layout changed.
-  unit:
+  # The PR gate runs the full unit tier as one runner per slot (see `make
+  # test-split-slots`), acceptance and twins on runners of their own, and a
+  # final `test` job that merges their coverage and enforces the ratchets.
+  # It used to be one 4-vCPU runner for ~16 minutes: cmd/ox's mostly serial
+  # tests set a 7.5-minute floor, acceptance and twins waited behind them, and
+  # a build cache keyed on go.sum left every run recompiling weeks of changes
+  # under -race. Same tests, same flags, same merged profile, same ratchets.
+  plan:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      actions: write  # prune superseded build caches after a main push saves one
+    outputs:
+      slots: ${{ steps.slots.outputs.slots }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The matrix comes from the Makefile so it cannot drift from the layout
+      # the merge step expects; `coverage-merge-unit` refuses a missing slot.
+      - id: slots
+        run: echo "slots=$(make -s test-split-slots)" >> "$GITHUB_OUTPUT"
+
+      - name: Test harness contracts
+        run: make coverage-ratchet-test
+
+  unit:
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: ${{ fromJSON(needs.plan.outputs.slots) }}
+    name: unit (${{ matrix.slot }})
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -38,10 +57,10 @@ jobs:
           # so the entry never refreshes between dependency bumps.
           cache: false
 
-      # One build cache, written only by a push to main (warm-test-cache below
-      # compiles every PR job's test binaries) and read by every job. Keyed per
-      # commit so it tracks main; restore-keys picks the newest. The legacy
-      # go.sum-keyed entry is the fallback until the first main push lands.
+      # One build cache, written only by a push to main (the `main` job) and
+      # read by every job. Keyed per commit so it tracks main; restore-keys
+      # picks the newest. The legacy go.sum-keyed entry is the fallback until
+      # the first main push lands.
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -67,24 +86,11 @@ jobs:
       #   --junitfile                       structured artifact for digest + post-mortem
       # Verbose mode (humans/local debugging): OX_TEST_LOG=1 + run gotestsum without
       # these flags, or call `make test` with V=1.
-      - name: Fast tests
-        if: github.event_name == 'push'
+      - name: Full unit tier, slot ${{ matrix.slot }}
         run: |
           TEST_JUNIT=test-results.xml \
           TEST_TIMINGS=test-timings.json \
-          make test
-
-      - name: Test harness contracts
-        run: make coverage-ratchet-test
-
-      # The full tier with cmd/ox split across four processes (see
-      # scripts/test_split.py): every test once, same flags, merged coverage.
-      - name: Full unit tier with coverage (PR gate)
-        if: github.event_name == 'pull_request'
-        run: |
-          TEST_JUNIT=test-results.xml \
-          TEST_TIMINGS=test-timings.json \
-          make test-all-split
+          make test-split-slot TEST_SPLIT_ONLY=${{ matrix.slot }}
 
       - name: Require requested test artifacts
         run: |
@@ -94,26 +100,98 @@ jobs:
           python3 scripts/test_metrics.py test-timings.json >/dev/null
 
       - name: Upload unit coverage
-        if: github.event_name == 'pull_request'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: unit-coverage
-          path: coverage.out
+          name: unit-coverage-${{ matrix.slot }}
+          path: tmp/unit-parts/coverage-${{ matrix.slot }}.out
           retention-days: 3
           overwrite: true
 
       # Codecov deprecated test-results-action in favor of this action with
       # report_type: test_results; test-results-action has no node24 release.
-      # PR-only, matching what the Coverage workflow uploaded: a push to main
-      # runs the fast tier, and feeding that subset in would misrepresent which
-      # tests ran.
       - name: Upload test results to Codecov
-        if: ${{ !cancelled() && github.event_name == 'pull_request' && hashFiles('test-results.xml') != '' }}
+        if: ${{ !cancelled() && hashFiles('test-results.xml') != '' }}
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           files: test-results.xml
           report_type: test_results
           token: ${{ secrets.CODECOV_TOKEN }}
+
+      - name: Failure digest
+        if: always() && hashFiles('test-results.xml') != ''
+        run: |
+          python3 .github/scripts/junit_to_summary.py test-results.xml >> "$GITHUB_STEP_SUMMARY"
+          if test -f test-timings.json; then
+            python3 scripts/test_metrics.py --markdown test-timings.json >> "$GITHUB_STEP_SUMMARY" || echo "Test timing metrics unavailable." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload JUnit results
+        if: always() && hashFiles('test-results.xml') != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: test-results-${{ matrix.slot }}
+          path: test-results.xml
+          retention-days: 14
+          overwrite: true
+
+      - name: Upload test timing events
+        if: always() && hashFiles('test-timings.json') != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: test-timing-events-${{ matrix.slot }}
+          path: test-timings.json
+          retention-days: 14
+          overwrite: true
+
+  # A push to main validates the merge with the fast tier, then compiles what
+  # PR jobs compile and saves it as the build cache every PR job restores.
+  main:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write  # prune superseded build caches
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: false
+
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: go-${{ runner.os }}-test-${{ github.sha }}
+          restore-keys: |
+            go-${{ runner.os }}-test-
+            go-${{ runner.os }}-
+
+      - name: Configure git identity for tests
+        run: |
+          git config --global user.email "ci@sageox.ai"
+          git config --global user.name "CI"
+
+      - name: Install gotestsum
+        run: go install gotest.tools/gotestsum@v1.13.0
+
+      - name: Fast tests
+        run: |
+          TEST_JUNIT=test-results.xml \
+          TEST_TIMINGS=test-timings.json \
+          make test
+
+      - name: Test harness contracts
+        run: make coverage-ratchet-test
+
+      - name: Require requested test artifacts
+        run: |
+          test -s test-results.xml
+          test -s test-timings.json
+          python3 -c 'import xml.etree.ElementTree as ET; root = ET.parse("test-results.xml").getroot(); assert any(root.iter("testcase")), "JUnit artifact has no test cases"'
+          python3 scripts/test_metrics.py test-timings.json >/dev/null
 
       - name: Failure digest
         if: always() && hashFiles('test-results.xml') != ''
@@ -141,15 +219,12 @@ jobs:
           retention-days: 14
           overwrite: true
 
-      # Main only: compile what PR jobs compile, save it, drop older entries.
       # The repo's Actions cache sits near its 10 GB budget, so exactly one
       # ~1.5 GB entry is kept; GitHub would otherwise evict by LRU.
       - name: Warm the build cache for PRs
-        if: github.event_name == 'push'
         run: make warm-test-cache
 
       - name: Save build cache
-        if: github.event_name == 'push'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -158,7 +233,6 @@ jobs:
           key: go-${{ runner.os }}-test-${{ github.sha }}
 
       - name: Prune superseded build caches
-        if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -286,21 +360,23 @@ jobs:
   # red suite could leave this check looking green.
   test:
     if: always()
-    needs: [unit, acceptance, twins]
+    needs: [plan, unit, main, acceptance, twins]
     runs-on: ubuntu-latest
     steps:
       - name: Require every suite to pass
         env:
           EVENT: ${{ github.event_name }}
+          PLAN: ${{ needs.plan.result }}
           UNIT: ${{ needs.unit.result }}
+          MAIN: ${{ needs.main.result }}
           ACCEPTANCE: ${{ needs.acceptance.result }}
           TWINS: ${{ needs.twins.result }}
         run: |
-          echo "unit=$UNIT acceptance=$ACCEPTANCE twins=$TWINS"
-          test "$UNIT" = success
+          echo "plan=$PLAN unit=$UNIT main=$MAIN acceptance=$ACCEPTANCE twins=$TWINS"
           if [ "$EVENT" = pull_request ]; then
-            test "$ACCEPTANCE" = success
-            test "$TWINS" = success
+            for result in "$PLAN" "$UNIT" "$ACCEPTANCE" "$TWINS"; do test "$result" = success; done
+          else
+            test "$MAIN" = success
           fi
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -319,8 +395,9 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         if: github.event_name == 'pull_request'
         with:
-          name: unit-coverage
-          path: .
+          pattern: unit-coverage-*
+          merge-multiple: true
+          path: tmp/unit-parts
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         if: github.event_name == 'pull_request'
@@ -336,7 +413,9 @@ jobs:
 
       - name: Merge coverage
         if: github.event_name == 'pull_request'
-        run: make coverage-merge
+        run: |
+          make coverage-merge-unit
+          make coverage-merge
 
       - name: Enforce risk-package coverage ratchets
         if: github.event_name == 'pull_request'

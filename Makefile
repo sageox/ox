@@ -1,7 +1,7 @@
 # Makefile for ox CLI tool
 
 .PHONY: check-no-git-lfs-shell check-raw-writer-chokepoint check-session-meta-rmw check-codedb-guarded-open check-test-tiers test-tiers
-.PHONY: test-all-split warm-test-cache coverage-integration-profile coverage-merge
+.PHONY: test-all-split test-split-slots test-split-slot coverage-merge-unit warm-test-cache coverage-integration-profile coverage-merge
 .PHONY: help build build-ox build-adapters build-acceptance install install-adapters clean dev run test test-cover test-timings test-all test-slow test-fuzz test-browser test-integration test-acceptance test-acceptance-cover test-acceptance-run test-release test-release-coverage release-stages test-agents test-preflight test-digital-twin test-digital-twin-cover test-cloud-api-twin test-ledger-twin eval eval-smoke eval-no-bash eval-scaffold-check test-sequential test-profile test-watch coverage coverage-report coverage-func coverage-baseline coverage-diff coverage-check coverage-ratchet coverage-ratchet-diff coverage-ratchet-test build-cover coverage-integration smoke-test lint lint-test-env format release release-snapshot dist install-hooks docs docs-check docs-publish refresh-friction-catalog bump-version verify-version check-release-drift beads-setup
 
 # Variables
@@ -307,27 +307,49 @@ test-all: check-test-tiers test-sessionprovenance ## Run all unit tests includin
 	@tail -n +2 $(SESSIONPROVENANCE_COVER) >> coverage.out
 	@python3 scripts/coverage_ratchet.py coverage.out --write-provenance coverage.out.provenance.json
 
-# Same tests, flags, and coverage as test-all, but cmd/ox — about 3,600 tests
-# that mostly run one at a time — is split across TEST_SPLIT_SHARDS `go test`
-# processes next to one process for every other package. On a 4-core CI runner
-# test-all spent its last 3.5 minutes on cmd/ox alone with three cores idle.
-# See scripts/test_split.py; refresh .config/test-split-weights.json from a CI
-# test-timing-events artifact with `scripts/test_split.py update-weights`.
-TEST_SPLIT_SHARDS ?= 4
-test-all-split: check-test-tiers test-sessionprovenance ## Full tier (same as test-all) with cmd/ox fanned out across TEST_SPLIT_SHARDS processes
-	$(call say,"Running all tests with cmd/ox split $(TEST_SPLIT_SHARDS) ways...")
-	@$(TEST_GIT_ISOLATION) $(TIME_CMD) python3 scripts/test_split.py run \
+# Same tests, flags, and coverage as test-all, cut into slots
+# (scripts/test_split.py): cmd/ox and internal/daemon — long chains of tests
+# that mostly run one at a time — become contiguous slices of their own test
+# order, the next-heaviest packages share a group, and everything else is the
+# `rest` slot. Locally `test-all-split` runs every slot at once; CI runs each
+# slot on its own runner (`test-split-slot`), because on a 4-vCPU runner the
+# tests are CPU-bound and processes sharing it only slow each other down.
+# Refresh .config/test-split-weights.json from CI test-timing-events artifacts
+# with `scripts/test_split.py update-weights`.
+TEST_SPLIT_LAYOUT := --split ./cmd/ox=4 --split ./internal/daemon=2 \
+	--group heavy=./internal/daemon/agentwork,./internal/ledger
+TEST_SPLIT_ONLY ?=
+TEST_SPLIT_PARTS := tmp/unit-parts
+TEST_SPLIT_RUN = python3 scripts/test_split.py run $(TEST_SPLIT_LAYOUT) \
 		--go "$(GO)" \
 		--gotestsum "$(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN)" \
-		--split ./cmd/ox=$(TEST_SPLIT_SHARDS) \
 		--weights .config/test-split-weights.json \
-		--work-dir tmp/test-split \
-		--coverprofile coverage.out \
 		$(if $(strip $(TEST_JUNIT)),--junit "$(TEST_JUNIT)",) \
-		$(if $(strip $(TEST_TIMINGS)),--timings "$(TEST_TIMINGS)",) \
+		$(if $(strip $(TEST_TIMINGS)),--timings "$(TEST_TIMINGS)",)
+
+test-all-split: check-test-tiers test-sessionprovenance ## Full tier (same as test-all) with every split slot running at once
+	$(call say,"Running all tests split into slots...")
+	@$(TEST_GIT_ISOLATION) $(TIME_CMD) $(TEST_SPLIT_RUN) --work-dir tmp/test-split --coverprofile coverage.out \
 		-- $(FULL_TEST_FLAGS) -covermode=atomic
 	@tail -n +2 $(SESSIONPROVENANCE_COVER) >> coverage.out
 	@python3 scripts/coverage_ratchet.py coverage.out --write-provenance coverage.out.provenance.json
+
+test-split-slots: ## Print the full tier's slots as a JSON array (the CI unit matrix)
+	@python3 scripts/test_split.py slots $(TEST_SPLIT_LAYOUT)
+
+test-split-slot: check-test-tiers ## Run one slot of the full tier: make test-split-slot TEST_SPLIT_ONLY=<slot>
+	@test -n "$(TEST_SPLIT_ONLY)" || { echo "Set TEST_SPLIT_ONLY to one of: $$($(MAKE) -s test-split-slots)"; exit 1; }
+	@$(TEST_GIT_ISOLATION) $(TIME_CMD) $(TEST_SPLIT_RUN) --only "$(TEST_SPLIT_ONLY)" --work-dir tmp/test-split \
+		--coverprofile $(TEST_SPLIT_PARTS)/coverage-$(TEST_SPLIT_ONLY).out \
+		-- $(FULL_TEST_FLAGS) -covermode=atomic
+	@# The nested public-contract module rides with `rest`, as it does in test-all.
+	@if [ "$(TEST_SPLIT_ONLY)" = rest ]; then \
+	  $(MAKE) --no-print-directory test-sessionprovenance && \
+	  tail -n +2 $(SESSIONPROVENANCE_COVER) >> $(TEST_SPLIT_PARTS)/coverage-rest.out; \
+	 fi
+
+coverage-merge-unit: ## Merge one coverage part per slot ($(TEST_SPLIT_PARTS)) into coverage.out; fails if a slot is missing
+	@python3 scripts/test_split.py merge-slots $(TEST_SPLIT_LAYOUT) --parts $(TEST_SPLIT_PARTS) --out coverage.out
 
 # Compile, without running, what the PR jobs compile, so a push to main can
 # save a build cache that PRs restore. A stale cache costs a PR run minutes of
