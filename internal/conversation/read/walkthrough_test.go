@@ -69,6 +69,8 @@ func momentLine(m WalkthroughMoment) string {
 		subject = m.Page.Title + "|" + m.Page.URL
 	case m.Frame != nil:
 		subject = m.Frame.Why
+	case m.Mark != nil:
+		subject = m.Mark.By
 	}
 	return strings.Join([]string{m.At, itoa(m.Cue), m.Kind, subject}, " ")
 }
@@ -130,7 +132,7 @@ func TestWalkthroughInventoryAndTarget(t *testing.T) {
 	if !d.ScreenRecording || d.Title != "Saved page walkthrough" || d.Duration != "00:00:25.200" {
 		t.Errorf("header = %v %q %q", d.ScreenRecording, d.Title, d.Duration)
 	}
-	if d.Target == nil || *d.Target != (WalkthroughTarget{App: "Browser", Title: "Team", Width: 1440, Height: 900}) {
+	if d.Target == nil || *d.Target != (WalkthroughTarget{Kind: "window", App: "Browser", Title: "Team", Width: 1440, Height: 900}) {
 		t.Errorf("target = %+v", d.Target)
 	}
 	if kf := d.Sources.Keyframes; kf == nil || *kf != (KeyframeInventory{Count: 3, Described: 2, Local: 1}) {
@@ -579,6 +581,85 @@ func TestWalkthroughFollowsCitationSelectors(t *testing.T) {
 				t.Errorf("cues = %v, want %v", got, c.want)
 			}
 		})
+	}
+}
+
+// --- Area takes and presenter marks ---
+
+// Area fixture: testdata/walkthrough-area/discussions holds one SageOx Desktop
+// AREA take — target_initial {kind:"area", size, backing_scale, display_id,
+// rect} with no app or title, pointer x/y relative to the rect — whose
+// keyframe-hints layer carries three presenter marks (written out of order,
+// one at the same instant as a click) beside inferred click and dwell hints.
+// It has no keyframes yet.
+const (
+	areaWalkRoot = "testdata/walkthrough-area/discussions"
+	areaWalkCnv  = "cnv_01a0f490-0000-7000-8000-0000000000d1"
+)
+
+// TestWalkthroughAreaTarget: an area take reads as "a screen area" of a size,
+// never as a window with a blank app and title.
+// Failure prevented: an agent tells the user "you recorded an untitled
+// window" or names the one app it happens to see as the whole recording.
+func TestWalkthroughAreaTarget(t *testing.T) {
+	env, d := readWalkthrough(t, areaWalkRoot, areaWalkCnv, WalkthroughOptions{})
+
+	if d.Target == nil || *d.Target != (WalkthroughTarget{Kind: "area", Width: 800, Height: 600}) {
+		t.Errorf("target = %+v", d.Target)
+	}
+	if !hasNote(d, "a screen area (800 × 600)") {
+		t.Errorf("notes must say a screen area was recorded, got %q", d.Notes)
+	}
+	if !strings.Contains(env.Guidance, "a screen area") {
+		t.Errorf("guidance = %q", env.Guidance)
+	}
+	_, w := readWalkthrough(t, desktopWalkRoot, desktopWalkCnv, WalkthroughOptions{})
+	if hasNote(w, "screen area") {
+		t.Errorf("a window take must not read as an area, got %q", w.Notes)
+	}
+}
+
+// TestWalkthroughMarksAreMoments: a presenter mark (keyframe-hints reason
+// "mark") is its own moment, in time order, ahead of anything else at the
+// same instant, and distinct from the inferred click and dwell hints, which
+// stay out of the timeline (the pointer layer already says what was clicked).
+// Failure prevented: the one moment the presenter flagged on purpose reads
+// like any other click, or not at all.
+func TestWalkthroughMarksAreMoments(t *testing.T) {
+	env, d := readWalkthrough(t, areaWalkRoot, areaWalkCnv, WalkthroughOptions{})
+
+	want := []string{
+		"00:00:00.500 1 page Checkout flow – Figma|",
+		"00:00:02.000 1 mark presenter",
+		"00:00:04.000 1 mark presenter",
+		"00:00:04.000 1 click AXButton:Pay now",
+		"00:00:09.000 2 mark presenter",
+	}
+	var got []string
+	var seqs []int
+	for _, m := range d.Moments {
+		got = append(got, momentLine(m))
+		if m.Mark != nil {
+			seqs = append(seqs, m.Mark.Seq)
+		}
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("moments:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	if fmt.Sprint(seqs) != "[1 2 3]" {
+		t.Errorf("mark seqs = %v", seqs)
+	}
+	if !strings.Contains(env.Guidance, "marked by the presenter") {
+		t.Errorf("guidance must point at marks, got %q", env.Guidance)
+	}
+	if _, w := readWalkthrough(t, desktopWalkRoot, desktopWalkCnv, WalkthroughOptions{}); strings.Contains(fmt.Sprint(w.Moments), MomentMark) {
+		t.Errorf("a take without marks has no mark moments")
+	}
+
+	// A cue window keeps only the marks inside it.
+	_, c := readWalkthrough(t, areaWalkRoot, areaWalkCnv, WalkthroughOptions{CueFirst: 2, CueLast: 2})
+	if len(c.Moments) != 1 || c.Moments[0].Kind != MomentMark {
+		t.Errorf("cue 2 moments = %+v", c.Moments)
 	}
 }
 

@@ -21,8 +21,10 @@ const DefaultMomentLimit = 80
 const maxPointerGaps = 20
 
 // Moment kinds, in the order a reader should weigh them: what the narrator
-// did on purpose first.
+// did on purpose first. A mark is the most deliberate of all — the presenter
+// pressed "Mark this moment" in SageOx Desktop to flag it for the reader.
 const (
+	MomentMark     = "mark"
 	MomentClick    = "click"
 	MomentDwell    = "dwell"
 	MomentPage     = "page"
@@ -30,9 +32,17 @@ const (
 )
 
 // layerKindKeyframeHints is the producer's advisory list of moments worth a
-// keyframe. Reported in the inventory; the moments themselves are derived
-// from the pointer and ax-tree layers it is derived from.
+// keyframe. Reported in the inventory. Its inferred rows (click, dwell,
+// focus-change) are derived from the pointer and ax-tree layers, which the
+// moments are read from directly; only its `mark` rows — the presenter's own
+// "Mark this moment" — become moments of their own.
 const layerKindKeyframeHints = "keyframe-hints"
+
+// Target kinds a walkthrough envelope's target_initial can carry.
+const (
+	targetKindWindow = "window"
+	targetKindArea   = "area"
+)
 
 // WalkthroughOptions selects which moments to serve: a cue range, a
 // media-clock window, or (neither) the whole recording up to Limit.
@@ -63,12 +73,16 @@ type WalkthroughData struct {
 	Window  WalkthroughWindow   `json:"window"`
 	Moments []WalkthroughMoment `json:"moments"`
 	// PointerGaps are spans in the window when the pointer was outside the
-	// captured window: nothing was pointed at there, as far as anyone knows.
+	// captured window or area: nothing was pointed at there, as far as anyone knows.
 	PointerGaps []WalkthroughGap `json:"pointer_gaps,omitempty"`
 }
 
-// WalkthroughTarget is the window that was recorded.
+// WalkthroughTarget is what was recorded: one window (Kind "window", with
+// its app and title), or a screen area (Kind "area": a rectangle on one
+// display, sized but with no app or title, since it shows whatever was under
+// it). Width and Height are the target's size in points.
 type WalkthroughTarget struct {
+	Kind   string `json:"kind,omitempty"`
 	App    string `json:"app,omitempty"`
 	Title  string `json:"title,omitempty"`
 	Width  int    `json:"width,omitempty"`
@@ -120,8 +134,16 @@ type WalkthroughMoment struct {
 	DwellMS int64          `json:"dwell_ms,omitempty"`
 	Page    *ScreenPage    `json:"page,omitempty"`
 	Frame   *KeyframeRef   `json:"frame,omitempty"`
+	Mark    *MarkRef       `json:"mark,omitempty"`
 
 	at time.Duration
+}
+
+// MarkRef is a moment the presenter marked on purpose. By is who marked it
+// ("presenter"); Seq is the producer's running mark number within the take.
+type MarkRef struct {
+	By  string `json:"by"`
+	Seq int    `json:"seq,omitempty"`
 }
 
 // KeyframeRef is a server-extracted still: how it was picked, what the
@@ -138,7 +160,7 @@ type KeyframeRef struct {
 	FetchCommand string `json:"fetch_command,omitempty"`
 }
 
-// WalkthroughGap is a span the pointer spent outside the captured window.
+// WalkthroughGap is a span the pointer spent outside the captured window or area.
 type WalkthroughGap struct {
 	From   string `json:"from"`
 	To     string `json:"to"`
@@ -206,6 +228,13 @@ func (r *Reader) Walkthrough(rawID string, opts WalkthroughOptions) *Envelope {
 	}
 
 	var moments []WalkthroughMoment
+
+	// Marks first, so a mark sorts ahead of anything else at its instant.
+	if hintsLayer := activeLayer(discovery, layerKindKeyframeHints); hintsLayer != nil {
+		for _, mk := range loadMarks(droot, hintsLayer, manifest, &warnings) {
+			moments = append(moments, WalkthroughMoment{at: mk.at, Kind: MomentMark, Mark: &MarkRef{By: "presenter", Seq: mk.seq}})
+		}
+	}
 
 	// Keyframes: the server's stills.
 	kf, hasFrames := loadKeyframes(droot, &warnings)
@@ -379,6 +408,14 @@ func walkthroughTarget(droot *os.Root, layers ...*format.DiscoveredLayer) *Walkt
 		}
 		ti := meta.Content.TargetInitial
 		t := &WalkthroughTarget{App: cleanScreenText(ti.App), Title: cleanScreenText(ti.Title)}
+		switch ti.Kind {
+		case targetKindWindow:
+			t.Kind = targetKindWindow
+		case targetKindArea:
+			// An area has no app or title of its own: whatever an envelope
+			// says there is not the target's name.
+			t.Kind, t.App, t.Title = targetKindArea, "", ""
+		}
 		if ti.Size != nil && ti.Size.W > 0 && ti.Size.H > 0 && ti.Size.W < 1e6 && ti.Size.H < 1e6 {
 			t.Width, t.Height = int(ti.Size.W), int(ti.Size.H)
 		}
@@ -454,6 +491,13 @@ func walkthroughNotes(d *WalkthroughData, hasFrames, hasPointer, hasAX, noTransc
 		return []string{"Not a screen walkthrough: this recording has no keyframes and no screen layers. What was said is in the transcript."}
 	}
 	var notes []string
+	if t := d.Target; t != nil && t.Kind == targetKindArea {
+		size := ""
+		if t.Width > 0 && t.Height > 0 {
+			size = fmt.Sprintf(" (%d × %d)", t.Width, t.Height)
+		}
+		notes = append(notes, "This walkthrough recorded a screen area"+size+", not one window: it has no app or window title, and it shows whatever was under the rectangle — often several apps, sometimes a notification. Page moments name the window the pointer was over.")
+	}
 	kf := d.Sources.Keyframes
 	switch {
 	case !hasFrames:
@@ -484,6 +528,15 @@ func walkthroughGuidance(conversationID string, d *WalkthroughData) string {
 		return fmt.Sprintf("Transcript: ox conversation transcript %s --cues N-M.", conversationID)
 	}
 	g := fmt.Sprintf("What was said at a moment: ox conversation transcript %s --cues N (the moment's cue).", conversationID)
+	if t := d.Target; t != nil && t.Kind == targetKindArea {
+		g = "This is a screen area, not one window, so there is no app or title to name it by. " + g
+	}
+	for _, m := range d.Moments {
+		if m.Kind == MomentMark {
+			g += " Moments of kind mark were marked by the presenter on purpose: read those first, with what was said at their cue."
+			break
+		}
+	}
 	if d.Window.Truncated {
 		g += fmt.Sprintf(" More moments exist: narrow with ox conversation walkthrough %s --cues N-M or --from/--to.", conversationID)
 	}

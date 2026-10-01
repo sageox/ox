@@ -124,6 +124,9 @@ func renderConversationWalkthroughText(w io.Writer, env *read.Envelope) {
 	fmt.Fprintln(w, cli.StyleBold.Render(d.Title))
 	if t := d.Target; t != nil {
 		line := "window: " + strings.TrimSpace(t.App+" · "+t.Title)
+		if t.Kind == "area" {
+			line = "area: a screen area"
+		}
 		if t.Width > 0 {
 			line += fmt.Sprintf(" (%dx%d)", t.Width, t.Height)
 		}
@@ -154,8 +157,12 @@ func renderConversationWalkthroughText(w io.Writer, env *read.Envelope) {
 			}
 		}
 	}
+	outside := "window"
+	if d.Target != nil && d.Target.Kind == "area" {
+		outside = "area"
+	}
 	for _, g := range d.PointerGaps {
-		fmt.Fprintln(w, cli.StyleDim.Render(fmt.Sprintf("pointer outside the window %s to %s", g.From, g.To)))
+		fmt.Fprintln(w, cli.StyleDim.Render(fmt.Sprintf("pointer outside the %s %s to %s", outside, g.From, g.To)))
 	}
 	if d.Window.Truncated {
 		fmt.Fprintln(w, cli.StyleDim.Render(fmt.Sprintf("(%d of %d moments; narrow with --cues N-M or --from/--to)", len(d.Moments), d.Window.Total)))
@@ -183,6 +190,11 @@ func walkthroughSourcesLine(d *read.WalkthroughData) string {
 // walkthroughMomentText renders what one moment names.
 func walkthroughMomentText(m read.WalkthroughMoment) string {
 	switch {
+	case m.Mark != nil:
+		if m.Mark.Seq > 0 {
+			return fmt.Sprintf("marked by the %s (#%d)", m.Mark.By, m.Mark.Seq)
+		}
+		return "marked by the " + m.Mark.By
 	case m.Element != nil:
 		s := screenElementText(m.Element)
 		if m.Element.Within != nil {

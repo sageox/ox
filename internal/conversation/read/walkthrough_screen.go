@@ -144,6 +144,59 @@ func loadPointerMoments(droot *os.Root, layer *format.DiscoveredLayer, manifest 
 	return out
 }
 
+// defaultHintsSidecar is the keyframe-hints layer's row file.
+const defaultHintsSidecar = "keyframe-hints.jsonl"
+
+// hintReasonMark is the keyframe-hints reason SageOx Desktop writes when the
+// presenter presses "Mark this moment" (detail {source:"user", seq}).
+const hintReasonMark = "mark"
+
+// markMoment is one presenter mark on the media clock.
+type markMoment struct {
+	at  time.Duration
+	seq int
+}
+
+// hintRow is the subset of a keyframe-hints.jsonl row the mark pass needs.
+type hintRow struct {
+	TUTC   json.RawMessage `json:"t_utc"`
+	TMS    *float64        `json:"t_ms"`
+	Reason string          `json:"reason"`
+	Detail struct {
+		Seq float64 `json:"seq"`
+	} `json:"detail"`
+}
+
+// loadMarks reads the presenter marks out of the keyframe-hints layer, time
+// sorted. Inferred rows (click, dwell, focus-change) are skipped without
+// counting against the kept-row cap; the moments they stand for come from
+// the pointer and ax-tree layers.
+func loadMarks(droot *os.Root, layer *format.DiscoveredLayer, manifest *format.Manifest, warnings *[]string) []markMoment {
+	t0, hasT0 := layerT0(layer, manifest)
+	var out []markMoment
+	forEachSidecarRow(droot, layer, defaultHintsSidecar, warnings, func(line []byte) rowResult {
+		var row hintRow
+		if json.Unmarshal(line, &row) != nil {
+			return rowMalformed
+		}
+		if row.Reason != hintReasonMark {
+			return rowSkipped
+		}
+		at, res := rowMediaTime(row.TUTC, row.TMS, t0, hasT0)
+		if res != rowKept {
+			return res
+		}
+		mk := markMoment{at: at}
+		if row.Detail.Seq >= 1 && row.Detail.Seq < 1e6 {
+			mk.seq = int(row.Detail.Seq)
+		}
+		out = append(out, mk)
+		return rowKept
+	})
+	sort.SliceStable(out, func(i, j int) bool { return out[i].at < out[j].at })
+	return out
+}
+
 // axTreeRow is the subset of an ax.jsonl row the walkthrough reads: marker
 // rows (snapshot + reason, no role) and node rows. `value` is deliberately
 // never decoded; `url` is decoded only to reduce a web area's address to

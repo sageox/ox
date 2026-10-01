@@ -19,7 +19,8 @@ description: >-
      the JSON envelopes and in `ox guide conversations` ("Screen
      walkthroughs"); keep this file to the orchestration they cannot carry. -->
 
-A walkthrough is one window recorded while someone narrates. Next to the
+A walkthrough is one window, or one screen area, recorded while someone
+narrates. Next to the
 video, SageOx keeps compact data about it: the pointer and accessibility
 **layers** (what was clicked, rested on, and which page was showing) and
 server-extracted **keyframes** (stills, with a one-line description when the
@@ -32,9 +33,13 @@ recording at a fraction of the cost of the video. Do not look for the video.
    sageox.ai link) for the summary. If its guidance names
    `ox conversation walkthrough`, this skill applies.
 2. **Read the screen side.** `ox conversation walkthrough <id>`. Check
-   `sources` and `notes` first: they say which data exists. Then read
-   `moments[]` — clicks, dwells (deliberate pointing, 2 s+), page changes,
-   keyframes — each with the transcript `cue` it belongs to. If
+   `target`, `sources` and `notes` first: they say what was recorded and
+   which data exists. A `target.kind` of `area` is a screen area (a size, no
+   app or title) that may show several apps — call it "a screen area", never
+   an untitled window. Then read `moments[]` — marks, clicks, dwells
+   (deliberate pointing, 2 s+), page changes, keyframes — each with the
+   transcript `cue` it belongs to. A `mark` is a moment the presenter marked
+   on purpose: start there, and treat it as the point they most wanted seen. If
    `window.truncated` is true, narrow with `--cues N-M` or `--from/--to`.
 3. **Join it to the narration.**
    - "What was on screen / pointed at when they said X?" — find X with
@@ -43,8 +48,8 @@ recording at a fraction of the cost of the video. Do not look for the video.
      cue either side when nothing lands exactly on it).
    - "What did they say when they clicked Y?" — take the moment's `cue` and
      read `ox conversation transcript <id> --cues N`.
-   - Words like "this", "that", "here" usually refer to the click or dwell in
-     the same cue. Name the element (`role`, `title`, `dom_id`, or `within`
+   - Words like "this", "that", "here" usually refer to the mark, click or
+     dwell in the same cue. Name the element (`role`, `title`, `dom_id`, or `within`
      for an unnamed one) and the `page` (`title`, `url` path) explicitly in
      your answer; that is what makes the request actionable in code.
 4. **Look only when you must.** A keyframe's `description` plus the element

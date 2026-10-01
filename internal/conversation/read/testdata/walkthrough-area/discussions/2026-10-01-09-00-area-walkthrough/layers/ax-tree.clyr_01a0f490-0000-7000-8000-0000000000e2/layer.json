@@ -1,0 +1,20 @@
+{
+  "$schema_version": 1,
+  "layer_id": "clyr_01a0f490-0000-7000-8000-0000000000e2",
+  "conversation_id": "cnv_01a0f490-0000-7000-8000-0000000000d1",
+  "kind": "ax-tree",
+  "modality": "json",
+  "mime": "application/x-ndjson",
+  "label": "Accessibility — Screen area · 800 × 600",
+  "origin": "captured",
+  "revision": 1,
+  "status": "active",
+  "supersedes": null,
+  "clock": {"t0": "2026-10-01T09:00:00.000Z", "class": "wall-clock", "offset_ms": 0},
+  "content": {
+    "kind": "ax-tree",
+    "coord_space": "target",
+    "refs": [{"ref": "git-file", "path": "ax.jsonl", "mime": "application/x-ndjson"}],
+    "target_initial": {"kind": "area", "size": {"w": 800, "h": 600}, "backing_scale": 2, "display_id": "disp_1", "rect": {"x": 200, "y": 150, "w": 800, "h": 600}}
+  }
+}
