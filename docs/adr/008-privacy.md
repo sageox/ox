@@ -11,7 +11,7 @@
 **Status:** Accepted (aspirational in parts — see banner and checklist above)
 **Date:** 2025-12-22
 **Deciders:** SageOx Engineering
-**Amended:** 2026-09-27 — usage events also go to PostHog, keyed by a persistent install ID and tagged with the repository's and team's SageOx IDs (see "Addendum (2026-09-27): PostHog usage events" at the end)
+**Amended:** 2026-09-27 — usage events also go to PostHog, keyed by a persistent install ID and tagged with the repository's and team's SageOx IDs (see "Addendum (2026-09-27): PostHog usage events" at the end); 2026-09-30 — the plan-review commands say how they ended (D7 in that addendum)
 
 ## Implementation status (added 2026-09-10)
 
@@ -469,6 +469,7 @@ The SageOx telemetry endpoint (`/api/v1/telemetry`) labels each event with a ran
 - **D4.** Commands that run automatically are not sent: coding-agent hooks other than SessionStart and SessionEnd, the git credential helper, git hooks, and any ox started by another ox (a hook running prime or a local query, sync starting the daemon). Each ox sets `OX_STARTED_BY_OX` for the processes it starts.
 - **D5.** Sending never delays or alters the command. At exit, ox starts a detached copy of itself that posts the event and gives up after 10 seconds. At most four senders run at once; when all four are busy (for example, on a network that silently drops packets to PostHog) the event is dropped. Builds without a PostHog key skip the event entirely, and a failure while capturing is recovered and ignored.
 - **D6.** The existing opt-outs cover these events: `ox config set telemetry off`, `DO_NOT_TRACK=1`, and `SAGEOX_TELEMETRY=false`. They are checked again when the command ends, so turning telemetry off does not report itself. The first-run notice this ADR promised now ships (see the status table).
+- **D7.** (Added 2026-09-30, by Madhur Shrimal.) Two commands exit 0 however they end, so their event also says how they ended — an addition to D3's list for these two commands only. `plan review` carries `review_outcome`: `approved` (a reviewer approved the plan in the browser), `idle` (the session timed out), `closed` (interrupted), `reused` (a review server for the plan was already running), or `static` (the page was exported to a file instead of served: `--no-serve`, no display, or no free port). A served session also carries the `rounds`, `items`, and `highlights` (items commenting on selected words) that reviewers submitted during it. `plan review await` carries `await_status`: `feedback`, `approved`, or `timeout`. These are counts and fixed words: no plan name, no reviewer name, nothing a reviewer wrote. Context: on 2026-09-30 PostHog held 3 `plan review` runs and 5 `plan review await` runs in the previous 30 days, every one a success; nothing showed whether a review got feedback or was abandoned.
 
 ### Consequences
 
@@ -494,3 +495,4 @@ ADR-027 (consultation-attribution privacy) governs who-read-what data in the Led
 - `internal/telemetry/posthog.go`: capture and the detached sender
 - `cmd/ox/telemetry_posthog.go`: what an event contains, the skip list, and the first-run notice
 - `cmd/ox/telemetry_posthog_e2e_test.go`: a release-style build reporting commands under one install ID and honoring `DO_NOT_TRACK`
+- `cmd/ox/plan_review.go` (`reportReviewSession`) and `cmd/ox/plan_review_await.go` (`emitAwait`): the outcome properties of D7, recorded through `cli.Context.SetOutcome`

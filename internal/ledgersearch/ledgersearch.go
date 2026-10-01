@@ -507,6 +507,7 @@ func scanPlanFeedback(ledgerPath string, terms []string, now time.Time, strict b
 				Items     []struct {
 					Section  string `json:"section"`
 					Label    string `json:"label"`
+					Quote    string `json:"quote"`
 					Status   string `json:"status"`
 					Note     string `json:"note"`
 					Reviewer string `json:"reviewer"`
@@ -524,7 +525,7 @@ func scanPlanFeedback(ledgerPath string, terms []string, now time.Time, strict b
 				b.WriteByte('\n')
 			}
 			for _, it := range round.Items {
-				for _, f := range []string{it.Reviewer, it.Status, it.Section, it.Label, it.Note} {
+				for _, f := range []string{it.Reviewer, it.Status, it.Section, it.Label, it.Quote, it.Note} {
 					if f != "" {
 						b.WriteString(f)
 						b.WriteByte(' ')

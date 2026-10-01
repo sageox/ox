@@ -16,6 +16,13 @@ printer; see `.claude/rules/json-output.md`. Writer-aware helpers such as
 `PrintWarningTo` honor their supplied writer. Command-specific JSON response
 envelopes remain part of the command's stdout contract.
 
+The common CLI pre-run resolves `OX_JSON=1` as the JSON default; explicit
+`--json` or `--json=false` takes precedence. It applies that result to both the
+configuration and command flags so handlers agree regardless of which they read.
+An environment default must not mark the flag as explicitly supplied: commands
+that choose JSON automatically for AI coworkers still need to distinguish an
+omitted flag from `--json=false`.
+
 ## Spinner Cancellation
 
 `cli.WithSpinner` returns `tea.ErrInterrupted` when dismissed before the operation

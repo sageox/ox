@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"runtime/pprof"
 	"runtime/trace"
+	"strconv"
 	"strings"
 	"time"
 
@@ -65,6 +66,18 @@ var rootCmd = &cobra.Command{
 
 		// store config in global for backward compatibility
 		cfg = cliCtx.Config
+
+		// Legacy handlers read JSON from local or root flags instead of cfg.
+		// Publish the resolved value without treating an environment default as
+		// an explicit flag. Cobra may retain an inherited flag across ResetFlags,
+		// so the root flag also needs the parsed flag's explicitness.
+		jsonChanged := cmd.Flags().Changed("json")
+		for _, flags := range []*pflag.FlagSet{cmd.Flags(), cmd.Root().PersistentFlags()} {
+			if flag := flags.Lookup("json"); flag != nil {
+				_ = flag.Value.Set(strconv.FormatBool(cfg.JSON))
+				flag.Changed = jsonChanged
+			}
+		}
 
 		// Daemon is started by `ox agent prime` as a child process of the coding agent.
 		// No auto-start here — when the agent exits, the daemon gets cleaned up automatically.

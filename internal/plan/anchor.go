@@ -17,6 +17,9 @@ package plan
 // The server needs the same computation to REMAP feedback when a plan is
 // updated: parse the freshly rendered HTML, enumerate the same elements the
 // page makes markable (review.js SELECTOR), and compute each element's anchor.
+// A highlight's "q" anchor (the same hash over heading + quoted words) is never
+// computed here: the page locates a highlight by searching for its words, and
+// RemapFeedback leaves highlights alone.
 // Known, accepted divergences (each degrades to "item stays orphaned but
 // visible", never to data loss):
 //   - Mermaid blocks: the browser hashes the post-render SVG text, the server
