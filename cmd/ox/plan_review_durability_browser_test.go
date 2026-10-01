@@ -98,7 +98,7 @@ func reply(body string) scriptedReply {
 
 const (
 	replyPushed   = `{"ok":true,"saved":true,"round_id":"$ID","duplicate":false,"committed":true,"pushed":true,"notified":true}`
-	replyDupe     = `{"ok":true,"saved":true,"round_id":"$ID","duplicate":true,"committed":true,"pushed":true,"notified":true}`
+	replyDupe     = `{"ok":true,"saved":true,"round_id":"$ID","duplicate":true,"committed":true,"pushed":true,"notified":false}`
 	replyUnpushed = `{"ok":true,"saved":true,"round_id":"$ID","duplicate":false,"committed":true,"pushed":false,"notified":true}`
 	replyOld      = `{"ok":true,"notified":true}`
 	replyWrongID  = `{"ok":true,"saved":true,"round_id":"someone-elses-round","committed":true,"pushed":true}`

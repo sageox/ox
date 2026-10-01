@@ -127,3 +127,44 @@ func TestRunPlanFeedbackShow_ReportsCorruptRounds(t *testing.T) {
 		})
 	}
 }
+
+// A plan with no review yet must say so in text and return empty arrays (not
+// null) in JSON, and an unreadable feedback dir must be an error rather than
+// an empty digest that looks healthy.
+func TestRunPlanFeedbackShow_EmptyAndUnreadable(t *testing.T) {
+	_, planDir := saveFeedbackTestPlan(t, "show-empty")
+
+	cmd := &cobra.Command{}
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	if err := runPlanFeedbackShow(cmd, "show-empty", false); err != nil {
+		t.Fatalf("show text: %v", err)
+	}
+	if got := strings.TrimSpace(out.String()); got != "No review feedback for this plan yet." {
+		t.Fatalf("text = %q", got)
+	}
+
+	out.Reset()
+	if err := runPlanFeedbackShow(cmd, "show-empty", true); err != nil {
+		t.Fatalf("show json: %v", err)
+	}
+	dec := json.NewDecoder(&out)
+	dec.DisallowUnknownFields()
+	var got struct {
+		Items         []json.RawMessage `json:"items"`
+		CorruptRounds []string          `json:"corrupt_rounds"`
+	}
+	if err := dec.Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Items == nil || len(got.Items) != 0 || got.CorruptRounds == nil || len(got.CorruptRounds) != 0 {
+		t.Fatalf("want empty (non-null) arrays, got %+v", got)
+	}
+
+	if err := os.WriteFile(filepath.Join(planDir, "feedback"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := runPlanFeedbackShow(cmd, "show-empty", false); err == nil || !strings.Contains(err.Error(), "check review rounds") {
+		t.Fatalf("err = %v", err)
+	}
+}

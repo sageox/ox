@@ -97,8 +97,9 @@ func recordPlanPushOutcome(ctx context.Context, ledgerPath, planDir string, push
 		"plan_dir", rel, "failed_attempts", m.FailedAttempts, "error", m.LastError)
 }
 
-// writePlanPushMarker writes atomically (temp + rename) so a concurrent flush
-// never reads a torn marker.
+// writePlanPushMarker writes atomically (fsync'd temp + rename) so a
+// concurrent flush never reads a torn marker. The temp file is dot-prefixed,
+// which listPlanPushPending skips.
 func writePlanPushMarker(path string, m planPushPending) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("create marker dir: %w", err)
@@ -107,22 +108,8 @@ func writePlanPushMarker(path string, m planPushPending) error {
 	if err != nil {
 		return fmt.Errorf("encode marker: %w", err)
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".marker-*")
-	if err != nil {
-		return fmt.Errorf("create marker temp: %w", err)
-	}
-	if _, err := tmp.Write(b); err != nil {
-		_ = tmp.Close()
-		_ = os.Remove(tmp.Name())
+	if err := fileutil.AtomicWriteBytes(path, b, 0o644); err != nil {
 		return fmt.Errorf("write marker: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmp.Name())
-		return fmt.Errorf("close marker: %w", err)
-	}
-	if err := os.Rename(tmp.Name(), path); err != nil {
-		_ = os.Remove(tmp.Name())
-		return fmt.Errorf("rename marker: %w", err)
 	}
 	return nil
 }

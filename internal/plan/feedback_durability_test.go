@@ -427,3 +427,84 @@ func TestLoadResolutions_CorruptEntrySkipped(t *testing.T) {
 		t.Fatalf("got %+v (%v), want the intact entry", got, err)
 	}
 }
+
+// Invalid input and broken on-disk state must fail loudly, never write a
+// resolution keyed to a path or report an empty history as healthy.
+func TestFeedbackStore_RejectsBadInputAndBrokenState(t *testing.T) {
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+
+	t.Run("resolution anchor and state are validated", func(t *testing.T) {
+		planDir := t.TempDir()
+		for _, r := range []Resolution{
+			{Anchor: "", State: ResolutionAddressed},
+			{Anchor: "../escape", State: ResolutionAddressed},
+			{Anchor: `a\b`, State: ResolutionAddressed},
+			{Anchor: "h1", State: "maybe"},
+		} {
+			if err := AppendResolution(planDir, r, now); err == nil {
+				t.Fatalf("AppendResolution(%+v) must fail", r)
+			}
+		}
+		if rs, err := LoadResolutions(planDir); err != nil || len(rs) != 0 {
+			t.Fatalf("rejected resolutions must not be stored: %+v err=%v", rs, err)
+		}
+	})
+
+	t.Run("corrupt legacy resolutions file is an error", func(t *testing.T) {
+		planDir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(planDir, feedbackSubdir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(planDir, feedbackSubdir, resolutionsFile), []byte("[{"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadResolutions(planDir); err == nil || !strings.Contains(err.Error(), "parse resolutions") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+
+	t.Run("resolutions path occupied by a file", func(t *testing.T) {
+		planDir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(planDir, feedbackSubdir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(planDir, feedbackSubdir, resolutionsSubdir), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := AppendResolution(planDir, Resolution{Anchor: "h1", State: ResolutionAddressed}, now); err == nil {
+			t.Fatal("AppendResolution must fail when its dir is a file")
+		}
+		if _, err := LoadResolutions(planDir); err == nil {
+			t.Fatal("LoadResolutions must fail when its dir is a file")
+		}
+	})
+
+	t.Run("feedback path occupied by a file", func(t *testing.T) {
+		planDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(planDir, feedbackSubdir), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := CorruptFeedbackRounds(planDir); err == nil {
+			t.Fatal("CorruptFeedbackRounds must surface an unreadable feedback dir")
+		}
+		set := FeedbackSet{ID: "round-0001", Reviewer: "Person A", Items: []FeedbackItem{{Anchor: "h1", Status: "comment", Note: "n"}}}
+		if _, err := SaveFeedback(planDir, set, now); err == nil {
+			t.Fatal("SaveFeedback must fail when feedback/ is a file")
+		}
+		set.ID = ""
+		if _, err := SaveFeedback(planDir, set, now); err == nil {
+			t.Fatal("SaveFeedback without an ID must fail when feedback/ is a file")
+		}
+	})
+
+	t.Run("round names that are not rounds carry no id", func(t *testing.T) {
+		for _, n := range []string{"remaps.json", "round-x.json", "round-20261001-120000.000000000.json", "round-20261001-120000.000000000-abc.txt"} {
+			if id := roundIDFromName(n); id != "" {
+				t.Fatalf("roundIDFromName(%q) = %q, want empty", n, id)
+			}
+		}
+		if id := roundIDFromName("round-20261001-120000.000000000-round-0001.json"); id != "round-0001" {
+			t.Fatalf("id = %q", id)
+		}
+	})
+}

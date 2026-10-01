@@ -111,7 +111,8 @@
     else if (data.saved === false) m = { kind: 'err', text: 'Not saved — the author’s machine could not store it' };
     else if (data.pushed) m = { kind: 'ok', text: verb + ' · synced to your team' };
     else m = { kind: 'warn', text: 'Saved on the author’s machine · not yet synced (will retry)' };
-    if (data.notified === false) m.text += ' · the plan’s authoring coworker was not notified automatically — tell them directly';
+    // a duplicate is a resend of a round whose first save already notified (or tried to)
+    if (data.notified === false && !data.duplicate) m.text += ' · the plan’s authoring coworker was not notified automatically — tell them directly';
     return m;
   }
   function sameItems(a, b) { return JSON.stringify(a) === JSON.stringify(b); }

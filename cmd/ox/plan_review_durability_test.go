@@ -61,6 +61,9 @@ type durableReviewFixture struct {
 // restored on cleanup, so these tests must not run in parallel.
 func newDurableReviewFixture(t *testing.T) *durableReviewFixture {
 	t.Helper()
+	if testing.Short() {
+		t.Skip("short: real ledger git repo with bare remote push")
+	}
 	ledger := t.TempDir()
 	origin := initGitLedgerWithOrigin(t, ledger)
 	planDir := filepath.Join(ledger, "data", "plans", "2026-10-01-durable")

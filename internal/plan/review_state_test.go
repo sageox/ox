@@ -97,6 +97,7 @@ check('not pushed', local.kind === 'warn' && local.text === 'Saved on the author
 var old = syncMessage('Sent', { notified: true });
 check('old server never claims synced', old.kind === 'ok' && old.text.indexOf('synced') < 0);
 check('duplicate is plain success', syncMessage('Sent', { saved: true, pushed: true, duplicate: true }).text === 'Sent · synced to your team');
+check('duplicate never claims not notified', syncMessage('Sent', { saved: true, pushed: true, duplicate: true, notified: false }).text === 'Sent · synced to your team');
 check('not notified named', syncMessage('Sent', { saved: true, pushed: true, notified: false }).text.indexOf('not notified') > 0);
 check('saved false is an error', syncMessage('Sent', { saved: false }).kind === 'err');
 
