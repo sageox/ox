@@ -51,8 +51,7 @@ func TestDoctorExitCLI(t *testing.T) {
 					env = append(env, "OX_JSON=1")
 				}
 				if mode == "unwritable_json" {
-					// The normal ANSI-stripping proxy swallows downstream errors.
-					// Use the existing direct-output mode to reach doctor's writer.
+					// Use direct output to exercise doctor's own writer error handling.
 					env = append(env, "CLICOLOR_FORCE=1")
 				}
 				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

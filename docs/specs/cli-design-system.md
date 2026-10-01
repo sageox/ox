@@ -23,6 +23,12 @@ An environment default must not mark the flag as explicitly supplied: commands
 that choose JSON automatically for AI coworkers still need to distinguish an
 omitted flag from `--json=false`.
 
+The stdout color-stripping proxy must finish flushing before the command reports
+success. If the output destination fails, report the write error on stderr and
+change an otherwise successful exit to 1. Preserve an existing nonzero command
+exit code. A failed destination must also unblock commands writing more output
+than the color-stripping pipe can buffer.
+
 ## Spinner Cancellation
 
 `cli.WithSpinner` returns `tea.ErrInterrupted` when dismissed before the operation

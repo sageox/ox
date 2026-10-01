@@ -1,12 +1,20 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/sageox/ox/internal/testguard"
 	"github.com/sageox/ox/internal/testutil/slogquiet"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // packageDir is the directory `go test` starts in — the cmd/ox source directory,
@@ -38,6 +46,8 @@ func repoPath(parts ...string) string {
 // instead of silently operating on the wrong one. Tests that need a repository
 // still build one and chdir into it exactly as before.
 func TestMain(m *testing.M) {
+	// m.Run aliases stderr to stdout in JSON mode; retain both original pipes.
+	stdout, stderr := os.Stdout, os.Stderr
 	slogquiet.Silence()
 
 	wd, err := os.Getwd()
@@ -82,5 +92,81 @@ func TestMain(m *testing.M) {
 	// working directory out from under a live process.
 	_ = os.Chdir(packageDir)
 	_ = os.RemoveAll(sandbox)
+
+	// init installs the same output pipes in the test binary. Drain them too,
+	// or `go test -list` can drop the tail of the acceptance test inventory.
+	stdout.Close()
+	if stdoutDone != nil {
+		if err := <-stdoutDone; err != nil {
+			fmt.Fprintf(stderr, "cmd/ox tests: flush stdout: %v\n", err)
+			if code == 0 {
+				code = 1
+			}
+		}
+	}
+	stderr.Close()
+	stderrWg.Wait()
 	os.Exit(code)
+}
+
+// A failed output destination must neither report success nor leave a large
+// writer blocked after the color-stripping pipe stops copying.
+func TestCLIOutputWriteFailures(t *testing.T) {
+	skipIntegration(t)
+	oxBin := testguard.BuildOxBinary(t, repoPath("..", ".."))
+	require.Greater(t, len(releaseNotes), 64*1024, "large-output fixture must exceed a typical pipe buffer")
+	for _, command := range []struct {
+		name     string
+		args     []string
+		output   string
+		exitCode int
+	}{
+		{"text", []string{"version"}, "Built:", 0},
+		{"json", []string{"version", "--json"}, `"version"`, 0},
+		{"large output", []string{"release-notes", "--raw"}, releaseNotes + "\n", 0},
+		{"existing failure", []string{"sync", "--read-only", "--json", "unexpected"}, `"invalid_arguments"`, 2},
+	} {
+		for _, unwritable := range []bool{false, true} {
+			name := "writable"
+			if unwritable {
+				name = "unwritable"
+			}
+			t.Run(command.name+"/"+name, func(t *testing.T) {
+				env := append(noInputCLIEnv(t), "FEATURE_CLOUD=false", "FEATURE_AUTH=false", "CLICOLOR_FORCE=0")
+				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+				defer cancel()
+				cmd := testguard.OxCmdContext(t, ctx, oxBin, t.TempDir(), env, command.args...)
+				var stdout, stderr bytes.Buffer
+				cmd.Stdout, cmd.Stderr = &stdout, &stderr
+				if unwritable {
+					path := filepath.Join(t.TempDir(), "output")
+					require.NoError(t, os.WriteFile(path, nil, 0o600))
+					file, err := os.Open(path)
+					require.NoError(t, err)
+					t.Cleanup(func() { _ = file.Close() })
+					cmd.Stdout = file
+				}
+				err := cmd.Run()
+				require.NoError(t, ctx.Err(), "output failure left the command blocked: %s", stderr.String())
+				exitCode := command.exitCode
+				if unwritable && exitCode == 0 {
+					exitCode = 1
+				}
+				if exitCode == 0 {
+					require.NoError(t, err, "stderr: %s", stderr.String())
+				} else {
+					var exitErr *exec.ExitError
+					require.ErrorAs(t, err, &exitErr, "stdout: %s; stderr: %s", stdout.String(), stderr.String())
+					assert.Equal(t, exitCode, exitErr.ExitCode())
+				}
+				if unwritable {
+					assert.Contains(t, stderr.String(), "write")
+					assert.Equal(t, 1, strings.Count(stderr.String(), "Error:"), "report the output error once")
+				} else {
+					assert.Contains(t, stdout.String(), command.output, "the full command result must be flushed")
+					assert.Empty(t, stderr.String())
+				}
+			})
+		}
+	}
 }

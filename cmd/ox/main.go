@@ -36,8 +36,11 @@ func (s *ansiStripper) Write(p []byte) (int, error) {
 	return len(p), err // report original length to caller
 }
 
-// stripWg is signaled when the ANSI-stripping goroutine finishes flushing.
-var stripWg sync.WaitGroup
+// stdoutDone reports the copy result so main can fail if output was lost.
+var stdoutDone chan error
+
+// stderrWg waits for diagnostics after stdout's result has been reported.
+var stderrWg sync.WaitGroup
 
 func init() {
 	// Agent UX Decision: Auto-disable terminal colors in agent context.
@@ -75,10 +78,12 @@ func init() {
 			realStdout := os.Stdout
 			os.Stdout = pw
 
-			stripWg.Add(1)
+			stdoutDone = make(chan error, 1)
 			go func() {
-				defer stripWg.Done()
-				io.Copy(&ansiStripper{realStdout}, pr) //nolint:errcheck // best-effort
+				_, err := io.Copy(&ansiStripper{realStdout}, pr)
+				// Unblock a producer still writing after the destination failed.
+				_ = pr.Close()
+				stdoutDone <- err
 			}()
 		}
 	}
@@ -88,9 +93,10 @@ func init() {
 			realStderr := os.Stderr
 			os.Stderr = pw
 
-			stripWg.Add(1)
+			stderrWg.Add(1)
 			go func() {
-				defer stripWg.Done()
+				defer stderrWg.Done()
+				defer pr.Close()
 				io.Copy(&ansiStripper{realStderr}, pr) //nolint:errcheck // best-effort
 			}()
 		}
@@ -126,6 +132,21 @@ func main() {
 
 	args := applyCatalogTokenRewrites(os.Args[1:], loadFlagAliases(defaultCatalogJSON))
 	exitCode := executeWithFrictionRecovery(args, 0)
+	// Flush the result before deciding success, while stderr can still report
+	// a failed destination. Preserve an existing command failure's exit code.
+	os.Stdout.Close()
+	if stdoutDone != nil {
+		if err := <-stdoutDone; err != nil {
+			err = fmt.Errorf("write stdout: %w", err)
+			printError(err)
+			if exitCode == 0 {
+				exitCode = 1
+				if cliCtx != nil {
+					cliCtx.Err = err
+				}
+			}
+		}
+	}
 	// Before the trace flush below, which can take seconds and must not count
 	// toward the command's reported duration.
 	capturePostHogCommand(exitCode, os.Stderr)
@@ -137,10 +158,9 @@ func main() {
 	observability.SetExitCode(exitCode)
 	observability.Shutdown(context.Background())
 
-	// close pipe writers so ANSI-stripping goroutines see EOF and flush
-	os.Stdout.Close()
+	// Flush diagnostics after reporting any stdout failure.
 	os.Stderr.Close()
-	stripWg.Wait()
+	stderrWg.Wait()
 
 	os.Exit(exitCode)
 }
