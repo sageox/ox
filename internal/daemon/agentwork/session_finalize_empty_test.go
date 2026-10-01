@@ -3,7 +3,9 @@ package agentwork
 import (
 	"encoding/json"
 	"log/slog"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/sageox/ox/internal/lfs"
@@ -112,6 +114,17 @@ func TestDetect_EmptyTranscriptDecision(t *testing.T) {
 			want: outcomeSkipped,
 		},
 		{
+			name: "same-size local copy whose bytes differ from the Ledger's",
+			setup: func(t *testing.T, f cacheFixture) {
+				other := strings.Replace(emptyRaw, "OxRiLy", "OxRiLz", 1)
+				require.Len(t, other, len(emptyRaw))
+				f.write(t, "raw.jsonl", other)
+				f.write(t, ".needs-summary", "{}")
+				f.ledgerEntry(t, emptyRaw, false)
+			},
+			want: outcomeSkipped,
+		},
+		{
 			name: "ledger manifest does not describe the transcript",
 			setup: func(t *testing.T, f cacheFixture) {
 				f.write(t, "raw.jsonl", emptyRaw)
@@ -191,4 +204,103 @@ func TestBuildPrompt_EmptyTranscriptRechecksLedger(t *testing.T) {
 	require.NoError(t, err)
 	payload := items[0].Payload.(*SessionFinalizePayload)
 	assert.False(t, payload.emptyTranscript, "the worker must not settle a copy the Ledger no longer describes")
+}
+
+// TestProcessResult_SettlesEmptyLedgerDownload drives the worker end to end
+// for a re-armed empty download: no LLM, "Brief session" at status ok, and the
+// Ledger's own record kept. Failure prevented: finalizing a download started
+// meta.json from blank and copied it over the Ledger's, erasing repo_id,
+// user_id and model and minting a new session id that 404s /c/ links.
+func TestProcessResult_SettlesEmptyLedgerDownload(t *testing.T) {
+	const name = "2026-09-24T23-03-riley-OxRiLy"
+	legacy := &lfs.SessionMeta{RepoID: "repo_empty_test", SessionName: name}
+	for _, tc := range []struct {
+		name      string
+		sessionID string
+		wantID    string
+	}{
+		{name: "session id kept", sessionID: "ses_01950000-0000-7000-8000-000000001106", wantID: "ses_01950000-0000-7000-8000-000000001106"},
+		{name: "legacy session keeps its derived id", sessionID: "", wantID: legacy.EffectiveSessionID()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ledgerPath := t.TempDir()
+			f := cacheFixture{
+				ledgerPath: ledgerPath,
+				name:       name,
+				cacheDir:   filepath.Join(ledgerPath, ".sageox", "cache", "sessions", name),
+			}
+			f.write(t, "raw.jsonl", emptyRaw)
+			f.write(t, ".needs-summary", "{}")
+			ledgerMeta, err := json.Marshal(map[string]any{
+				"version": "1.0", "session_name": name, "session_id": tc.sessionID,
+				"username": "riley", "user_id": "usr_riley", "repo_id": "repo_empty_test",
+				"agent_id": "OxRiLy", "agent_type": "claude-code", "model": "claude-opus",
+				"created_at":       "2026-09-24T23:03:00Z",
+				"summary_status":   "unrecoverable",
+				"validation_error": "content validation failed: title too short (0 chars, minimum 3)",
+				"summary_attempts": 3,
+				"files":            map[string]lfs.FileRef{"raw.jsonl": lfs.NewFileRef([]byte(emptyRaw))},
+			})
+			require.NoError(t, err)
+			f.ledgerMeta(t, string(ledgerMeta))
+
+			tel := &fakeTelemetry{}
+			h := NewSessionFinalizeHandlerForTest(slog.New(slog.DiscardHandler))
+			h.SetTelemetry(tel)
+			items := detectCacheOnly(t, h, ledgerPath)
+			require.Len(t, items, 1, "precondition: the empty download is queued")
+
+			req, err := h.BuildPrompt(items[0])
+			require.NoError(t, err)
+			require.True(t, req.SkipLLM, "an empty transcript must never reach the LLM")
+			require.NoError(t, h.ProcessResult(items[0], &RunResult{}))
+
+			got, err := lfs.ReadSessionMeta(filepath.Join(ledgerPath, "sessions", name))
+			require.NoError(t, err)
+			assert.Equal(t, "Brief session", got.Title)
+			assert.Equal(t, "ok", got.SummaryStatus)
+			assert.Empty(t, got.ValidationError)
+			assert.Zero(t, got.SummaryAttempts)
+			assert.Equal(t, "repo_empty_test", got.RepoID)
+			assert.Equal(t, "usr_riley", got.UserID)
+			assert.Equal(t, "claude-opus", got.Model)
+			assert.Equal(t, tc.wantID, got.SessionID, "the session id the team resolves must not change")
+			assert.NoDirExists(t, f.cacheDir, "the download is removed once the session is published")
+
+			skipped := tel.lastByName("summarization_skipped")
+			require.NotNil(t, skipped)
+			assert.Equal(t, "empty_transcript", skipped.props["skip_kind"])
+			assert.Nil(t, tel.lastByName("summarization"), "no LLM ran, so no summarization event")
+		})
+	}
+}
+
+// TestProcessResult_PrefilterSkipDiscardsLocalCopy: a thin local recording the
+// prefilter judged not worth summarizing is discarded without the LLM and never
+// staged into the Ledger. It shares ProcessResult's summary switch with the
+// empty-transcript path above. Failure prevented: a trivial session the team
+// never needed reaches the shared Ledger.
+func TestProcessResult_PrefilterSkipDiscardsLocalCopy(t *testing.T) {
+	ledgerPath := t.TempDir()
+	name := "2026-05-04T15-00-testuser-OxThIN"
+	f := cacheFixture{
+		ledgerPath: ledgerPath,
+		name:       name,
+		cacheDir:   filepath.Join(ledgerPath, ".sageox", "cache", "sessions", name),
+	}
+	f.write(t, "raw.jsonl", `{"_meta":{"schema_version":"1","agent_type":"claude-code"}}`+"\n"+
+		`{"type":"user","content":"hi","seq":1}`+"\n")
+
+	h := NewSessionFinalizeHandlerForTest(slog.New(slog.DiscardHandler))
+	items := detectCacheOnly(t, h, ledgerPath)
+	require.Len(t, items, 1, "precondition: the local recording is queued")
+
+	req, err := h.BuildPrompt(items[0])
+	require.NoError(t, err)
+	require.True(t, req.SkipLLM, "the prefilter must skip the LLM")
+	require.NoError(t, h.ProcessResult(items[0], &RunResult{}))
+
+	assert.NoDirExists(t, f.cacheDir, "the discarded recording is removed")
+	_, statErr := os.Stat(filepath.Join(ledgerPath, "sessions", name))
+	assert.True(t, os.IsNotExist(statErr), "a discarded recording must never be staged into the Ledger")
 }
