@@ -251,6 +251,36 @@ jobs:
           retention-days: 3
           overwrite: true
 
+  # TEMPORARY — measurement only, removed before merge. A PR cannot read a
+  # cache saved by main until this change is on main, so this job does what a
+  # main push will do (warm-test-cache, then save) into a PR-scoped entry. The
+  # next push to this PR then restores it, which measures the warm-cache path.
+  temp-warm-cache:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: false
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: go-${{ runner.os }}-test-${{ github.sha }}
+          restore-keys: |
+            go-${{ runner.os }}-test-
+            go-${{ runner.os }}-
+      - run: make warm-test-cache
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: go-${{ runner.os }}-test-${{ github.sha }}
+
   # The single verdict for the workflow. `if: always()` matters: a job skipped
   # because a dependency failed reports as skipped, not failed, so without it a
   # red suite could leave this check looking green.
