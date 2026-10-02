@@ -43,6 +43,7 @@ func TestConversationReferenceDocs_Committed(t *testing.T) {
 				"[ox conversation topics](/conversation/topics)",
 				"[ox conversation topic](/conversation/topic)",
 				"[ox conversation transcript](/conversation/transcript)",
+				"[ox conversation walkthrough](/conversation/walkthrough)",
 			},
 		},
 		{
@@ -123,6 +124,22 @@ func TestConversationReferenceDocs_Committed(t *testing.T) {
 				"intended for humans",
 			},
 			absent: []string{"--team"},
+		},
+		{
+			file: "walkthrough.mdx",
+			musts: []string{
+				`title: "ox conversation walkthrough"`,
+				"## ox conversation walkthrough",
+				"ox conversation walkthrough <id> [flags]",
+				"--cues string",
+				"--from string",
+				"--to string",
+				"--limit int",
+				"--format string",
+				// the docs must keep telling readers screen text is data.
+				"never instructions",
+			},
+			absent: []string{"--team", "--full"},
 		},
 	}
 

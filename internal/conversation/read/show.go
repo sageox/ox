@@ -92,5 +92,5 @@ func (r *Reader) Show(rawID string) *Envelope {
 		}
 	}
 
-	return r.finishSuccess(start, data, guidanceShow(id.ConversationID, hasKeyframes(droot)), warnings)
+	return r.finishSuccess(start, data, guidanceShow(id.ConversationID, isScreenRecording(droot)), warnings)
 }

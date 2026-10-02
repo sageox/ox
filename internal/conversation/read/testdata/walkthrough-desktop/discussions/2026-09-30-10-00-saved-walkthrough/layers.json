@@ -1,0 +1,14 @@
+{
+  "$schema_version": 1,
+  "id": "cnv_01a0f488-0000-7000-8000-0000000000b1",
+  "type": "recording",
+  "context_type": "team",
+  "context_id": "team_fixture01",
+  "title": "Walkthrough – Browser · Team.mov",
+  "started_at": "2026-09-30T10:00:00Z",
+  "ended_at": null,
+  "finalized_at": null,
+  "sealed_at": null,
+  "boundary_ref": "",
+  "clock": {"t0": "2026-09-30T10:00:00Z", "clock_class": "recording-local", "pauses": []}
+}

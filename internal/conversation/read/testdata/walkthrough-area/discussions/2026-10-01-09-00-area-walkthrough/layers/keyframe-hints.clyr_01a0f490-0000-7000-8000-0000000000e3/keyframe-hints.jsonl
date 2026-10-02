@@ -1,0 +1,5 @@
+{"t_utc":"2026-10-01T09:00:09.000Z","t_ms":9000,"reason":"mark","weight":1,"detail":{"source":"user","seq":3}}
+{"t_utc":"2026-10-01T09:00:04.000Z","t_ms":4000,"reason":"click","weight":1,"detail":{"ax_ref":"axn_pay","button":"left"}}
+{"t_utc":"2026-10-01T09:00:02.000Z","t_ms":2000,"reason":"mark","weight":1,"detail":{"source":"user","seq":1}}
+{"t_utc":"2026-10-01T09:00:04.000Z","t_ms":4000,"reason":"mark","weight":1,"detail":{"source":"user","seq":2}}
+{"t_utc":"2026-10-01T09:00:05.500Z","t_ms":5500,"reason":"dwell","weight":0.9,"detail":{"ax_ref":"axn_pay"}}
