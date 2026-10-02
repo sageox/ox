@@ -38,11 +38,26 @@ func TestConversationReferenceDocs_Committed(t *testing.T) {
 				`title: "ox conversation"`,
 				"## ox conversation",
 				"[ox conversation list](/conversation/list)",
+				"[ox conversation search](/conversation/search)",
 				"[ox conversation show](/conversation/show)",
 				"[ox conversation topics](/conversation/topics)",
 				"[ox conversation topic](/conversation/topic)",
 				"[ox conversation transcript](/conversation/transcript)",
 			},
+		},
+		{
+			file: "search.mdx",
+			musts: []string{
+				`title: "ox conversation search"`,
+				"ox conversation search [keywords] [flags]",
+				"--participant stringArray",
+				"--speaker string",
+				"--since string",
+				"--until string",
+				"--limit int",
+			},
+			// single-team by design (plan D18), same as every sibling.
+			absent: []string{"--team", "--all-teams"},
 		},
 		{
 			file: "list.mdx",

@@ -119,27 +119,7 @@ func commitAndPushPlanDir(ctx context.Context, ledgerPath, planDir string) (plan
 		return planCommitStatus{Err: err.Error()}, err
 	}
 
-	// ensure .gitignore is in place before any commit to prevent cache leakage
-	gitserver.EnsureGitignoreBeforeCommitCtx(ctx, ledgerPath)
-
-	commitMsg := fmt.Sprintf("plan: %s", filepath.Base(planDir))
-	err = gitutil.WithRepoLock(ctx, ledgerPath, func() error {
-		// Mid-rebase safety belongs at index-mutation time, not just push time:
-		// an unguarded `git add` during a conflicted rebase marks the conflict
-		// resolved (see .claude/rules/cache-only-design.md).
-		if err := gitutil.IsSafeForGitOps(ledgerPath); err != nil {
-			return fmt.Errorf("ledger not safe for plan commit (%s): %w", ledgerPath, err)
-		}
-		// --sparse: ledger repos use sparse-checkout (cone mode).
-		if out, err := gitutil.RunGit(ctx, ledgerPath, "add", "--sparse", "--", rel); err != nil {
-			return fmt.Errorf("git add %s failed: %s: %w", rel, gitutil.SanitizeOutput(out), err)
-		}
-		if _, err := gitutil.CommitLedgerSnapshot(ctx, ledgerPath, commitMsg, rel); err != nil {
-			return fmt.Errorf("commit %s: %w", rel, err)
-		}
-		return nil
-	})
-	if err != nil {
+	if err := commitPlanLocalCtx(ctx, ledgerPath, planDir, ""); err != nil {
 		return planCommitStatus{Err: gitutil.SanitizeOutput(err.Error())}, err
 	}
 
@@ -170,6 +150,51 @@ func ledgerRelPath(ledgerPath, planDir string) (string, error) {
 		return "", fmt.Errorf("plan dir %q is not inside ledger %q", planDir, ledgerPath)
 	}
 	return filepath.ToSlash(rel), nil
+}
+
+// commitPlanLocal stages one plan dir and commits it to the ledger WITHOUT
+// pushing. See commitPlanLocalCtx.
+func commitPlanLocal(ledgerPath, planDir, msgPrefix string) error {
+	return commitPlanLocalCtx(context.Background(), ledgerPath, planDir, msgPrefix)
+}
+
+// commitPlanLocalCtx is the single plan add+commit path: it stages one plan dir
+// and commits it through the canonical gitutil.CommitLedgerSnapshot under
+// ADR-030's repo lock, without pushing. msgPrefix defaults to "plan: ".
+// "Nothing to commit" is success (an idempotent re-save).
+//
+// Path-scoped on purpose: the ledger index can hold unrelated staged files
+// (the daemon's data/github imports were observed staged in the field), and a
+// bare `git commit` sweeps them into a "plan:" commit. CommitLedgerSnapshot
+// commits the exact index entries under the pathspec as an immutable tree,
+// unlike `git commit -- <path>`, which re-reads the worktree at commit time.
+func commitPlanLocalCtx(ctx context.Context, ledgerPath, planDir, msgPrefix string) error {
+	rel, err := ledgerRelPath(ledgerPath, planDir)
+	if err != nil {
+		return err
+	}
+	if msgPrefix == "" {
+		msgPrefix = "plan: "
+	}
+	// ensure .gitignore is in place before any commit to prevent cache leakage
+	gitserver.EnsureGitignoreBeforeCommitCtx(ctx, ledgerPath)
+
+	return gitutil.WithRepoLock(ctx, ledgerPath, func() error {
+		// Mid-rebase safety belongs at index-mutation time, not just push time:
+		// an unguarded `git add` during a conflicted rebase marks the conflict
+		// resolved (see .claude/rules/cache-only-design.md).
+		if err := gitutil.IsSafeForGitOps(ledgerPath); err != nil {
+			return fmt.Errorf("ledger not safe for plan commit (%s): %w", ledgerPath, err)
+		}
+		// --sparse: ledger repos use sparse-checkout (cone mode).
+		if out, err := gitutil.RunGit(ctx, ledgerPath, "add", "--sparse", "--", rel); err != nil {
+			return fmt.Errorf("git add %s failed: %s: %w", rel, gitutil.SanitizeOutput(out), err)
+		}
+		if _, err := gitutil.CommitLedgerSnapshot(ctx, ledgerPath, msgPrefix+filepath.Base(planDir), rel); err != nil {
+			return fmt.Errorf("commit plan %s: %w", rel, err)
+		}
+		return nil
+	})
 }
 
 // commitPlanBackfillToLedger stages every backfilled plan rename, in-place

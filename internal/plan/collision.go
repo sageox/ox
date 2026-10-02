@@ -56,7 +56,7 @@ func (d *collisionDetector) Detect(ctx context.Context, in Input, gitRoot string
 	return annotations, nil
 }
 
-// detectCodeDB opens the shared codedb in SQL-only mode (mirroring
+// detectCodeDB opens the shared codedb read-only, SQL-only (no integrity check; mirroring
 // `ox code insights`) and maps plan files to open PRs and contention. Returns
 // nil on any failure so enrichment is never blocked by a missing/locked index.
 func (d *collisionDetector) detectCodeDB(ctx context.Context, gitRoot string, files []string) []Annotation {
@@ -69,7 +69,7 @@ func (d *collisionDetector) detectCodeDB(ctx context.Context, gitRoot string, fi
 		return nil
 	}
 
-	db, err := codedb.OpenSQLOnly(dataDir)
+	db, err := codedb.OpenSQLReadOnly(dataDir)
 	if err != nil {
 		slog.Debug("collision codedb open failed", "dir", dataDir, "error", err)
 		return nil

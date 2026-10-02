@@ -30,12 +30,14 @@ import (
 // DiscussionsDirName is the conversations subtree of a team-context checkout.
 const DiscussionsDirName = "discussions"
 
-// FolderResolver is the fallback seam for index misses (D3): when the
-// server's resolve endpoint learns to return the storage location, a client
-// implementing this interface plugs in here and an index miss falls back to
-// it (the only place auth + network are acceptable on the read path).
-// Deliberately unimplemented in v1 — until then a miss stays a typed
-// not_indexed error, never a local folder scan.
+// FolderResolver is the fallback seam for index misses (D3). Open installs
+// summarizedFolderResolver, which answers a miss by walking the discussions
+// root for a summarized folder with that recording id: INDEX.json covers only
+// a recent window on real teams, and conversation search returns hits from
+// the whole history, so a miss must not strand them. When the server's
+// resolve endpoint learns to return the storage location, a network-backed
+// resolver can replace it here (the only place auth + network are acceptable
+// on the read path).
 type FolderResolver interface {
 	// ResolveFolder maps a rec_ recording id to its discussion folder name.
 	// The returned name is untrusted and passes the same path guard as an
@@ -69,6 +71,7 @@ func Open(projectRoot string) (*Reader, *Error) {
 			"no local team context for this repo (ephemeral mode, or the daemon has not synced yet); conversation reads need a synced team-context checkout")
 	}
 	r := New(filepath.Join(tc.Path, DiscussionsDirName), tc.LastSync)
+	r.fallback = summarizedFolderResolver{discussionsRoot: r.discussionsRoot}
 	if ep := endpoint.GetForProject(projectRoot); ep != "" {
 		r.syncHost = endpoint.NormalizeSlug(ep)
 	}
@@ -90,9 +93,8 @@ func New(discussionsRoot string, lastSync time.Time) *Reader {
 	}
 }
 
-// SetFallback installs the future index-miss resolver (D3 seam). No-op
-// architecture hook in v1: nothing in the ox tree implements FolderResolver
-// yet.
+// SetFallback replaces the index-miss resolver (D3 seam). Tests use it to
+// stage a resolver; nil restores the strict INDEX.json-only lookup.
 func (r *Reader) SetFallback(f FolderResolver) { r.fallback = f }
 
 // row is one live, guard-validated index entry with the derived fields the
