@@ -414,6 +414,7 @@ type Output struct {
 	// This is local-only context (not persisted to ledger), so full name is safe here.
 	CurrentUserName    string   `json:"current_user_name,omitempty"`    // privacy-safe display name (e.g., "Ryan S.")
 	CurrentUserAliases []string `json:"current_user_aliases,omitempty"` // all name forms the agent might encounter
+	CurrentUserKind    string   `json:"current_user_kind,omitempty"`    // "ai" when the current user is the AI coworker a team token acts as; empty for a person
 
 	// Code search availability
 	CodeDBAvailable bool   `json:"code_db_available,omitempty"` // true if code search index exists on disk

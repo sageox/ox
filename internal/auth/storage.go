@@ -181,16 +181,17 @@ func GetTokenForEndpoint(ep string) (*StoredToken, error) {
 	return token, nil
 }
 
-// GetUserID returns the authenticated user's unique ID for the given endpoint.
+// GetUserID returns the authenticated user's unique ID for the given endpoint,
+// or the agt_ id of the AI coworker a team token acts as (see TeamCoworker).
 // Returns empty string if not authenticated or on error.
 func GetUserID(ep string) string {
-	var token *StoredToken
-	var err error
-	if ep != "" {
-		token, err = GetTokenForEndpoint(ep)
-	} else {
-		token, err = GetToken()
+	if ep == "" {
+		ep = endpoint.Get()
 	}
+	if c, _ := TeamCoworker(ep); c != nil {
+		return c.ID
+	}
+	token, err := GetTokenForEndpoint(ep)
 	if err != nil || token == nil {
 		return ""
 	}
@@ -198,15 +199,16 @@ func GetUserID(ep string) string {
 }
 
 // GetUsername returns the authenticated user's display name for a given endpoint.
-// Prefers email, falls back to name, then empty string.
+// Prefers email, falls back to name, then empty string. For the AI coworker a
+// team token acts as, it returns the coworker's slug (Coworker.Username).
 func GetUsername(ep string) string {
-	var token *StoredToken
-	var err error
-	if ep != "" {
-		token, err = GetTokenForEndpoint(ep)
-	} else {
-		token, err = GetToken()
+	if ep == "" {
+		ep = endpoint.Get()
 	}
+	if c, _ := TeamCoworker(ep); c != nil {
+		return c.Username()
+	}
+	token, err := GetTokenForEndpoint(ep)
 	if err != nil || token == nil {
 		return ""
 	}

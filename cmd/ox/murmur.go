@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/endpoint"
@@ -179,21 +180,30 @@ func runMurmur(cmd *cobra.Command, args []string) error {
 
 	now := time.Now().UTC()
 
-	// resolve principal (human user the agent works for) — uses attribution slug,
-	// not auth-specific identity. Works offline / without OAuth.
-	principalID := identity.AttributionUsername(endpoint.GetForProject(projectRoot), config.GetDisplayName())
+	// resolve principal — the person the agent works for, or the AI coworker a
+	// team token acts as — as an attribution slug, which resolves offline and
+	// without OAuth.
+	ep := endpoint.GetForProject(projectRoot)
+	if _, err := auth.TeamCoworker(ep); err != nil {
+		return err
+	}
+	principal := identity.ResolveAttribution(ep, config.GetDisplayName())
 
 	murmur := ledger.MurmurFile{
 		SchemaVersion: "1",
 		ID:            id.String(),
 		Timestamp:     now,
 		AgentID:       agentID,
-		PrincipalID:   principalID,
+		PrincipalID:   principal.Username,
 		PrincipalType: "human",
 		Topic:         topic,
 		Importance:    importance,
 		Content:       rawContent,
 		Scope:         scope,
+	}
+	if principal.AI {
+		murmur.PrincipalType = "ai"
+		murmur.PrincipalDisplay = principal.DisplayName
 	}
 	if files != "" {
 		murmur.Metadata = map[string]string{"files": files}

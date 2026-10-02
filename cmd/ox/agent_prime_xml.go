@@ -560,6 +560,9 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 	fmt.Fprintf(&sb, " status=%q", output.Status)
 	if output.CurrentUserName != "" {
 		fmt.Fprintf(&sb, " you=\"%s\"", escapeXML(output.CurrentUserName))
+		if output.CurrentUserKind != "" {
+			fmt.Fprintf(&sb, " you_kind=%q", output.CurrentUserKind)
+		}
 		if len(output.CurrentUserAliases) > 0 {
 			fmt.Fprintf(&sb, " you_aliases=\"%s\"", escapeXML(strings.Join(output.CurrentUserAliases, ", ")))
 		}

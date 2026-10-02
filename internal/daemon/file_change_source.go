@@ -210,6 +210,14 @@ func (p *FileChangeMurmurPublisher) publish() {
 		return
 	}
 
+	// A team token with no AI coworker attached has no one to attribute the
+	// changes to; ox murmur refuses the same way.
+	coworker, err := auth.TeamCoworker(endpoint.GetForProject(p.projectRoot))
+	if err != nil {
+		p.logger.Warn("file change murmur skipped", "error", err)
+		return
+	}
+
 	now := time.Now()
 	branch := repotools.GetCurrentBranch(p.projectRoot)
 	content := formatFileChangeMurmur(changes, branch)
@@ -235,6 +243,10 @@ func (p *FileChangeMurmurPublisher) publish() {
 		Content:       content,
 		Scope:         "ledger",
 		Metadata:      buildFileChangeMetadata(changes, branch, p.projectRoot),
+	}
+	if coworker != nil {
+		murmur.PrincipalType = "ai"
+		murmur.PrincipalDisplay = coworker.DisplayName
 	}
 
 	relPath := ledger.MurmurFilePath(now.UTC(), id.String())
@@ -292,7 +304,8 @@ func resolveOriginURL(projectRoot string) string {
 	return shortenRemoteURL(urls[0])
 }
 
-// resolvePrincipal returns the short username from ox login credentials.
+// resolvePrincipal returns the short username from ox login credentials, or
+// the slug of the AI coworker a team token acts as.
 func resolvePrincipal(projectRoot string) string {
 	ep := endpoint.GetForProject(projectRoot)
 	if username := auth.GetUsername(ep); username != "" {

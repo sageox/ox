@@ -24,14 +24,22 @@ import (
 // hourly, long enough to amortize over typical CLI invocation rhythms.
 const tokenMetaCacheTTL = 1 * time.Hour
 
+// noCoworkerTTL replaces tokenMetaCacheTTL for an answer that a team token
+// has no AI coworker. Recording and murmurs refuse on that answer, and the
+// operator's fix is to attach a coworker in SageOx; serving the refusal from
+// cache for an hour would keep refusing after the fix.
+const noCoworkerTTL = 1 * time.Minute
+
 // tokenMetaCacheFile is the file basename inside CacheDir() for the
 // serialized cache. The directory is created lazily with 0700 perms.
 const tokenMetaCacheFile = "token_meta.json"
 
 // TokenMeta is the subset of /api/v1/auth/me fields ox needs to drive the
-// expiry-warning UX. ExpiresAt is a pointer so "never expires" (server
-// returns null) round-trips as nil — IsZero on time.Time is ambiguous with
-// the zero-time sentinel used elsewhere in storage.go.
+// expiry-warning UX — or, for a team token, of the introspection answer, which
+// also names the AI coworker the token acts as. ExpiresAt is a pointer so
+// "never expires" (server returns null) round-trips as nil — IsZero on
+// time.Time is ambiguous with the zero-time sentinel used elsewhere in
+// storage.go.
 type TokenMeta struct {
 	// ExpiresAt is the real server-side expiry, or nil for never-expires
 	// tokens. NEVER use StoredToken.ExpiresAt for env-supplied tokens — that
@@ -48,6 +56,15 @@ type TokenMeta struct {
 
 	// Name is the human-friendly label the user gave the token.
 	Name string `json:"name,omitempty"`
+
+	// Coworker is the AI coworker a team token acts as. Nil unless the server
+	// named one.
+	Coworker *Coworker `json:"coworker,omitempty"`
+
+	// NoCoworker records the server answering "coworker": null for a team
+	// token: no AI coworker is attached. False when the server's answer has no
+	// coworker field at all.
+	NoCoworker bool `json:"no_coworker,omitempty"`
 
 	// FetchedAt is when this entry was last refreshed from the server.
 	FetchedAt time.Time `json:"fetched_at"`
@@ -164,7 +181,11 @@ func FetchTokenMetaCached(ctx context.Context, ep, token string) (*TokenMeta, er
 	}
 
 	if entry, ok := cache.Entries[key]; ok {
-		if time.Since(entry.FetchedAt) < tokenMetaCacheTTL {
+		ttl := tokenMetaCacheTTL
+		if entry.NoCoworker {
+			ttl = noCoworkerTTL
+		}
+		if time.Since(entry.FetchedAt) < ttl {
 			result := entry
 			return &result, nil
 		}
@@ -201,9 +222,13 @@ type authMeResponse struct {
 }
 
 // fetchTokenMetaFromServer GETs /api/v1/auth/me and maps the response
-// to TokenMeta. Network/parse failures surface as errors; callers
-// downgrade to a soft no-op.
+// to TokenMeta. A team token is introspected instead (fetchTeamTokenMeta).
+// Network/parse failures surface as errors; callers downgrade to a soft
+// no-op.
 func fetchTokenMetaFromServer(ctx context.Context, ep, token string) (*TokenMeta, error) {
+	if strings.HasPrefix(token, TeamTokenPrefix) {
+		return fetchTeamTokenMeta(ctx, ep, token)
+	}
 	u := strings.TrimRight(ep, "/") + "/api/v1/auth/me"
 	req, err := useragent.NewRequest(ctx, http.MethodGet, u, nil)
 	if err != nil {
@@ -235,4 +260,36 @@ func fetchTokenMetaFromServer(ctx context.Context, ep, token string) (*TokenMeta
 		TokenPrefix: parsed.TokenPrefix,
 		Name:        parsed.Name,
 	}, nil
+}
+
+// fetchTeamTokenMeta introspects a team token: introspection is the answer
+// that names the AI coworker the token acts as.
+func fetchTeamTokenMeta(ctx context.Context, ep, token string) (*TokenMeta, error) {
+	res, err := introspect(ctx, ep, token)
+	if err != nil {
+		return nil, err
+	}
+	meta := &TokenMeta{}
+	if res.ExpiresAt != nil && !res.ExpiresAt.IsZero() {
+		expiresAt := res.ExpiresAt.Time
+		meta.ExpiresAt = &expiresAt
+	}
+	switch {
+	case len(res.Coworker) == 0:
+		// a server older than the coworker field: no answer either way
+	case string(res.Coworker) == "null":
+		meta.NoCoworker = true
+	default:
+		var c Coworker
+		// An unreadable coworker, or one without an agt_ id, is treated like
+		// a server that sent no coworker field: there is no id to attribute to.
+		if json.Unmarshal(res.Coworker, &c) == nil && isCoworkerID(c.ID) {
+			c.DisplayName = strings.TrimSpace(c.DisplayName)
+			if c.DisplayName == "" {
+				c.DisplayName = c.ID
+			}
+			meta.Coworker = &c
+		}
+	}
+	return meta, nil
 }

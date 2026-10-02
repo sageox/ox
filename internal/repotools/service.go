@@ -54,7 +54,7 @@ func (g *GitIdentity) Slug() string {
 		return "anonymous"
 	}
 
-	slug := slugify(identifier)
+	slug := Slugify(identifier)
 	if slug == "" {
 		return "anonymous"
 	}

@@ -1,11 +1,16 @@
 package auth
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sageox/ox/internal/endpoint"
 )
 
 // Note: these tests use t.Setenv which is incompatible with t.Parallel
@@ -518,4 +523,83 @@ func TestEnvTokenIsTeamFamily(t *testing.T) {
 		t.Setenv("SAGEOX_ENDPOINT", "https://staging.sageox.ai")
 		assert.False(t, EnvTokenIsTeamFamily(ep))
 	})
+}
+
+// serveTeamToken binds a valid team SAGEOX_TOKEN to an endpoint answering
+// teamAnswer(coworker) and returns the endpoint.
+func serveTeamToken(t *testing.T, coworker string) string {
+	t.Helper()
+	withTempCacheDir(t)
+	ep := serveIntrospectBody(t, teamAnswer(coworker))
+	t.Setenv(endpoint.EnvVar, ep)
+	t.Setenv(EnvVarToken, "oxt_test_1ljPfr")
+	return ep
+}
+
+// Failure prevented: team-token work is refused when the server never said no
+// coworker is attached, or allowed when it did.
+func TestTeamCoworker(t *testing.T) {
+	t.Run("none attached", func(t *testing.T) {
+		_, err := TeamCoworker(serveTeamToken(t, `null`))
+		assert.ErrorIs(t, err, ErrNoCoworker)
+	})
+	t.Run("server predates the field", func(t *testing.T) {
+		c, err := TeamCoworker(serveTeamToken(t, ""))
+		assert.NoError(t, err)
+		assert.Nil(t, c)
+	})
+	t.Run("server unreachable, nothing cached", func(t *testing.T) {
+		withTempCacheDir(t)
+		srv := httptest.NewServer(http.NotFoundHandler())
+		srv.Close()
+		t.Setenv(endpoint.EnvVar, srv.URL)
+		t.Setenv(EnvVarToken, "oxt_test_1ljPfr")
+
+		c, err := TeamCoworker(srv.URL)
+		assert.NoError(t, err)
+		assert.Nil(t, c)
+	})
+}
+
+// Failure prevented: people's commands start asking the server about their own
+// credential on every attribution — a round trip each, or a 5 s stall offline.
+func TestTeamCoworker_NeverAsksAboutAPersonalCredential(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls.Add(1) }))
+	t.Cleanup(srv.Close)
+	withTempCacheDir(t)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv(endpoint.EnvVar, srv.URL)
+	require.NoError(t, SaveTokenForEndpoint(srv.URL, createTestTokenForTest(time.Hour)))
+
+	for _, envToken := range []string{"", "oxp_test_4bDZfN"} { // ox login; personal token
+		t.Setenv(EnvVarToken, envToken)
+		c, err := TeamCoworker(srv.URL)
+		require.NoError(t, err)
+		assert.Nil(t, c)
+		GetUserID(srv.URL)
+		GetUsername(srv.URL)
+	}
+	assert.Zero(t, calls.Load())
+}
+
+// Failure prevented: a coworker named without ASCII letters gets an empty slug.
+func TestCoworkerUsername_FallsBackToID(t *testing.T) {
+	assert.Equal(t, "agt_01abc", (&Coworker{ID: "agt_01ABC", DisplayName: "ロボ"}).Username())
+}
+
+// Failure prevented: session metadata and daemon murmurs carry no id or
+// principal for the coworker.
+func TestGetUserIDAndUsername_TeamCoworker(t *testing.T) {
+	ep := serveTeamToken(t, `{"id":"agt_rip","display_name":"Rip"}`)
+
+	assert.Equal(t, "agt_rip", GetUserID(ep))
+	assert.Equal(t, "rip", GetUsername(ep))
+	assert.Equal(t, "agt_rip", GetUserID(""))
+	assert.Equal(t, "rip", GetUsername(""))
+
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv(EnvVarToken, "")
+	assert.Empty(t, GetUserID(ep))
+	assert.Empty(t, GetUsername(ep))
 }

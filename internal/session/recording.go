@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/sageox/agentx"
+	"github.com/sageox/ox/internal/auth"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/paths"
@@ -1202,6 +1204,13 @@ func StartRecording(projectRoot string, opts StartRecordingOptions) (*RecordingS
 		return nil, fmt.Errorf("%w: project root", ErrEmptyPath)
 	}
 
+	// A team token with no AI coworker attached would record the session under
+	// the git identity of the machine running it.
+	coworker, err := auth.TeamCoworker(endpoint.GetForProject(projectRoot))
+	if err != nil {
+		return nil, err
+	}
+
 	// clean up stale empty recording stubs to prevent accumulation
 	cleanupStaleEmptyRecordings(projectRoot)
 
@@ -1292,10 +1301,15 @@ func StartRecording(projectRoot string, opts StartRecordingOptions) (*RecordingS
 		sessionFile = filepath.Join(sessionPath, "raw.jsonl")
 	}
 
-	// auto-detect session origin if not explicitly provided
+	// auto-detect session origin if not explicitly provided; an AI coworker's
+	// session has no human in the loop
 	origin := opts.Origin
 	if origin == "" {
-		origin = string(agentx.DetectOriginFromOS(""))
+		var explicit agentx.SessionOrigin
+		if coworker != nil {
+			explicit = agentx.OriginAgent
+		}
+		origin = string(agentx.DetectOriginFromOS(explicit))
 	}
 
 	continuedFromSessionID := opts.ContinuedFromSessionID
