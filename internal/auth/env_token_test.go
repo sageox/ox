@@ -548,6 +548,14 @@ func TestTeamCoworker(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Nil(t, c)
 	})
+	t.Run("mistyped team token", func(t *testing.T) {
+		ep := serveTeamToken(t, `null`)
+		t.Setenv(EnvVarToken, "oxt_test_1ljPfX") // checksum fails
+
+		c, err := TeamCoworker(ep)
+		assert.NoError(t, err)
+		assert.Nil(t, c)
+	})
 	t.Run("server unreachable, nothing cached", func(t *testing.T) {
 		withTempCacheDir(t)
 		srv := httptest.NewServer(http.NotFoundHandler())

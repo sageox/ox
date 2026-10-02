@@ -261,7 +261,7 @@ func serveIntrospectBody(t *testing.T, body string) string {
 // teamAnswer is an introspection answer for a team token whose coworker field
 // is coworker verbatim; "" leaves the field out, as a server older than it does.
 func teamAnswer(coworker string) string {
-	body := `{"active":true,"principal_kind":"team-service","team":{"team_id":"team_1"}`
+	body := `{"active":true,"principal_kind":"team-service","expires_at":"2030-01-02T03:04:05Z","team":{"team_id":"team_1"}`
 	if coworker != "" {
 		body += `,"coworker":` + coworker
 	}
@@ -288,6 +288,8 @@ func TestFetchTokenMetaFromServer_Coworker(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, tc.wantCoworker, meta.Coworker)
 			assert.Equal(t, tc.wantNoCoworker, meta.NoCoworker)
+			require.NotNil(t, meta.ExpiresAt, "a team token's expiry still drives the expiry warning")
+			assert.Equal(t, time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC), meta.ExpiresAt.UTC())
 		})
 	}
 }
