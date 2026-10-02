@@ -52,6 +52,10 @@ Comment on exact words in a plan review, hand your AI coworker a SageOx recordin
 - **Usage data now says which failure it was** — when a command fails, its event names the failure in ox's own wording or by its error type, with no values filled in: never arguments, paths, or anything you typed. `ox config get telemetry` lists what's sent.
 - **Usage data records how a plan review ended** — approved, timed out, or closed, with counts of comments and highlights; never their text.
 
+### Fixed
+
+- **ox no longer hangs on Windows when its input is redirected** — choosing the light or dark markdown theme asks the terminal for its background color, and on Windows that query opens the console directly whenever stdin isn't already a console: a pipe, a file, `NUL`, or Git Bash. The reply could never be interrupted, so the query's own two-second timeout never fired and the command waited forever instead of falling back to dark — `ox guide` and `ox doctor` from Git Bash, any AI coworker capturing ox's output, and two packages of the Windows test suite, which died at the Go test timeout with the read still parked in `ReadConsole`. The query is now only made when stdin really is the console, which is the only case where it can be interrupted and time out.
+
 ## [0.19.0] - 2026-09-28
 
 Sessions that never captured any work stay out of your Ledger again, and ox now sends usage data, which you can turn off.
