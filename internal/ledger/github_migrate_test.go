@@ -14,6 +14,27 @@ import (
 
 // --- A. Conflict marker repair ---
 
+// TestRepairConflictMarkerFiles_OrphanedTail verifies a file left with only the tail of a conflict is repaired.
+// Failure prevented: a tail-only file passes the opening-marker check and stays invalid JSON forever (GH #1056).
+func TestRepairConflictMarkerFiles_OrphanedTail(t *testing.T) {
+	tmp := t.TempDir()
+	now := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+	dir := DateDir(tmp, now, "pr")
+	require.NoError(t, os.MkdirAll(dir, 0755))
+	tail := "{\"number\":409,\n=======\n\"title\":\"new\"}\n>>>>>>> Stashed changes\n"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "409.json"), []byte(tail), 0644))
+
+	_, corrupted, err := ScanLegacyGitHubFiles(tmp)
+	require.NoError(t, err)
+	assert.Len(t, corrupted, 1, "scan must report the tail-only file")
+
+	count, err := RepairConflictMarkerFiles(tmp, slog.Default())
+	require.NoError(t, err)
+	assert.Equal(t, 1, count)
+	_, err = os.Stat(filepath.Join(dir, "409.json"))
+	assert.True(t, os.IsNotExist(err))
+}
+
 // TestRepairConflictMarkerFiles verifies corrupted files are deleted.
 // Failure prevented: corrupted JSON files cause unmarshal errors during sync.
 func TestRepairConflictMarkerFiles(t *testing.T) {

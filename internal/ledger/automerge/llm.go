@@ -114,7 +114,7 @@ func (r *Resolver) mergeOneWithLLM(ctx context.Context, repoPath, path string) e
 		return fmt.Errorf("llm: %w", err)
 	}
 	merged = stripFences(merged)
-	if hasConflictMarkers([]byte(merged)) {
+	if gitutil.HasConflictMarkersBytes([]byte(merged)) {
 		return fmt.Errorf("llm output still contains conflict markers")
 	}
 
