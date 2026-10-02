@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/cli"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/repotools"
 	"github.com/spf13/cobra"
 )
@@ -121,6 +123,20 @@ func runSessionCommit(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// refuse before `git add`, which would mark a conflict resolved with its markers (#1055)
+	if unmerged := parseUnmergedPaths(string(output)); len(unmerged) > 0 {
+		return fmt.Errorf("refusing to commit: %d unresolved conflict(s) in %s, e.g. %s; resolve them by hand (git status, then git checkout --ours/--theirs <file>) and rerun",
+			len(unmerged), sessionsDir, unmerged[0].Path)
+	}
+	// a conflict already `git add`ed by hand is stage-0 but still carries its markers
+	marked, err := sessionFileWithConflictMarkers(projectRoot, string(output))
+	if err != nil {
+		return fmt.Errorf("failed to check session files for conflict markers: %w", err)
+	}
+	if marked != "" {
+		return fmt.Errorf("refusing to commit: %s still contains conflict markers; remove them by hand and rerun", marked)
+	}
+
 	// stage session files
 	addCmd := exec.Command("git", "-C", projectRoot, "add", sessionsDir)
 	if err := addCmd.Run(); err != nil {
@@ -144,8 +160,8 @@ func runSessionCommit(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// commit
-	commitCmd := exec.Command("git", "-C", projectRoot, "commit", "-m", commitMsg)
+	// commit only the sessions dir, so the user's other staged files stay staged
+	commitCmd := exec.Command("git", "-C", projectRoot, "commit", "-m", commitMsg, "--", sessionsDir)
 	commitOutput, err := commitCmd.CombinedOutput()
 	if err != nil {
 		// check if nothing to commit
@@ -177,6 +193,36 @@ func runSessionCommit(cmd *cobra.Command, args []string) error {
 }
 
 // contains checks if a string slice contains a value
+// sessionFileWithConflictMarkers returns the first changed session file, from
+// `git status --porcelain` output, whose working-tree content has conflict markers.
+func sessionFileWithConflictMarkers(projectRoot, porcelain string) (string, error) {
+	for _, line := range strings.Split(porcelain, "\n") {
+		if len(line) < 4 || strings.ContainsRune(line[:2], 'D') {
+			continue
+		}
+		rel := line[3:]
+		if i := strings.Index(rel, " -> "); i >= 0 {
+			rel = rel[i+len(" -> "):]
+		}
+		// untracked directories are listed once, so walk them
+		var marked string
+		err := filepath.WalkDir(filepath.Join(projectRoot, rel), func(path string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() || marked != "" {
+				return err
+			}
+			has, err := gitutil.HasConflictMarkers(path)
+			if has {
+				marked = path
+			}
+			return err
+		})
+		if err != nil || marked != "" {
+			return marked, err
+		}
+	}
+	return "", nil
+}
+
 func contains(slice []string, val string) bool {
 	for _, s := range slice {
 		if s == val {

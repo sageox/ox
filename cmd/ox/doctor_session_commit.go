@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/sageox/ox/internal/gitutil"
 )
 
 func init() {
@@ -53,12 +56,41 @@ func checkSessionCommit(fix bool) checkResult {
 			fmt.Sprintf("Run `ox doctor --fix` to commit %d staged session file(s)", sessionCount))
 	}
 
-	// fix=true: commit the staged files
-	commitMsg := buildSessionCommitMessage(sessionIDs)
-	if err := commitStagedSessions(ledgerPath, commitMsg); err != nil {
+	// fix=true: refuse an unmerged index; the whole-index commit below would sweep it in (#1055)
+	statusOut, err := exec.Command("git", "-C", ledgerPath, "status", "--porcelain=v1").Output()
+	if err != nil {
+		return SkippedCheck("staged session commit", "status check failed", "")
+	}
+	if unmerged := parseUnmergedPaths(string(statusOut)); len(unmerged) > 0 {
+		sample := unmerged[0].Path
+		if len(unmerged) > 1 {
+			sample = fmt.Sprintf("%s (+%d more)", sample, len(unmerged)-1)
+		}
 		return FailedCheck("staged session commit",
-			"commit failed",
-			fmt.Sprintf("Error: %v", err))
+			"unresolved conflicts present, refusing to auto-commit",
+			fmt.Sprintf("%d unmerged file(s) at %s, e.g. %s.\n       "+
+				"Committing now would bake the conflict markers into the ledger permanently. "+
+				"Resolve by hand:\n       "+
+				"  cd %s\n       "+
+				"  git status                       # inspect the conflict\n       "+
+				"  git checkout --ours <file>       # or --theirs, only if that side HAS the file\n       "+
+				"  git add <file> && git commit",
+				len(unmerged), ledgerPath, sample, ledgerPath))
+	}
+
+	// commit only sessions/ through the validated snapshot so markers or invalid meta.json are refused
+	commitMsg := buildSessionCommitMessage(sessionIDs)
+	committed, err := gitutil.CommitLedgerSnapshot(context.Background(), ledgerPath, commitMsg, "sessions/")
+	if err != nil {
+		return FailedCheck("staged session commit",
+			"refusing to auto-commit",
+			fmt.Sprintf("%v\n       "+
+				"Fix the named file by hand (remove the markers, or `git -C %s checkout HEAD -- <file>` "+
+				"to discard the local change), then `git add` it and rerun `ox doctor --fix`.",
+				err, ledgerPath))
+	}
+	if !committed {
+		return PassedCheck("staged session commit", "nothing to commit")
 	}
 
 	return PassedCheck("staged session commit",
@@ -123,18 +155,4 @@ func buildSessionCommitMessage(sessionIDs []string) string {
 		return fmt.Sprintf("Add %d sessions %s", len(sessionIDs), timestamp)
 	}
 	return fmt.Sprintf("Update sessions %s", timestamp)
-}
-
-// commitStagedSessions commits the staged session files in the ledger.
-func commitStagedSessions(ledgerPath, commitMsg string) error {
-	cmd := exec.Command("git", "-C", ledgerPath, "commit", "--no-verify", "-m", commitMsg)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		// check if nothing to commit (shouldn't happen since we checked for staged files)
-		if strings.Contains(string(output), "nothing to commit") {
-			return nil
-		}
-		return fmt.Errorf("git commit: %w: %s", err, string(output))
-	}
-	return nil
 }
