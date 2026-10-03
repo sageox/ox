@@ -7,7 +7,9 @@
       "onramp"
     ],
     "targets": [
-      "claude-project"
+      "claude-project",
+      "claude-rules",
+      "droid-rules"
     ]
   },
   "targets": [
@@ -15,6 +17,20 @@
       "key": "claude-project",
       "root": ".claude/skills",
       "format": "agent-skills/v1",
+      "scope": "project",
+      "link_policy": "reject"
+    },
+    {
+      "key": "claude-rules",
+      "root": ".claude/rules",
+      "format": "markdown-rules/v1",
+      "scope": "project",
+      "link_policy": "reject"
+    },
+    {
+      "key": "droid-rules",
+      "root": ".factory/rules",
+      "format": "markdown-rules/v1",
       "scope": "project",
       "link_policy": "reject"
     }
