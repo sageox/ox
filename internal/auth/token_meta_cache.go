@@ -27,7 +27,10 @@ const tokenMetaCacheTTL = 1 * time.Hour
 // noCoworkerTTL replaces tokenMetaCacheTTL for an answer that a team token
 // has no AI coworker. Recording and murmurs refuse on that answer, and the
 // operator's fix is to attach a coworker in SageOx; serving the refusal from
-// cache for an hour would keep refusing after the fix.
+// cache for an hour would keep refusing after the fix. While the server cannot
+// be reached, the stale answer stands (FetchTokenMetaCached falls back to it)
+// and the refusal continues: falling back instead would attribute the work to
+// the machine's git identity, which is what the refusal prevents.
 const noCoworkerTTL = 1 * time.Minute
 
 // tokenMetaRetryAfter is how long a process waits before re-fetching a token
