@@ -174,11 +174,7 @@ func (s *Store) RunInTransaction(ctx context.Context, commitMsg string, fn func(
 		if _, err := conn.ExecContext(ctx, "CALL DOLT_ADD('-A')"); err != nil {
 			slog.Warn("dolt add failed", "err", err)
 		}
-		author := fmt.Sprintf("%s <%s>", s.committerName, s.committerEmail)
-		if s.committerName == "" {
-			author = "carts <carts@sageox.ai>"
-		}
-		if _, err := conn.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)", commitMsg, author); err != nil {
+		if _, err := conn.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)", commitMsg, s.commitAuthor()); err != nil {
 			if !strings.Contains(err.Error(), "nothing to commit") {
 				slog.Warn("dolt commit failed", "err", err)
 			}
@@ -194,17 +190,23 @@ func (tx *Transaction) Exec(ctx context.Context, _ string, query string, args ..
 	return tx.tx.ExecContext(ctx, query, args...)
 }
 
+// commitAuthor is the --author for DOLT_COMMIT. Dolt refuses an author with no
+// email, so a committer without one (an AI coworker, or a git config with no
+// user.email) commits as the carts default.
+func (s *Store) commitAuthor() string {
+	if s.committerName == "" || s.committerEmail == "" {
+		return "carts <carts@sageox.ai>"
+	}
+	return fmt.Sprintf("%s <%s>", s.committerName, s.committerEmail)
+}
+
 // doltCommit creates a Dolt commit outside a transaction (for schema init).
 func (s *Store) doltCommit(ctx context.Context, msg string) {
 	if _, err := s.db.ExecContext(ctx, "CALL DOLT_ADD('-A')"); err != nil {
 		slog.Debug("dolt add all failed", "err", err)
 		return
 	}
-	author := fmt.Sprintf("%s <%s>", s.committerName, s.committerEmail)
-	if s.committerName == "" {
-		author = "carts <carts@sageox.ai>"
-	}
-	if _, err := s.db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)", msg, author); err != nil {
+	if _, err := s.db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)", msg, s.commitAuthor()); err != nil {
 		if !strings.Contains(err.Error(), "nothing to commit") {
 			slog.Debug("dolt commit failed", "err", err)
 		}
