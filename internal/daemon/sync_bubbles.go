@@ -5,7 +5,11 @@ package daemon
 // scoped per sageox-mono ADR-073 — one scope per call, members-only) and
 // pulls each one into its canonical XDG path (paths.KBDir(kb_id)). Per
 // the daemon-CLI split (.claude/rules/daemon-git.md) this only ever
-// pulls — never adds, commits, or pushes. Symlink management (D2) and
+// pulls — never adds, commits, or pushes. That includes ignore rules:
+// a bubble checkout gets local-only excludes in .git/info/exclude
+// (kb.EnsureLocalExcludes), never a committed .sageox/.gitignore, because
+// the server-side Curator commits into .sageox/curator/ and a committed
+// `*` rule would hide its artifacts from it. Symlink management (D2) and
 // GC (D3) live in separate beads and intentionally NOT here.
 
 import (
@@ -377,6 +381,17 @@ func (s *SyncScheduler) reconcileBubble(ctx context.Context, b api.KB) {
 		// non-fatal: we still write meta.json
 	}
 
+	// local-only ignore rules for the files this loop writes (meta.json,
+	// cache/). These go in .git/info/exclude, NEVER a committed
+	// .sageox/.gitignore: a committed `*` rule on a bubble's main hides the
+	// server Curator's own .sageox/curator/ artifacts from its `git add -A`
+	// and it re-drives every synthesis forever (see internal/kb/localexclude.go).
+	// Reapplied on every pass so a clone from an older ox heals itself.
+	if _, err := kb.EnsureLocalExcludes(target); err != nil {
+		s.logger.Warn("kb_sync ensure local excludes failed", "kb_id", b.KBID, "type", string(b.KBType), "error", err)
+		// non-fatal: worst case meta.json shows as untracked in git status
+	}
+
 	if err := writeKBMeta(target, b); err != nil {
 		s.logger.Warn("kb_sync meta write failed", "kb_id", b.KBID, "type", string(b.KBType), "error", err)
 		return
@@ -386,9 +401,9 @@ func (s *SyncScheduler) reconcileBubble(ctx context.Context, b api.KB) {
 // cloneBubble performs the initial clone of a bubble into the canonical
 // XDG path via gitserver.TwoPhaseClone — the same shallow + blob:none +
 // sparse-checkout pipeline team-contexts use. This unlocks manifest-driven
-// sparse sets, depth-1 history, and EnsureCheckoutGitignore as part of the
-// clone itself. NEVER shells out to git-lfs (per
-// .claude/rules/lfs-no-git-lfs-binary.md); TwoPhaseClone calls
+// sparse sets and depth-1 history as part of the clone itself. NEVER
+// shells out to git-lfs (per .claude/rules/lfs-no-git-lfs-binary.md);
+// TwoPhaseClone calls
 // gitutil.StripLFSConfig to disable any smudge filter git-lfs may have
 // injected during the clone.
 func (s *SyncScheduler) cloneBubble(ctx context.Context, b api.KB, target string) error {
@@ -429,13 +444,12 @@ func (s *SyncScheduler) cloneBubble(ctx context.Context, b api.KB, target string
 		s.logger.Warn("kb_sync post-clone ensure merge attrs failed", "kb_id", b.KBID, "type", string(b.KBType), "error", err)
 	}
 
-	// belt-and-suspenders: TwoPhaseClone already calls EnsureCheckoutGitignoreCtx
-	// internally, but we re-call it explicitly to mirror the explicit-is-better
-	// posture from sync_gc.go. Idempotent — no-ops when entries are already
-	// present.
-	if err := gitserver.EnsureCheckoutGitignoreCtx(ctx, target); err != nil {
-		s.logger.Warn("kb_sync post-clone ensure checkout gitignore failed", "kb_id", b.KBID, "type", string(b.KBType), "error", err)
-	}
+	// NOTE: no gitserver.EnsureCheckoutGitignoreCtx here, and TwoPhaseClone
+	// skips it for RepoKindKB. That helper commits .sageox/.gitignore, which
+	// (a) violates this loop's pull-only contract and (b) once on a bubble's
+	// main makes the server Curator skip its own .sageox/curator/ files.
+	// Local ignore rules are installed by reconcileBubble via
+	// kb.EnsureLocalExcludes after this returns.
 	return nil
 }
 
