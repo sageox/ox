@@ -105,7 +105,7 @@ func ResolveAttribution(ep, configDisplayName string) Attribution {
 	// The git identity, $USER and display_name config on the machine running
 	// a team token describe that machine, not the coworker doing the work.
 	if c, _ := auth.TeamCoworker(ep); c != nil {
-		return Attribution{Username: c.Username(), Name: c.DisplayName, DisplayName: c.DisplayName, AI: true}
+		return Attribution{Username: c.Username(), Name: c.Name(), DisplayName: c.Name(), AI: true}
 	}
 
 	var email, name, username string

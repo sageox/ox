@@ -281,7 +281,7 @@ func TestFetchTokenMetaFromServer_Coworker(t *testing.T) {
 		{"none attached", `null`, nil, true},
 		{"server predates the field", "", nil, false},
 		{"id unsafe in a session name", `{"id":"agt_a b","display_name":"Rip"}`, nil, false},
-		{"unnamed", `{"id":"agt_rip","display_name":""}`, &Coworker{ID: "agt_rip", DisplayName: "agt_rip"}, false},
+		{"unnamed", `{"id":"agt_rip","display_name":""}`, &Coworker{ID: "agt_rip"}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			meta, err := fetchTokenMetaFromServer(context.Background(), serveIntrospectBody(t, teamAnswer(tc.coworker)), "oxt_test_1ljPfr")
@@ -305,4 +305,23 @@ func TestFetchTokenMetaCached_NoCoworkerAnswerExpiresInAMinute(t *testing.T) {
 	meta, err := FetchTokenMetaCached(context.Background(), ep, "oxt_test_1ljPfr")
 	require.NoError(t, err)
 	assert.Equal(t, &Coworker{ID: "agt_rip", DisplayName: "Rip"}, meta.Coworker)
+}
+
+// Failure prevented: with the server unreachable, every lookup one command
+// makes waits out the request timeout again.
+func TestFetchTokenMetaCached_DoesNotRetryAFailedFetchAtOnce(t *testing.T) {
+	withTempCacheDir(t)
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(srv.Close)
+
+	for range 3 {
+		meta, err := FetchTokenMetaCached(context.Background(), srv.URL, "oxt_test_1ljPfr")
+		require.NoError(t, err)
+		assert.Nil(t, meta)
+	}
+	assert.Equal(t, int32(1), calls.Load())
 }

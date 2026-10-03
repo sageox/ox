@@ -547,20 +547,31 @@ func openCartsStore(cmd *cobra.Command) (*carts.Store, *repotools.GitIdentity, e
 
 	// use identity.ResolveAttribution for git commit author (Name + Email).
 	// Name is LOCAL ONLY (not shared in ledger), safe for git author field.
-	attr := ident.ResolveAttribution(endpoint.GetForProject(root), config.GetDisplayName())
-	gitIdent := &repotools.GitIdentity{Name: attr.Name, Email: attr.Email}
+	gitIdent := cartsCommitter(ident.ResolveAttribution(endpoint.GetForProject(root), config.GetDisplayName()))
 
 	store, err := carts.OpenFromTeamContext(
 		context.Background(),
 		teamDir,
-		attr.Name,
-		attr.Email,
+		gitIdent.Name,
+		gitIdent.Email,
 	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open carts store: %w", err)
 	}
 
 	return store, gitIdent, nil
+}
+
+// cartsCommitter is the author of carts' Dolt commits. Dolt refuses an author
+// with no email and an AI coworker has none, so a coworker's commits keep the
+// machine's git identity, as they did before team tokens named coworkers.
+func cartsCommitter(attr ident.Attribution) *repotools.GitIdentity {
+	if attr.AI {
+		if g, err := repotools.DetectGitIdentity(); err == nil && g != nil {
+			return g
+		}
+	}
+	return &repotools.GitIdentity{Name: attr.Name, Email: attr.Email}
 }
 
 func isJSON(cmd *cobra.Command) bool {

@@ -24,6 +24,7 @@ import (
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/ledger"
+	"github.com/sageox/ox/internal/repotools"
 )
 
 // serveTeamCoworker binds a valid team SAGEOX_TOKEN to an endpoint whose
@@ -159,4 +160,19 @@ func TestSessionMeta_TeamCoworker(t *testing.T) {
 	ep := endpoint.GetForProject(projectRoot)
 	meta := sessionMetaBase("s", identity.AttributionDisplayName(ep, ""), "OxAiCw", "claude-code", time.Now(), projectRoot, state.SessionID).Build()
 	assert.Equal(t, "agt_rip", meta.UserID)
+}
+
+// Failure prevented: a coworker's carts commits fail, because Dolt refuses an
+// author with no email and a coworker has none.
+func TestCartsCommitter_CoworkerKeepsMachineGitIdentity(t *testing.T) {
+	t.Setenv("GIT_CONFIG_COUNT", "2")
+	t.Setenv("GIT_CONFIG_KEY_0", "user.name")
+	t.Setenv("GIT_CONFIG_VALUE_0", "Pod")
+	t.Setenv("GIT_CONFIG_KEY_1", "user.email")
+	t.Setenv("GIT_CONFIG_VALUE_1", "pod@example.com")
+
+	assert.Equal(t, &repotools.GitIdentity{Name: "Pod", Email: "pod@example.com"},
+		cartsCommitter(identity.Attribution{Name: "Rip", DisplayName: "Rip", Username: "rip", AI: true}))
+	assert.Equal(t, &repotools.GitIdentity{Name: "Ada", Email: "ada@example.com"},
+		cartsCommitter(identity.Attribution{Name: "Ada", Email: "ada@example.com"}))
 }

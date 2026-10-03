@@ -180,30 +180,32 @@ func runMurmur(cmd *cobra.Command, args []string) error {
 
 	now := time.Now().UTC()
 
-	// resolve principal — the person the agent works for, or the AI coworker a
-	// team token acts as — as an attribution slug, which resolves offline and
-	// without OAuth.
+	// resolve principal: the AI coworker a team token acts as, or else the
+	// human user the agent works for — an attribution slug, not auth-specific
+	// identity, so it works offline / without OAuth.
 	ep := endpoint.GetForProject(projectRoot)
-	if _, err := auth.TeamCoworker(ep); err != nil {
+	coworker, err := auth.TeamCoworker(ep)
+	if err != nil {
 		return err
 	}
-	principal := identity.ResolveAttribution(ep, config.GetDisplayName())
 
 	murmur := ledger.MurmurFile{
 		SchemaVersion: "1",
 		ID:            id.String(),
 		Timestamp:     now,
 		AgentID:       agentID,
-		PrincipalID:   principal.Username,
 		PrincipalType: "human",
 		Topic:         topic,
 		Importance:    importance,
 		Content:       rawContent,
 		Scope:         scope,
 	}
-	if principal.AI {
+	if coworker != nil {
+		murmur.PrincipalID = coworker.Username()
 		murmur.PrincipalType = "ai"
-		murmur.PrincipalDisplay = principal.DisplayName
+		murmur.PrincipalDisplay = coworker.Name()
+	} else {
+		murmur.PrincipalID = identity.AttributionUsername(ep, config.GetDisplayName())
 	}
 	if files != "" {
 		murmur.Metadata = map[string]string{"files": files}

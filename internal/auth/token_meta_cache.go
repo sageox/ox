@@ -19,9 +19,9 @@ import (
 	"github.com/sageox/ox/internal/useragent"
 )
 
-// tokenMetaCacheTTL is how long /api/v1/auth/me responses stay fresh on disk
-// before the next interactive command re-fetches. Cheap enough to refresh
-// hourly, long enough to amortize over typical CLI invocation rhythms.
+// tokenMetaCacheTTL is how long a token's metadata stays fresh on disk before
+// the next command re-fetches. Cheap enough to refresh hourly, long enough to
+// amortize over typical CLI invocation rhythms.
 const tokenMetaCacheTTL = 1 * time.Hour
 
 // noCoworkerTTL replaces tokenMetaCacheTTL for an answer that a team token
@@ -29,6 +29,11 @@ const tokenMetaCacheTTL = 1 * time.Hour
 // operator's fix is to attach a coworker in SageOx; serving the refusal from
 // cache for an hour would keep refusing after the fix.
 const noCoworkerTTL = 1 * time.Minute
+
+// tokenMetaRetryAfter is how long a process waits before re-fetching a token
+// whose fetch failed. One command looks a team token up several times, and
+// with the server unreachable each lookup would wait out the request timeout.
+const tokenMetaRetryAfter = 1 * time.Minute
 
 // tokenMetaCacheFile is the file basename inside CacheDir() for the
 // serialized cache. The directory is created lazily with 0700 perms.
@@ -80,6 +85,10 @@ type tokenMetaCacheFileFormat struct {
 // tokenMetaCacheMu guards on-disk reads/writes against the small race
 // between concurrent CLI invocations sharing the same file.
 var tokenMetaCacheMu sync.Mutex
+
+// tokenMetaFetchFailedAt records, per cache key, when this process last failed
+// to fetch (see tokenMetaRetryAfter). Guarded by tokenMetaCacheMu.
+var tokenMetaFetchFailedAt = map[string]time.Time{}
 
 // tokenHashKey returns the hex-encoded SHA-256 of the token. Used as the
 // stable cache key so the on-disk file never contains plaintext tokens.
@@ -157,13 +166,15 @@ func saveTokenMetaCache(c *tokenMetaCacheFileFormat) error {
 }
 
 // FetchTokenMetaCached returns token metadata for the given (endpoint,
-// token) pair. Cache TTL is tokenMetaCacheTTL; on stale or missing entry
-// it fetches fresh from GET <ep>/api/v1/auth/me, persists, and returns.
+// token) pair. Cache TTL is tokenMetaCacheTTL (noCoworkerTTL for a "no
+// coworker" answer); on stale or missing entry it fetches fresh
+// (fetchTokenMetaFromServer), persists, and returns.
 //
-// Returns (nil, nil) — and never an error — when the network call would
-// be wasteful or fails non-fatally. The caller is a warning emitter, not
-// a critical path; we never want to surface auth-me failures to the user.
-// Errors are only returned for genuinely malformed inputs (empty token).
+// Returns (nil, nil) — and never an error — when the fetch fails and nothing
+// is cached. Both callers, the expiry warning and team-token attribution
+// (TeamCoworker), treat metadata as best-effort and must not surface fetch
+// failures to the user. Errors are only returned for genuinely malformed
+// inputs (empty token).
 func FetchTokenMetaCached(ctx context.Context, ep, token string) (*TokenMeta, error) {
 	if token == "" {
 		return nil, fmt.Errorf("empty token")
@@ -191,11 +202,16 @@ func FetchTokenMetaCached(ctx context.Context, ep, token string) (*TokenMeta, er
 		}
 	}
 
-	fresh, err := fetchTokenMetaFromServer(ctx, ep, token)
-	if err != nil {
+	var fresh *TokenMeta
+	if time.Since(tokenMetaFetchFailedAt[key]) >= tokenMetaRetryAfter {
+		fresh, err = fetchTokenMetaFromServer(ctx, ep, token)
+		if err != nil {
+			tokenMetaFetchFailedAt[key] = time.Now()
+		}
+	}
+	if fresh == nil {
 		// network/server problem — fall back to the stale entry if we
-		// have one rather than blocking the caller. The warning is
-		// best-effort; we never want to escalate.
+		// have one rather than blocking the caller.
 		if entry, ok := cache.Entries[key]; ok {
 			result := entry
 			return &result, nil
@@ -285,9 +301,6 @@ func fetchTeamTokenMeta(ctx context.Context, ep, token string) (*TokenMeta, erro
 		// a server that sent no coworker field: there is no id to attribute to.
 		if json.Unmarshal(res.Coworker, &c) == nil && isCoworkerID(c.ID) {
 			c.DisplayName = strings.TrimSpace(c.DisplayName)
-			if c.DisplayName == "" {
-				c.DisplayName = c.ID
-			}
 			meta.Coworker = &c
 		}
 	}

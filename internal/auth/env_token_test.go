@@ -591,9 +591,14 @@ func TestTeamCoworker_NeverAsksAboutAPersonalCredential(t *testing.T) {
 	assert.Zero(t, calls.Load())
 }
 
-// Failure prevented: a coworker named without ASCII letters gets an empty slug.
-func TestCoworkerUsername_FallsBackToID(t *testing.T) {
-	assert.Equal(t, "agt_01abc", (&Coworker{ID: "agt_01ABC", DisplayName: "ロボ"}).Username())
+// Failure prevented: a coworker with no ASCII name, or none, gets an empty
+// slug or name, or one agt_ id gets two different slugs.
+func TestCoworker_FallsBackToID(t *testing.T) {
+	for _, name := range []string{"ロボ", ""} {
+		assert.Equal(t, "agt_01abc", (&Coworker{ID: "agt_01ABC", DisplayName: name}).Username())
+	}
+	assert.Equal(t, "agt_01ABC", (&Coworker{ID: "agt_01ABC"}).Name())
+	assert.Equal(t, "Rip", (&Coworker{ID: "agt_01ABC", DisplayName: "Rip"}).Name())
 }
 
 // Failure prevented: session metadata and daemon murmurs carry no id or

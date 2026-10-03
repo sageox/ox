@@ -236,7 +236,6 @@ func (p *FileChangeMurmurPublisher) publish() {
 		ID:            id.String(),
 		Timestamp:     now.UTC(),
 		AgentID:       p.resolveAgentID(),
-		PrincipalID:   resolvePrincipal(p.projectRoot),
 		PrincipalType: "human",
 		Topic:         "file-changes",
 		Importance:    importance,
@@ -245,8 +244,11 @@ func (p *FileChangeMurmurPublisher) publish() {
 		Metadata:      buildFileChangeMetadata(changes, branch, p.projectRoot),
 	}
 	if coworker != nil {
+		murmur.PrincipalID = coworker.Username()
 		murmur.PrincipalType = "ai"
-		murmur.PrincipalDisplay = coworker.DisplayName
+		murmur.PrincipalDisplay = coworker.Name()
+	} else {
+		murmur.PrincipalID = resolvePrincipal(p.projectRoot)
 	}
 
 	relPath := ledger.MurmurFilePath(now.UTC(), id.String())
@@ -304,8 +306,7 @@ func resolveOriginURL(projectRoot string) string {
 	return shortenRemoteURL(urls[0])
 }
 
-// resolvePrincipal returns the short username from ox login credentials, or
-// the slug of the AI coworker a team token acts as.
+// resolvePrincipal returns the short username from ox login credentials.
 func resolvePrincipal(projectRoot string) string {
 	ep := endpoint.GetForProject(projectRoot)
 	if username := auth.GetUsername(ep); username != "" {

@@ -214,11 +214,19 @@ func EnvTokenIsTeamFamily(ep string) bool {
 // Coworker is the AI coworker a team token acts as, as introspection names it.
 type Coworker struct {
 	ID          string `json:"id"`           // agt_…
-	DisplayName string `json:"display_name"` // the coworker's name in SageOx
+	DisplayName string `json:"display_name"` // the coworker's name in SageOx; may be empty
+}
+
+// Name is the coworker's display name, or its agt_ id when it has none.
+func (c *Coworker) Name() string {
+	if c.DisplayName != "" {
+		return c.DisplayName
+	}
+	return c.ID
 }
 
 // Username is the coworker's slug. Slugify keeps only ASCII letters and
-// digits, so a name with neither falls back to the agt_ id.
+// digits, so an empty name, or one with neither, falls back to the agt_ id.
 func (c *Coworker) Username() string {
 	if slug := repotools.Slugify(c.DisplayName); slug != "" {
 		return slug
