@@ -14,11 +14,13 @@ import (
 	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/codedb"
 	"github.com/sageox/ox/internal/codedb/search"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/decision"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/ledgersearch"
 	"github.com/sageox/ox/internal/observability"
 )
@@ -262,7 +264,7 @@ func writeQueryResponse(combined *combinedQueryResponse, qa *queryArgs) (int, er
 	}
 
 	outputBytes := buf.Len()
-	_, err := buf.WriteTo(os.Stdout)
+	err := cli.WriteJSONBytes(os.Stdout, buf.Bytes())
 	return outputBytes, err
 }
 
@@ -331,8 +333,11 @@ func queryTeamContext(qa *queryArgs, projectRoot, agentID, agentType string) (*a
 
 	ep := endpoint.GetForProject(projectRoot)
 	token, err := auth.EnsureValidTokenForEndpoint(ep, 300)
-	if err != nil || token == nil || token.AccessToken == "" {
-		return nil, fmt.Errorf("not authenticated. Run 'ox login' first")
+	if err != nil {
+		return nil, fmt.Errorf("load credentials: %w", err)
+	}
+	if token == nil || token.AccessToken == "" {
+		return nil, errkind.Errorf(errkind.NotLoggedIn, "not authenticated. Run 'ox login' first")
 	}
 
 	// Outside an initialized repo the credential is the only identity there
@@ -375,7 +380,7 @@ func queryTeamContext(qa *queryArgs, projectRoot, agentID, agentType string) (*a
 	}
 	if err != nil {
 		if errors.Is(err, api.ErrUnauthorized) {
-			return nil, fmt.Errorf("not authenticated. Run 'ox login' first")
+			return nil, errkind.Errorf(errkind.Auth, "not authenticated. Run 'ox login' first")
 		}
 		if errors.Is(err, api.ErrVersionUnsupported) {
 			return nil, fmt.Errorf("CLI version too old. Run 'ox version' and update")

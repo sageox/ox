@@ -41,9 +41,62 @@ func TestExpectedTeamTopLevelDirs_IgnoresEmptyIncludeEntries(t *testing.T) {
 	expected := expectedTeamTopLevelDirs(&manifest.ManifestConfig{
 		Includes: []string{"agents/", "", "   ", "/", "memory/rollups"},
 	})
-	assert.True(t, expected["agents"])
-	assert.True(t, expected["memory"], "a nested include registers its top-level directory")
-	assert.False(t, expected[""], "blank and bare-slash entries must not register an empty directory")
+	assert.True(t, expected.top("agents"))
+	assert.True(t, expected.top("memory"), "a nested include registers its top-level directory")
+	assert.Contains(t, expected["memory"], "memory/rollups",
+		"a nested include must keep its full path so the child filter can scope to it")
+	assert.False(t, expected.top(""), "blank and bare-slash entries must not register an empty directory")
+	assert.NotContains(t, expected, "", "blank entries must not register at all")
+}
+
+// TestExpectedTeamDirs_CoversChecksEachIncludeAtItsOwnDepth pins the child
+// filter that decides which tracked files a top-level directory is expected to
+// hold. This is the unit behind the archived-only-board regression: the doctor
+// used to flatten every include to its first segment, so bulletin/general/posts/
+// made every file under bulletin/ — the never-synced archive/ too — count as
+// promised content.
+//
+// Failure prevented: a false doctor failure on a board whose posts have all
+// expired, and — the other direction — an include being ignored because a
+// sibling name shares its prefix on a non-boundary.
+func TestExpectedTeamDirs_CoversChecksEachIncludeAtItsOwnDepth(t *testing.T) {
+	expected := expectedTeamTopLevelDirs(&manifest.ManifestConfig{
+		Includes: []string{"agents/", "bulletin/general/posts/", "memory/rollups"},
+	})
+
+	tests := []struct {
+		name string
+		rel  string
+		want bool
+	}{
+		{"top-level include reaches everything beneath it", "agents/rules/team.md", true},
+		{"nested include reaches its own subtree", "bulletin/general/posts/notes-abc.md", true},
+		{"nested include reaches the sidecar beside the post", "bulletin/general/posts/notes-abc.meta.json", true},
+		{"archived sibling is outside every include", "bulletin/general/archive/ab/old-abc.md", false},
+		{"a file directly under the board root is outside every include", "bulletin/README.md", false},
+		{"include without trailing slash matches a same-named file", "memory/rollups", true},
+		{"include without trailing slash matches beneath a same-named directory", "memory/rollups/2026-09.md", true},
+		{"prefix match must stop at a path boundary", "bulletin/general/postsX/leak.md", false},
+		{"memory/ from the fallback still covers daily notes", "memory/daily/2026-09-21.md", true},
+		{"a directory no include mentions is never covered", "data/raw.bin", false},
+		{"leading slash is tolerated", "/agents/skills/x.md", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, expected.covers(tt.rel), "covers(%q)", tt.rel)
+		})
+	}
+}
+
+// TestExpectedTeamTopLevelDirs_DeduplicatesRepeatedIncludes: the fallback set
+// and the tracked manifest usually agree on the common directories, and each
+// repeated include would otherwise be walked once per copy.
+func TestExpectedTeamTopLevelDirs_DeduplicatesRepeatedIncludes(t *testing.T) {
+	expected := expectedTeamTopLevelDirs(&manifest.ManifestConfig{
+		Includes: []string{"agents/", "/agents/", "agents", "bulletin/general/posts/", "bulletin/general/posts"},
+	})
+	assert.Equal(t, []string{"agents"}, expected["agents"])
+	assert.Equal(t, []string{"bulletin/general/posts"}, expected["bulletin"])
 }
 
 // TestManifestPathDenied covers the deny matching that decides whether a

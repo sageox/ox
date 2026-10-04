@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"runtime"
 	"strings"
@@ -38,9 +37,7 @@ var versionCmd = &cobra.Command{
 		}
 
 		if jsonOutput {
-			encoder := json.NewEncoder(cmd.OutOrStdout())
-			encoder.SetIndent("", "  ")
-			return encoder.Encode(info)
+			return cli.PrintJSONTo(cmd.OutOrStdout(), info)
 		}
 
 		printVersionStyled(info)

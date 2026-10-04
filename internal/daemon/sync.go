@@ -30,7 +30,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -225,6 +225,12 @@ type SyncScheduler struct {
 	// tracks last ledger HEAD sha to detect changes and trigger ledger index rebuilds
 	lastLedgerSha string
 
+	// single-flight + cooldown state for ledger index rebuilds (guarded by mu).
+	// a full rebuild walks every ledger commit, so it must never overlap itself
+	// and must not re-run more often than LedgerIndexMinInterval.
+	ledgerBuildRunning  bool
+	lastLedgerBuildDone time.Time
+
 	// settings fetcher for CLI feature flag polling
 	settingsFetcher *SettingsFetcher
 
@@ -264,6 +270,7 @@ type SyncScheduler struct {
 // syncError tracks a sync error with timestamp.
 type syncError struct {
 	Time    time.Time
+	Repo    string // what clearErrors matches: "ledger", or a team context's directory name
 	Message string
 }
 
@@ -682,12 +689,13 @@ type SyncStatistics struct {
 }
 
 // recordError records a sync error for diagnostics.
-func (s *SyncScheduler) recordError(msg string) {
+func (s *SyncScheduler) recordError(repo, msg string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	s.recentErrors = append(s.recentErrors, syncError{
 		Time:    time.Now(),
+		Repo:    repo,
 		Message: msg,
 	})
 
@@ -695,6 +703,18 @@ func (s *SyncScheduler) recordError(msg string) {
 	if len(s.recentErrors) > s.maxRecentErrs {
 		s.recentErrors = s.recentErrors[len(s.recentErrors)-s.maxRecentErrs:]
 	}
+}
+
+// clearErrors drops repo's recorded errors once it syncs again. Without it the
+// status kept a fixed repo's last error, its error count, and the Warning that
+// count produces for up to recentErrorWindow.
+func (s *SyncScheduler) clearErrors(repo string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.recentErrors = slices.DeleteFunc(s.recentErrors, func(e syncError) bool {
+		return e.Repo == repo
+	})
 }
 
 // recentErrorWindow bounds how far back "recent" reaches for both the error
@@ -1373,9 +1393,15 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 			s.issues.ClearIssue(IssueTypeGitLock, "ledger")
 		}
 
+		s.clearDisprovedBySkip("ledger", result.SkipReason)
+
 		// remote-unchanged or recently-fetched: update sync timestamps
 		if result.SkipReason == "remote unchanged" || result.SkipReason == "recently fetched" {
 			s.workspaceRegistry.ClearSyncFailures("ledger")
+			if s.issues != nil {
+				// ClearSyncFailures just ended the backoff this issue reports.
+				s.issues.ClearIssue(IssueTypeSyncBackoff, "ledger")
+			}
 			s.mu.Lock()
 			s.lastSync = time.Now()
 			s.mu.Unlock()
@@ -1397,7 +1423,7 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 
 	// handle errors
 	if result.Err != nil {
-		s.recordError(result.Err.Error())
+		s.recordError("ledger", result.Err.Error())
 		s.metrics.RecordPullFailure()
 		s.workspaceRegistry.RecordSyncFailure("ledger")
 		s.recordSyncStateFailure(s.config.LedgerPath)
@@ -1437,6 +1463,7 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 
 	// sync succeeded - clear all failure-related issues
 	s.workspaceRegistry.ClearSyncFailures("ledger")
+	s.clearErrors("ledger")
 	if s.issues != nil {
 		s.issues.ClearIssue(IssueTypeMergeConflict, "ledger")
 		s.issues.ClearIssue(IssueTypeSyncBackoff, "ledger")
@@ -1450,6 +1477,11 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 		// the daemon was restarted. A successful pull is proof the clone is
 		// not stuck, the same evidence the other issue types above rely on.
 		s.issues.ClearIssue(IssueTypeRebaseStuck, "ledger")
+		// A pull that reached this point read the index successfully, which
+		// is the exact fact IssueTypeRepoIntegrity denies. Without this
+		// clear the issue would outlive the repair, the way
+		// IssueTypeRebaseStuck did before ox-baz5.3.
+		s.issues.ClearIssue(IssueTypeRepoIntegrity, "ledger")
 	}
 
 	duration := time.Since(startTime)
@@ -1956,9 +1988,15 @@ func (s *SyncScheduler) syncFromWatcher(ctx context.Context) {
 	s.checkCodeDBFreshness(ctx)
 }
 
-// triggerLedgerIndexRebuild checks if content sources (ledger, team contexts) have
-// changed since the last ledger index build and fires a background rebuild if so.
+// triggerLedgerIndexRebuild checks if the ledger has changed since the last
+// ledger index build and fires a background rebuild if so.
 // Runs on its own tick (LedgerCheckInterval), independent of ledger pull cadence.
+//
+// A full rebuild walks every ledger commit (minutes to tens of minutes on large
+// ledgers), so rebuilds are single-flight and rate limited: a trigger that arrives
+// while a build is running, or inside the LedgerIndexMinInterval cooldown after
+// one finished, is coalesced. The fingerprint is recomputed on every tick, so the
+// next eligible tick always builds against the latest HEAD (latest wins).
 func (s *SyncScheduler) triggerLedgerIndexRebuild(ctx context.Context) {
 	if s.codedb == nil {
 		return
@@ -1968,54 +2006,52 @@ func (s *SyncScheduler) triggerLedgerIndexRebuild(ctx context.Context) {
 		return
 	}
 
-	// build composite fingerprint from all content sources
 	fingerprint := s.contentSourceFingerprint(ctx, ledger.Path)
+
 	s.mu.Lock()
 	if fingerprint == "" || fingerprint == s.lastLedgerSha {
 		s.mu.Unlock()
 		return
 	}
 	oldFingerprint := s.lastLedgerSha
+	if s.ledgerBuildRunning {
+		s.mu.Unlock()
+		s.logger.Info("codedb ledger index rebuild coalesced", "reason", "build_in_progress", "new_fingerprint", fingerprint)
+		return
+	}
+	minInterval := s.config.LedgerIndexMinInterval
+	if sinceDone := time.Since(s.lastLedgerBuildDone); !s.lastLedgerBuildDone.IsZero() && sinceDone < minInterval {
+		s.mu.Unlock()
+		s.logger.Info("codedb ledger index rebuild deferred", "reason", "cooldown", "retry_after", (minInterval - sinceDone).Round(time.Second), "new_fingerprint", fingerprint)
+		return
+	}
+	s.ledgerBuildRunning = true
 	s.mu.Unlock()
 
 	s.logger.Info("codedb ledger index rebuild triggered", "old_fingerprint", oldFingerprint, "new_fingerprint", fingerprint)
 	go func(fp, ledgerPath string) {
 		s.codedb.BuildLedgerIndex(ctx, ledgerPath)
-		// only advance fingerprint after successful build so failed builds retry
+		// advance fingerprint and cooldown clock together; a failed build still
+		// starts the cooldown so errors cannot turn into a retry storm
 		s.mu.Lock()
 		s.lastLedgerSha = fp
+		s.lastLedgerBuildDone = time.Now()
+		s.ledgerBuildRunning = false
 		s.mu.Unlock()
 	}(fingerprint, ledger.Path)
 }
 
-// contentSourceFingerprint returns a composite hash of HEAD shas from all content
-// sources: ledger + team contexts. Any change in any source triggers a rebuild.
+// contentSourceFingerprint returns the HEAD sha of the ledger, the only content
+// source BuildLedgerIndex indexes (it runs IndexLocalRepo on the ledger path alone).
+// Team context repos are deliberately excluded: they are not indexed here, so their
+// commits must not force a full rebuild.
 func (s *SyncScheduler) contentSourceFingerprint(ctx context.Context, ledgerPath string) string {
-	// start with ledger HEAD
 	out, err := exec.CommandContext(ctx, "git", "-C", ledgerPath, "rev-parse", "HEAD").Output()
 	if err != nil {
 		s.logger.Debug("codedb ledger: failed to get ledger HEAD", "error", err)
 		return ""
 	}
-	parts := []string{"ledger=" + strings.TrimSpace(string(out))}
-
-	// append team context HEADs sorted by path for deterministic fingerprint
-	teamContexts := s.workspaceRegistry.GetTeamContexts()
-	sort.Slice(teamContexts, func(i, j int) bool {
-		return teamContexts[i].Path < teamContexts[j].Path
-	})
-	for _, tc := range teamContexts {
-		if tc.Path == "" || !tc.Exists {
-			continue
-		}
-		tcOut, tcErr := exec.CommandContext(ctx, "git", "-C", tc.Path, "rev-parse", "HEAD").Output()
-		if tcErr != nil {
-			continue // skip unavailable team contexts
-		}
-		parts = append(parts, tc.Path+"="+strings.TrimSpace(string(tcOut)))
-	}
-
-	return strings.Join(parts, ":")
+	return "ledger=" + strings.TrimSpace(string(out))
 }
 
 // Sync performs an immediate full sync. Used for manual requests via IPC.
@@ -2361,7 +2397,9 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 			mCfg, err := s.twoPhaseClone(cloneCtx, cloneURL, payload.RepoPath, progress)
 			if err != nil {
 				s.logger.Error("checkout: two-phase clone failed", "error", err)
-				s.recordError(fmt.Sprintf("clone %s failed: %v", payload.RepoType, err))
+				// Keyed by pullTeamContext's repoName, the key clearErrors is
+				// called with once this team context syncs.
+				s.recordError(filepath.Base(payload.RepoPath), fmt.Sprintf("clone %s failed: %v", payload.RepoType, err))
 				return err
 			}
 			if mCfg != nil {
@@ -2427,7 +2465,7 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 		if output, err := cloneCmd.CombinedOutput(); err != nil {
 			sanitizedOutput := gitutil.SanitizeOutput(string(output))
 			s.logger.Error("checkout: clone failed", "error", err, "output", sanitizedOutput)
-			s.recordError(fmt.Sprintf("clone %s failed: %v", payload.RepoType, err))
+			s.recordError(payload.RepoType, fmt.Sprintf("clone %s failed: %v", payload.RepoType, err))
 			if sanitizedOutput != "" {
 				return fmt.Errorf("git clone failed: %s", sanitizedOutput)
 			}

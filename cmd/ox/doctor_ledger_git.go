@@ -503,19 +503,34 @@ func fixLedgerBranchBehind(ledgerPath string, behindCount int) checkResult {
 			// diverged fix) went through ledgerLLMResolveHook. Behind-only pulls hit
 			// exactly the same sessions/ conflicts as the others.
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			_, resolveErr := ledgerLLMResolveHook()(ctx, ledgerPath, nil)
+			resolved, resolveErr := ledgerLLMResolveHook()(ctx, ledgerPath, nil)
 			cancel()
-			if resolveErr != nil {
-				slog.Debug("rebase auto-resolve failed", "error", resolveErr)
+			// resolved MUST be honored, not just resolveErr. The hook maps
+			// automerge's ErrLLMUnavailable to (false, nil) on purpose: the LLM
+			// tier is opt-in via OX_LLM_MERGE_BIN, so "no binary configured" is
+			// the ordinary state of a default install, not an error worth
+			// shouting about. Checking only the error therefore reads "I could
+			// not resolve this" as success, skips the abort, and leaves the
+			// rebase in progress — and ADR-030 D3 makes every later run decline
+			// to touch a rebase it did not start, so the ledger stays wedged
+			// until a human does git surgery. internal/gitutil/push.go states
+			// the contract every other caller already honors: "(false, nil) ...
+			// PushWithRetry aborts the rebase and returns an error."
+			if resolveErr != nil || !resolved {
+				slog.Debug("rebase auto-resolve failed", "error", resolveErr, "resolved", resolved)
 				// AuditAndAbort: log HEAD SHA, unmerged files, and stash count
 				// before discarding rebase state so silent recovery is not
 				// invisible. See ox-ooy3 and .claude/rules/daemon-git.md.
 				abortCtx, abortCancel := context.WithTimeout(context.Background(), 15*time.Second)
 				_ = gitutil.AuditAndAbort(abortCtx, ledgerPath, gitutil.AuditOpRebase, "doctor --fix auto-resolve failed", slog.Default())
 				abortCancel()
+				reason := "auto-resolve could not resolve every conflicted path"
+				if resolveErr != nil {
+					reason = resolveErr.Error()
+				}
 				result = FailedCheck("Ledger branch status",
 					"pull --rebase failed (aborted)",
-					fmt.Sprintf("Conflict during rebase (aborted to restore clean state): %s", errStr))
+					fmt.Sprintf("Conflict during rebase (aborted to restore clean state): %s: %s", errStr, reason))
 				return nil
 			}
 			result = PassedCheck("Ledger branch status",

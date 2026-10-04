@@ -42,7 +42,7 @@ func (r *Reader) Show(rawID string) *Envelope {
 	if idErr != nil {
 		return r.finishError(start, idErr, nil)
 	}
-	rw, droot, lookErr := r.lookup(id.RecordingID)
+	rw, droot, lookErr := r.lookup(id)
 	if lookErr != nil {
 		return r.finishError(start, lookErr, nil)
 	}
@@ -92,5 +92,5 @@ func (r *Reader) Show(rawID string) *Envelope {
 		}
 	}
 
-	return r.finishSuccess(start, data, guidanceShow(id.ConversationID), warnings)
+	return r.finishSuccess(start, data, guidanceShow(id.ConversationID, isScreenRecording(droot)), warnings)
 }

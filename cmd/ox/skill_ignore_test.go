@@ -5,6 +5,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+
+	"github.com/sageox/agentx"
 )
 
 // gitIgnores asks git itself whether a path is ignored.
@@ -71,6 +73,13 @@ func TestScopedIgnoreFiles_GitActuallyIgnoresEveryReservedPath(t *testing.T) {
 		".agents/skills/ox-cli-recap/SKILL.md",
 		".factory/rules/ox-cli.md",
 		".factory/rules/ox-cli-use-team-context.md",
+		".claude/rules/sageox-team-security.md",
+		".cursor/rules/sageox-team-security.mdc",
+		".github/instructions/sageox-team-security.md",
+		".clinerules/sageox-team-security.md",
+		".kiro/steering/sageox-team-security.md",
+		".factory/rules/sageox-team-security.md",
+		".windsurf/rules/sageox-team-security.md",
 	}
 	mustBeVisible := []string{
 		".claude/skills/sageox/SKILL.md",     // the one committed on-ramp
@@ -113,7 +122,7 @@ func TestScopedIgnoreFiles_NoFootprintInDirectoriesOxDoesNotUse(t *testing.T) {
 	if len(written) != 1 || written[0].Rel != filepath.Join(".claude", ".gitignore") {
 		t.Errorf("expected only .claude/.gitignore, got %v", written)
 	}
-	for _, dir := range []string{".agents", ".factory"} {
+	for _, dir := range []string{".agents", ".factory", ".cursor", ".github", ".clinerules", ".kiro", ".windsurf"} {
 		if _, err := os.Stat(filepath.Join(root, dir)); err == nil {
 			t.Errorf("ox created %s/ in a repository that does not use it", dir)
 		}
@@ -166,6 +175,11 @@ func TestIsReservedManagedPath_OwnershipBoundary(t *testing.T) {
 		{".claude/commands/ox-cli-prime.md", true, "pre-fold command still on disk"},
 		{".agents/skills/ox-cli-recap/SKILL.md", true, "shared Codex/Gemini projection"},
 		{".factory/rules/ox-cli.md", true, "droid rule"},
+		{".cursor/rules/sageox-team-security.mdc", true, "Cursor Team Rule projection"},
+		{".github/instructions/sageox-team-security.md", true, "Copilot Team Rule projection"},
+		{".clinerules/sageox-team-security.md", true, "Cline Team Rule projection"},
+		{".kiro/steering/sageox-team-security.md", true, "Kiro Team Rule projection"},
+		{".windsurf/rules/sageox-team-security.md", true, "Windsurf Team Rule projection"},
 
 		{".claude/skills/sageox/SKILL.md", false, "the committed on-ramp must stay staged"},
 		{".claude/skills/ox-kb/SKILL.md", false, "user-authored, ox-named but not ox-cli-"},
@@ -173,12 +187,37 @@ func TestIsReservedManagedPath_OwnershipBoundary(t *testing.T) {
 		{".claude/rules/design.md", false, "user-authored rule"},
 		{".claude/settings.json", false, "hook settings must still be staged"},
 		{".claude/rules/sageox/use-team-context.md", false, "legacy nested rule: retired by the adapter sweep, not hidden"},
+		{".cursor/rules/my-rule.mdc", false, "user-authored Cursor rule"},
+		{".clinerules/my-rule.md", false, "user-authored Cline rule"},
 	}
 	for _, c := range cases {
 		got := isReservedManagedPath(root, filepath.Join(root, filepath.FromSlash(c.rel)))
 		if got != c.reserved {
 			t.Errorf("%s: got reserved=%v want %v (%s)", c.rel, got, c.reserved, c.why)
 		}
+	}
+}
+
+func TestIsReservedManagedPath_UnprefixedInstallNeedsVerifiedOwnership(t *testing.T) {
+	root := t.TempDir()
+	rel := ".claude/skills/post-cutoff/SKILL.md"
+	path := filepath.Join(root, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	preamble := []byte("---\nname: post-cutoff\ndescription: curated facts\n---\n")
+	owned := append(preamble, agentx.StampedContent([]byte("\nmanaged body\n"), "1.0.0", "ox")...)
+	if err := os.WriteFile(path, owned, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !isReservedManagedPath(root, path) {
+		t.Fatal("init would force-stage an unprefixed skill whose ownership stamp verifies")
+	}
+	if err := os.WriteFile(path, append(preamble, []byte("\nlocal body\n")...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if isReservedManagedPath(root, path) {
+		t.Fatal("a catalog name alone hid a local skill from staging")
 	}
 }
 

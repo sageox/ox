@@ -22,6 +22,14 @@ themselves and AI coworkers drift — rebuilding the same lost context every
 session. `ox` closes that gap. Decisions become shared memory; every session
 starts with the full picture instead of from zero.
 
+> **Capture the conversation, then build on it.** `ox` brings team context into
+> your coding sessions; the [SageOx desktop app](https://sageox.ai/product/desktop)
+> helps make capturing human context in the first place even easier. One click
+> records a call or an in-person conversation, and within 60 seconds after the
+> recording ends, SageOx distills it into shared context your AI coworkers can
+> build on — no re-explaining, no copied notes.
+> **[Install SageOx Desktop →](https://sageox.ai/product/desktop)** (macOS 14.4+)
+
 **Ask your coding agent what the team already figured out — even if it happened
 in a different agent, on a different machine, days ago.**
 
@@ -224,7 +232,7 @@ Full detail: [Privacy Policy](https://sageox.ai/privacy) ·
 | Query past sessions, discussions, and code — across agents and machines | ✅ | `ox query "..."` | [query](docs/reference/query.mdx) |
 | Auto-recorded coworker sessions | ✅ | `ox agent prime`, `ox session list` | [session capture](docs/architecture/session-capture-architecture.md) |
 | Real-time coordination signals between coworkers | ✅ | `ox murmur "..."` | — |
-| Team-context-enriched implementation plans | ✅ | `ox plan enrich`, `ox plan render` | [plan](docs/reference/plan) |
+| Team-context-enriched plans (design, GTM, rollout, engineering) | ✅ | `ox plan enrich`, `ox plan render` | [plan](docs/reference/plan) |
 | Planning-relevant code insights (hotspots, contention) | ✅ | `ox code insights` | — |
 | Load an expert AI coworker into context | ✅ | `ox coworker load <name>` | — |
 | Diagnose and auto-fix your setup | ✅ | `ox doctor --fix` | [doctor](docs/reference/doctor.mdx) |

@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -284,6 +285,42 @@ func TestBrowserRoundTrip_AcceptClearsAndReopenReturnsToAgent(t *testing.T) {
 	// reopen must re-notify the authoring coworker (submit + reopen dedupe to one task)
 	if n := len(activeTasks(t, gitRoot)); n != 1 {
 		t.Errorf("reopen must leave the authoring coworker notified, got %d tasks", n)
+	}
+}
+
+// TestBrowserRoundTrip_ReopenedHighlightKeepsItsWords proves a reopen names
+// what it reopens: Devon reopens an addressed highlight, and the item that
+// returns to Avery carries the highlight's words and section — the digest Avery
+// reads quotes them. Failure prevented: the reopened highlight reaches the agent
+// as a bare anchor, which nothing can turn back into the words it was about.
+func TestBrowserRoundTrip_ReopenedHighlightKeepsItsWords(t *testing.T) {
+	srv, _, planDir := newNotifyingReviewServer(t)
+	const anchor, quote = "q1a2b3c4d", "double-fire under load"
+	round := fmt.Sprintf(`{"reviewer":"Devon","items":[{"anchor":%q,"section":"Risks","label":%q,"quote":%q,"status":"request-change","note":"why twice?"}]}`,
+		anchor, quote, quote)
+	if code := reviewPOST(t, srv.URL+"/feedback", "secret", round); code != http.StatusOK {
+		t.Fatalf("submit: %d", code)
+	}
+	if err := plan.AppendResolution(planDir, plan.Resolution{Anchor: anchor, State: plan.ResolutionAddressed, Note: "done"}, time.Now()); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if code := reviewPOST(t, srv.URL+"/reopen", "secret", `{"anchor":"`+anchor+`","note":"still fires twice"}`); code != http.StatusOK {
+		t.Fatalf("reopen: %d", code)
+	}
+
+	res, done := awaitSnapshot(planDir)
+	if !done || len(res.Open) != 1 {
+		t.Fatalf("the reopened highlight must return to the agent as open, got done=%v %+v", done, res.Open)
+	}
+	if it := res.Open[0]; it.Quote != quote || it.Section != "Risks" || it.Note != "still fires twice" {
+		t.Fatalf("the reopened highlight must carry its words and section: %+v", it)
+	}
+	items, err := plan.AssembleReview(planDir)
+	if err != nil {
+		t.Fatalf("assemble: %v", err)
+	}
+	if d := plan.FeedbackDigest(items); !strings.Contains(d, "“"+quote+"”") {
+		t.Fatalf("the agent's digest must quote the reopened highlight's words:\n%s", d)
 	}
 }
 

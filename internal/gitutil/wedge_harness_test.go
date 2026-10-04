@@ -41,6 +41,41 @@ type ledgerFixture struct {
 	cloud string // the other writer (cloud summarizer / a teammate)
 }
 
+// Fixture commands must preserve inherited Git isolation so background maintenance
+// cannot outlive a command and race temporary-repository cleanup.
+func TestLedgerGitCommandsPreserveInheritedConfig(t *testing.T) {
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	settings := []struct{ key, inherited, want string }{
+		{"gc.auto", "0", "0"},
+		{"gc.autoDetach", "false", "false"},
+		{"maintenance.auto", "false", "false"},
+		{"receive.autogc", "false", "false"},
+		{"commit.gpgsign", "true", "false"},
+	}
+	t.Setenv("GIT_CONFIG_COUNT", fmt.Sprint(len(settings)))
+	for i, setting := range settings {
+		t.Setenv(fmt.Sprintf("GIT_CONFIG_KEY_%d", i), setting.key)
+		t.Setenv(fmt.Sprintf("GIT_CONFIG_VALUE_%d", i), setting.inherited)
+	}
+	dir := t.TempDir()
+	for _, command := range []string{"gitInRepo", "gitAllowFail"} {
+		t.Run(command, func(t *testing.T) {
+			fixture := &ledgerFixture{t: t}
+			for _, setting := range settings {
+				var value string
+				if command == "gitInRepo" {
+					value = gitInRepo(t, dir, "config", "--get", setting.key)
+				} else {
+					var ok bool
+					value, ok = fixture.gitAllowFail(dir, "config", "--get", setting.key)
+					require.True(t, ok, "read %s", setting.key)
+				}
+				require.Equal(t, setting.want, value, setting.key)
+			}
+		})
+	}
+}
+
 func newLedgerFixture(t *testing.T) *ledgerFixture {
 	t.Helper()
 	if testing.Short() {
@@ -72,13 +107,12 @@ func (f *ledgerFixture) git(dir string, args ...string) string {
 // the steps that are SUPPOSED to fail while the repo is wedged.
 func (f *ledgerFixture) gitAllowFail(dir string, args ...string) (string, bool) {
 	f.t.Helper()
-	cmd := exec.Command("git", args...)
+	cmd := exec.Command("git", append([]string{"-c", "commit.gpgsign=false"}, args...)...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), // safe: git subprocess in a temp fixture repo, not the ox CLI
 		"GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0",
 		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
 		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
-		"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=commit.gpgsign", "GIT_CONFIG_VALUE_0=false",
 	)
 	out, err := cmd.CombinedOutput()
 	return strings.TrimSpace(string(out)), err == nil
@@ -265,7 +299,7 @@ func TestWedge_PointerNeverLosesToHydratedContent(t *testing.T) {
 // path swept them.
 func TestWedge_StaleLockBlocksPushForever(t *testing.T) {
 	t.Parallel()
-	for _, lock := range []string{"index.lock", "next-index-13088.lock", "shallow.lock"} {
+	for _, lock := range []string{"index.lock", deadPIDLockName, "shallow.lock"} {
 		t.Run(lock, func(t *testing.T) {
 			f := newLedgerFixture(t)
 			p := filepath.Join(f.local, ".git", lock)

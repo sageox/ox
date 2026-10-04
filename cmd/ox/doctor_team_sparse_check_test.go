@@ -6,15 +6,17 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/manifest"
 )
 
-// seedSparseTeamContext builds a team-context clone in the GH #862 shape: its
-// own manifest includes agents/, but the sparse spec omits it, so the directory
-// exists in HEAD and is absent from the working tree.
+// seedSparseTeamContext builds a team-context clone whose manifest includes
+// agents/ but whose sparse spec omits it, so the directory exists in HEAD and
+// is absent from the working tree.
 func seedSparseTeamContext(t *testing.T) string {
 	t.Helper()
 	run := func(dir string, args ...string) {
@@ -30,12 +32,14 @@ func seedSparseTeamContext(t *testing.T) string {
 	run(repo, "init", "--initial-branch=main")
 	run(repo, "config", "user.email", "t@example.com")
 	run(repo, "config", "user.name", "T")
-	for rel, content := range map[string]string{
-		".sageox/sync.manifest": "version 1\ninclude .sageox/\ninclude agents/\ninclude memory/\n",
+	files := map[string]string{
+		".sageox/sync.manifest": "version 1\ninclude .sageox/\ninclude agents/\ninclude coworkers/\ninclude memory/\n",
 		"agents/rules/team.md":  "team rule\n",
+		"coworkers/helper.md":   "coworker\n",
 		"memory/MEMORY.md":      "memory\n",
 		"README.md":             "root\n",
-	} {
+	}
+	for rel, content := range files {
 		p := filepath.Join(repo, filepath.FromSlash(rel))
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 			t.Fatalf("mkdir %s: %v", rel, err)
@@ -48,7 +52,7 @@ func seedSparseTeamContext(t *testing.T) string {
 	run(repo, "commit", "-q", "-m", "seed")
 	run(repo, "sparse-checkout", "init", "--no-cone")
 	// deliberately omit /agents/ — this is the #862 shape
-	run(repo, "sparse-checkout", "set", "--no-cone", "/*", "!/*/", "/.sageox/", "/memory/")
+	run(repo, "sparse-checkout", "set", "--no-cone", "/*", "!/*/", "/.sageox/", "/coworkers/", "/memory/")
 
 	if _, err := os.Stat(filepath.Join(repo, "agents")); !os.IsNotExist(err) {
 		t.Fatalf("fixture is wrong: agents/ should be absent from the working tree (err=%v)", err)
@@ -56,15 +60,14 @@ func seedSparseTeamContext(t *testing.T) string {
 	return repo
 }
 
-// TestCheckTeamSparseCheckout_ReportsAndRepairsTheManifestOmission drives the
-// doctor check itself, not just its helpers.
+// TestCheckTeamSparseCheckout_ReportsAndRepairsManifestIncludedDirectory drives
+// the doctor check itself, not just its helpers.
 //
-// Failure prevented: GH #862 — the tracked manifest omitted agents/, sparse
-// checkout never materialized it, and team rules silently never reached any
-// client while this check reported everything fine. The helper that detects the
-// omission was tested; the check that reports and repairs it was not, so a
-// regression in the reporting or repair branch would ship unnoticed.
-func TestCheckTeamSparseCheckout_ReportsAndRepairsTheManifestOmission(t *testing.T) {
+// Failure prevented: a stale local sparse spec can omit a directory the current
+// manifest includes. The helper that detects the omission was tested; the check
+// that reports and repairs it was not, so a regression in the reporting or
+// repair branch would ship unnoticed.
+func TestCheckTeamSparseCheckout_ReportsAndRepairsManifestIncludedDirectory(t *testing.T) {
 	teamPath := seedSparseTeamContext(t)
 
 	gitRoot, cleanup := setupTempGitRepo(t)
@@ -89,7 +92,7 @@ func TestCheckTeamSparseCheckout_ReportsAndRepairsTheManifestOmission(t *testing
 	if !strings.Contains(result.message, "agents/") {
 		t.Errorf("message must name the missing directory, got: %s", result.message)
 	}
-	if !strings.Contains(result.message, "already included by their manifest") {
+	if !strings.Contains(result.message, "ox can restore locally") {
 		t.Errorf("message must classify this as locally repairable, got: %s", result.message)
 	}
 	if _, err := os.Stat(filepath.Join(teamPath, "agents")); !os.IsNotExist(err) {
@@ -97,8 +100,8 @@ func TestCheckTeamSparseCheckout_ReportsAndRepairsTheManifestOmission(t *testing
 	}
 
 	// --- fix mode: actually materialize it ---
-	if fixed := checkTeamSparseCheckout(true); fixed.passed != true && len(fixed.detail) == 0 {
-		t.Errorf("unexpected empty result from fix mode: %+v", fixed)
+	if fixed := checkTeamSparseCheckout(true); !fixed.passed || fixed.warning {
+		t.Errorf("fix mode must repair the manifest-included directory: %+v", fixed)
 	}
 	if _, err := os.Stat(filepath.Join(teamPath, "agents", "rules", "team.md")); err != nil {
 		t.Fatalf("fix mode must materialize the manifest-included directory: %v", err)
@@ -110,28 +113,18 @@ func TestCheckTeamSparseCheckout_ReportsAndRepairsTheManifestOmission(t *testing
 	}
 }
 
-// TestCheckTeamSparseCheckout_UnmaterializedNeedsServerFixNotLocalRepair pins
-// the branch that separates "ox can fix this" from "only the server can".
-//
-// A directory that exists in HEAD but not in the working tree, whose absence
-// the tracked manifest does NOT contradict, cannot be repaired locally: the
-// manifest is generated server-side and the tracked copy wins over the client
-// fallback, so re-applying the sparse spec would faithfully re-exclude it.
-//
-// Failure prevented: ox claiming a local repair it cannot perform. `--fix` would
-// report success, the content would still be absent, and the next run would
-// report the same thing forever — while the actual defect (a manifest that omits
-// content the commit carries, GH #862) went unreported to the only people who
-// can fix it.
-func TestCheckTeamSparseCheckout_UnmaterializedNeedsServerFixNotLocalRepair(t *testing.T) {
+// TestCheckTeamSparseCheckout_OmittedRequiredDirRepairsLocally is the real GH
+// #862 shape: the tracked manifest omits agents/, but the client sparse policy
+// floors it in because ox reads team rules and skills from that directory.
+func TestCheckTeamSparseCheckout_OmittedRequiredDirRepairsLocally(t *testing.T) {
 	teamPath := seedSparseTeamContext(t)
 
-	// Rewrite the manifest so it no longer includes agents/. The directory is
-	// still in HEAD and still absent from the working tree, but now nothing
-	// claims it should be there — which is exactly the server-side omission.
+	// Rewrite the manifest so it no longer includes agents/. The committed
+	// directory remains absent from the working tree until doctor reapplies the
+	// client policy that floors it into the sparse set.
 	manifestPath := filepath.Join(teamPath, ".sageox", "sync.manifest")
 	if err := os.WriteFile(manifestPath,
-		[]byte("version 1\ninclude .sageox/\ninclude memory/\n"), 0o644); err != nil {
+		[]byte("version 1\ninclude .sageox/\ninclude coworkers/\ninclude memory/\n"), 0o644); err != nil {
 		t.Fatalf("rewrite manifest: %v", err)
 	}
 
@@ -150,33 +143,125 @@ func TestCheckTeamSparseCheckout_UnmaterializedNeedsServerFixNotLocalRepair(t *t
 	}
 
 	result := checkTeamSparseCheckout(false)
-
-	if !strings.Contains(result.message, "missing directories that exist in HEAD") {
-		t.Errorf("must report the HEAD-vs-worktree gap, got: %s", result.message)
+	if result.passed || result.warning {
+		t.Errorf("a locally repairable omission must fail, not warn: passed=%v warning=%v", result.passed, result.warning)
 	}
-	if !strings.Contains(result.detail, "server-side manifest fix") {
-		t.Errorf("must name the server-side remedy rather than implying a local fix, got: %s", result.detail)
+	if !strings.Contains(result.message, "agents/") || !strings.Contains(result.message, "ox can restore locally") {
+		t.Errorf("must name agents/ and the local remedy, got: %s", result.message)
 	}
-	// A warning, not a failure: nothing here is broken on this machine, and it
-	// must not become a --fix target that can never converge.
-	if !result.passed || !result.warning {
-		t.Errorf("unrepairable-locally must be a warning, not a failure: passed=%v warning=%v",
-			result.passed, result.warning)
+	if _, err := os.Stat(filepath.Join(teamPath, "agents")); !os.IsNotExist(err) {
+		t.Error("report mode must not modify the checkout")
 	}
 
-	// And --fix must not pretend otherwise.
-	if fixed := checkTeamSparseCheckout(true); !strings.Contains(fixed.message, "missing directories that exist in HEAD") {
-		t.Errorf("--fix must not claim to have repaired a server-side omission, got: %s", fixed.message)
+	fixed := checkTeamSparseCheckout(true)
+	if !fixed.passed || fixed.warning {
+		t.Errorf("fix mode must repair the omitted required directory: %+v", fixed)
+	}
+	if _, err := os.Stat(filepath.Join(teamPath, "agents", "rules", "team.md")); err != nil {
+		t.Fatalf("fix mode must materialize the committed team rule: %v", err)
+	}
+	if after := checkTeamSparseCheckout(false); !after.passed || after.warning {
+		t.Errorf("check must converge after repair: %+v", after)
 	}
 }
 
-// TestManifestIncludedMissingDirs_NoManifestClaimsNothing.
-// Failure prevented: treating "we could not read a manifest" as "the manifest
-// includes everything", which would route every missing directory into the
-// locally-repairable branch and make ox re-apply a sparse spec it never read.
-func TestManifestIncludedMissingDirs_NoManifestClaimsNothing(t *testing.T) {
-	if got := manifestIncludedMissingDirs(nil, []string{"agents/", "memory/"}); got != nil {
-		t.Errorf("a nil manifest must claim no directories, got %v", got)
+func TestCheckTeamSparseCheckout_NonRequiredOmissionNeedsServerFix(t *testing.T) {
+	teamPath := seedSparseTeamContext(t)
+
+	// Simulate the server-side manifest omitting coworkers/ while keeping the
+	// client's required agents/ directory explicitly included.
+	manifestPath := filepath.Join(teamPath, ".sageox", "sync.manifest")
+	if err := os.WriteFile(manifestPath,
+		[]byte("version 1\ninclude .sageox/\ninclude agents/\ninclude memory/\n"), 0o644); err != nil {
+		t.Fatalf("rewrite manifest: %v", err)
+	}
+
+	// Materialize required agents/ while excluding coworkers/, which is part of
+	// the expected team-context shape but is not a client-required floor.
+	cmd := exec.Command("git", "sparse-checkout", "set", "--no-cone",
+		"/*", "!/*/", "/.sageox/", "/memory/", "/agents/")
+	cmd.Dir = teamPath
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("set sparse checkout: %v: %s", err, out)
+	}
+
+	gitRoot, cleanup := setupTempGitRepo(t)
+	defer cleanup()
+	restoreCwd := changeToDir(t, gitRoot)
+	defer restoreCwd()
+	requireSageoxDir(t, gitRoot)
+	if err := config.SaveLocalConfig(gitRoot, &config.LocalConfig{
+		TeamContexts: []config.TeamContext{{TeamID: "team-server", TeamName: "Engineering", Path: teamPath}},
+	}); err != nil {
+		t.Fatalf("SaveLocalConfig: %v", err)
+	}
+
+	result := checkTeamSparseCheckout(false)
+	if !result.passed || !result.warning {
+		t.Errorf("a non-required omission must remain a warning: %+v", result)
+	}
+	if !strings.Contains(result.message, "coworkers/") || !strings.Contains(result.detail, "server-side manifest fix") {
+		t.Errorf("must name the missing directory and server remedy: message=%q detail=%q", result.message, result.detail)
+	}
+	if fixed := checkTeamSparseCheckout(true); !fixed.passed || !fixed.warning {
+		t.Errorf("--fix must not claim a server-only omission was repaired: %+v", fixed)
+	}
+}
+
+func TestLocallyRepairableMissingDirs_UnionDenyAndDedup(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     *manifest.ManifestConfig
+		missing []string
+		want    []string
+	}{
+		{
+			name:    "required floor applies without manifest",
+			missing: []string{"agents/", "memory/"},
+			want:    []string{"agents/"},
+		},
+		{
+			name: "manifest and floor are deduplicated",
+			cfg: &manifest.ManifestConfig{
+				Includes: []string{"agents/", "memory/"},
+			},
+			missing: []string{"agents/", "memory/"},
+			want:    []string{"agents/", "memory/"},
+		},
+		{
+			name: "explicit deny wins",
+			cfg: &manifest.ManifestConfig{
+				Includes: []string{"agents/", "memory/"},
+				Denies:   []string{"agents/"},
+			},
+			missing: []string{"agents/", "memory/"},
+			want:    []string{"memory/"},
+		},
+		{
+			name: "nested deny removes overlapping manifest include",
+			cfg: &manifest.ManifestConfig{
+				Includes: []string{"docs/"},
+				Denies:   []string{"docs/private/"},
+			},
+			missing: []string{"docs/"},
+		},
+		{
+			name: "nested deny preserves required floor",
+			cfg: &manifest.ManifestConfig{
+				Denies: []string{"agents/private/"},
+			},
+			missing: []string{"agents/"},
+			want:    []string{"agents/"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := locallyRepairableMissingDirs(tt.cfg, tt.missing)
+			if !slices.Equal(got, tt.want) {
+				t.Fatalf("locallyRepairableMissingDirs() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 

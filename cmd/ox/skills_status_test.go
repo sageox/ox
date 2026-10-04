@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/skillmanager"
+	"github.com/sageox/ox/internal/teamconverge"
 	"github.com/stretchr/testify/require"
 )
 
@@ -79,6 +81,40 @@ func TestCollectSkillsStatus_DistinguishesTheFailureModes(t *testing.T) {
 		require.False(t, out.Repo.SlugFromRemote)
 		require.Contains(t, strings.Join(out.Problems, "\n"), "cannot match here")
 	})
+}
+
+func TestCollectSkillsStatus_ExposesPendingVersusFailedConvergence(t *testing.T) {
+	for _, status := range []teamconverge.PendingStatus{teamconverge.PendingRetry, teamconverge.PendingFailed} {
+		t.Run(string(status), func(t *testing.T) {
+			repo := t.TempDir()
+			report := teamconverge.Report{Snapshot: teamconverge.Snapshot{Path: "/team", Commit: "abcdef1234567890"}}
+			_, err := teamconverge.SavePending(repo, status, report, "fixture reason")
+			require.NoError(t, err)
+
+			out := collectSkillsStatus(repo)
+			require.NotNil(t, out.Convergence)
+			require.Equal(t, status, out.Convergence.Status)
+			require.Contains(t, strings.Join(out.Problems, "\n"), string(status))
+			var rendered strings.Builder
+			renderSkillsStatus(&rendered, out)
+			require.Contains(t, rendered.String(), "convergence  "+string(status))
+			require.Contains(t, rendered.String(), "abcdef123456")
+		})
+	}
+}
+
+func TestCollectSkillsStatus_DoesNotPromiseRetriesAfterBudgetIsExhausted(t *testing.T) {
+	repo := t.TempDir()
+	report := teamconverge.Report{Snapshot: teamconverge.Snapshot{Path: "/team", Commit: "abcdef"}}
+	for range teamconverge.MaxAutomaticConvergenceAttempts {
+		_, err := teamconverge.SavePending(repo, teamconverge.PendingRetry, report, "still busy")
+		require.NoError(t, err)
+	}
+
+	out := collectSkillsStatus(repo)
+	problems := strings.Join(out.Problems, "\n")
+	require.Contains(t, problems, "automatic retry limit reached")
+	require.NotContains(t, problems, "will retry automatically")
 }
 
 // writeTeamSkillFixture stages a published skill in a team checkout.
@@ -311,4 +347,88 @@ func TestInstalledState_ScriptsHeldIsStillInstalled(t *testing.T) {
 	held := skillmanager.TeamSkillDecision{Name: "grants", NeedsApprove: true, Reason: "withheld, the manifest itself needs approval"}
 	state, _ = installedState(repo, []string{".agents/skills"}, held, plannedPaths{})
 	require.Equal(t, skillWithheld, state)
+}
+
+func TestSkillsStatusGuidance_PartialInstallNamesScriptsApproval(t *testing.T) {
+	out := skillsStatusOutput{TeamSkills: []teamSkillStatus{{
+		Name: "deploy", AppliesHere: true, State: skillInstalled, NeedsApproval: true,
+		Detail: "installed without its scripts pending approval: bundled-script (scripts/run.sh)",
+	}}}
+	got := skillsStatusGuidance(out)
+	require.Contains(t, got, "ox skills approve --allow-scripts deploy")
+	require.NotContains(t, got, "Nothing to do")
+}
+
+func TestCollectSkillsStatus_ReportsAutoInstalledProseAndWithheldCounts(t *testing.T) {
+	repo, team := stageApprovalRepo(t, "notes", nil)
+	writeTeamSkillFiles(t, team, "danger", nil)
+	require.NoError(t, os.WriteFile(
+		filepath.Join(team, "agents", "skills", "danger", "SKILL.md"),
+		[]byte("---\nname: danger\nallowed-tools: Bash\n---\n\nbody\n"), 0o644))
+
+	out := collectSkillsStatus(repo)
+	require.Equal(t, 1, out.Summary.AutoInstalledProse,
+		"an automatically installed prose Team Skill was invisible in the trust summary")
+	require.Equal(t, 1, out.Summary.Withheld,
+		"a Team Skill waiting for approval was absent from the withheld count")
+
+	var human strings.Builder
+	renderSkillsStatus(&human, out)
+	// Both counts must reach the human view. Asserted as two independent
+	// substrings rather than one sentence: the phrasing is a presentation
+	// choice, but a count that silently stops rendering is the bug.
+	require.Contains(t, human.String(), "1 withheld pending approval")
+	require.Contains(t, human.String(), "1 auto-installed as prose")
+
+	wire, err := json.Marshal(out)
+	require.NoError(t, err)
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal(wire, &payload))
+	summary, ok := payload["summary"].(map[string]any)
+	require.True(t, ok, "JSON output has no stable summary object: %s", wire)
+	require.Equal(t, float64(1), summary["auto_installed_prose"])
+	require.Equal(t, float64(1), summary["withheld"])
+}
+
+func TestCollectSkillsStatus_ReportsInvalidTeamSkillName(t *testing.T) {
+	repo, team := stageApprovalRepo(t, "deploy", nil)
+	manifest := filepath.Join(team, "agents", "skills", "deploy", "SKILL.md")
+	require.NoError(t, os.WriteFile(manifest,
+		[]byte("---\nname: deploy.\n---\n\nbody\n"), 0o644))
+
+	out := collectSkillsStatus(repo)
+	var found *teamSkillStatus
+	for i := range out.TeamSkills {
+		if out.TeamSkills[i].Name == "deploy." {
+			found = &out.TeamSkills[i]
+		}
+	}
+	require.NotNil(t, found, "the refused skill vanished from status: %+v", out.TeamSkills)
+	require.Equal(t, skillUnavailable, found.State)
+	require.Contains(t, found.Detail, "may not end with a dot")
+	require.Contains(t, found.Detail, "rename it in the Team Context")
+}
+
+func TestSkillTargetRootsExcludesRuleTargets(t *testing.T) {
+	t.Parallel()
+
+	repo := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, ".sageox"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(repo, ".sageox", "skills.lock.json"), []byte(`{
+  "schema_version": 2,
+  "desired": {
+    "bundles": [],
+    "targets": ["claude-project", "claude-rules"]
+  },
+  "targets": [
+    {"key":"claude-project","root":".claude/skills","format":"agent-skills/v1","scope":"project","link_policy":"reject"},
+    {"key":"claude-rules","root":".claude/rules","format":"markdown-rules/v1","scope":"project","link_policy":"reject"}
+  ]
+}
+`), 0o644))
+
+	roots, err := skillTargetRoots(repo)
+	require.NoError(t, err)
+	require.Equal(t, []string{".claude/skills"}, roots,
+		"skills commands must never treat a native rules directory as a skills root")
 }

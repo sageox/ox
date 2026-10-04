@@ -871,3 +871,67 @@ func TestLegacyMigration_FailedRemovalNeverClobbersUnstagedWork(t *testing.T) {
 		t.Errorf("rollback overwrote the user's unstaged work with HEAD:\n got: %q\nwant: %q", got, userBytes)
 	}
 }
+
+// TestLegacyMigration_NeverUntracksAHandAuthoredCatalogNamedSkill is the git-side
+// half of the catalog-name ownership fix.
+//
+// Reserved-ness now covers unprefixed catalog names so the installer can gitignore
+// them, but classifyLegacyPath reads the same predicate to decide which of a
+// customer's TRACKED files ox may `git rm --cached`. A human who committed their
+// own `post-cutoff` skill — a name that is ordinary English and was never spoken
+// for — would have it silently untracked and then hidden by the ignore entry ox
+// writes in the same commit. Their work survives on disk and vanishes from every
+// teammate's clone, which is the harm the reviewer described.
+//
+// Failure prevented: `ox` untracks and hides a skill a human wrote and committed,
+// in a commit whose subject says it is tidying up after ox.
+func TestLegacyMigration_NeverUntracksAHandAuthoredCatalogNamedSkill(t *testing.T) {
+	root := migrationRepo(t)
+
+	// Committed by a human, at a name ox's catalog happens to use. Deliberately
+	// unstamped: there is no ox claim on it of any kind.
+	const rel = ".claude/skills/post-cutoff/SKILL.md"
+	body := "---\nname: post-cutoff\ndescription: notes I wrote myself\n---\nMY RESEARCH NOTES\n"
+	writeRepoFile(t, root, rel, body)
+	git(t, root, "add", rel)
+	git(t, root, "commit", "-q", "-m", "my own post-cutoff skill")
+
+	if got := classifyLegacyPath(root, rel); got != legacyUserOwned {
+		t.Fatalf("%s classified %v, want legacyUserOwned: a name alone must not make a human's committed file ox's", rel, got)
+	}
+
+	if _, err := ensureScopedIgnoreFiles(root); err != nil {
+		t.Fatalf("ensureScopedIgnoreFiles: %v", err)
+	}
+	m, err := planLegacyMigration(root)
+	if err != nil {
+		t.Fatalf("planLegacyMigration: %v", err)
+	}
+	if strings.Contains(strings.Join(m.uncache, "\n"), rel) {
+		t.Fatalf("the migration staged an untrack for %s; a human's committed skill would leave every teammate's clone", rel)
+	}
+	if err := m.Apply(); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	joined := strings.Join(trackedPaths(t, root), "\n")
+	if !strings.Contains(joined, rel) {
+		t.Errorf("%s was untracked; ox removed a file it does not own from the repository", rel)
+	}
+	got, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
+	if err != nil {
+		t.Fatalf("read %s: %v", rel, err)
+	}
+	if string(got) != body {
+		t.Errorf("%s was rewritten; ox destroyed hand-authored content", rel)
+	}
+
+	// The prefixed sweep is the reason this code exists and must be untouched by
+	// the narrowing: ox-cli-plan carries a namespace the user was told to avoid.
+	if strings.Contains(joined, ".claude/skills/ox-cli-plan/SKILL.md") {
+		t.Error("ox-cli-plan is still tracked; the prefixed sweep stopped working and vendor files keep appearing in pull requests")
+	}
+	if strings.Contains(joined, ".claude/rules/ox-cli.md") {
+		t.Error("the ox-cli rule is still tracked; the prefixed sweep stopped working")
+	}
+}

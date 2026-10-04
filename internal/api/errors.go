@@ -1,12 +1,16 @@
 package api
 
-import "errors"
+import (
+	"errors"
+
+	"github.com/sageox/ox/internal/errkind"
+)
 
 // ErrVersionUnsupported is returned when the server indicates the CLI version is no longer supported
-var ErrVersionUnsupported = errors.New("CLI version no longer supported by server")
+var ErrVersionUnsupported = errkind.Errorf(errkind.VersionUnsupported, "CLI version no longer supported by server")
 
 // ErrUnauthorized is returned when the API returns 401 Unauthorized
-var ErrUnauthorized = errors.New("authentication required: run 'ox login' first")
+var ErrUnauthorized = errkind.Errorf(errkind.Auth, "authentication required: run 'ox login' first")
 
 // ErrCLISettingsUnsupported is returned by older servers that have not yet
 // deployed the optional CLI settings endpoint. Callers must fall back to local

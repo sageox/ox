@@ -112,9 +112,16 @@ type TeamContextInfo struct {
 	TeamRules []teamdocs.TeamRule `json:"team_rules,omitempty"`
 
 	// v4 Team Memory
-	MemoryContent        string   `json:"memory_content,omitempty"`         // full MEMORY.md content (always inlined)
-	SoulHint             string   `json:"soul_hint,omitempty"`              // path to SOUL.md (reference, not inlined)
-	TeamHint             string   `json:"team_hint,omitempty"`              // path to TEAM.md (reference, not inlined)
+	MemoryContent string `json:"memory_content,omitempty"` // full MEMORY.md content (always inlined)
+	SoulHint      string `json:"soul_hint,omitempty"`      // path to SOUL.md (reference, not inlined)
+	TeamHint      string `json:"team_hint,omitempty"`      // path to TEAM.md (reference, not inlined)
+	// BulletinHint is the absolute path of the local team bulletin board
+	// directory, <team>/bulletin/general/posts. A pointer only: post bodies
+	// are never inlined. Set only when <team>/bulletin exists in the
+	// checkout (the posts dir itself may be absent after every post
+	// expired). Not gated on the publish flag — reads continue when
+	// publishing is off.
+	BulletinHint         string   `json:"bulletin_hint,omitempty"`
 	MemoryDaily          []string `json:"memory_daily,omitempty"`           // available daily summary files
 	MemoryWeekly         []string `json:"memory_weekly,omitempty"`          // available weekly summary files
 	MemoryMonthly        []string `json:"memory_monthly,omitempty"`         // available monthly summary files
@@ -422,6 +429,7 @@ type Output struct {
 	// This is local-only context (not persisted to ledger), so full name is safe here.
 	CurrentUserName    string   `json:"current_user_name,omitempty"`    // privacy-safe display name (e.g., "Ryan S.")
 	CurrentUserAliases []string `json:"current_user_aliases,omitempty"` // all name forms the agent might encounter
+	CurrentUserKind    string   `json:"current_user_kind,omitempty"`    // "ai" when the current user is the AI coworker a team token acts as; empty for a person
 
 	// Code search availability
 	CodeDBAvailable bool   `json:"code_db_available,omitempty"` // true if code search index exists on disk

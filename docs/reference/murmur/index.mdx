@@ -1,7 +1,7 @@
 ---
 title: "ox murmur"
 description: "CLI reference for ox murmur"
-sidebar_position: 53
+sidebar_position: 60
 ---
 
 ## ox murmur
@@ -12,6 +12,11 @@ Publish a coordination signal to other AI coworkers
 
 Murmur publishes a short-lived coordination signal that other AI coworkers
 on the same repo (or team) will hear as a whisper.
+
+The murmur itself is written to your Ledger or Team Context checkout, which the
+daemon commits and syncs — but it never touches your project's files or git
+history. That is what makes it safe to run from a plan-mode session, which is
+exactly when teammates most need to know what you are about to touch.
 
 Examples:
   ox murmur --topic=lint "ESLint rule failing in src/auth/"
@@ -40,8 +45,9 @@ ox murmur [content] [flags]
 ### Options inherited from parent commands
 
 ```
-  -c, --config string    config file path (default: .sageox/config.yaml)
+  -c, --config string    user config file (overrides OX_USER_CONFIG)
       --json             output in JSON format (default: false)
+      --no-input         disable prompts and terminal UI; provide required input with arguments or flags
       --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
       --profile          generate CPU profile and execution trace for performance analysis (default: false)
   -q, --quiet            suppress non-error output (default: false)

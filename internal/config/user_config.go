@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/sageox/ox/internal/ephemeral"
+	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/paths"
 	"gopkg.in/yaml.v3"
 )
@@ -302,6 +304,8 @@ func (c *AgentWorkerConfig) WithDefaults() *AgentWorkerConfig {
 
 // UserConfig holds user-level configuration from config.yaml
 type UserConfig struct {
+	// Trace is a persistent, machine-local receiver opt-in. It does not configure Claude Code.
+	Trace             *TraceConfig `yaml:"trace,omitempty"`
 	DisplayName       string       `yaml:"display_name,omitempty"`
 	TipsEnabled       *bool        `yaml:"tips_enabled,omitempty"`
 	TelemetryEnabled  *bool        `yaml:"telemetry_enabled,omitempty"`
@@ -373,6 +377,9 @@ type UserConfig struct {
 	// warning threshold (default 1). Combined with PATExpiryWarningThresholdPct
 	// via max(). Set to 0 with pct==0 to disable warnings entirely.
 	PATExpiryWarningMinDays *int `yaml:"pat_expiry_warning_min_days,omitempty"`
+
+	// TelemetryNoticeShown records that the one-time telemetry notice was shown.
+	TelemetryNoticeShown *bool `yaml:"telemetry_notice_shown,omitempty"`
 }
 
 // PATExpiryWarningDefaults returns the default warning threshold (5%) and
@@ -440,6 +447,16 @@ func (c *UserConfig) HasSeenSessionTerms() bool {
 // SetSessionTermsShown records whether the user has seen the session recording notice.
 func (c *UserConfig) SetSessionTermsShown(shown bool) {
 	c.SessionTermsShown = &shown
+}
+
+// HasSeenTelemetryNotice returns true if the one-time telemetry notice has been shown.
+func (c *UserConfig) HasSeenTelemetryNotice() bool {
+	return c.TelemetryNoticeShown != nil && *c.TelemetryNoticeShown
+}
+
+// SetTelemetryNoticeShown records whether the one-time telemetry notice has been shown.
+func (c *UserConfig) SetTelemetryNoticeShown(shown bool) {
+	c.TelemetryNoticeShown = &shown
 }
 
 // IsTelemetryEnabled returns true if telemetry is enabled (default: true)
@@ -559,7 +576,10 @@ func (c *UserConfig) SetMurmurReceive(mode string) {
 func LoadUserConfig() (*UserConfig, error) {
 	// OX_USER_CONFIG overrides all path discovery — for CI/ephemeral environments
 	if envPath := os.Getenv(EnvUserConfig); envPath != "" {
-		cfg, err := loadUserConfigFromFile(envPath)
+		cfg, err := LoadUserConfigFile(envPath)
+		if errors.Is(err, os.ErrNotExist) {
+			err = nil // an absent environment-selected file still means defaults
+		}
 		publishEphemeralPreference(cfg)
 		return cfg, err
 	}
@@ -609,19 +629,17 @@ func LoadUserConfigFrom(configDir string) (*UserConfig, error) {
 	return &cfg, nil
 }
 
-// loadUserConfigFromFile loads user config from an explicit file path.
-func loadUserConfigFromFile(path string) (*UserConfig, error) {
+// LoadUserConfigFile loads an explicitly selected user config file.
+// Unlike default path discovery, a missing file is an error.
+func LoadUserConfigFile(path string) (*UserConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return &UserConfig{}, nil
-		}
-		return &UserConfig{}, fmt.Errorf("reading config from OX_USER_CONFIG=%s: %w", path, err)
+		return &UserConfig{}, fmt.Errorf("reading user config %q: %w", path, err)
 	}
 
 	var cfg UserConfig
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return &UserConfig{}, fmt.Errorf("parsing config from OX_USER_CONFIG=%s: %w", path, err)
+		return &UserConfig{}, fmt.Errorf("parsing user config %q: %w", path, err)
 	}
 
 	return &cfg, nil
@@ -676,15 +694,10 @@ func SaveUserConfig(cfg *UserConfig) error {
 		return fmt.Errorf("marshaling config: %w", err)
 	}
 
-	tempPath := configPath + ".tmp"
-
-	if err := os.WriteFile(tempPath, data, 0600); err != nil {
-		return fmt.Errorf("writing temp config: %w", err)
-	}
-
-	if err := os.Rename(tempPath, configPath); err != nil {
-		os.Remove(tempPath)
-		return fmt.Errorf("renaming temp config: %w", err)
+	// Unique temporary files let independent CLI invocations save atomically
+	// without renaming or removing each other's in-flight writes.
+	if err := fileutil.AtomicWriteBytes(configPath, data, 0600); err != nil {
+		return fmt.Errorf("writing user config: %w", err)
 	}
 
 	return nil

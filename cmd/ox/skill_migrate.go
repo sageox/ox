@@ -199,6 +199,13 @@ const (
 
 func classifyLegacyPath(repoRoot, rel string) legacyClass {
 	parts := strings.Split(filepath.ToSlash(rel), "/")
+	if len(parts) == 2 && parts[0] == ".clinerules" {
+		name := strings.TrimSuffix(parts[1], ".md")
+		if skillmanager.IsReclaimableName(name) {
+			return legacyReserved
+		}
+		return legacyUserOwned
+	}
 	if len(parts) < 3 {
 		return legacyUserOwned
 	}
@@ -207,7 +214,22 @@ func classifyLegacyPath(repoRoot, rel string) legacyClass {
 
 	switch surface {
 	case ".claude/skills", ".agents/skills":
-		if skillmanager.IsReservedName(name) {
+		// IsReclaimableName, not the wider IsReservedName, because legacyReserved
+		// untracks a file from Git with no content stamp to justify it — and in the
+		// same commit ox writes the ignore rule that then hides it. A human's
+		// committed skill would disappear from every teammate's clone while their
+		// own copy sits on disk looking fine, so nothing ever tells them.
+		//
+		// Reserved-ness is deliberately wider than ownership: it also covers
+		// unprefixed catalog names, which ox writes and ignores but has no claim
+		// on. "post-cutoff" is ordinary English naming what a skill IS, and a
+		// customer may have committed their own under it before ox shipped one.
+		//
+		// This also makes the arm consistent with the retired-name arm directly
+		// below, which already refuses to act on a name alone and demands a
+		// verifying ox stamp first. Every skill ox actually writes is prefixed, so
+		// narrowing costs no reach.
+		if skillmanager.IsReclaimableName(name) {
 			return legacyReserved
 		}
 		if skills.IsRetired(name) {
@@ -230,8 +252,18 @@ func classifyLegacyPath(repoRoot, rel string) legacyClass {
 			return legacySuperseded
 		}
 		return legacyUserOwned
-	case ".claude/rules", ".factory/rules", ".agents/rules":
-		if skillmanager.IsReservedName(name) {
+	case ".claude/rules", ".factory/rules", ".agents/rules",
+		".cursor/rules", ".github/instructions", ".kiro/steering", ".windsurf/rules":
+		// Same narrowing, same reason as the skills arm above: untracking is
+		// destructive, so only a DECLARED namespace proves ownership. The names ox
+		// may claim on sight are the exact "ox-cli.md", "ox-cli-*", and the legacy
+		// "sageox-team-*" — so a user rule that happens to share a catalog skill's
+		// name is no longer swept out of their repository.
+		//
+		// The current "-team" suffix is deliberately absent: it is ordinary English
+		// (ADR-033), so a rule wearing it may be the user's, and untracking theirs
+		// is not recoverable.
+		if skillmanager.IsReclaimableName(name) {
 			return legacyReserved
 		}
 		// A legacy rule or command is removed only when its ox stamp still verifies
@@ -378,7 +410,11 @@ func trackedAgentPaths(repoRoot string) ([]string, error) {
 	args := []string{"ls-files", "-z", "--",
 		".claude/skills", ".claude/rules", ".claude/commands",
 		".agents/skills", ".agents/rules", ".factory/rules",
-		".claude/.gitignore", ".agents/.gitignore", ".factory/.gitignore"}
+		".cursor/rules", ".github/instructions", ".clinerules",
+		".kiro/steering", ".windsurf/rules",
+		".claude/.gitignore", ".agents/.gitignore", ".factory/.gitignore",
+		".cursor/.gitignore", ".github/instructions/.gitignore", ".clinerules/.gitignore",
+		".kiro/.gitignore", ".windsurf/.gitignore"}
 	cmd := exec.Command("git", args...)
 	cmd.Dir = repoRoot
 	out, err := cmd.Output()

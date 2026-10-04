@@ -16,6 +16,7 @@ import (
 	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
+	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/logger"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/prime"
@@ -269,6 +270,7 @@ func emitStartupBanner(w io.Writer, ctx *HookContext) {
 // (covering agents without hooks), and we call it again here as a safety net.
 // startSessionRecording is idempotent (checks session.IsRecording first).
 func handleStart(ctx *HookContext) error {
+	startTraceReceiverForHook(ctx)
 	emitStartupBanner(os.Stdout, ctx)
 
 	source := ""
@@ -340,10 +342,16 @@ func stopSessionForClear(ctx *HookContext, agentID string) {
 	// set StoppedAt to signal this session is complete
 	now := time.Now()
 	if updateErr := session.UpdateRecordingStateForAgent(ctx.ProjectRoot, agentID, func(s *session.RecordingState) {
+		s.RecordTraceBoundary("stop", now)
 		s.StoppedAt = &now
+		state = s
 	}); updateErr != nil {
 		slog.Debug("hook: clear could not set StoppedAt", "agent_id", agentID, "error", updateErr)
 	}
+
+	// the daemon finalizes this recording after the state file below is
+	// gone; hand it the native session ids and the stop time on a footer
+	_ = stampRecordingCarrierAtStop(state, now)
 
 	// fire-and-forget IPC to daemon to finalize the stopped session
 	if state.SessionPath != "" {
@@ -413,10 +421,16 @@ func handleEnd(ctx *HookContext) error {
 
 	now := time.Now()
 	if updateErr := session.UpdateRecordingStateForAgent(ctx.ProjectRoot, agentID, func(s *session.RecordingState) {
+		s.RecordTraceBoundary("stop", now)
 		s.StoppedAt = &now
+		state = s
 	}); updateErr != nil {
 		slog.Debug("hook: end could not set StoppedAt", "agent_id", agentID, "error", updateErr)
 	}
+
+	// the daemon finalizes this recording after the state file below is
+	// gone; hand it the native session ids and the stop time on a footer
+	_ = stampRecordingCarrierAtStop(state, now)
 
 	// dispatch delegated finalization via daemon IPC. Best-effort: if the
 	// daemon is unreachable, the daemon's anti-entropy sweep will still
@@ -528,7 +542,7 @@ func handlePrompt(ctx *HookContext) error {
 	// The plan nudge above only fires when `ox plan enrich` armed it. An agent
 	// that authored a page without ever running enrich arms nothing, so the
 	// artifact itself is the second, independent signal.
-	emitUnsavedArtifactNudge(os.Stdout, ctx.ProjectRoot, agentID)
+	emitUnsavedArtifactNudge(os.Stdout, ctx.ProjectRoot, agentID, ctx.Marker.PrimedAt)
 
 	// Steer the agent toward `ox plan enrich`/`ox plan render` at the planning
 	// moment — fired when the agent is in plan mode (permission_mode == "plan")
@@ -539,6 +553,14 @@ func handlePrompt(ctx *HookContext) error {
 		rawPrompt = ctx.Input.RawBytes
 	}
 	emitPlanHint(os.Stdout, ctx.ProjectRoot, agentID, rawPrompt)
+	// Codex never runs `ox plan enrich` on its own and has no ExitPlanMode, so
+	// the enrich-armed unsaved-plan stamp is never set for it. Arm it from the
+	// planning prompt itself; the Stop-hook capture clears it if the plan is
+	// saved. Armed AFTER emitUnsavedPlanNudge above, so it speaks on a later
+	// prompt — once the plan exists — never on the request that armed it.
+	if ctx.AgentType == "codex" {
+		armUnsavedPlanFromPrompt(ctx.ProjectRoot, agentID, rawPrompt)
+	}
 
 	emitWhispers(os.Stdout, agentID)
 
@@ -609,13 +631,67 @@ func handleAfterTool(ctx *HookContext) error {
 		handlePlanExit(ctx, agentID)
 	}
 
-	// emit pending whispers (fallback — primary delivery is handlePrompt)
-	emitWhispers(os.Stdout, agentID)
+	// Same-turn nudge for an authored page the agent just wrote. Claude Code
+	// only: it is the agent whose PostToolUse honors the JSON additionalContext
+	// envelope. When it fires, stdout must be that JSON alone, so the plain-text
+	// whisper fallback is skipped for this call — for Claude Code that fallback
+	// is discarded anyway, and handlePrompt remains its primary delivery.
+	pageNudged := ctx.AgentType == "claude-code" && ctx.Input != nil &&
+		emitWrittenPageNudge(os.Stdout, ctx.ProjectRoot, agentID, ctx.Input.ToolName, ctx.Input.ToolInput)
+	if !pageNudged {
+		// emit pending whispers (fallback — primary delivery is handlePrompt)
+		emitWhispers(os.Stdout, agentID)
+	}
 
 	state, err := session.LoadRecordingStateForAgent(ctx.ProjectRoot, agentID)
 	if err != nil || state == nil {
 		slog.Debug("hook: afterTool no recording state", "agentID", agentID, "err", err)
 		return nil // not recording for this agent, silent noop
+	}
+
+	// Serialize the read cursor and append transaction with the watcher and
+	// recovery. Reload after locking so concurrent hooks cannot replay a batch.
+	return fileutil.WithFileLock(context.Background(), filepath.Join(state.SessionPath, "raw.jsonl"), func() error {
+		return captureHookEntries(ctx, agentID, state.SessionPath, state.SessionID)
+	})
+}
+
+// captureHookEntries drains new entries under the raw.jsonl lock acquired by
+// the caller for expectedSessionPath. It reloads recording state itself, but
+// a stop/start cycle for this agent can swap in a new SessionPath between the
+// caller's read and this reload (StartRecording can immediately mint a fresh
+// session after a stale, incomplete stop). If that happens, the lock we're
+// holding is for the wrong raw.jsonl -- writing here would race whatever
+// legitimately holds the new session's lock. Skip this invocation instead;
+// the next hook call reloads state and locks the current session correctly.
+//
+// SessionPath alone is not a reliable generation check: it's minute-granular
+// (GenerateSessionName), so a stop immediately followed by a restart for the
+// same agent within the same minute mints an IDENTICAL path. expectedSessionID
+// is the durable per-recording identity minted once at StartRecording, so it
+// still distinguishes the two generations when the path collides; fall back
+// to the path comparison only for a pre-SessionID recording (empty on both
+// sides).
+func captureHookEntries(ctx *HookContext, agentID, expectedSessionPath, expectedSessionID string) error {
+	// The stop command sets this before waiting for the raw lock. A hook
+	// queued behind its final drain must never append to finalized content.
+	if session.HasExplicitStop(ctx.ProjectRoot, agentID) {
+		return nil
+	}
+	state, err := session.LoadRecordingStateForAgent(ctx.ProjectRoot, agentID)
+	if err != nil || state == nil || state.StoppedAt != nil {
+		return err
+	}
+	changed := state.SessionPath != expectedSessionPath
+	if expectedSessionID != "" || state.SessionID != "" {
+		changed = state.SessionID != expectedSessionID
+	}
+	if changed {
+		slog.Debug("hook: afterTool session changed since lock acquired, skipping", "agentID", agentID, "lockedPath", expectedSessionPath, "currentPath", state.SessionPath, "lockedSessionID", expectedSessionID, "currentSessionID", state.SessionID)
+		return nil
+	}
+	if err := session.RecoverRawAppend(filepath.Join(state.SessionPath, "raw.jsonl"), state.SourceOffset); err != nil {
+		return err
 	}
 
 	// Track every afterTool invocation + its terminal reason so `ox session status`
@@ -766,7 +842,16 @@ func handleAfterTool(ctx *HookContext) error {
 		}
 	}
 
-	if appendErr := appendRedactedEntries(rawPath, sessionEntries); appendErr != nil {
+	writer, writeErr := session.NewRawWriter(rawPath, ctx.ProjectRoot)
+	if writeErr != nil {
+		return writeErr
+	}
+	appendErr := writer.AppendRecordingBatch(filepath.Join(state.SessionPath, ".recording.json"), sessionEntries, newOffset)
+	closeErr := writer.Close()
+	if appendErr == nil {
+		appendErr = closeErr
+	}
+	if appendErr != nil {
 		slog.Info("hook: append entries failed", "agentID", agentID, "path", rawPath, "error", appendErr)
 		recordHookStatus("append-failed")
 		return nil // non-fatal
@@ -774,8 +859,6 @@ func handleAfterTool(ctx *HookContext) error {
 
 	now := time.Now().UTC()
 	_ = session.UpdateRecordingStateForAgent(ctx.ProjectRoot, agentID, func(s *session.RecordingState) {
-		s.SourceOffset = newOffset
-		s.EntryCount += len(sessionEntries)
 		s.HookInvocations++
 		s.LastHookStatus = "ok"
 		s.LastHookAt = &now
@@ -810,6 +893,10 @@ func handleStop(ctx *HookContext) error {
 	// Best-effort by contract — it never returns an error and never fails the
 	// turn.
 	maybePublishSessionDraft(ctx)
+	// Codex's only plan-exit signal is a <proposed_plan> block at turn end.
+	if ctx.AgentType == "codex" && ctx.Marker != nil {
+		maybeCaptureCodexPlan(ctx, ctx.Marker.AgentID)
+	}
 	return nil
 }
 
@@ -923,9 +1010,19 @@ func startSessionRecordingIfConfigured(ctx *HookContext) {
 		agentID = ctx.Marker.AgentID
 		agentSessionID = ctx.Marker.AgentSessionID
 	}
-	if ctx.Input != nil && ctx.Input.SessionID != "" {
-		agentSessionID = ctx.Input.SessionID
+	source := ""
+	if ctx.Input != nil {
+		if ctx.Input.SessionID != "" {
+			agentSessionID = ctx.Input.SessionID
+		}
+		source = ctx.Input.Source
 	}
 
 	startSessionRecording(ctx.ProjectRoot, agentID, ctx.AgentType, "", recordingSessionIDFromMarker(ctx.Marker), agentSessionID)
+
+	// every SessionStart — startup, resume, clear, compact — reports the
+	// agent's current native session id; append it (with its reason) to the
+	// live recording so a recording that outlives a /clear lists every id it
+	// spanned, and a repeat sighting (compact) advances last_seen.
+	recordNativeSessionForRecording(ctx.ProjectRoot, agentID, agentSessionID, source)
 }

@@ -143,19 +143,31 @@ delivery, not whether murmurs are relayed for others.`,
 	},
 	{
 		Key:         "telemetry",
-		Description: "Anonymous usage telemetry",
-		LongDescription: `Controls anonymous usage statistics collection.
+		Description: "Usage telemetry",
+		LongDescription: `Controls the usage data ox sends to help improve it.
 
-When enabled, ox sends anonymous data to help improve the tool:
-  - Command usage frequency (e.g., "ox session start" was run)
-  - Error rates (no error details or stack traces)
-  - Feature adoption metrics
+When on, ox sends:
+  - To PostHog, once per command: its name and the names of its
+    flags; whether it succeeded and, if it failed, a category such
+    as auth or network and which failure it was, named by ox's own
+    wording or the error's type with no values filled in; how long
+    it took; the ox version, OS, and CPU architecture; whether a
+    person, an AI coworker (and which one), or CI ran it; why ox
+    runs in ephemeral mode, if it does; and, inside a repository set
+    up for SageOx, the repository's and team's SageOx IDs. Events
+    carry a random ID made for this install, the client_id file in
+    ox's config directory (~/.config/sageox by default), and no
+    names, emails, or login details. Delete that file to get a new
+    ID.
+  - To SageOx: command, session, and AI coworker events tagged with
+    the repository's SageOx ID; timing traces while you are logged
+    in; and what was typed when ox cannot parse a command.
 
-What is NEVER collected:
-  - Your code or file contents
-  - Personal information (names, emails, etc.)
-  - Session recordings or conversations
-  - Repository names or paths`,
+Telemetry never includes your code, file contents, or session
+conversations. Nothing sent to PostHog includes command arguments,
+file paths, or values from an error message.
+
+DO_NOT_TRACK=1 turns all of it off, the same as setting this to off.`,
 		Category:    "Privacy",
 		ValidValues: []string{"on", "off"},
 		Default:     "on",

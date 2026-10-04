@@ -16,6 +16,7 @@ import (
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/kb"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/spf13/cobra"
@@ -188,7 +189,7 @@ func handleKBDescribeError(w io.Writer, err error, input string, jsonOutput bool
 		return cli.ErrSilent
 	}
 	if errors.Is(err, api.ErrUnauthorized) {
-		return fmt.Errorf("not authenticated — run 'ox login'")
+		return errkind.Errorf(errkind.Auth, "not authenticated — run 'ox login'")
 	}
 	// any other error passes through unwrapped.
 	return err

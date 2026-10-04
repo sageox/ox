@@ -129,6 +129,9 @@ func TestReadSyncNativeLifecycle(t *testing.T) {
 	require.Equal(t, "denied", failed.ErrorClass)
 	require.True(t, failed.Ready, "%+v", failed)
 	require.Equal(t, warm.LastSuccessfulSync, failed.LastSuccessfulSync)
+	// Hydration never ran, so the counts are the ones verification took.
+	require.Equal(t, warm.Hydration, failed.Hydration)
+	require.Equal(t, warm.Coverage.Files, failed.Coverage.Files)
 	t.Setenv("SAGEOX_TOKEN", "")
 	local := CheckReadiness(ctx, f.opts.Path, f.opts.RepoID, f.opts.Endpoint)
 	require.True(t, local.Ready, "%+v", local)
@@ -233,14 +236,20 @@ func TestReadSyncRecoveryAndReaderLock(t *testing.T) {
 	require.NoError(t, <-done)
 }
 
-// Failure prevented: failed cold clones become published empty ledgers, or an
-// existing reader's receipt can be used for another repo/credential context.
+// Failure prevented: failed cold clones become published empty ledgers or
+// claim progress they never made, or an existing reader's receipt can be used
+// for another repo/credential context.
 func TestReadSyncColdFailureAndIdentityIsolation(t *testing.T) {
 	f := newReadFixture(t)
 	f.denied.Store(true)
 	result := ReadSync(context.Background(), f.opts)
 	require.False(t, result.Ready)
 	require.NoDirExists(t, f.opts.Path)
+	// Refused before any checkout, the attempt kept nothing, and its result
+	// must stay distinguishable from one that failed part-way.
+	require.False(t, result.Resumable)
+	require.Equal(t, ReadHydration{State: "unknown"}, result.Hydration)
+	require.Zero(t, result.Coverage.Files)
 	f.denied.Store(false)
 	require.True(t, ReadSync(context.Background(), f.opts).Ready)
 	wrong := CheckReadiness(context.Background(), f.opts.Path, "repo_01936d5a-0001-7abc-8def-0123456789ab", f.opts.Endpoint)

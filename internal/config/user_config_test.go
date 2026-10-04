@@ -217,6 +217,32 @@ func TestLoadUserConfig_CorruptYAML(t *testing.T) {
 	assert.Error(t, err, "corrupt YAML should return an error")
 }
 
+// Independent trace-enable invocations used to race on config.yaml.tmp, leaving
+// one command failing at rename despite both saving a valid configuration.
+func TestSaveUserConfigConcurrentAtomicWrites(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	t.Setenv(EnvUserConfig, configPath)
+	const writers = 16
+	start := make(chan struct{})
+	errs := make(chan error, writers)
+	for range writers {
+		go func() {
+			<-start
+			errs <- SaveUserConfig(&UserConfig{Trace: &TraceConfig{Enabled: true, Port: 14318}})
+		}()
+	}
+	close(start)
+	for range writers {
+		require.NoError(t, <-errs)
+	}
+	cfg, err := LoadUserConfig()
+	require.NoError(t, err)
+	require.True(t, cfg.Trace.Enabled)
+	entries, err := os.ReadDir(filepath.Dir(configPath))
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "temporary writes must be cleaned up")
+}
+
 func TestLoadConfig_EnvOnly(t *testing.T) {
 	// Load() should read from env vars only, not config files
 	t.Setenv("OX_VERBOSE", "1")
@@ -668,4 +694,20 @@ func TestLoadUserConfig_QualityThresholds(t *testing.T) {
 	require.NotNil(t, cfg.AgentWorker)
 	assert.InDelta(t, 0.5, cfg.AgentWorker.GetQualityUploadThreshold(), 0.001)
 	assert.InDelta(t, 0.15, cfg.AgentWorker.GetQualityDiscardThreshold(), 0.001)
+}
+
+// Failure prevented: the notice flag does not survive a save and load (a wrong
+// YAML tag), so the one-time telemetry notice appears on every run.
+func TestUserConfig_TelemetryNoticeShownSurvivesSaveAndLoad(t *testing.T) {
+	t.Setenv(EnvUserConfig, filepath.Join(t.TempDir(), "config.yaml"))
+	cfg, err := LoadUserConfig()
+	require.NoError(t, err)
+	require.False(t, cfg.HasSeenTelemetryNotice())
+
+	cfg.SetTelemetryNoticeShown(true)
+	require.NoError(t, SaveUserConfig(cfg))
+	reloaded, err := LoadUserConfig()
+
+	require.NoError(t, err)
+	assert.True(t, reloaded.HasSeenTelemetryNotice())
 }

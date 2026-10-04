@@ -124,6 +124,21 @@ func Adapt(c color.Color) color.Color {
 	return Profile.Convert(c)
 }
 
+// ColorEnabled reports whether the resolved profile can carry color at all —
+// false under NO_COLOR, `OX_COLOR_PROFILE=ascii`, and any non-TTY stdout
+// (a pipe, a redirect, an AI coworker's capture buffer).
+//
+// It asks Adapt rather than comparing Profile against an enum so it stays
+// correct if colorprofile renumbers its constants: Adapt's documented contract
+// is that ASCII and NoTTY return nil, and that contract is the whole question.
+//
+// Callers use this to choose an entirely different rendering path, not just a
+// different color — see cli.PrintJSON, which must emit byte-exact JSON when the
+// answer is false.
+func ColorEnabled() bool {
+	return Adapt(lipgloss.Color("#ffffff")) != nil
+}
+
 // Color parses a hex ("#7AAA77") or ANSI index ("214") color and adapts it to
 // the terminal's profile. Use this anywhere lipgloss.Color would be reached for
 // in non-TUI code.

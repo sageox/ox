@@ -183,7 +183,9 @@ func TestReadSyncLFSEmptyObjectRequiresEmptyOID(t *testing.T) {
 }
 
 func TestMaterializeEmptyReadObjectMissingDir(t *testing.T) {
-	require.Error(t, materializeEmptyReadObject(filepath.Join(t.TempDir(), "missing", "context-trace.jsonl")))
+	landed, err := materializeEmptyReadObject(filepath.Join(t.TempDir(), "missing", "context-trace.jsonl"))
+	require.Error(t, err)
+	require.False(t, landed)
 }
 
 // Failure prevented: ledgers with over 100 unique pointers exceed the backend's
@@ -478,18 +480,24 @@ func TestReadSyncLFSSurplusBatchResponseNamesTheSurplusEntry(t *testing.T) {
 // subprocesses between the two, so the window is an ordinary timeout, not a race.
 func TestRecordReadFailureDropsDetailWhenTheOperationWasInterrupted(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	failure := missingHydration(ReadFailureDetail{Reason: "object_refused", Path: "sessions/a/session.md"})
+	var skips readSkips
+	for _, path := range []string{"sessions/a/session.md", "sessions/b/session.md"} {
+		require.True(t, skips.skip(ctx, missingHydration(ReadFailureDetail{Reason: "object_refused", Path: path})))
+	}
+	failure := skips.err()
 
 	var live ReadSyncResult
 	recordReadFailure(ctx, &live, failure)
 	require.Equal(t, "missing_hydration", live.ErrorClass)
 	require.NotNil(t, live.ErrorDetail)
+	require.NotNil(t, live.Skipped)
 
 	cancel()
 	var interrupted ReadSyncResult
 	recordReadFailure(ctx, &interrupted, failure)
 	require.Equal(t, "interrupted", interrupted.ErrorClass)
 	require.Nil(t, interrupted.ErrorDetail, "the class and the detail must describe one failure")
+	require.Nil(t, interrupted.Skipped, "the objects the summary names did not fail the operation either")
 }
 
 // Failure prevented: a server-controlled or pointer-supplied identifier is
@@ -798,12 +806,14 @@ func TestReadSkipsStopOnlyWhereContinuingCannotMaterialize(t *testing.T) {
 			var skips readSkips
 			require.Equal(t, !tc.stops, skips.skip(tc.ctx, tc.err))
 			if tc.stops {
-				require.NoError(t, skips.first, "a failure hydration stops at is returned directly, never accumulated")
+				require.NoError(t, skips.err(), "a failure hydration stops at is returned directly, never accumulated")
+				require.Zero(t, skips.total, "nor counted among the failures walked past")
 				return
 			}
 			require.Equal(t, tc.err, skips.first)
 			require.True(t, skips.skip(tc.ctx, errors.New("a later object")))
-			require.Equal(t, tc.err, skips.first, "the first failure walked past is the one reported")
+			require.Equal(t, tc.err, errors.Unwrap(skips.err()), "the first failure walked past is the one reported")
+			require.Equal(t, 2, skips.total)
 		})
 	}
 }
@@ -1258,6 +1268,8 @@ func TestReadSyncColdStageSurvivesCanceledInspection(t *testing.T) {
 	require.False(t, result.Ready)
 	require.Equal(t, "interrupted", result.ErrorClass)
 	require.NoDirExists(t, c.opts.Path)
+	require.True(t, result.Resumable, "the stage it kept is still one the next attempt continues from")
+	require.Equal(t, ReadHydration{State: "unknown"}, result.Hydration, "canceled before counting, it reports no progress of its own")
 	kept, err := os.ReadFile(filepath.Join(stage, "sessions/cold/a.md"))
 	require.NoError(t, err)
 	require.Equal(t, c.contents[c.paths["sessions/cold/a.md"]], kept, "cancellation is not evidence against the stage")

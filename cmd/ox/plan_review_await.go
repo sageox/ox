@@ -1,15 +1,14 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"sort"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/plan"
 	"github.com/spf13/cobra"
 )
@@ -87,9 +86,10 @@ func runPlanReviewAwait(cmd *cobra.Command, slug string, timeout time.Duration) 
 		return fmt.Errorf("watch feedback: %w", err)
 	}
 	defer w.Close()
-	_ = os.MkdirAll(filepath.Join(planDir, "feedback"), 0o755)
-	_ = w.Add(planDir)
-	_ = w.Add(filepath.Join(planDir, "feedback"))
+	// An incomplete watch set would silently wait out --timeout; fail instead.
+	if err := addPlanReviewWatches(w, planDir); err != nil {
+		return fmt.Errorf("watch feedback: %w", err)
+	}
 
 	// Re-snapshot AFTER registering the watcher: feedback written in the gap between
 	// the first snapshot and watch registration would otherwise be seen by neither
@@ -176,13 +176,13 @@ func awaitSnapshot(planDir string) (awaitResult, bool) {
 }
 
 func emitAwait(cmd *cobra.Command, slug string, res awaitResult) error {
+	// the command exits 0 on all three, so its usage event says which
+	cliCtx.SetOutcome("await_status", res.Status)
 	res.Slug = slug
 	if res.Open == nil {
 		res.Open = []plan.MergedItem{}
 	}
-	enc := json.NewEncoder(cmd.OutOrStdout())
-	enc.SetIndent("", "  ")
-	return enc.Encode(res)
+	return cli.PrintJSONTo(cmd.OutOrStdout(), res)
 }
 
 func init() {

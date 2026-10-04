@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/sageox/ox/internal/skillmanager"
@@ -117,6 +116,29 @@ func TestReconcileSkillInventoryIfStale_RepairsAfterUpgrade(t *testing.T) {
 	}
 }
 
+func TestReconcileSkillInventoryIfStale_LeavesGitStatusClean(t *testing.T) {
+	repoRoot, managedFile := installSkillsForTest(t)
+	gitInitRepo(t, repoRoot)
+	if err := os.WriteFile(filepath.Join(repoRoot, ".gitignore"), []byte(".sageox/cache/\n"), 0o644); err != nil {
+		t.Fatalf("write fixture ignore: %v", err)
+	}
+	gitOutput(t, repoRoot, "add", "-A")
+	gitOutput(t, repoRoot, "commit", "-q", "-m", "baseline")
+
+	removeManaged(t, managedFile)
+	setLockRevision(t, repoRoot, "revision-from-an-older-release")
+	if status := gitOutput(t, repoRoot, "status", "--porcelain"); status != "" {
+		t.Fatalf("fixture is dirty before prime: %q", status)
+	}
+
+	if changed := reconcileSkillInventoryIfStale(repoRoot); changed == 0 {
+		t.Fatal("fixture did not exercise automatic projection repair")
+	}
+	if status := gitOutput(t, repoRoot, "status", "--porcelain"); status != "" {
+		t.Fatalf("session-start reconciliation changed tracked repository state: %q", status)
+	}
+}
+
 // TestReconcileSkillInventoryIfStale_CurrentInventoryDoesNoWork pins the cost
 // discipline that makes this safe on the session hot path. When the recorded
 // revision already matches the binary, prime must not build a plan — which means
@@ -136,6 +158,35 @@ func TestReconcileSkillInventoryIfStale_CurrentInventoryDoesNoWork(t *testing.T)
 	if managedExists(t, managedFile) {
 		t.Errorf("prime restored a file without a version/revision mismatch — the hot path is no longer cheap; " +
 			"repairing local drift belongs to `ox doctor`, which reads every managed file by design")
+	}
+}
+
+// TestReconcileSkillInventoryIfStale_TwoUnchangedPrimesBuildOnePlan proves the
+// complete session sequence, not just the steady-state half: the first prime
+// sees an old recorded revision and plans/applies once; the next prime sees the
+// revision that apply recorded and returns before planning.
+//
+// Deleting the restored file between calls is intentional observability. A
+// second plan would notice and restore it, while the revision-only fast path
+// leaves local drift for doctor/daemon repair.
+func TestReconcileSkillInventoryIfStale_TwoUnchangedPrimesBuildOnePlan(t *testing.T) {
+	repoRoot, managedFile := installSkillsForTest(t)
+	removeManaged(t, managedFile)
+	setLockRevision(t, repoRoot, "revision-from-an-older-release")
+
+	if changed := reconcileSkillInventoryIfStale(repoRoot); changed == 0 {
+		t.Fatal("first prime did not plan the stale inventory")
+	}
+	if !managedExists(t, managedFile) {
+		t.Fatal("first prime did not apply its plan")
+	}
+
+	removeManaged(t, managedFile)
+	if changed := reconcileSkillInventoryIfStale(repoRoot); changed != 0 {
+		t.Fatalf("second unchanged prime planned work: changed=%d", changed)
+	}
+	if managedExists(t, managedFile) {
+		t.Fatal("second unchanged prime rebuilt the plan instead of taking the revision fast path")
 	}
 }
 
@@ -174,16 +225,10 @@ func TestReconcileSkillInventoryIfStale_ToleratesMalformedLockfile(t *testing.T)
 	}
 }
 
-// TestReconcileSkillInventoryIfStale_SelfHealsAMissingIgnoreRule covers the state
-// a build that predated the ignore invariant left behind in real checkouts:
-// reserved-prefix skills materialized on disk with NO rule hiding them.
-//
-// Such a repository is stuck without this. The staleness compare short-circuits
-// because the recorded revision already matches, so Apply — where the ignore rule
-// is written — is never reached, and nothing on the session path would ever
-// notice. The files sit untracked and unignored, one `git add -A` from being
-// committed into the customer's history.
-func TestReconcileSkillInventoryIfStale_SelfHealsAMissingIgnoreRule(t *testing.T) {
+// TestReconcileSkillInventoryIfStale_DoesNotRepairTrackedIgnoreAtSessionStart
+// pins the session-start boundary: prime may refresh gitignored projections, but
+// repository policy belongs to explicit lifecycle commands such as init/doctor.
+func TestReconcileSkillInventoryIfStale_DoesNotRepairTrackedIgnoreAtSessionStart(t *testing.T) {
 	repoRoot, _ := installSkillsForTest(t)
 
 	// Reproduce the damaged state: skills present and current, ignore rule gone.
@@ -196,11 +241,9 @@ func TestReconcileSkillInventoryIfStale_SelfHealsAMissingIgnoreRule(t *testing.T
 		t.Errorf("healing the ignore rule must not require a reconcile; got changed=%d", changed)
 	}
 
-	data, err := os.ReadFile(filepath.Join(repoRoot, ".claude", ".gitignore"))
-	if err != nil {
-		t.Fatalf("prime did not restore the ignore rule; the repository stays one `git add -A` from committing vendor files: %v", err)
-	}
-	if !strings.Contains(string(data), "skills/ox-cli-*/") {
-		t.Errorf("ignore rule restored without the skills glob:\n%s", data)
+	for _, dir := range []string{".claude", ".agents", ".factory"} {
+		if _, err := os.Stat(filepath.Join(repoRoot, dir, ".gitignore")); !os.IsNotExist(err) {
+			t.Errorf("prime recreated tracked %s/.gitignore: %v", dir, err)
+		}
 	}
 }

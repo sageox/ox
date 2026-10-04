@@ -105,3 +105,17 @@ func TestSetDefaults(t *testing.T) {
 		t.Errorf("default source should be cli, got %s", i.Source)
 	}
 }
+
+// Failure prevented: Dolt refuses a commit whose author has no email (an AI
+// coworker, or a git config with no user.email), so the carts change is lost.
+func TestCommitAuthor(t *testing.T) {
+	for _, tc := range []struct{ name, email, want string }{
+		{"Ada", "ada@example.com", "Ada <ada@example.com>"},
+		{"Rip", "", "carts <carts@sageox.ai>"},
+		{"", "", "carts <carts@sageox.ai>"},
+	} {
+		if got := (&Store{committerName: tc.name, committerEmail: tc.email}).commitAuthor(); got != tc.want {
+			t.Errorf("commitAuthor(%q, %q) = %q, want %q", tc.name, tc.email, got, tc.want)
+		}
+	}
+}

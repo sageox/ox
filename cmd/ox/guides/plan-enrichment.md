@@ -6,7 +6,7 @@ audience: ai
 
 # Plan Enrichment
 
-When you produce an implementation plan for non-trivial work — multi-file, architectural, touching a hotspot or open PR, or roughly 5+ steps — SageOx can fold in team context automatically, at zero LLM cost, before you present it.
+When you produce a plan for non-trivial work of any kind — a design direction, a GTM or launch sequence, a rollout, an engineering change; multi-file, architectural, touching a hotspot or open PR, or roughly 5+ steps — SageOx can fold in team context automatically, at zero LLM cost, before you present it.
 
 ## The two calls
 
@@ -24,6 +24,25 @@ For material work, author a purpose-built visual `plan.html`; then pass that pag
 - `ox plan save --file plan.html` records the authored page as canonical (`primary=html`) and derives `plan.md` for terminal/search use.
 - `ox plan render --file plan.html` injects prior art, collisions, expert routing, knowledge bubbles, team memory, attribution, and the review loop without rewriting the authored page.
 - `ox plan review <slug>` reopens that same visual argument; it must never regenerate a generic page from the derived markdown.
+
+The same path saves every artifact a teammate should see, not only plans:
+`ox plan save --file page.html --kind plan|mockup|review|evidence`. A mockup,
+review sheet, or evidence page belongs in the ledger exactly as much as a plan.
+
+Interactivity must be CSS-only (radio/checkbox + `:has()`, `<details>`, inline
+SVG) by policy, so a page behaves the same in every host (MCP app cards, Claude
+artifacts, the viewer). The hosted viewer at `/plan/<pln_id>` runs scripts in a
+sandboxed iframe. See `docs/specs/plan-authoring-html.md`.
+
+### Saved means shared
+
+`ox plan save` commits AND pushes, then prints the share link
+(`https://<endpoint>/plan/<pln_id>`). If it prints **NOT SHARED** (or `--json`
+reports `"share": {"shared": false, "reason": ..., "fix": ...}`), the plan is
+only on this machine — run the printed fix (usually `ox doctor --fix`) before
+telling anyone to open the link. Re-saving a page with the same
+`<meta name="ox-plan-slug">` (or `--slug`) records a new revision of the same
+plan and keeps its link.
 
 Never use the rejected legacy `--plan + --html` pair. It creates two candidate
 sources of truth and historically allowed review to discard the authored page.
@@ -64,7 +83,8 @@ first ten minutes into a wall of text.
 ## Verify before you're done
 
 ```bash
-ox plan lint <slug> [--strict]
+ox plan lint --file plan.html   # BEFORE the first save
+ox plan lint <slug> [--strict]  # after saving
 ```
 
 Checks the rendered page for SageOx attribution, meaningful-visual realization,

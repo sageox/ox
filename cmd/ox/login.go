@@ -147,6 +147,7 @@ func getAlternativeEndpoints(currentEndpoint string) []string {
 
 var loginCmd = &cobra.Command{
 	Use:   "login",
+	Args:  cobra.NoArgs,
 	Short: "Authenticate with sageox.ai",
 	Long:  "Authenticate with sageox.ai to access premium features and sync your configuration.",
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -238,6 +239,9 @@ func selectLoginEndpoint() (string, error) {
 	// if only one endpoint and it's not authenticated, just use it
 	if len(endpoints) == 1 && !endpoints[0].IsValid {
 		return endpoints[0].URL, nil
+	}
+	if cli.NoInput() {
+		return "", fmt.Errorf("--no-input requires --endpoint <endpoint> to choose where to log in")
 	}
 
 	// show endpoint selection
@@ -481,6 +485,9 @@ func runLoginFlow(cmd *cobra.Command, currentEndpoint string) error {
 	err = cli.WithSpinnerNoResult("Syncing git credentials...", func() error {
 		return fetchGitCredentialsWithRetry(client)
 	})
+	if errors.Is(err, tea.ErrInterrupted) {
+		return err
+	}
 	if err != nil {
 		// filter out confusing "run 'ox login'" advice since user just logged in
 		errMsg := err.Error()

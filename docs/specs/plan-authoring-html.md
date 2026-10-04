@@ -58,10 +58,34 @@ decision, don't just state it:
   lights up, a docked explainer updates.
 - **Animated timelines** with toggles.
 - **Side-by-side comparison panes** and **verdict cards**.
-- **Self-contained single file** — inline CSS/JS, no external dependencies.
+- **Self-contained single file** — inline CSS and inline SVG, no external
+  dependencies.
 
 A plan page that merely reformats prose has missed the point; the page should do
 work a document cannot.
+
+### Interactivity is CSS-only
+
+Keep interactivity CSS-only **by policy**, so a page behaves the same in every
+host it lands in: MCP app cards, Claude artifacts, and the hosted viewer at
+`https://<endpoint>/plan/<pln_id>` (the link `ox plan save` prints). The viewer
+does run scripts — in an iframe with `sandbox="allow-scripts"`, no same-origin
+access, and network/forms/popups denied by CSP + sandbox (sageox-monorepo
+ADR-131, 2026-09-28 amendment) — but other hosts differ, and a page whose tabs
+or inspectors depend on JavaScript behaves differently from host to host.
+Build every interaction from CSS state instead:
+
+| Interaction | CSS-only pattern |
+|---|---|
+| Tabs / segmented views | hidden `<input type="radio">` per tab + `:checked ~` or `:has(#tab-2:checked)` to show the panel |
+| Toggles, before/after, layer switches | `<input type="checkbox">` + `:has(:checked)` |
+| Field inspectors, linked highlights | `:hover`, `:focus-within`, `:has(.field:hover)` on a shared ancestor |
+| Progressive disclosure | `<details><summary>` (also the Implementation notes appendix) |
+| Diagrams, charts, timelines | inline `<svg>` (CSS transitions for motion) |
+
+A script may still enhance the page in the local `ox plan render` loop, but the
+page must be complete without it. ox's own review chrome is injected by ox and is
+not subject to this rule.
 
 ## The design register (not optional)
 
@@ -105,6 +129,20 @@ successor. Do not introduce a second brand hue.
 ramps' mid stops are *fill* values — sage-700 lands at 4.31:1 and warning-600 at
 3.16:1 as text on cream, both under WCAG AA. The values above are the corrected
 text-safe ones.
+## What counts as a plan
+
+A plan is any work a team executes against — a design direction, a GTM or launch
+sequence, a rollout, an engineering change. `ox plan save --kind` records which
+one it is: `plan` (default) | `mockup` | `review` | `evidence`. Nothing here
+assumes the reader or the executor is an engineer.
+
+Most of this document is shared: the design register, the authoring contract,
+and the hero-visual expectation hold for every kind. Two requirements are
+plan-only, and `ox plan lint` enforces them that way — the **device mockup** for
+a user-facing surface, and the **execution-depth appendix**. A mockup already
+*is* the proposal a device mockup would ask for, and a mockup, review sheet or
+evidence page has no second reader to relocate depth for.
+
 ## The human-attention contract
 
 A material plan has two readers and therefore two layers:
@@ -113,13 +151,19 @@ A material plan has two readers and therefore two layers:
    trade-offs, and one meaningful hero visualization that explains the system's
    topology, sequence, state, or comparison. Decorative icons and wordmarks do
    not count as a visualization.
-2. **Implementation depth (collapsed initially):** exactly one closed
+2. **Execution depth (collapsed initially):** exactly one closed
    `<details><summary>Implementation notes</summary>...</details>` appendix at
-   the end with exact files, edits, rollout mechanics, and gotchas.
+   the end with the exact steps — files and edits for an engineering change,
+   channels and sequencing for a launch, surfaces and states for a design
+   direction — plus rollout mechanics and gotchas. **The summary text is the
+   literal string `Implementation notes` regardless of the plan's kind**: ox
+   lint (`internal/plan/lint.go`) and the markdown extractor key on it, so it is
+   a section name, not a claim about who executes.
 
 Do not average the two audiences into a long document. Keep the depth, but move
 it behind native progressive disclosure so the approver's first scan stays
-visual and the implementing AI coworker still has precise instructions.
+visual and whoever executes — an AI coworker, an engineer, a marketer — still
+has precise instructions.
 
 ## The minimal authoring contract
 
@@ -133,6 +177,12 @@ and to ungrouped review anchors.
 | `<meta name="ox-plan-slug" content="...">` | Explicit slug override | Slug derived from title |
 | H2 headings **or** `data-ox-section="Name"` on view containers | Groups enrichment badges and review anchors by section; gives the derived markdown its H2s | Ungrouped anchors; flat derived markdown |
 
+ox knows the page is HTML by its name: a `--file` ending in `.html` or `.htm` is
+saved as the HTML plan of record even without `<!doctype html>`. Piped input has
+no name, so it must start with `<!doctype html>` or `<html>`. A full document is
+still best: without a doctype browsers use quirks mode, and without a `<head>` ox
+cannot stamp the plan's id into the page.
+
 ## What ox injects — the chrome contract
 
 `ox plan render --file plan.html` serves the authored page with the ox chrome
@@ -143,8 +193,12 @@ and to ungrouped review anchors.
 - The bundle carries: (a) the **SageOx enrichment overlay** — collision /
   prior-art / expert-routing chips plus surfaced context; (b) the **footer
   credit**; (c) the full **live review loop** — click any element to attach a
-  mark, content-hash anchored so it works on arbitrary authored markup, served
-  via `ox plan review <slug>`.
+  mark, or highlight text to comment on exactly those words, content-hash
+  anchored so it works on arbitrary authored markup, served
+  via `ox plan review <slug>`. It binds two keys: `r` toggles review mode, and
+  `Esc` closes an open note, then the mode. A page handler that acts on either
+  key should call `preventDefault()` — the chrome ignores a keypress an earlier
+  listener marked handled, and marks the ones it acts on.
 - Injection is **idempotent and append-only** — re-rendering replaces the marker
   block and never touches authored markup.
 - `--artifact` serves/writes the authored page **verbatim**, zero injection.
@@ -212,10 +266,12 @@ rediscovered, and the first one is also caught by the `mermaid.font-race` lint.
 ## Trust posture
 
 The plan is the developer's **own local content rendered locally for that
-developer**: the review server binds `127.0.0.1` and is token-gated, so author
-scripting is a feature, not a threat — the interactivity is the point.
+developer**: the review server binds `127.0.0.1` and is token-gated, so an
+author script is not a threat locally — but it is an enhancement only: pages
+stay CSS-only by policy so they behave the same in every host, and the hosted
+viewer runs any script in a sandboxed iframe (see *Interactivity is CSS-only*).
 `--artifact` is the strict export for when the page needs to travel beyond the
 local loop: a fully self-contained page — no external fonts, scripts, or
-network fetches; CSS and JS inline. Self-contained is the whole claim: there is
+network fetches; CSS inline. Self-contained is the whole claim: there is
 no CSP nonce/hash handling, so a strict host CSP that disallows
 `unsafe-inline` will still block the page's inline styles and scripts.

@@ -53,9 +53,10 @@ func DefaultPatterns() []SecretPattern {
 	return []SecretPattern{
 		// AWS Access Keys (AKIA... format, exactly 20 chars) — long-lived IAM access keys.
 		{
-			Name:    "aws_access_key",
-			Pattern: regexp.MustCompile(`AKIA[0-9A-Z]{16}`),
-			Redact:  "[REDACTED_AWS_KEY]",
+			Name:     "aws_access_key",
+			Pattern:  regexp.MustCompile(`AKIA[0-9A-Z]{16}`),
+			Redact:   "[REDACTED_AWS_KEY]",
+			Keywords: []string{"akia"},
 		},
 
 		// AWS STS session access key id (ASIA... format, exactly 20 chars) — short-lived
@@ -65,16 +66,18 @@ func DefaultPatterns() []SecretPattern {
 		// Forensic scan 2026-05-10 found 194 occurrences in committed raw.jsonl files that
 		// slipped past the AKIA-only regex; this closes that gap.
 		{
-			Name:    "aws_sts_session_key",
-			Pattern: regexp.MustCompile(`ASIA[0-9A-Z]{16}`),
-			Redact:  "[REDACTED_AWS_STS_KEY]",
+			Name:     "aws_sts_session_key",
+			Pattern:  regexp.MustCompile(`ASIA[0-9A-Z]{16}`),
+			Redact:   "[REDACTED_AWS_STS_KEY]",
+			Keywords: []string{"asia"},
 		},
 
 		// AWS Secret Keys (40 char base64, usually after key= or similar)
 		{
-			Name:    "aws_secret_key",
-			Pattern: regexp.MustCompile(`(?i)(aws_secret_access_key|aws_secret_key|secret_access_key)\s*[=:]\s*['"]?([A-Za-z0-9/+=]{40})['"]?`),
-			Redact:  "[REDACTED_AWS_SECRET]",
+			Name:     "aws_secret_key",
+			Pattern:  regexp.MustCompile(`(?i)(aws_secret_access_key|aws_secret_key|secret_access_key)\s*[=:]\s*['"]?([A-Za-z0-9/+=]{40})['"]?`),
+			Redact:   "[REDACTED_AWS_SECRET]",
+			Keywords: []string{"aws_secret_key", "secret_access_key"},
 		},
 
 		// GitHub tokens. Split per-prefix so the report identifies WHICH
@@ -153,51 +156,58 @@ func DefaultPatterns() []SecretPattern {
 
 		// GitLab personal access tokens (glpat- prefix)
 		{
-			Name:    "gitlab_token",
-			Pattern: regexp.MustCompile(`glpat-[A-Za-z0-9\-_]{20,}`),
-			Redact:  "[REDACTED_GITLAB_TOKEN]",
+			Name:     "gitlab_token",
+			Pattern:  regexp.MustCompile(`glpat-[A-Za-z0-9\-_]{20,}`),
+			Redact:   "[REDACTED_GITLAB_TOKEN]",
+			Keywords: []string{"glpat-"},
 		},
 
 		// GitLab OAuth access tokens (gloas- prefix)
 		{
-			Name:    "gitlab_oauth_token",
-			Pattern: regexp.MustCompile(`gloas-[A-Za-z0-9\-_]{15,}`),
-			Redact:  "[REDACTED_GITLAB_OAUTH]",
+			Name:     "gitlab_oauth_token",
+			Pattern:  regexp.MustCompile(`gloas-[A-Za-z0-9\-_]{15,}`),
+			Redact:   "[REDACTED_GITLAB_OAUTH]",
+			Keywords: []string{"gloas-"},
 		},
 
 		// GitLab deploy tokens (gldt- prefix)
 		{
-			Name:    "gitlab_deploy_token",
-			Pattern: regexp.MustCompile(`gldt-[A-Za-z0-9\-_]{15,}`),
-			Redact:  "[REDACTED_GITLAB_DEPLOY_TOKEN]",
+			Name:     "gitlab_deploy_token",
+			Pattern:  regexp.MustCompile(`gldt-[A-Za-z0-9\-_]{15,}`),
+			Redact:   "[REDACTED_GITLAB_DEPLOY_TOKEN]",
+			Keywords: []string{"gldt-"},
 		},
 
 		// GitLab runner tokens (glrt- prefix)
 		{
-			Name:    "gitlab_runner_token",
-			Pattern: regexp.MustCompile(`glrt-[A-Za-z0-9\-_]{15,}`),
-			Redact:  "[REDACTED_GITLAB_RUNNER_TOKEN]",
+			Name:     "gitlab_runner_token",
+			Pattern:  regexp.MustCompile(`glrt-[A-Za-z0-9\-_]{15,}`),
+			Redact:   "[REDACTED_GITLAB_RUNNER_TOKEN]",
+			Keywords: []string{"glrt-"},
 		},
 
 		// GitLab feed tokens (glft- prefix)
 		{
-			Name:    "gitlab_feed_token",
-			Pattern: regexp.MustCompile(`glft-[A-Za-z0-9\-_]{15,}`),
-			Redact:  "[REDACTED_GITLAB_FEED_TOKEN]",
+			Name:     "gitlab_feed_token",
+			Pattern:  regexp.MustCompile(`glft-[A-Za-z0-9\-_]{15,}`),
+			Redact:   "[REDACTED_GITLAB_FEED_TOKEN]",
+			Keywords: []string{"glft-"},
 		},
 
 		// SageOx share-session cookies
 		{
-			Name:    "sox_share_session",
-			Pattern: regexp.MustCompile(`sox_share_session=[A-Za-z0-9_\-]{15,}`),
-			Redact:  "sox_share_session=[REDACTED_SOX_SHARE_SESSION]",
+			Name:     "sox_share_session",
+			Pattern:  regexp.MustCompile(`sox_share_session=[A-Za-z0-9_\-]{15,}`),
+			Redact:   "sox_share_session=[REDACTED_SOX_SHARE_SESSION]",
+			Keywords: []string{"sox_share_session="},
 		},
 
 		// SageOx API keys (mk_ prefix)
 		{
-			Name:    "sageox_api_key",
-			Pattern: regexp.MustCompile(`\bmk_[A-Za-z0-9]{20,}`),
-			Redact:  "[REDACTED_SAGEOX_API_KEY]",
+			Name:     "sageox_api_key",
+			Pattern:  regexp.MustCompile(`\bmk_[A-Za-z0-9]{20,}`),
+			Redact:   "[REDACTED_SAGEOX_API_KEY]",
+			Keywords: []string{"mk_"},
 		},
 
 		// SageOx bearer tokens — the whole ox<letter>_ family generically
@@ -217,65 +227,74 @@ func DefaultPatterns() []SecretPattern {
 		// inside proxy_, so "proxy_endpoint_override" in a captured shell
 		// transcript would be silently rewritten.
 		{
-			Name:    "sageox_bearer_token",
-			Pattern: regexp.MustCompile(`\box[a-z]_[A-Za-z0-9_\-]{8,}`),
-			Redact:  "[REDACTED_SAGEOX_TOKEN]",
+			Name:     "sageox_bearer_token",
+			Pattern:  regexp.MustCompile(`\box[a-z]_[A-Za-z0-9_\-]{8,}`),
+			Redact:   "[REDACTED_SAGEOX_TOKEN]",
+			Keywords: []string{"ox"},
 		},
 
 		// AgentX keys (axk_ prefix, exactly 32 chars after prefix)
 		{
-			Name:    "agentx_key",
-			Pattern: regexp.MustCompile(`\baxk_[A-Za-z0-9_]{32}\b`),
-			Redact:  "[REDACTED_AGENTX_KEY]",
+			Name:     "agentx_key",
+			Pattern:  regexp.MustCompile(`\baxk_[A-Za-z0-9_]{32}\b`),
+			Redact:   "[REDACTED_AGENTX_KEY]",
+			Keywords: []string{"axk_"},
 		},
 
 		// Slack tokens (xoxb-, xoxp-, xoxa-, xoxs-, xoxr-)
 		{
-			Name:    "slack_token",
-			Pattern: regexp.MustCompile(`xox[abpsr]-[A-Za-z0-9\-]{10,}`),
-			Redact:  "[REDACTED_SLACK_TOKEN]",
+			Name:     "slack_token",
+			Pattern:  regexp.MustCompile(`xox[abpsr]-[A-Za-z0-9\-]{10,}`),
+			Redact:   "[REDACTED_SLACK_TOKEN]",
+			Keywords: []string{"xox"},
 		},
 
 		// Stripe API keys (sk_live_, sk_test_, pk_live_, pk_test_)
 		{
-			Name:    "stripe_key",
-			Pattern: regexp.MustCompile(`[sr]k_(live|test)_[A-Za-z0-9]{24,}`),
-			Redact:  "[REDACTED_STRIPE_KEY]",
+			Name:     "stripe_key",
+			Pattern:  regexp.MustCompile(`[sr]k_(live|test)_[A-Za-z0-9]{24,}`),
+			Redact:   "[REDACTED_STRIPE_KEY]",
+			Keywords: []string{"k_live_", "k_test_"},
 		},
 
 		// Twilio API keys and auth tokens
 		{
-			Name:    "twilio_key",
-			Pattern: regexp.MustCompile(`SK[a-f0-9]{32}`),
-			Redact:  "[REDACTED_TWILIO_KEY]",
+			Name:     "twilio_key",
+			Pattern:  regexp.MustCompile(`SK[a-f0-9]{32}`),
+			Redact:   "[REDACTED_TWILIO_KEY]",
+			Keywords: []string{"sk"},
 		},
 
 		// SendGrid API keys
 		{
-			Name:    "sendgrid_key",
-			Pattern: regexp.MustCompile(`SG\.[A-Za-z0-9_\-]{22}\.[A-Za-z0-9_\-]{43}`),
-			Redact:  "[REDACTED_SENDGRID_KEY]",
+			Name:     "sendgrid_key",
+			Pattern:  regexp.MustCompile(`SG\.[A-Za-z0-9_\-]{22}\.[A-Za-z0-9_\-]{43}`),
+			Redact:   "[REDACTED_SENDGRID_KEY]",
+			Keywords: []string{"sg."},
 		},
 
 		// Mailchimp API keys
 		{
-			Name:    "mailchimp_key",
-			Pattern: regexp.MustCompile(`[a-f0-9]{32}-us[0-9]{1,2}`),
-			Redact:  "[REDACTED_MAILCHIMP_KEY]",
+			Name:     "mailchimp_key",
+			Pattern:  regexp.MustCompile(`[a-f0-9]{32}-us[0-9]{1,2}`),
+			Redact:   "[REDACTED_MAILCHIMP_KEY]",
+			Keywords: []string{"-us"},
 		},
 
 		// NPM tokens
 		{
-			Name:    "npm_token",
-			Pattern: regexp.MustCompile(`npm_[A-Za-z0-9]{36}`),
-			Redact:  "[REDACTED_NPM_TOKEN]",
+			Name:     "npm_token",
+			Pattern:  regexp.MustCompile(`npm_[A-Za-z0-9]{36}`),
+			Redact:   "[REDACTED_NPM_TOKEN]",
+			Keywords: []string{"npm_"},
 		},
 
 		// PyPI tokens
 		{
-			Name:    "pypi_token",
-			Pattern: regexp.MustCompile(`pypi-[A-Za-z0-9_\-]{50,}`),
-			Redact:  "[REDACTED_PYPI_TOKEN]",
+			Name:     "pypi_token",
+			Pattern:  regexp.MustCompile(`pypi-[A-Za-z0-9_\-]{50,}`),
+			Redact:   "[REDACTED_PYPI_TOKEN]",
+			Keywords: []string{"pypi-"},
 		},
 
 		// Heroku API keys (UUIDs - careful with false positives).
@@ -294,45 +313,51 @@ func DefaultPatterns() []SecretPattern {
 
 		// Private keys (RSA, DSA, EC, OPENSSH)
 		{
-			Name:    "private_key_header",
-			Pattern: regexp.MustCompile(`-----BEGIN\s+(RSA|DSA|EC|OPENSSH|PGP)?\s*PRIVATE KEY-----`),
-			Redact:  "[REDACTED_PRIVATE_KEY]",
+			Name:     "private_key_header",
+			Pattern:  regexp.MustCompile(`-----BEGIN\s+(RSA|DSA|EC|OPENSSH|PGP)?\s*PRIVATE KEY-----`),
+			Redact:   "[REDACTED_PRIVATE_KEY]",
+			Keywords: []string{"private key-----"},
 		},
 
 		// Generic private key (fallback)
 		{
-			Name:    "private_key_generic",
-			Pattern: regexp.MustCompile(`-----BEGIN PRIVATE KEY-----`),
-			Redact:  "[REDACTED_PRIVATE_KEY]",
+			Name:     "private_key_generic",
+			Pattern:  regexp.MustCompile(`-----BEGIN PRIVATE KEY-----`),
+			Redact:   "[REDACTED_PRIVATE_KEY]",
+			Keywords: []string{"-----begin private key-----"},
 		},
 
 		// Base64-encoded secrets in environment variables
 		{
-			Name:    "export_aws_secret",
-			Pattern: regexp.MustCompile(`(?i)export\s+(AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN)\s*=\s*['"]?[A-Za-z0-9/+=]{20,}['"]?`),
-			Redact:  "[REDACTED_EXPORT]",
+			Name:     "export_aws_secret",
+			Pattern:  regexp.MustCompile(`(?i)export\s+(AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN)\s*=\s*['"]?[A-Za-z0-9/+=]{20,}['"]?`),
+			Redact:   "[REDACTED_EXPORT]",
+			Keywords: []string{"aws_secret_access_key", "aws_session_token"},
 		},
 
 		// Generic export of sensitive env vars
 		{
-			Name:    "export_secret",
-			Pattern: regexp.MustCompile(`(?i)export\s+(GITHUB_TOKEN|GITLAB_TOKEN|API_KEY|SECRET_KEY|AUTH_TOKEN|ACCESS_TOKEN|PRIVATE_KEY|PASSWORD|PASSWD|DB_PASSWORD|DATABASE_PASSWORD|MYSQL_PASSWORD|POSTGRES_PASSWORD|REDIS_PASSWORD|MONGO_PASSWORD)\s*=\s*['"]?[^'"\s]+['"]?`),
-			Redact:  "[REDACTED_EXPORT]",
+			Name:     "export_secret",
+			Pattern:  regexp.MustCompile(`(?i)export\s+(GITHUB_TOKEN|GITLAB_TOKEN|API_KEY|SECRET_KEY|AUTH_TOKEN|ACCESS_TOKEN|PRIVATE_KEY|PASSWORD|PASSWD|DB_PASSWORD|DATABASE_PASSWORD|MYSQL_PASSWORD|POSTGRES_PASSWORD|REDIS_PASSWORD|MONGO_PASSWORD)\s*=\s*['"]?[^'"\s]+['"]?`),
+			Redact:   "[REDACTED_EXPORT]",
+			Keywords: []string{"export"},
 		},
 
 		// Connection strings with embedded credentials (DB protocols)
 		{
-			Name:    "connection_string",
-			Pattern: regexp.MustCompile(`(?i)(mongodb|postgres|postgresql|mysql|redis|amqp|mssql):\/\/[^:]+:[^@]+@[^\s'"]+`),
-			Redact:  "[REDACTED_CONNECTION_STRING]",
+			Name:     "connection_string",
+			Pattern:  regexp.MustCompile(`(?i)(mongodb|postgres|postgresql|mysql|redis|amqp|mssql):\/\/[^:]+:[^@]+@[^\s'"]+`),
+			Redact:   "[REDACTED_CONNECTION_STRING]",
+			Keywords: []string{"mongodb", "postgres", "mysql", "redis", "amqp", "mssql"},
 		},
 
 		// HTTP(S) URLs with embedded userinfo (PAT in clone URL, etc.)
 		// SkipIf whitelists already-masked or GitHub-style sentinel passwords.
 		{
-			Name:    "url_with_password",
-			Pattern: regexp.MustCompile(`https?://[^\s/:@]+:[^\s/:@]{6,}@[^\s'"]+`),
-			Redact:  "[REDACTED_URL_WITH_CREDENTIALS]",
+			Name:     "url_with_password",
+			Pattern:  regexp.MustCompile(`https?://[^\s/:@]+:[^\s/:@]{6,}@[^\s'"]+`),
+			Redact:   "[REDACTED_URL_WITH_CREDENTIALS]",
+			Keywords: []string{"://"},
 			SkipIf: []string{
 				":x-oauth-basic@",
 				":x-access-token@",
@@ -343,66 +368,75 @@ func DefaultPatterns() []SecretPattern {
 
 		// Bearer tokens in HTTP headers â clean shape: "Authorization: Bearer <token>"
 		{
-			Name:    "authorization_bearer",
-			Pattern: regexp.MustCompile(`(?i)Authorization:\s*Bearer\s+[A-Za-z0-9._=/+\-]{20,}`),
-			Redact:  "Authorization: Bearer [REDACTED_BEARER_TOKEN]",
+			Name:     "authorization_bearer",
+			Pattern:  regexp.MustCompile(`(?i)Authorization:\s*Bearer\s+[A-Za-z0-9._=/+\-]{20,}`),
+			Redact:   "Authorization: Bearer [REDACTED_BEARER_TOKEN]",
+			Keywords: []string{"authorization:"},
 		},
 
 		// Basic auth headers â clean shape: "Authorization: Basic <b64>"
 		{
-			Name:    "authorization_basic",
-			Pattern: regexp.MustCompile(`(?i)Authorization:\s*Basic\s+[A-Za-z0-9+/=]{20,}`),
-			Redact:  "Authorization: Basic [REDACTED_BASIC_AUTH]",
+			Name:     "authorization_basic",
+			Pattern:  regexp.MustCompile(`(?i)Authorization:\s*Basic\s+[A-Za-z0-9+/=]{20,}`),
+			Redact:   "Authorization: Basic [REDACTED_BASIC_AUTH]",
+			Keywords: []string{"authorization:"},
 		},
 
 		// Legacy bearer pattern retained for backward compatibility (covers
 		// looser shapes like "bearer=<token>" without the Authorization prefix).
 		{
-			Name:    "bearer_token",
-			Pattern: regexp.MustCompile(`(?i)(authorization|bearer)\s*[:=]\s*['"]?bearer\s+[A-Za-z0-9_\-\.]{20,}['"]?`),
-			Redact:  "[REDACTED_BEARER_TOKEN]",
+			Name:     "bearer_token",
+			Pattern:  regexp.MustCompile(`(?i)(authorization|bearer)\s*[:=]\s*['"]?bearer\s+[A-Za-z0-9_\-\.]{20,}['"]?`),
+			Redact:   "[REDACTED_BEARER_TOKEN]",
+			Keywords: []string{"bearer"},
 		},
 
 		// Legacy basic auth pattern retained for backward compatibility.
 		{
-			Name:    "basic_auth",
-			Pattern: regexp.MustCompile(`(?i)authorization\s*[:=]\s*['"]?basic\s+[A-Za-z0-9+/=]{10,}['"]?`),
-			Redact:  "[REDACTED_BASIC_AUTH]",
+			Name:     "basic_auth",
+			Pattern:  regexp.MustCompile(`(?i)authorization\s*[:=]\s*['"]?basic\s+[A-Za-z0-9+/=]{10,}['"]?`),
+			Redact:   "[REDACTED_BASIC_AUTH]",
+			Keywords: []string{"authorization"},
 		},
 
 		// Generic API key patterns (must be after more specific patterns)
 		{
-			Name:    "generic_api_key",
-			Pattern: regexp.MustCompile(`(?i)(api[_-]?key|apikey)\s*[=:]\s*['"]?([A-Za-z0-9_\-]{20,})['"]?`),
-			Redact:  "[REDACTED_API_KEY]",
+			Name:     "generic_api_key",
+			Pattern:  regexp.MustCompile(`(?i)(api[_-]?key|apikey)\s*[=:]\s*['"]?([A-Za-z0-9_\-]{20,})['"]?`),
+			Redact:   "[REDACTED_API_KEY]",
+			Keywords: []string{"api"},
 		},
 
 		// Generic token patterns
 		{
-			Name:    "generic_token",
-			Pattern: regexp.MustCompile(`(?i)(access[_-]?token|auth[_-]?token|secret[_-]?token)\s*[=:]\s*['"]?([A-Za-z0-9_\-]{20,})['"]?`),
-			Redact:  "[REDACTED_TOKEN]",
+			Name:     "generic_token",
+			Pattern:  regexp.MustCompile(`(?i)(access[_-]?token|auth[_-]?token|secret[_-]?token)\s*[=:]\s*['"]?([A-Za-z0-9_\-]{20,})['"]?`),
+			Redact:   "[REDACTED_TOKEN]",
+			Keywords: []string{"token"},
 		},
 
 		// Generic password patterns (careful: may have false positives)
 		{
-			Name:    "generic_password",
-			Pattern: regexp.MustCompile(`(?i)(password|passwd|pwd)\s*[=:]\s*['"]([^'"]{8,})['"]`),
-			Redact:  "[REDACTED_PASSWORD]",
+			Name:     "generic_password",
+			Pattern:  regexp.MustCompile(`(?i)(password|passwd|pwd)\s*[=:]\s*['"]([^'"]{8,})['"]`),
+			Redact:   "[REDACTED_PASSWORD]",
+			Keywords: []string{"password", "passwd", "pwd"},
 		},
 
 		// Generic secret patterns
 		{
-			Name:    "generic_secret",
-			Pattern: regexp.MustCompile(`(?i)(secret|secret_key|client_secret)\s*[=:]\s*['"]?([A-Za-z0-9_\-/+=]{16,})['"]?`),
-			Redact:  "[REDACTED_SECRET]",
+			Name:     "generic_secret",
+			Pattern:  regexp.MustCompile(`(?i)(secret|secret_key|client_secret)\s*[=:]\s*['"]?([A-Za-z0-9_\-/+=]{16,})['"]?`),
+			Redact:   "[REDACTED_SECRET]",
+			Keywords: []string{"secret"},
 		},
 
 		// JWT tokens (header.payload.signature format)
 		{
-			Name:    "jwt_token",
-			Pattern: regexp.MustCompile(`eyJ[A-Za-z0-9_-]*\.eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*`),
-			Redact:  "[REDACTED_JWT]",
+			Name:     "jwt_token",
+			Pattern:  regexp.MustCompile(`eyJ[A-Za-z0-9_-]*\.eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*`),
+			Redact:   "[REDACTED_JWT]",
+			Keywords: []string{"eyj"},
 		},
 
 		// .env-style sensitive assignments â fallback for cases the more
@@ -410,9 +444,10 @@ func DefaultPatterns() []SecretPattern {
 		// generic_api_key / generic_token / generic_password so the more
 		// specific [REDACTED_*] slugs win when they apply.
 		{
-			Name:    "env_assignment",
-			Pattern: regexp.MustCompile(`(?i)\b(GITHUB_TOKEN|GITLAB_TOKEN|DATABASE_PASSWORD|DB_PASSWORD|MYSQL_PASSWORD|POSTGRES_PASSWORD|REDIS_PASSWORD|MONGO_PASSWORD)\s*=\s*['"]?[A-Za-z0-9_\-\.=/+]{12,}['"]?`),
-			Redact:  "[REDACTED_ENV_ASSIGNMENT]",
+			Name:     "env_assignment",
+			Pattern:  regexp.MustCompile(`(?i)\b(GITHUB_TOKEN|GITLAB_TOKEN|DATABASE_PASSWORD|DB_PASSWORD|MYSQL_PASSWORD|POSTGRES_PASSWORD|REDIS_PASSWORD|MONGO_PASSWORD)\s*=\s*['"]?[A-Za-z0-9_\-\.=/+]{12,}['"]?`),
+			Redact:   "[REDACTED_ENV_ASSIGNMENT]",
+			Keywords: []string{"_token", "_password"},
 		},
 	}
 }

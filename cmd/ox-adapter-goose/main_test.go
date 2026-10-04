@@ -7,12 +7,12 @@ import (
 	"github.com/sageox/ox/pkg/adapterprotocol"
 )
 
-// TestHandleInfo_CapabilitiesPinned locks the declared capability set.
+// TestHandleInfo_CapabilitiesPinned proves handleInfo() actually wires
+// adapterprotocol.GooseCapabilities — the canonical source in
+// pkg/adapterprotocol/capabilities.go, including why it carries no
+// file_watcher — into the response.
 //
-// KEEP IN SYNC with the "goose" entry in internal/prime/conformance_test.go's
-// adapterCaps fixture. Adding or removing a capability requires updating BOTH.
-//
-// Every capability listed here MUST have its handler registered in the
+// Every capability listed there MUST have its handler registered in the
 // adapterruntime.Config literal in main.go. Declaring a capability without
 // wiring its handler makes the subcommand return "not implemented" at runtime
 // while every check reports the feature as present — see ox-8arr, where exactly
@@ -23,17 +23,8 @@ func TestHandleInfo_CapabilitiesPinned(t *testing.T) {
 		t.Fatalf("handleInfo() error: %v", err)
 	}
 
-	want := []string{
-		adapterprotocol.CapSkillsInstaller,
-		adapterprotocol.CapSessionReader,
-		adapterprotocol.CapHookInstaller,
-		adapterprotocol.CapIncrementalReader,
-		adapterprotocol.CapSessionImporter,
-		adapterprotocol.CapCapturePrior,
-		adapterprotocol.CapServeMode,
-	}
-
 	got := append([]string(nil), info.Capabilities...)
+	want := append([]string(nil), adapterprotocol.GooseCapabilities...)
 	sort.Strings(got)
 	sort.Strings(want)
 
@@ -43,15 +34,6 @@ func TestHandleInfo_CapabilitiesPinned(t *testing.T) {
 	for i := range got {
 		if got[i] != want[i] {
 			t.Fatalf("capabilities = %v, want %v", got, want)
-		}
-	}
-
-	// Goose sessions are SQLite rows behind a virtual handle, so there is no
-	// path fsnotify could watch. Declaring file_watcher would make the daemon
-	// try to tail a handle that will never exist on disk.
-	for _, c := range info.Capabilities {
-		if c == adapterprotocol.CapFileWatcher {
-			t.Error("goose must not declare file_watcher: session handles are virtual")
 		}
 	}
 }

@@ -46,6 +46,8 @@ func writeRawHeader(projectRoot string, state *session.RecordingState) error {
 		Username:               identity.AttributionDisplayName(projectEndpoint, config.GetDisplayName()),
 		RepoID:                 repoID,
 		OxVersion:              version.Version,
+		NativeSessions:         state.NativeSessions,
+		TraceCapture:           state.Trace,
 	}
 
 	// enrich with adapter metadata if available
@@ -131,18 +133,39 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 				// gitleaks layers in order before encoding.
 				drainEntries := session.ConvertRawEntries(entries)
 
-				if appendErr := appendRedactedEntries(rawPath, drainEntries); appendErr != nil {
-					return nil, fmt.Errorf("append final session entries: %w", appendErr)
-				} else {
-					// only advance offset/count after successful append;
-					// leaving them unchanged lets the next drain retry these entries
-					_ = session.UpdateRecordingStateForAgent(projectRoot, state.AgentID, func(s *session.RecordingState) {
-						s.SourceOffset = newOffset
-						s.EntryCount += len(entries)
-					})
+				writer, err := session.NewRawWriter(rawPath, projectRoot)
+				if err != nil {
+					return nil, err
 				}
+				appendErr := writer.AppendRecordingBatch(filepath.Join(state.SessionPath, ".recording.json"), drainEntries, newOffset)
+				closeErr := writer.Close()
+				if appendErr != nil {
+					return nil, appendErr
+				}
+				if closeErr != nil {
+					return nil, closeErr
+				}
+				state.SourceOffset = newOffset
+				state.EntryCount += len(entries)
+
 			}
 		}
+	}
+
+	// The header was written at start, before any /clear or resume could add
+	// a native session id and before the stop time existed. Append both now
+	// as the footer so the ledger copy of raw.jsonl is self-describing on its
+	// own (a daemon retry of this upload has no .recording.json to consult).
+	// Appended rather than rewritten: a parallel PostToolUse hook may still
+	// hold the file open. Best-effort: meta.json gets the same values from
+	// state regardless.
+	stoppedAt := session.ResolveStoppedAt(state.StoppedAt, rawPath, time.Now())
+	if err := session.StampRawCarrier(rawPath, session.CarrierStamp{
+		NativeSessions: state.NativeSessions,
+		TraceCapture:   state.Trace,
+		StoppedAt:      stoppedAt,
+	}); err != nil {
+		slog.Warn("finalize: could not stamp raw.jsonl carrier", "session", state.SessionPath, "error", err)
 	}
 
 	// read back the completed raw.jsonl to generate artifacts
@@ -190,6 +213,12 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 		}
 		if toolOutput, ok := rawMap["tool_output"].(string); ok {
 			entry.ToolOutput = toolOutput
+		}
+		if callID, ok := rawMap["call_id"].(string); ok {
+			entry.CallID = callID
+		}
+		if isError, ok := rawMap["is_error"].(bool); ok {
+			entry.IsError = isError
 		}
 		sessionEntries = append(sessionEntries, entry)
 	}

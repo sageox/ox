@@ -15,6 +15,7 @@ import (
 // not race by swapping process-wide hooks.
 type sessionUploadEffects struct {
 	uploadLFS       func(projectRoot, sessionDir string) (map[string]lfs.FileRef, error)
+	uploadTraces    func(projectRoot, cacheDir, sessionDir string) (map[string]lfs.FileRef, error)
 	commitInitial   func(ledgerPath, sessionName string) error
 	commitRetry     func(ledgerPath, sessionName string, includeSummary bool) error
 	reconcilePlans  func(projectRoot string, slugs []string, sessionName, sessionID string)
@@ -24,6 +25,7 @@ type sessionUploadEffects struct {
 func productionSessionUploadEffects() sessionUploadEffects {
 	return sessionUploadEffects{
 		uploadLFS:       uploadSessionLFS,
+		uploadTraces:    uploadSessionTraces,
 		commitInitial:   commitAndPushLedger,
 		commitRetry:     commitAndPushLedgerWithExtras,
 		reconcilePlans:  reconcileProducedPlansAtStop,

@@ -96,6 +96,26 @@ func scanLedgerSacredDeletions(ctx context.Context, ledgerPath, repoPath string)
 		candidates := sacred.Entities(touched)
 		if len(candidates) > sacred.DetectorEntityThreshold {
 			if removed := removedEntities(ctx, ledgerPath, cur, candidates); len(removed) > sacred.DetectorEntityThreshold {
+				// An entity path that vanished is not proof a plan or session was
+				// LOST. A rename takes the old path away and puts an equivalent one
+				// back, which is exactly what `ox plan backfill` does when it
+				// retitles plans: on this repository's own ledger, commit abee78b3
+				// ("plan: backfill 26 title(s)") reported 5 deletions while the plan
+				// population went 27 -> 27. Nothing was lost, and the alert fired on
+				// every scan for two months afterwards.
+				//
+				// Git's own rename detection cannot close this: the backfill rewrote
+				// meta.json in the same commit that moved it, so the pair falls below
+				// the similarity threshold and git reports an unpaired delete.
+				//
+				// The population count is the honest question — "are there fewer
+				// plans and sessions than before?" — and it is the one a human means
+				// by "a wipe." A reorganization keeps the count; a wipe reduces it.
+				// See DetectorEntityThreshold's note on why a detector that cries
+				// wolf is worse than no detector.
+				if lost, ok := netEntitiesLost(ctx, ledgerPath, cur); ok && lost <= sacred.DetectorEntityThreshold {
+					return
+				}
 				hits = append(hits, wipe{cur, len(removed)})
 			}
 		}
@@ -168,6 +188,54 @@ func removedEntities(ctx context.Context, ledgerPath, treeish string, candidates
 		}
 	}
 	return removed
+}
+
+// netEntitiesLost reports how many whole plans/sessions the commit removed on
+// net — the population before it minus the population after.
+//
+// ok is false when either tree cannot be read (a root that does not exist yet
+// is normal in a young ledger). A caller that cannot get an answer must NOT
+// treat that as "nothing was lost": the second return exists so an unreadable
+// tree falls through to reporting rather than silently suppressing an alert.
+func netEntitiesLost(ctx context.Context, ledgerPath, commit string) (int, bool) {
+	before, okBefore := entityPopulation(ctx, ledgerPath, commit+"^")
+	after, okAfter := entityPopulation(ctx, ledgerPath, commit)
+	if !okBefore || !okAfter {
+		return 0, false
+	}
+	return before - after, true
+}
+
+// entityPopulation counts the whole plans and sessions present in one tree.
+func entityPopulation(ctx context.Context, ledgerPath, treeish string) (int, bool) {
+	total := 0
+	for _, prefix := range sacred.Prefixes {
+		root := strings.TrimSuffix(prefix, "/")
+		// `<treeish>:<root>` descends INTO the root. Passing the root as a
+		// pathspec instead (`ls-tree -d <treeish> -- data/plans`) returns the
+		// directory entry itself — one line, before and after — so every wipe
+		// measured as zero net loss and was silently suppressed. The
+		// real-deletion test caught that; without it this "fix" would have
+		// turned a noisy detector into a blind one.
+		out, err := gitutil.RunGit(ctx, ledgerPath, "ls-tree", "-d", "--name-only", treeish+":"+root)
+		if err != nil {
+			// A missing root is an empty population, not a failure: `sessions/`
+			// does not exist until the first session lands. Distinguishing that
+			// from a broken tree is why this returns a bool rather than -1.
+			if strings.Contains(err.Error(), "Not a valid object name") ||
+				strings.Contains(err.Error(), "does not exist") ||
+				strings.Contains(err.Error(), "exists on disk, but not in") {
+				continue
+			}
+			return 0, false
+		}
+		for _, line := range strings.Split(out, "\n") {
+			if strings.TrimSpace(line) != "" {
+				total++
+			}
+		}
+	}
+	return total, true
 }
 
 // shortSHA abbreviates a commit id for bounded log/summary output.

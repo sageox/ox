@@ -71,6 +71,80 @@ func TestCheckOxIgnoreRulesIn_UserNegationIsReportedNotFought(t *testing.T) {
 	}
 }
 
+func TestCheckOxIgnoreRulesIn_ProbesTeamSkillNamespace(t *testing.T) {
+	root := newIgnoreTestRepo(t)
+	touch(t, root, ".claude/skills/sageox-team-probe/SKILL.md")
+	if _, err := ensureScopedIgnoreFiles(root); err != nil {
+		t.Fatalf("ensureScopedIgnoreFiles: %v", err)
+	}
+	deeper := filepath.Join(root, ".claude", "skills", ".gitignore")
+	if err := os.WriteFile(deeper, []byte("!sageox-team-probe/\n"), 0o644); err != nil {
+		t.Fatalf("write deeper ignore: %v", err)
+	}
+
+	res := checkOxIgnoreRulesIn(root, true)
+	if !res.warning || !strings.Contains(res.message, "still not ignored") {
+		t.Fatalf("team namespace override was not reported: message=%q detail=%q", res.message, res.detail)
+	}
+	if !gitIgnores(t, root, ".claude/skills/ox-cli-plan/SKILL.md") {
+		t.Error("fixture unexpectedly broke the runtime namespace too")
+	}
+	if gitIgnores(t, root, ".claude/skills/sageox-team-probe/SKILL.md") {
+		t.Error("fixture did not expose the Team Skill ignore override")
+	}
+}
+
+func TestCheckOxIgnoreRulesIn_ProbesNativeTeamRuleNamespace(t *testing.T) {
+	root := newIgnoreTestRepo(t)
+	touch(t, root, ".claude/rules/sageox-team-probe.md")
+	if _, err := ensureScopedIgnoreFiles(root); err != nil {
+		t.Fatalf("ensureScopedIgnoreFiles: %v", err)
+	}
+	deeper := filepath.Join(root, ".claude", "rules", ".gitignore")
+	if err := os.MkdirAll(filepath.Dir(deeper), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(deeper, []byte("!sageox-team-probe.md\n"), 0o644); err != nil {
+		t.Fatalf("write deeper ignore: %v", err)
+	}
+
+	res := checkOxIgnoreRulesIn(root, true)
+	if !res.warning || !strings.Contains(res.message, "still not ignored") {
+		t.Fatalf("Team Rule namespace override was not reported: message=%q detail=%q", res.message, res.detail)
+	}
+	if gitIgnores(t, root, ".claude/rules/sageox-team-probe.md") {
+		t.Error("fixture did not expose the Team Rule ignore override")
+	}
+}
+
+func TestCheckOxIgnoreRulesIn_RepairsEveryNativeTeamRuleNamespace(t *testing.T) {
+	root := newIgnoreTestRepo(t)
+	projections := []string{
+		".claude/rules/sageox-team-probe.md",
+		".cursor/rules/sageox-team-probe.mdc",
+		".github/instructions/sageox-team-probe.md",
+		".clinerules/sageox-team-probe.md",
+		".kiro/steering/sageox-team-probe.md",
+		".factory/rules/sageox-team-probe.md",
+		".windsurf/rules/sageox-team-probe.md",
+	}
+	for _, rel := range projections {
+		touch(t, root, rel)
+	}
+	if got := checkOxIgnoreRulesIn(root, false); got.passed {
+		t.Fatalf("unprotected Team Rule surfaces reported healthy: %s / %s", got.message, got.detail)
+	}
+	res := checkOxIgnoreRulesIn(root, true)
+	if !res.passed || res.warning {
+		t.Fatalf("--fix did not protect every Team Rule surface: %s / %s", res.message, res.detail)
+	}
+	for _, rel := range projections {
+		if !gitIgnores(t, root, rel) {
+			t.Errorf("Team Rule projection remains visible to git: %s", rel)
+		}
+	}
+}
+
 // TestCheckOxIgnoreRulesIn_NoFootprintInUnusedAgentDirs: a Claude-only repo must
 // not sprout .agents/ or .factory/ just because a check ran.
 func TestCheckOxIgnoreRulesIn_NoFootprintInUnusedAgentDirs(t *testing.T) {
@@ -269,5 +343,55 @@ func TestCheckLegacyOxFilesIn_DefersWhileAGitOperationIsInFlight(t *testing.T) {
 	}
 	if after := strings.Join(trackedPaths(t, root), "\n"); after != before {
 		t.Error("the migration touched the index during an in-flight merge")
+	}
+}
+
+// TestCanonicalFixSlugs_RetiredSpellingReachesItsReplacement: `adapter-rules`
+// is the retired public spelling of `claude-skills`. Resolving it once, at
+// parse time, is what lets every downstream membership test compare canonical
+// names only. Without it each call site has to hand-OR both spellings — and the
+// next alias someone registers would then silently fix nothing, with no failing
+// test to say so.
+func TestCanonicalFixSlugs_RetiredSpellingReachesItsReplacement(t *testing.T) {
+	got := canonicalFixSlugs([]string{
+		CheckSlugAdapterRules,
+		CheckSlugLedgerPathMismatch,
+		"claude-code:hooks-missing",
+		"not-a-real-slug",
+	})
+	want := []string{
+		CheckSlugClaudeSkills,
+		CheckSlugLedgerPathMismatch,
+		"claude-code:hooks-missing", // adapter slugs are not registry checks
+		"not-a-real-slug",           // left alone so validation echoes the typo
+	}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("--fix-slug canonicalization wrong:\n got %v\nwant %v", got, want)
+	}
+
+	// The customer claim: `ox doctor --fix-slug=adapter-rules` drives the
+	// claude-skills check, and nothing else.
+	opts := doctorOptions{
+		fix:      true,
+		fixSlugs: canonicalFixSlugs([]string{CheckSlugAdapterRules}),
+	}
+	if !opts.shouldFix(CheckSlugClaudeSkills) {
+		t.Error("--fix-slug=adapter-rules no longer drives the claude-skills check")
+	}
+	if opts.shouldFix(CheckSlugLedgerPathMismatch) {
+		t.Error("--fix-slug=adapter-rules leaked into an unrelated check")
+	}
+}
+
+// TestCanonicalFixSlugs_EmptyMeansFixAll: an empty slug list is the "--fix
+// applies to everything" signal. Canonicalizing must not turn it into a
+// non-nil empty slice that some future length check reads differently.
+func TestCanonicalFixSlugs_EmptyMeansFixAll(t *testing.T) {
+	if got := canonicalFixSlugs(nil); got != nil {
+		t.Errorf("nil slug list became %#v", got)
+	}
+	opts := doctorOptions{fix: true, fixSlugs: canonicalFixSlugs(nil)}
+	if !opts.shouldFix(CheckSlugLedgerPathMismatch) {
+		t.Error("--fix with no slugs stopped applying to all checks")
 	}
 }

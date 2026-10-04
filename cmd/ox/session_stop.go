@@ -93,10 +93,15 @@ func processSession(projectRoot string, state *session.RecordingState) (*process
 	entries := make([]session.Entry, 0, len(rawEntries))
 	for _, raw := range rawEntries {
 		entry := session.Entry{
-			Timestamp: raw.Timestamp,
-			Content:   raw.Content,
-			ToolName:  raw.ToolName,
-			ToolInput: raw.ToolInput,
+			Timestamp:  raw.Timestamp,
+			Content:    raw.Content,
+			ToolName:   raw.ToolName,
+			ToolInput:  raw.ToolInput,
+			ToolOutput: raw.ToolOutput,
+			IsError:    raw.IsError,
+			// the one key shared by the call entry, its result, the native
+			// transcript and the agent's trace — never drop it on this path
+			CallID: raw.CallID,
 		}
 
 		// map role to entry type
@@ -184,6 +189,8 @@ func processSession(projectRoot string, state *session.RecordingState) (*process
 		Username:               identity.AttributionDisplayName(projectEndpoint, config.GetDisplayName()),
 		RepoID:                 repoID,
 		OxVersion:              version.Version,
+		NativeSessions:         state.NativeSessions,
+		StoppedAt:              state.StoppedAt,
 	}
 	if err := rawWriter.WriteHeader(meta); err != nil {
 		rawWriter.Close()
@@ -192,21 +199,7 @@ func processSession(projectRoot string, state *session.RecordingState) (*process
 
 	// write entries
 	for _, entry := range entries {
-		data := map[string]any{
-			"type":      string(entry.Type),
-			"content":   entry.Content,
-			"timestamp": entry.Timestamp,
-		}
-		if entry.ToolName != "" {
-			data["tool_name"] = entry.ToolName
-		}
-		if entry.ToolInput != "" {
-			data["tool_input"] = entry.ToolInput
-		}
-		if entry.ToolOutput != "" {
-			data["tool_output"] = entry.ToolOutput
-		}
-		if err := rawWriter.WriteRaw(data); err != nil {
+		if err := rawWriter.WriteRaw(rawEntryMap(entry)); err != nil {
 			rawWriter.Close()
 			return nil, fmt.Errorf("failed to write entry: %w", err)
 		}

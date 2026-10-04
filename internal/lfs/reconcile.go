@@ -2,6 +2,7 @@ package lfs
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -10,21 +11,23 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/gitutil"
+	"github.com/sageox/ox/internal/session/pipeline"
 )
 
 // ReconcileResult describes what ReconcileUnpushedPointers found and fixed.
 type ReconcileResult struct {
 	ScannedPointers int      // total pointer files found across the scanned trees
 	MissingOnRemote int      // pointers whose LFS OIDs are not in the remote store
-	Replaced        int      // pointers replaced with empty stubs
+	Replaced        int      // unrecoverable pointer artifacts removed
 	Squashed        bool     // whether unpushed history was squashed
-	ReplacedFiles   []string // relative paths of replaced files
+	ReplacedFiles   []string // relative paths of removed pointer artifacts
 }
 
 // ReconcileUnpushedPointers scans the working tree under sessions/ AND data/plans/
 // for LFS pointer files whose backing blobs are missing from the remote LFS store,
-// replaces them with empty stubs, and squashes all unpushed commits into one so the
+// removes the unrecoverable artifacts, and squashes all unpushed commits into one so the
 // poisoned pointer blobs no longer appear in the push pack.
 //
 // data/plans/ is included because a poisoned PLAN pointer wedges the push exactly
@@ -33,7 +36,7 @@ type ReconcileResult struct {
 // pointer whose blob was never uploaded (the pre-fix GH #810 bug) stalls the ledger
 // with no self-heal, which is precisely how one such ledger sat unpushable for 43
 // commits. Post-fix the plan path never commits an un-uploaded pointer; this walk
-// heals the ones that predate the fix (their bytes are gone, so blanking to unblock
+// heals the ones that predate the fix (their bytes are gone, so removing the broken reference to unblock
 // is the only recovery) and backstops any future regression.
 //
 // This is the repair mechanism for ledgers whose push is blocked by
@@ -67,7 +70,7 @@ func ReconcileUnpushedPointers(ctx context.Context, ledgerPath, endpointURL stri
 // ReconcileUnpushedPointers. newClient is invoked ONLY when orphan candidates are
 // found, preserving the "no pointers → no client, no error" behavior that clean
 // ledgers with no configured remote rely on. Tests inject a fake-LFS-server
-// client to exercise the destructive blank-and-squash path.
+// client to exercise the missing-artifact removal and squash path.
 func reconcileUnpushedPointers(ctx context.Context, ledgerPath string, logger *slog.Logger, newClient func() (*Client, error)) (*ReconcileResult, error) {
 	if logger == nil {
 		logger = slog.Default()
@@ -203,32 +206,49 @@ func reconcileUnpushedPointers(ctx context.Context, ledgerPath string, logger *s
 
 	// Reconcile's commit is intentionally unscoped because the later soft-reset
 	// squash republishes every unpushed change. Refuse pre-existing staged
-	// corruption before blanking any pointer so a bad session cannot either ride
+	// corruption before removing any pointer so a bad session cannot either ride
 	// along in the repair commit or turn a recoverable LFS cleanup destructive.
 	if err := gitutil.ValidateStagedLedgerCommit(ctx, ledgerPath); err != nil {
 		return result, fmt.Errorf("validate Ledger before LFS reconcile: %w", err)
 	}
 
-	logger.Info("lfs reconcile: replacing orphaned pointers with empty stubs",
+	missingRefs := make(map[string]FileRef, len(missing))
+	for idx := range missing {
+		missingRefs[pointers[idx].relPath] = pointers[idx].ref
+	}
+	metadata, err := prepareMissingPointerMetadata(ledgerPath, missingRefs)
+	if err != nil {
+		return result, fmt.Errorf("prepare missing artifact metadata: %w", err)
+	}
+
+	logger.Info("lfs reconcile: removing unrecoverable pointer artifacts",
 		"missing", len(missing), "total_pointers", len(pointers))
 
-	// replace missing pointers with empty content and stage
+	// Remove missing artifacts instead of committing non-pointer bytes under
+	// LFS-listed filenames. Metadata was validated before changing any file.
 	for idx := range missing {
 		p := pointers[idx]
 		absPath := filepath.Join(ledgerPath, p.relPath)
-		if err := os.WriteFile(absPath, []byte{}, 0o644); err != nil {
-			logger.Warn("lfs reconcile: write failed", "path", p.relPath, "error", err)
-			continue
+		if err := os.Remove(absPath); err != nil {
+			return result, fmt.Errorf("remove missing pointer %s: %w", p.relPath, err)
 		}
 		addCtx, addCancel := context.WithTimeout(ctx, 5*time.Second)
 		_, addErr := gitutil.RunGit(addCtx, ledgerPath, "add", "--sparse", p.relPath)
 		addCancel()
 		if addErr != nil {
-			logger.Warn("lfs reconcile: stage failed", "path", p.relPath, "error", addErr)
-			continue
+			return result, fmt.Errorf("stage missing pointer removal %s: %w", p.relPath, addErr)
 		}
 		result.Replaced++
 		result.ReplacedFiles = append(result.ReplacedFiles, p.relPath)
+	}
+
+	for relPath, content := range metadata {
+		if err := fileutil.AtomicWriteBytes(filepath.Join(ledgerPath, relPath), content, 0o644); err != nil {
+			return result, fmt.Errorf("update missing artifact metadata %s: %w", relPath, err)
+		}
+		if _, err := gitutil.RunGit(ctx, ledgerPath, "add", "--sparse", relPath); err != nil {
+			return result, fmt.Errorf("stage missing artifact metadata %s: %w", relPath, err)
+		}
 	}
 
 	if result.Replaced == 0 {
@@ -236,13 +256,9 @@ func reconcileUnpushedPointers(ctx context.Context, ledgerPath string, logger *s
 	}
 
 	// commit the replacements
-	msg := fmt.Sprintf("fix: replace %d orphaned LFS pointers with empty stubs", result.Replaced)
+	msg := fmt.Sprintf("fix: remove %d unrecoverable LFS artifacts", result.Replaced)
 	commitCtx, commitCancel := context.WithTimeout(ctx, 10*time.Second)
-	if err := gitutil.ValidateStagedLedgerCommit(commitCtx, ledgerPath); err != nil {
-		commitCancel()
-		return result, fmt.Errorf("validate replacements: %w", err)
-	}
-	_, commitErr := gitutil.RunGit(commitCtx, ledgerPath, "commit", "-m", msg, "--no-verify")
+	_, commitErr := gitutil.CommitLedgerSnapshot(commitCtx, ledgerPath, msg)
 	commitCancel()
 	if commitErr != nil {
 		return result, fmt.Errorf("commit replacements: %w", commitErr)
@@ -259,6 +275,96 @@ func reconcileUnpushedPointers(ctx context.Context, ledgerPath string, logger *s
 	result.Squashed = true
 
 	logger.Info("lfs reconcile complete", "replaced", result.Replaced)
+	return result, nil
+}
+
+// prepareMissingPointerMetadata removes only matching missing-object references,
+// clearing trace metadata when either attachment is removed and preserving all
+// unrelated fields (including fields from newer clients). Parse all
+// manifests before touching pointers so corrupt or mismatched metadata fails safe.
+func prepareMissingPointerMetadata(ledgerPath string, missing map[string]FileRef) (map[string][]byte, error) {
+	manifests := make(map[string]map[string]json.RawMessage)
+	filesByManifest := make(map[string]map[string]json.RawMessage)
+	changed := make(map[string]bool)
+	for artifactPath, ref := range missing {
+		parts := strings.Split(filepath.ToSlash(artifactPath), "/")
+		depth := 2
+		if parts[0] == "data" {
+			depth = 3
+		}
+		if len(parts) <= depth {
+			return nil, fmt.Errorf("invalid artifact path %s", artifactPath)
+		}
+		metaPath := filepath.Join(append(parts[:depth:depth], "meta.json")...)
+		if _, seen := manifests[metaPath]; !seen {
+			absPath := filepath.Join(ledgerPath, metaPath)
+			info, err := os.Lstat(absPath)
+			if os.IsNotExist(err) {
+				manifests[metaPath] = nil
+				continue
+			}
+			if err != nil {
+				return nil, err
+			}
+			if !info.Mode().IsRegular() {
+				return nil, fmt.Errorf("metadata %s is not a regular file", metaPath)
+			}
+			data, err := os.ReadFile(absPath)
+			if err != nil {
+				return nil, err
+			}
+			var meta map[string]json.RawMessage
+			if err := json.Unmarshal(data, &meta); err != nil || meta == nil {
+				return nil, fmt.Errorf("metadata %s is not a valid JSON object", metaPath)
+			}
+			manifests[metaPath] = meta
+			var files map[string]json.RawMessage
+			if raw, ok := meta["files"]; ok {
+				if err := json.Unmarshal(raw, &files); err != nil {
+					return nil, fmt.Errorf("metadata files %s: %w", metaPath, err)
+				}
+			}
+			filesByManifest[metaPath] = files
+		}
+		files := filesByManifest[metaPath]
+		name := strings.Join(parts[depth:], "/")
+		if raw, exists := files[name]; exists {
+			var registered FileRef
+			if err := json.Unmarshal(raw, &registered); err != nil {
+				return nil, err
+			}
+			if registered.BareOID() != ref.BareOID() || !registered.IsLFS() {
+				return nil, fmt.Errorf("metadata reference for %s disagrees with missing pointer", artifactPath)
+			}
+			delete(files, name)
+			changed[metaPath] = true
+		}
+		if pipeline.IsTraceFile(name) {
+			if _, exists := manifests[metaPath]["trace"]; exists {
+				delete(manifests[metaPath], "trace")
+				changed[metaPath] = true
+			}
+		}
+	}
+	result := make(map[string][]byte)
+	for metaPath, files := range filesByManifest {
+		if !changed[metaPath] {
+			continue
+		}
+		encodedFiles, err := json.Marshal(files)
+		if err != nil {
+			return nil, err
+		}
+		meta := manifests[metaPath]
+		if files != nil {
+			meta["files"] = encodedFiles
+		}
+		content, err := json.MarshalIndent(meta, "", "  ")
+		if err != nil {
+			return nil, err
+		}
+		result[metaPath] = append(content, '\n')
+	}
 	return result, nil
 }
 
@@ -295,14 +401,10 @@ func squashUnpushed(ctx context.Context, repoPath, commitMsg string) error {
 	}
 
 	squashCtx, squashCancel := context.WithTimeout(ctx, 10*time.Second)
-	if err := gitutil.ValidateStagedLedgerCommit(squashCtx, repoPath); err != nil {
-		squashCancel()
-		return rollbackSoftReset(ctx, repoPath, original, fmt.Errorf("validate squash: %w", err))
-	}
-	_, err = gitutil.RunGit(squashCtx, repoPath, "commit", "-m", commitMsg, "--no-verify")
+	_, err = gitutil.CommitLedgerSnapshot(squashCtx, repoPath, commitMsg)
 	squashCancel()
 	if err != nil {
-		return rollbackSoftReset(ctx, repoPath, original, fmt.Errorf("squash commit: %w", err))
+		return rollbackSoftReset(ctx, repoPath, original, fmt.Errorf("validate squash or commit: %w", err))
 	}
 
 	return nil

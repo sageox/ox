@@ -21,7 +21,7 @@ const ProtocolVersion = 1
 // revision. Bumped when wire-level changes are made (new event types,
 // new HelloResponse fields) without changing the major ProtocolVersion.
 // Adapters can use this for fine-grained capability negotiation.
-const ProtocolDate = "2026-08-15"
+const ProtocolDate = "2026-09-21"
 
 // --- Adapter types ---
 
@@ -43,15 +43,35 @@ const (
 	CapSessionImporter    = "session_importer"
 	CapServeMode          = "serve_mode"
 	CapSubagentController = "subagent_controller"
-	CapRulesInstaller     = "rules_installer"
-	CapCommandsInstaller  = "commands_installer"
-	CapSkillsInstaller    = "skills_installer"
-	CapCapturePrior       = "capture_prior"
+	// DEPRECATED — scheduled for removal in ox 0.18.0. Announced in ox 0.6.2
+	// and superseded in ox 0.17.0 by the declarative InfoResponse.RuleTargets
+	// descriptor. No ox-bundled adapter declares it any more; ox honors it for
+	// one release so a third-party protocol-v1 adapter written against the
+	// 0.6.2 announcement keeps installing its rules while it migrates to
+	// rule_targets. The window and the migration path are stated for adapter
+	// authors in docs/guides/adapter-authoring.md.
+	//
+	// The machine-readable "Deprecated:" prefix is deliberately NOT used here:
+	// every remaining caller IS the compatibility path this window exists to
+	// preserve, so staticcheck SA1019 would fail the build on the very code
+	// being kept. Restore the prefix in the same change that deletes the
+	// window.
+	CapRulesInstaller    = "rules_installer"
+	CapCommandsInstaller = "commands_installer"
+	// Unlike CapRulesInstaller, this capability is NOT deprecated and carries
+	// no removal version: nine of ox's ten bundled adapters still declare it,
+	// and ox falls back to the imperative install-skills/check-skills/
+	// uninstall-skills RPCs whenever an adapter's InfoResponse.SkillTargets is
+	// empty. It becomes a removal candidate only once bundled and third-party
+	// adapters alike stop declaring it — see docs/guides/adapter-authoring.md.
+	CapSkillsInstaller = "skills_installer"
+	CapCapturePrior    = "capture_prior"
 )
 
-// Native project skill target vocabulary.
+// Native project inventory target vocabulary.
 const (
 	SkillFormatAgentSkillsV1 = "agent-skills/v1"
+	RuleFormatMarkdownV1     = "markdown-rules/v1"
 	SkillScopeProject        = "project"
 	SkillLinkPolicyReject    = "reject"
 )
@@ -84,10 +104,16 @@ type InfoResponse struct {
 	// ox CLI canonicalizes and deduplicates these descriptors before planning,
 	// so multiple adapters may safely advertise the same shared target.
 	SkillTargets []SkillTarget `json:"skill_targets,omitempty"`
+	// RuleTargets describes native, project-scoped rule roots. Rules use the
+	// same target descriptor and central inventory as skills; adapters only
+	// declare location and format, never install catalog content themselves.
+	RuleTargets []SkillTarget `json:"rule_targets,omitempty"`
 }
 
-// SkillTarget describes a native Agent Skills projection owned by the host.
-// Root is repository-relative; absolute and escaping paths are rejected.
+// SkillTarget describes a native asset projection owned by the host. The name
+// is retained for protocol-v1 compatibility; Format distinguishes Agent Skills
+// trees from flat Markdown rule catalogs. Root is repository-relative;
+// absolute and escaping paths are rejected.
 type SkillTarget struct {
 	Key        string `json:"key"`
 	Root       string `json:"root"`
@@ -133,12 +159,23 @@ type UninstallHooksResponse struct {
 }
 
 // RulesParams are passed to install-rules, check-rules, and uninstall-rules.
+//
+// DEPRECATED — scheduled for removal in ox 0.18.0. The install-rules /
+// check-rules / uninstall-rules RPCs were announced in ox 0.6.2 and superseded
+// in ox 0.17.0 by RuleTargets. Under the target model an adapter declares only
+// where its rules live and in what format, and ox reconciles the content
+// centrally from its own catalog — adapters no longer write rule files
+// themselves. Declare rule_targets instead. See CapRulesInstaller for the
+// compatibility window and why the "Deprecated:" prefix is withheld.
 type RulesParams struct {
 	RepoRoot string `json:"repo_root"`
 	Version  string `json:"version"` // ox version for stamped content
 }
 
 // InstallRulesResponse is returned by `install-rules`.
+//
+// DEPRECATED — scheduled for removal in ox 0.18.0; declare rule_targets
+// instead. See RulesParams.
 type InstallRulesResponse struct {
 	Installed bool `json:"installed"`
 	// FilesWritten lists the files this install wrote. Each entry MUST be
@@ -149,6 +186,9 @@ type InstallRulesResponse struct {
 }
 
 // CheckRulesResponse is returned by `check-rules`.
+//
+// DEPRECATED — scheduled for removal in ox 0.18.0; declare rule_targets
+// instead. See RulesParams.
 type CheckRulesResponse struct {
 	Installed bool     `json:"installed"`
 	Missing   []string `json:"missing,omitempty"`
@@ -157,6 +197,9 @@ type CheckRulesResponse struct {
 }
 
 // UninstallRulesResponse is returned by `uninstall-rules`.
+//
+// DEPRECATED — scheduled for removal in ox 0.18.0; declare rule_targets
+// instead. See RulesParams.
 type UninstallRulesResponse struct {
 	Uninstalled  bool     `json:"uninstalled"`
 	FilesRemoved []string `json:"files_removed"`

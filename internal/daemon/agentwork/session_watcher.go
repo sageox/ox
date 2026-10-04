@@ -388,6 +388,9 @@ func (m *SessionWatcherManager) runWatcher(
 		// way to call WriteEntry without redaction running first. Adapters can
 		// only emit RawEntry JSON on stdout — they have no write access to
 		// raw.jsonl.
+		if err := session.RecoverRawAppend(rawPath, state.SourceOffset); err != nil {
+			return err
+		}
 		rw, err := session.NewRawWriter(rawPath, aw.projectRoot)
 		if err != nil {
 			m.logger.Error("failed to open raw.jsonl for writing",
@@ -410,8 +413,11 @@ func (m *SessionWatcherManager) runWatcher(
 				m.logger.Warn("catch-up read failed; continuing from the persisted offset",
 					"session", aw.sessionName, "offset", cursor, "error", readErr)
 			case len(entries) > 0:
+				if newOffset <= cursor {
+					return fmt.Errorf("catch-up entries do not advance source cursor: %d <= %d", newOffset, cursor)
+				}
 				converted := session.ConvertRawEntries(entries)
-				if writeErr := writeEntries(rw, converted); writeErr != nil {
+				if writeErr := m.appendBatch(aw, rw, converted, newOffset); writeErr != nil {
 					// the cursor must NOT advance past entries that never reached
 					// the ledger: doing so marks them consumed and they are gone
 					// for good. Leaving it where it is costs a re-read.
@@ -420,7 +426,6 @@ func (m *SessionWatcherManager) runWatcher(
 					return nil
 				}
 				cursor = newOffset
-				m.persistOffset(aw, cursor, len(converted))
 				m.logger.Info("catch-up read recovered entries",
 					"session", aw.sessionName,
 					"entries", len(entries),
@@ -541,7 +546,7 @@ func (m *SessionWatcherManager) pollSession(
 		}
 
 		converted := session.ConvertRawEntries(entries)
-		if writeErr := writeEntries(rw, converted); writeErr != nil {
+		if writeErr := m.appendBatch(aw, rw, converted, newOffset); writeErr != nil {
 			// Advancing here would mark entries consumed that never reached
 			// the ledger, and the adapter would resume past them — they are
 			// unrecoverable. Stop with the cursor where it is so a restart
@@ -553,7 +558,6 @@ func (m *SessionWatcherManager) pollSession(
 		}
 
 		offset = newOffset
-		m.persistOffset(aw, offset, len(converted))
 	}
 }
 
@@ -571,34 +575,17 @@ func writeEntries(rw *session.RawWriter, entries []session.Entry) error {
 
 // persistOffset updates SourceOffset and EntryCount in .recording.json.
 // Uses atomic write (temp file + rename) to avoid races with CLI writes.
-// Best-effort: errors are logged but don't stop the watcher.
-func (m *SessionWatcherManager) persistOffset(aw *activeWatcher, offset int64, entryDelta int) {
-	recPath := filepath.Join(aw.cachePath, recordingMarker)
-	data, err := os.ReadFile(recPath)
-	if err != nil {
-		return
-	}
-	var state session.RecordingState
-	if err := json.Unmarshal(data, &state); err != nil {
-		return
-	}
-	state.SourceOffset = offset
-	state.EntryCount += entryDelta
-	updated, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		return
-	}
-	// atomic write: write to temp file then rename to avoid partial writes
-	// and reduce the race window with CLI writes to the same file
-	tmpPath := recPath + ".tmp"
-	if err := os.WriteFile(tmpPath, updated, 0600); err != nil {
-		m.logger.Debug("failed to write temp offset file", "session", aw.sessionName, "error", err)
-		return
-	}
-	if err := os.Rename(tmpPath, recPath); err != nil {
-		m.logger.Debug("failed to rename temp offset file", "session", aw.sessionName, "error", err)
-		_ = os.Remove(tmpPath)
-	}
+// Errors stop the watcher, preserving its append journal for recovery.
+func (m *SessionWatcherManager) persistOffset(aw *activeWatcher, offset int64, entryDelta int) error {
+	return session.MutateRecordingStateFile(filepath.Join(aw.cachePath, recordingMarker), func(state *session.RecordingState) error {
+		state.SourceOffset = offset
+		state.EntryCount += entryDelta
+		return nil
+	})
+}
+
+func (m *SessionWatcherManager) appendBatch(aw *activeWatcher, rw *session.RawWriter, entries []session.Entry, newOffset int64) error {
+	return rw.AppendRecordingBatch(filepath.Join(aw.cachePath, recordingMarker), entries, newOffset)
 }
 
 // resolveAdapter returns the adapter for the given name.

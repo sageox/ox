@@ -37,7 +37,8 @@ import (
 //     would have produced had it read the index instead of the worktree.
 //     Without pathspecs the whole-index tree from step 1 is used.
 //  3. Only the blobs the tree changes vs its parent are validated: index mode
-//     (ValidateLedgerEntryMode) and content (ValidateLedgerBlob). An
+//     (ValidateLedgerEntryMode) and content (ValidateLedgerBlob). LFS artifact
+//     names require pointers unless the same immutable tree registers storage=git. An
 //     unchanged blob was vetted when first committed; scanning the whole tree
 //     would cost O(repo) and risk flagging historical content.
 //  4. ADR-024 backstop: the same immutable delta is refused if it would delete

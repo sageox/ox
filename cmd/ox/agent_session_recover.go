@@ -1,17 +1,22 @@
 package main
 
 import (
-	"encoding/json"
+	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/doctor"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
@@ -90,16 +95,37 @@ func runAgentSessionRecover(inst *agentinstance.Instance) error {
 
 // recoverViaNormalStop uses the normal session stop flow when the adapter file exists.
 func recoverViaNormalStop(inst *agentinstance.Instance, projectRoot string, state *session.RecordingState) error {
-	// process session through the normal pipeline
-	result, err := processAgentSession(projectRoot, state)
+	// process session through the normal pipeline. Hold the raw.jsonl writer's
+	// file lock so this never races a hook or watcher still appending a batch
+	// under the same lock -- the recording may not actually be dead.
+	//
+	// The state handed in was loaded BEFORE the wait. A writer that held the
+	// lock may have committed a batch and advanced the cursor in the meantime;
+	// reconciling its journal against the stale cursor would truncate a
+	// committed batch, or re-import it and drop its redaction checkpoint.
+	// Reload under the lock, exactly as the stop path does.
+	var result *agentSessionResult
+	err := fileutil.WithFileLock(context.Background(), filepath.Join(state.SessionPath, "raw.jsonl"), func() error {
+		latest, reloadErr := reloadRecordingForFinalDrain(projectRoot, state)
+		if reloadErr != nil {
+			return reloadErr
+		}
+		var processErr error
+		if result, processErr = processAgentSession(projectRoot, latest); processErr != nil {
+			return processErr
+		}
+		// Clear before releasing the lock, and clear THIS recording. A hook
+		// queued on the lock re-reads the state once it gets in; if the state
+		// were still there it would append a batch that nothing will ever
+		// finalize, and recovery would then delete the evidence it exists.
+		if clearErr := session.ClearRecordingStateAt(latest.SessionPath, latest.SessionID); clearErr != nil {
+			return fmt.Errorf("clear recovered recording state: %w", clearErr)
+		}
+		return nil
+	})
 	if err != nil {
 		_ = doctor.SetNeedsDoctorAgent(projectRoot)
 		return fmt.Errorf("failed to process session: %w", err)
-	}
-
-	if err := session.ClearRecordingStateForAgent(projectRoot, inst.AgentID); err != nil {
-		_ = doctor.SetNeedsDoctorAgent(projectRoot)
-		return fmt.Errorf("failed to clear recovered recording state: %w", err)
 	}
 
 	output := &sessionRecoverOutput{
@@ -117,6 +143,29 @@ func recoverViaNormalStop(inst *agentinstance.Instance, projectRoot string, stat
 	return outputRecoverJSON(output)
 }
 
+// withCachedRecordingForRecovery runs fn on the recording as it stands once the
+// capture lock is ours, with any pending append journal already settled against
+// its current cursor. Everything that reads, publishes, discards, or clears the
+// cached recording runs inside it: "recover" is pointed at recordings that only
+// LOOK dead, and a capture that slipped in after the read would be left out of
+// the upload and then orphaned by the clear.
+func withCachedRecordingForRecovery(projectRoot string, state *session.RecordingState, rawPath string, fn func(latest *session.RecordingState) error) error {
+	return fileutil.WithFileLock(context.Background(), rawPath, func() error {
+		latest, err := reloadRecordingForFinalDrain(projectRoot, state)
+		if err == nil {
+			err = session.RecoverRawAppend(rawPath, latest.SourceOffset)
+		}
+		if err != nil {
+			// Fail closed and keep the recording: an unprovable journal must not
+			// be uploaded, and clearing state would discard the only cursor that
+			// can later prove it.
+			_ = doctor.SetNeedsDoctorAgent(projectRoot)
+			return fmt.Errorf("failed to reconcile cached session before recovery: %w", err)
+		}
+		return fn(latest)
+	})
+}
+
 // recoverFromCache uploads raw.jsonl from cache when the adapter file is gone.
 // raw.jsonl is the source of truth -- all other artifacts (events, summary)
 // can be regenerated from it. This ensures no session data is lost even when
@@ -125,15 +174,26 @@ func recoverViaNormalStop(inst *agentinstance.Instance, projectRoot string, stat
 // Interactive terminals get a confirmation prompt before uploading.
 // Non-interactive contexts (agents) auto-upload for backward compatibility.
 func recoverFromCache(inst *agentinstance.Instance, projectRoot string, state *session.RecordingState, rawPath string) error {
-	// read raw session to get entry count and entries for summary prompt
-	stored, err := session.ReadSessionFromPath(rawPath)
+	// A crash between a batch write and its cursor commit leaves unacknowledged
+	// bytes on raw.jsonl, possibly holding credential output whose redaction
+	// checkpoint never landed. Nothing reads the file before that is settled:
+	// what is read here is what gets published.
+	//
+	// The lock is NOT held across the prompt below -- a human decision can take
+	// minutes and a live hook gives up on the lock after seconds. So this first
+	// pass only sizes the prompt; publishing re-takes the lock and re-reads.
+	var entryCount int
+	err := withCachedRecordingForRecovery(projectRoot, state, rawPath, func(latest *session.RecordingState) error {
+		stored, readErr := session.ReadSessionFromPath(rawPath)
+		if readErr != nil {
+			return unreadableCachedSessionError(projectRoot, latest, readErr)
+		}
+		entryCount = len(stored.Entries)
+		return nil
+	})
 	if err != nil {
-		_ = session.ClearRecordingStateForAgent(projectRoot, state.AgentID)
-		return fmt.Errorf("failed to read cached session: %w", err)
+		return err
 	}
-
-	entryCount := len(stored.Entries)
-	entries := convertStoredMapEntries(stored.Entries)
 
 	// interactive confirmation: prompt human users before uploading orphaned sessions
 	if cli.IsInteractive() {
@@ -142,9 +202,8 @@ func recoverFromCache(inst *agentinstance.Instance, projectRoot string, state *s
 		if !cli.ConfirmYesNo(prompt, false) {
 			// user declined -- offer to discard
 			if cli.ConfirmYesNo("Discard the orphaned session data?", false) {
-				_ = session.ClearRecordingStateForAgent(projectRoot, state.AgentID)
-				if state.SessionPath != "" {
-					_ = os.RemoveAll(state.SessionPath)
+				if err := discardCachedRecording(projectRoot, state, rawPath); err != nil {
+					return err
 				}
 				output := &sessionRecoverOutput{
 					Success: true,
@@ -168,16 +227,131 @@ func recoverFromCache(inst *agentinstance.Instance, projectRoot string, state *s
 		}
 	}
 
+	var output *sessionRecoverOutput
+	err = withCachedRecordingForRecovery(projectRoot, state, rawPath, func(latest *session.RecordingState) error {
+		var publishErr error
+		output, publishErr = publishCachedRecording(inst, projectRoot, latest, rawPath)
+		return publishErr
+	})
+	if err != nil {
+		return err
+	}
+	return outputRecoverJSON(output)
+}
+
+// discardCachedRecording drops the recording the coworker chose to discard, and
+// only that one: the prompt it answers to was shown without the lock held.
+func discardCachedRecording(projectRoot string, state *session.RecordingState, rawPath string) error {
+	return withCachedRecordingForRecovery(projectRoot, state, rawPath, func(latest *session.RecordingState) error {
+		// The coworker asked for this transcript to be gone, so a removal that
+		// fails is an error, never "discarded": RemoveAll deletes what it can
+		// and reports the first entry it could not, which names what is left.
+		// The state file lives inside SessionPath and goes with it; the clear
+		// below only matters if a concurrent state update wrote it back.
+		if err := os.RemoveAll(latest.SessionPath); err != nil {
+			return fmt.Errorf("remove cached recording: %w", err)
+		}
+		return session.ClearRecordingStateAt(latest.SessionPath, latest.SessionID)
+	})
+}
+
+// unreadableCachedSessionError reports a cached transcript that could not be
+// read, and deliberately leaves the recording in place. The read can fail for
+// reasons that pass (permissions, a filesystem hiccup); clearing the state would
+// orphan the transcript for good, and nothing else points at it. Discarding it is
+// the coworker's call, so the error says how.
+func unreadableCachedSessionError(projectRoot string, state *session.RecordingState, readErr error) error {
+	_ = doctor.SetNeedsDoctorAgent(projectRoot)
+	return fmt.Errorf("failed to read cached session: %w\nrecording state preserved; retry 'ox agent %s session recover', or discard it with 'ox agent %s session abort'",
+		readErr, state.AgentID, state.AgentID)
+}
+
+// errRecoveryRefused marks a recovery stopped before it touched anything because
+// the Ledger entry it would write over cannot be proven to belong to this
+// recording.
+var errRecoveryRefused = errors.New("recovery refused to overwrite a Ledger session")
+
+// checkRecoveryDestination decides, before recovery mutates anything, whether
+// the Ledger directory for sessionName may receive this recording.
+// recoveredID is the ID the recording carries: its state, else its raw header.
+//
+// Recovery keeps the cache directory's name as the Ledger key, and two sessions
+// started in one minute can share it. A finalized session is the Ledger's record,
+// so recovery may rewrite it only when both IDs are present and equal (a retry
+// of an interrupted recovery). Every other finalized destination is refused.
+// Tradeoff: an interrupted legacy retry is now refused rather than guessed;
+// doctor surfaces it.
+//
+// Allowed: no meta.json yet, and a draft placeholder (it carries the ID the
+// finished session keeps) unless it names a different session.
+func checkRecoveryDestination(ledgerSessionDir, sessionName, recoveredID string) error {
+	// the name is the last element of a path in the recording state and becomes
+	// a Ledger path that a draft purge RemoveAlls: "", "." and ".." would
+	// address the Ledger or its sessions directory, not one session. (Unlike
+	// validateDraftSessionName this allows ".." inside a name: a username can
+	// carry it, and such a recovery must stay allowed.)
+	if sessionName == "" || sessionName == "." || sessionName == ".." || strings.ContainsAny(sessionName, `/\`) {
+		return fmt.Errorf("%w: cache directory name %q is not a single session name", errRecoveryRefused, sessionName)
+	}
+
+	existing, err := lfs.ReadSessionMeta(ledgerSessionDir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		// meta.json arrives from teammates by git, and its parse errors can echo
+		// its text back (a files key), so sanitize before it reaches a terminal
+		return fmt.Errorf("%w: session %q has unreadable existing metadata: %s", errRecoveryRefused, sessionName, cli.SanitizeTerminalText(err.Error()))
+	}
+
+	destinationID := existing.SessionID
+	if existing.IsDraft() {
+		if destinationID != "" && recoveredID != "" && destinationID != recoveredID {
+			return fmt.Errorf("%w: draft %q belongs to session ID %q, not the recovered session ID %q", errRecoveryRefused, sessionName, destinationID, recoveredID)
+		}
+		return nil
+	}
+
+	switch {
+	case destinationID == "":
+		return fmt.Errorf("%w: finalized session %q has legacy metadata without a session ID", errRecoveryRefused, sessionName)
+	case recoveredID == "":
+		return fmt.Errorf("%w: finalized session %q has session ID %q but the recording carries no session ID", errRecoveryRefused, sessionName, destinationID)
+	case destinationID != recoveredID:
+		return fmt.Errorf("%w: finalized session %q has session ID %q, not the recovered session ID %q", errRecoveryRefused, sessionName, destinationID, recoveredID)
+	}
+	return nil
+}
+
+// publishCachedRecording uploads the cached raw.jsonl and clears the recording.
+// The caller holds the capture lock with the journal settled, and keeps holding
+// it until this returns: the bytes read here are the bytes published, and the
+// recording cleared is the one they came from.
+func publishCachedRecording(inst *agentinstance.Instance, projectRoot string, state *session.RecordingState, rawPath string) (*sessionRecoverOutput, error) {
+	stored, err := session.ReadSessionFromPath(rawPath)
+	if err != nil {
+		return nil, unreadableCachedSessionError(projectRoot, state, err)
+	}
+	entryCount := len(stored.Entries)
+	entries := convertStoredMapEntries(stored.Entries)
+
 	// resolve ledger path for upload
 	ledgerPath, ledgerErr := resolveLedgerPath()
 
-	recoverEp := endpoint.GetForProject(projectRoot)
-	sessionName := session.GenerateSessionName(state.AgentID, identity.AttributionUsername(recoverEp, config.GetDisplayName()))
+	sessionName := session.GetSessionName(state.SessionPath)
+	startMinted := state.SessionID
+	if startMinted == "" {
+		startMinted = session.ReadHeaderSessionID(rawPath)
+	}
 	var ledgerSessionDir string
 	var uploaded bool
 
 	if ledgerErr == nil {
 		ledgerSessionDir = filepath.Join(ledgerPath, "sessions", sessionName)
+		if err := checkRecoveryDestination(ledgerSessionDir, sessionName, startMinted); err != nil {
+			_ = doctor.SetNeedsDoctorAgent(projectRoot)
+			return nil, err
+		}
 		if err := os.MkdirAll(ledgerSessionDir, 0755); err != nil {
 			slog.Warn("create ledger session dir failed", "error", err)
 		} else {
@@ -228,10 +402,6 @@ func recoverFromCache(inst *agentinstance.Instance, projectRoot string, state *s
 					// when neither source has one. Resolved before the builder
 					// is constructed so sessionMetaBase always receives the
 					// final ID.
-					startMinted := state.SessionID
-					if startMinted == "" {
-						startMinted = session.ReadHeaderSessionID(rawPath)
-					}
 					sessionID := session.ResolveOrMintSessionID(preservedID, startMinted)
 
 					displayName := identity.AttributionDisplayName(endpoint.GetForProject(projectRoot), config.GetDisplayName())
@@ -241,6 +411,8 @@ func recoverFromCache(inst *agentinstance.Instance, projectRoot string, state *s
 						ContinuedFromSessionID(state.ContinuedFromSessionID).
 						ProducedCommits(state.ProducedCommits).
 						ProducedPlans(state.ProducedPlans).
+						NativeSessions(state.NativeSessions).
+						StoppedAt(session.ResolveStoppedAt(state.StoppedAt, rawPath, time.Now())).
 						WithFiles(fileRefs)
 					meta := metaBuilder.Build()
 					if err := lfs.WriteSessionMeta(ledgerSessionDir, meta); err != nil {
@@ -281,8 +453,14 @@ func recoverFromCache(inst *agentinstance.Instance, projectRoot string, state *s
 		_ = session.WriteNeedsSummaryMarker(cacheDir, rawPath, ledgerSessionDir)
 	}
 
-	// clear stale recording state
-	_ = session.ClearRecordingStateForAgent(projectRoot, state.AgentID)
+	// clear stale recording state -- this recording, while the lock is still
+	// held. A clear that fails is not a recovery: the recording is still live, so
+	// a later hook would append to a published session and the next recover
+	// would publish it again.
+	if err := session.ClearRecordingStateAt(state.SessionPath, state.SessionID); err != nil {
+		_ = doctor.SetNeedsDoctorAgent(projectRoot)
+		return nil, fmt.Errorf("clear recovered recording state: %w", err)
+	}
 
 	// keep cache alive — raw.jsonl in ledger becomes an LFS stub after push,
 	// but push-summary needs to read it. Cache is pruned later by
@@ -304,14 +482,9 @@ func recoverFromCache(inst *agentinstance.Instance, projectRoot string, state *s
 		Message:          "session recovered from cache",
 		LedgerSessionDir: ledgerSessionDir,
 	}
-	return outputRecoverJSON(output)
+	return output, nil
 }
 
 func outputRecoverJSON(output *sessionRecoverOutput) error {
-	jsonOut, err := json.MarshalIndent(output, "", "  ")
-	if err != nil {
-		return fmt.Errorf("format recover JSON: %w", err)
-	}
-	fmt.Println(string(jsonOut))
-	return nil
+	return cli.PrintJSONTo(os.Stdout, output)
 }

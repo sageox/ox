@@ -350,7 +350,7 @@ for h in "${HUNTERS[@]}"; do
     continue
   fi
   (
-    invoke_claude "claude-sonnet-4-6" "$prompt" "$OUT/surface.md" "$OUT/hunter-${h}.jsonl" "0.05" \
+    invoke_claude "claude-sonnet-5" "$prompt" "$OUT/surface.md" "$OUT/hunter-${h}.jsonl" "0.05" \
       "$SKILL/schemas/hunter.json"
     # Expand the {"findings":[...]} envelope into bare JSONL lines, OR detect
     # the {"verdict":"error",...} stub that invoke_claude wrote on CLI failure.
@@ -420,7 +420,7 @@ done < "$OUT/hunter-status.tsv"
 # --- Phase 4: DEDUP ---------------------------------------------------------
 echo "[4/6] dedup (root-cause merge) ...................."
 if [[ -f "$SKILL/prompts/dedup.md" ]] && [[ -s "$OUT/findings-raw.jsonl" ]]; then
-  invoke_claude "claude-sonnet-4-6" "$SKILL/prompts/dedup.md" \
+  invoke_claude "claude-sonnet-5" "$SKILL/prompts/dedup.md" \
     "$OUT/findings-raw.jsonl" "$OUT/findings-deduped.jsonl" "0.05" \
     "$SKILL/schemas/dedup.json" \
     || { echo "cap hit during dedup; aborting"; exit 2; }
@@ -451,10 +451,10 @@ OPUS_CLASSES="authz cryptography multi-hop-taint agent-tool-abuse exploitability
 while IFS= read -r line; do
   [[ -z "$line" ]] && continue
   cls=$(echo "$line" | jq -r '.class // ""' 2>/dev/null || echo "")
-  model="claude-sonnet-4-6"
+  model="claude-sonnet-5"
   est="0.05"
   for opus_cls in $OPUS_CLASSES; do
-    [[ "$cls" == "$opus_cls" ]] && { model="claude-opus-4-7"; est="0.30"; break; }
+    [[ "$cls" == "$opus_cls" ]] && { model="claude-opus-5-5"; est="0.30"; break; }
   done
   if [[ -f "$SKILL/prompts/validator.md" ]]; then
     echo "$line" > "$OUT/.validate-input"

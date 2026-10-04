@@ -212,9 +212,7 @@ func runAgentSessionPlanHistory(inst *agentinstance.Instance, args []string) err
 		fmt.Printf("  Raw: %s\n", rawPath)
 		fmt.Println()
 		fmt.Println("--- Machine Output ---")
-		jsonOut, _ := json.MarshalIndent(output, "", "  ")
-		fmt.Println(string(jsonOut))
-		return nil
+		return cli.PrintJSONTo(os.Stdout, output)
 	}
 
 	if cfg.Text {
@@ -235,9 +233,7 @@ func runAgentSessionPlanHistory(inst *agentinstance.Instance, args []string) err
 	}
 
 	// default: JSON output
-	jsonOut, _ := json.MarshalIndent(output, "", "  ")
-	fmt.Println(string(jsonOut))
-	return nil
+	return cli.PrintJSONTo(os.Stdout, output)
 }
 
 // parsePlanHistoryFile extracts --file value from args.

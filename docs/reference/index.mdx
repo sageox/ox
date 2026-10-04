@@ -15,9 +15,10 @@ Shared team context between your AI and human coworkers. Sessions, ledgers, and 
 ### Options
 
 ```
-  -c, --config string    config file path (default: .sageox/config.yaml)
+  -c, --config string    user config file (overrides OX_USER_CONFIG)
   -h, --help             help for ox
       --json             output in JSON format (default: false)
+      --no-input         disable prompts and terminal UI; provide required input with arguments or flags
       --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
       --profile          generate CPU profile and execution trace for performance analysis (default: false)
   -q, --quiet            suppress non-error output (default: false)
@@ -28,6 +29,7 @@ Shared team context between your AI and human coworkers. Sessions, ledgers, and 
 ### SEE ALSO
 
 * [ox adapter](/adapter)	 - Manage external adapter binaries
+* [ox addons](/addons)	 - Install skills, rules, and the context each skill carries
 * [ox code](/code)	 - Search code, symbols, history, PRs, and comments in this repo
 * [ox conversation](/conversation)	 - Read recorded team conversations from the local Team Context
 * [ox decision](/decision)	 - Work with Decision Records (ADRs, DDRs) — enrich with team context
@@ -44,7 +46,7 @@ Shared team context between your AI and human coworkers. Sessions, ledgers, and 
 * [ox login](/login)	 - Authenticate with sageox.ai
 * [ox logout](/logout)	 - Log out of SageOx
 * [ox murmur](/murmur)	 - Publish a coordination signal to other AI coworkers
-* [ox plan](/plan)	 - Work with implementation plans (enrich, render, review)
+* [ox plan](/plan)	 - Work with plans (enrich, render, review)
 * [ox pr](/pr)	 - Author SageOx content for pull requests
 * [ox query](/query)	 - Search team knowledge
 * [ox recap](/recap)	 - Show the concrete value SageOx has delivered to your work
@@ -55,5 +57,5 @@ Shared team context between your AI and human coworkers. Sessions, ledgers, and 
 * [ox sync](/sync)	 - Manually sync ledger/team contexts (rarely needed)
 * [ox team](/team)	 - Work with your teams and coworkers
 * [ox uninstall](/uninstall)	 - Remove SageOx from this repository
-* [ox upgrade](/upgrade)	 - Upgrade ox to the latest version
+* [ox upgrade](/upgrade)	 - Upgrade ox to the latest or a specific version
 * [ox viz](/viz)	 - Choose, author, render, and lint visual explanations

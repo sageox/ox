@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/teamaccess"
 	"github.com/sageox/ox/internal/testguard"
 	"github.com/stretchr/testify/require"
 )
@@ -29,6 +30,7 @@ type conversationE2E struct {
 	workspace   string
 	primaryTeam conversationTeamContext
 	configHome  string
+	cacheHome   string
 	env         []string
 }
 
@@ -109,6 +111,12 @@ func setupConversationWorkspace(t *testing.T, now time.Time) *conversationE2E {
 	writeConversationProjectConfig(t, workspace, primary)
 	writeConversationLocalConfigTeams(t, workspace, []conversationTeamContext{primary})
 	writeConversationFakeAuth(t, configHome, now)
+	// The access gate needs a membership confirmation, and this harness has
+	// no server to ask: seed the one a server would have written, fresh.
+	// Tests of the gate itself remove it (removeConversationAccessCache) or
+	// point the harness at a fake server.
+	require.NoError(t, teamaccess.SeedAllowed(filepath.Join(cacheHome, "sageox"),
+		"https://test.sageox.ai", conversationFakeAccessToken, primary.id, time.Now()))
 
 	env := []string{
 		"HOME=" + home,
@@ -126,6 +134,7 @@ func setupConversationWorkspace(t *testing.T, now time.Time) *conversationE2E {
 		workspace:   workspace,
 		primaryTeam: primary,
 		configHome:  configHome,
+		cacheHome:   cacheHome,
 		env:         env,
 	}
 }
@@ -225,9 +234,13 @@ func writeConversationLocalConfigTeams(t *testing.T, workspace string, teams []c
 	require.NoError(t, os.WriteFile(path, []byte(sb.String()), 0o600))
 }
 
+// conversationFakeAccessToken is the harness login's access token.
+const conversationFakeAccessToken = "test-access-token"
+
 // writeConversationFakeAuth writes a minimal auth.json under the rerouted XDG config
-// home. No network calls happen in this test suite — the file exists
-// only so endpoint resolution inside ox does not refuse to run. `now`
+// home. No network calls happen in this test suite: the access gate is
+// satisfied by the seeded membership cache, so this credential is never
+// presented to a server. `now`
 // is the harness's reference instant — `expires_at` is derived from it
 // so the file's contents are deterministic across wall-clock drift.
 func writeConversationFakeAuth(t *testing.T, configHome string, now time.Time) {
@@ -238,7 +251,7 @@ func writeConversationFakeAuth(t *testing.T, configHome string, now time.Time) {
 	token := map[string]any{
 		"tokens": map[string]any{
 			"test.sageox.ai": map[string]any{
-				"access_token": "test-access-token",
+				"access_token": conversationFakeAccessToken,
 				"token_type":   "Bearer",
 				"expires_at":   now.Add(24 * time.Hour).Format(time.RFC3339),
 			},

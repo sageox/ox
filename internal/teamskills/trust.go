@@ -74,10 +74,22 @@ var scriptExtensions = map[string]bool{
 	".py": true, ".rb": true, ".pl": true, ".lua": true,
 	".ps1": true, ".bat": true, ".cmd": true,
 	".js": true, ".mjs": true, ".cjs": true, ".ts": true, ".php": true,
+	".command": true, ".exs": true, ".awk": true, ".vbs": true,
+	".scpt": true, ".applescript": true, ".gradle": true, ".tf": true,
 }
 
 // scriptDirNames are directory names that mean "runnable" at ANY depth.
-var scriptDirNames = map[string]bool{"scripts": true, "script": true, "bin": true}
+var scriptDirNames = map[string]bool{
+	"scripts": true, "script": true, "bin": true, "hooks": true,
+}
+
+// scriptBaseNames are conventional interpreter/build entrypoints whose names,
+// rather than extensions or bytes, make them runnable.
+var scriptBaseNames = map[string]bool{
+	"makefile": true, "gnumakefile": true, "justfile": true,
+	"taskfile.yml": true, "taskfile.yaml": true,
+	"dockerfile": true, "containerfile": true,
+}
 
 // IsExecutableFile reports whether a skill file can cause code to run, and why.
 //
@@ -94,6 +106,9 @@ func IsExecutableFile(relPath string, content []byte) (bool, string) {
 		if scriptDirNames[strings.ToLower(seg)] {
 			return true, "under " + seg + "/"
 		}
+	}
+	if scriptBaseNames[strings.ToLower(path.Base(clean))] {
+		return true, "runnable filename " + path.Base(clean)
 	}
 	if scriptExtensions[strings.ToLower(path.Ext(clean))] {
 		return true, "script extension " + path.Ext(clean)
@@ -162,7 +177,14 @@ func Classify(s Skill) Verdict {
 		// Frontmatter and inline-command checks apply to markdown; a non-runnable
 		// asset is inert until something runs it, and the predicate above already
 		// covers anything that is runnable.
-		if !strings.HasSuffix(clean, ".md") {
+		//
+		// Case-INSENSITIVE, matching the extension check above. Discovery Lstats
+		// "SKILL.md", which APFS and every Windows volume resolve to a file
+		// actually named SKILL.MD; a case-sensitive test here returned before ever
+		// looking for `allowed-tools:` or an inline command, so that manifest
+		// classified as prose and auto-installed with a shell grant nobody
+		// approved.
+		if !strings.EqualFold(path.Ext(clean), ".md") {
 			continue
 		}
 		normalized := strings.ReplaceAll(string(f.Content), "\r\n", "\n")

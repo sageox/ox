@@ -1,0 +1,14 @@
+{
+  "$schema_version": 1,
+  "id": "cnv_019ffe10-0000-7000-8000-000000000011",
+  "type": "recording",
+  "context_type": "team",
+  "context_id": "team_fixture01",
+  "title": "Settings walkthrough",
+  "started_at": "2026-08-18T01:00:00Z",
+  "ended_at": null,
+  "finalized_at": null,
+  "sealed_at": null,
+  "boundary_ref": "",
+  "clock": {"t0": "2026-08-18T01:00:00Z", "clock_class": "recording-local", "pauses": []}
+}

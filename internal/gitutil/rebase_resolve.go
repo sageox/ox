@@ -70,7 +70,10 @@ func resolveOneRebaseStep(ctx context.Context, repoPath string, safePrefixes []s
 	// list all unmerged files from the index (handles content, rename, and delete conflicts)
 	entries, err := listUnmergedEntries(ctx, repoPath)
 	if err != nil {
-		return false, fmt.Errorf("list unmerged entries: %w", err)
+		// Unwrapped for the same reason as ResolveAutostashConflicts: the
+		// ErrConflictProbeFailed tag must survive to the caller, and the
+		// wrapped message already names the command that failed.
+		return false, err
 	}
 	if len(entries) == 0 {
 		// No conflicts. If a rebase is still running, it halted for some reason
@@ -408,6 +411,17 @@ type unmergedEntry struct {
 	path  string
 }
 
+// HasUnmergedEntries reports whether repoPath's index currently holds unmerged
+// (conflicted) entries. An error means the probe could not run and is tagged
+// with ErrConflictProbeFailed — it is NOT a report that the index is clean.
+func HasUnmergedEntries(ctx context.Context, repoPath string) (bool, error) {
+	entries, err := listUnmergedEntries(ctx, repoPath)
+	if err != nil {
+		return false, err
+	}
+	return len(entries) > 0, nil
+}
+
 // listUnmergedEntries returns all unmerged entries from the git index.
 // Uses git ls-files --unmerged which correctly reports rename/rename,
 // rename/delete, and content conflicts — unlike git diff --diff-filter=U
@@ -415,7 +429,15 @@ type unmergedEntry struct {
 func listUnmergedEntries(ctx context.Context, repoPath string) ([]unmergedEntry, error) {
 	out, err := RunGit(ctx, repoPath, "ls-files", "--unmerged")
 	if err != nil {
-		return nil, err
+		// Tag every probe FAILURE so callers can tell it from a probe RESULT.
+		// The most likely error here is context cancellation (laptop sleep, VPN
+		// flap, daemon shutdown), which kills git before it writes a byte of
+		// stderr — an error that proves nothing about the index. Note that such
+		// an error does not necessarily NAME cancellation: exec.CommandContext
+		// only returns the context error when the context was already dead
+		// before Start, and otherwise reports "signal: killed". See
+		// ErrConflictProbeFailed in conflict.go.
+		return nil, fmt.Errorf("%w: git ls-files --unmerged: %w", ErrConflictProbeFailed, err)
 	}
 	out = strings.TrimSpace(out)
 	if out == "" {

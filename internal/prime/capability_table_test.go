@@ -149,7 +149,7 @@ func TestOxCapabilitiesClassInvariants(t *testing.T) {
 
 // TestOxCapabilitiesCountsByClass pins the expected entry counts so the table
 // stays in sync with the documented surface inventory (5 floor, 0 command,
-// 18 skill = 23 total). Update deliberately when surfaces change.
+// 19 skill = 24 total). Update deliberately when surfaces change.
 func TestOxCapabilitiesCountsByClass(t *testing.T) {
 	counts := map[MechanismClass]int{}
 	for _, c := range OxCapabilities() {
@@ -161,17 +161,17 @@ func TestOxCapabilitiesCountsByClass(t *testing.T) {
 		// Claude-only .claude/commands surface became skills, so the same
 		// lifecycle affordances now reach every adapter with a skills root.
 		MechanismCommand: 0,
-		// 4 auto-activating playbooks + the committed `sageox` on-ramp
+		// 5 auto-activating playbooks + the committed `sageox` on-ramp
 		// + 13 slash-only lifecycle surfaces folded in from commands.
-		MechanismSkill: 18,
+		MechanismSkill: 19,
 	}
 	for class, n := range want {
 		if counts[class] != n {
 			t.Errorf("mechanism_class %q: got %d entries, want %d", class, counts[class], n)
 		}
 	}
-	if total := len(OxCapabilities()); total != 23 {
-		t.Errorf("total capabilities: got %d, want 23", total)
+	if total := len(OxCapabilities()); total != 24 {
+		t.Errorf("total capabilities: got %d, want 24", total)
 	}
 }
 
@@ -267,5 +267,35 @@ func TestOxVizSkillActivatesForMaterialPRWriting(t *testing.T) {
 		if !strings.Contains(string(content), want) {
 			t.Errorf("ox-cli-viz activation description missing %q", want)
 		}
+	}
+}
+
+// TestAdditiveSkillsAllExistOnDisk closes the table→disk direction that
+// TestEveryOnDiskSurfaceIsAccounted leaves open.
+//
+// That test asks "is every on-disk surface accounted for?" — it cannot notice an
+// allowlist entry for a surface that no longer exists. `post-cutoff` was exactly
+// that: it moved out of extensions/skills/ into the Add-on Catalog
+// (extensions/addons/, ADR-032 D6) and its additiveSkills entry stayed behind,
+// still excusing it from the conformance table. Nothing failed, because nothing
+// looked in this direction.
+//
+// Failure prevented: a dead exemption outliving the thing it exempted, so a
+// later skill reusing that name inherits an excuse nobody granted it.
+func TestAdditiveSkillsAllExistOnDisk(t *testing.T) {
+	root := repoRoot(t)
+
+	for id, reason := range additiveSkills {
+		skill := filepath.Join(root, "extensions", "skills", id, "SKILL.md")
+		command := filepath.Join(root, "extensions", "claude", "commands", id+".md")
+
+		_, skillErr := os.Stat(skill)
+		_, commandErr := os.Stat(command)
+		if skillErr == nil || commandErr == nil {
+			continue
+		}
+		t.Errorf("additiveSkills excuses %q from the conformance table, but no such surface is on disk "+
+			"(looked for %s and %s) — remove the entry, or restore the surface (reason on file: %q)",
+			id, skill, command, reason)
 	}
 }

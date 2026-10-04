@@ -1,0 +1,28 @@
+{
+  "$schema_version": 1,
+  "layer_id": "clyr_01a0f484-0000-7000-8000-0000000000c1",
+  "conversation_id": "cnv_01a0f488-0000-7000-8000-0000000000b1",
+  "kind": "pointer",
+  "modality": "json",
+  "mime": "application/x-ndjson",
+  "label": "Pointer — Browser · Team",
+  "origin": "captured",
+  "revision": 1,
+  "status": "active",
+  "supersedes": null,
+  "clock": {"t0": "2026-09-30T10:00:00.500Z", "class": "wall-clock", "offset_ms": 0},
+  "coverage": {
+    "spans": [{"start_utc": "2026-09-30T10:00:00.500Z", "end_utc": "2026-09-30T10:00:25.500Z"}],
+    "gaps": [
+      {"start_utc": "2026-09-30T10:00:01.500Z", "end_utc": "2026-09-30T10:00:02.500Z", "reason": "pointer-outside-target"},
+      {"start_utc": "2026-09-30T10:00:23.500Z", "end_utc": "2026-09-30T10:00:24.500Z", "reason": "pointer-outside-target"}
+    ]
+  },
+  "content": {
+    "kind": "pointer",
+    "sample_hz": 2,
+    "coord_space": "target",
+    "refs": [{"ref": "git-file", "path": "pointer.jsonl", "mime": "application/x-ndjson"}],
+    "target_initial": {"kind": "window", "app": "Browser", "title": "Team", "size": {"w": 1440, "h": 900}, "backing_scale": 2, "display_id": "disp_1"}
+  }
+}

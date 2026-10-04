@@ -1572,3 +1572,31 @@ func BenchmarkContainsSecrets(b *testing.B) {
 		r.ContainsSecrets(input)
 	}
 }
+
+// Both secret-scanning hot paths read whole raw.jsonl lines, and a single
+// tool-output line runs to megabytes — the size class that decides how long
+// `ox session stop` blocks and what every entry write costs. Measure at that
+// scale rather than the sentence scale the benchmarks above use, and measure
+// both catalogs: they differ by ~190 detectors, so a keyword regression in the
+// gitleaks tiers would be invisible to the pre-push catalog alone.
+func BenchmarkScanForSecrets_MegabyteLine(b *testing.B) {
+	input := strings.Repeat("x", 1024*1024)
+
+	for _, tc := range []struct {
+		name     string
+		redactor *Redactor
+	}{
+		// What scanPaths builds in cmd/ox/prepush_scan.go.
+		{"prepush_catalog", NewRedactor()},
+		// What RawWriter applies to every session entry write.
+		{"production_catalog", NewRedactorWithPatterns(productionCatalog())},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			b.SetBytes(int64(len(input)))
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				tc.redactor.ScanForSecrets(input)
+			}
+		})
+	}
+}

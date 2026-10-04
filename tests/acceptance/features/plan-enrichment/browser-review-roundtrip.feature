@@ -80,3 +80,50 @@ Feature: The Browser Review Round-Trip
       When his connection to the review loop drops and then comes back
       Then Quinn's in-progress marks are still on the page
       And he can submit them once he is back
+
+  Rule: A reviewer can comment on exactly the words they highlight
+
+    Scenario: Devon highlights a phrase and Avery receives those exact words
+      Given Devon is reviewing one of Avery's plans on the served review page
+      When Devon highlights a phrase in a section, writes a note, and submits
+      Then Avery receives the item with the highlighted words, the section, and the note
+      And Devon's page shows the phrase highlighted
+
+    Scenario: Devon still marks a whole section with a plain click
+      Given Devon highlighted a phrase in a section
+      When Devon clicks elsewhere in that section and leaves a note
+      Then that note is about the whole section, not the phrase
+      And Avery receives the highlight and the section note as separate items
+
+    Scenario: Devon highlights a word the section repeats
+      Given a word appears twice in one section of Avery's plan
+      When Devon highlights just that word
+      Then ox asks Devon to highlight a longer phrase
+      And no comment is left on an ambiguous spot
+
+    Scenario: Avery addresses a highlight and Devon's page shows it resolved
+      Given Devon left a highlight on Avery's plan and is still on the page
+      When Avery addresses the highlight and marks it resolved
+      Then Devon's page shows the highlighted words as addressed without Devon reopening it
+
+    Scenario: Avery rewrites the highlighted words and Devon can still accept the fix
+      Given Avery addressed Devon's highlight by rewriting the words it covered
+      When Devon looks at the comments on the page
+      Then the highlight is still listed, marked addressed with its text changed
+      And Devon can accept or reopen it from there
+
+    Scenario: Devon reopens a highlight and Avery gets the words back
+      Given Avery marked Devon's highlight addressed but Devon is not satisfied
+      When Devon reopens it on the page
+      Then the item that returns to Avery still quotes the highlighted words
+
+    Scenario: Quinn's unsent highlight survives the review server restarting
+      Given Quinn highlighted a phrase and saved a note but has not submitted it
+      When the review server stops and is started again
+      Then Quinn's page reconnects on its own with the phrase still highlighted and the note intact
+      And Quinn can submit it once the page is back
+
+    Scenario: Quinn reloads the page while the review server is down
+      Given Quinn opened the review page and left an unsent highlight
+      When the review server stops and Quinn reloads the page
+      Then the plan still shows, marked offline, with the phrase still highlighted

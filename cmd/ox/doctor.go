@@ -2,15 +2,17 @@ package main
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
 	lipgloss "charm.land/lipgloss/v2"
 
 	"github.com/sageox/ox/internal/auth"
@@ -20,6 +22,7 @@ import (
 	"github.com/sageox/ox/internal/doctor"
 	"github.com/sageox/ox/internal/doctor/checks"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/perf"
 	"github.com/sageox/ox/internal/tips"
@@ -37,6 +40,7 @@ type checkResult struct {
 	priority      string // "critical", "info", or "" (default warning)
 	message       string
 	detail        string        // action hint shown on next line with └─
+	err           error         // preserves interruption through diagnostic checks
 	detailRaw     bool          // if true, detail is pre-styled; skip MutedStyle wrapping
 	children      []checkResult // nested child checks shown with ⎿
 	fixLevel      FixLevel      // how fix should behave (from DoctorCheck metadata)
@@ -120,7 +124,7 @@ type doctorOptions struct {
 // When fixSlugs has entries, returns true only if slug is in the list.
 func (opts doctorOptions) shouldFix(slug string) bool {
 	// auto-fix checks always apply their fix (they're non-destructive and always safe)
-	if check, ok := DoctorCheckRegistry[slug]; ok && check.IsAutoFixable() {
+	if check := GetDoctorCheck(slug); check != nil && check.IsAutoFixable() {
 		return true
 	}
 	if len(opts.fixSlugs) == 0 {
@@ -144,10 +148,15 @@ type doctorState struct {
 
 var doctorCmd = &cobra.Command{
 	Use:   "doctor",
+	Args:  cobra.NoArgs,
 	Short: "Run diagnostics on ox installation and configuration",
 	Long: `Run comprehensive diagnostics on your ox installation, project configuration,
 git health, agent environment, and connected services. Use --fix to auto-repair
-common issues, or --fix-slug to target specific checks.`,
+common issues, or --fix-slug to target specific checks.
+
+Exits 1 if any check fails or required setup is missing, including with --json.
+Warnings and skipped checks alone exit 0. JSON output remains a single report;
+read summary.has_failed for the result and the process exit code for scripting.`,
 	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		// --force-session-uploads: force detection and upload of incomplete sessions
@@ -222,7 +231,7 @@ common issues, or --fix-slug to target specific checks.`,
 		// short-circuit: not in a git repo
 		if gitRoot == "" {
 			if cfg != nil && cfg.JSON {
-				return json.NewEncoder(cmd.OutOrStdout()).Encode(JSONDoctorOutput{
+				if err := cli.PrintJSONTo(cmd.OutOrStdout(), JSONDoctorOutput{
 					Summary: JSONSummary{Failed: 1, HasFailed: true},
 					Categories: []JSONCategory{{
 						Name: "Setup",
@@ -231,7 +240,10 @@ common issues, or --fix-slug to target specific checks.`,
 							Message: "not inside a git repository",
 						}},
 					}},
-				})
+				}); err != nil {
+					return err
+				}
+				return doctorExitError(true, "Setup")
 			}
 			w := cmd.OutOrStdout()
 			renderDoctorHeader(w, false)
@@ -247,7 +259,7 @@ common issues, or --fix-slug to target specific checks.`,
 			content := strings.Join(steps, "\n")
 			fmt.Fprintln(w, ui.RenderBox("No Git Repository", content, ui.BoxWarning))
 			fmt.Fprintln(w)
-			return nil
+			return doctorExitError(true, "Setup")
 		}
 
 		// short-circuit with setup guidance if not ready
@@ -266,10 +278,13 @@ common issues, or --fix-slug to target specific checks.`,
 						Message: "not initialized — run 'ox init' to set up this project",
 					})
 				}
-				return json.NewEncoder(cmd.OutOrStdout()).Encode(JSONDoctorOutput{
+				if err := cli.PrintJSONTo(cmd.OutOrStdout(), JSONDoctorOutput{
 					Summary:    JSONSummary{Failed: len(checks), HasFailed: true},
 					Categories: []JSONCategory{{Name: "Setup", Checks: checks}},
-				})
+				}); err != nil {
+					return err
+				}
+				return doctorExitError(true, "Setup")
 			}
 			w := cmd.OutOrStdout()
 			renderDoctorHeader(w, false)
@@ -304,7 +319,7 @@ common issues, or --fix-slug to target specific checks.`,
 			content := strings.Join(steps, "\n")
 			fmt.Fprintln(w, ui.RenderBox("Setup Required", content, ui.BoxWarning))
 			fmt.Fprintln(w)
-			return nil
+			return doctorExitError(true, "Setup")
 		}
 
 		fix, _ := cmd.Flags().GetBool("fix")
@@ -331,7 +346,7 @@ common issues, or --fix-slug to target specific checks.`,
 
 		opts := doctorOptions{
 			fix:      fix || len(fixSlugs) > 0, // --fix-slug implies fix mode
-			fixSlugs: fixSlugs,
+			fixSlugs: canonicalFixSlugs(fixSlugs),
 			forceYes: forceYes,
 			verbose:  verbose,
 		}
@@ -341,7 +356,10 @@ common issues, or --fix-slug to target specific checks.`,
 			renderDoctorHeader(cmd.OutOrStdout(), opts.fix)
 		}
 
-		categories := runDoctorChecks(cmd.Context(), opts)
+		categories, err := runDoctorChecks(cmd.Context(), opts)
+		if err != nil {
+			return err
+		}
 		hasFailed := displayDoctorResults(cmd, categories, opts)
 
 		// record doctor run timestamp for staleness tracking
@@ -374,11 +392,40 @@ common issues, or --fix-slug to target specific checks.`,
 		// PAT is exactly the class of thing they'd want surfaced.
 		_ = auth.CheckAndWarnExpiry(cmd.Context(), projectEndpoint, os.Stderr)
 
-		if hasFailed && (cfg == nil || !cfg.JSON) {
-			return fmt.Errorf("some checks failed")
-		}
-		return nil
+		return doctorExitError(hasFailed, strings.Join(failedCheckCategories(categories), ","))
 	},
+}
+
+// The report decides success in every output mode. JSON already contains the
+// failure details, so return its exit code without a second error message.
+func doctorExitError(hasFailed bool, detail string) error {
+	if !hasFailed {
+		return nil
+	}
+	err := errors.New("some checks failed")
+	if cfg != nil && cfg.JSON {
+		err = &commandExitError{ExitCode: 1, Message: err.Error()}
+	}
+	return errkind.WithDetail(errkind.ChecksFailed, detail, err)
+}
+
+// failedCheckCategories names the categories holding a failed check, in
+// report order. Usage telemetry sends them, and they are fixed names; a
+// check's own name can carry a repository name or a path.
+func failedCheckCategories(categories []checkCategory) []string {
+	var names []string
+	for _, cat := range categories {
+		if slices.ContainsFunc(cat.checks, checkFailed) && !slices.Contains(names, cat.name) {
+			names = append(names, cat.name)
+		}
+	}
+	return names
+}
+
+// checkFailed is the failure the report counts: a check or a child check
+// that neither passed nor was skipped.
+func checkFailed(c checkResult) bool {
+	return (!c.passed && !c.skipped) || slices.ContainsFunc(c.children, checkFailed)
 }
 
 var gcCmd = &cobra.Command{
@@ -391,11 +438,34 @@ var gcCmd = &cobra.Command{
 	},
 }
 
+// canonicalFixSlugs resolves retired public slugs to the check that replaced
+// them, so every membership test downstream compares canonical names only.
+// Users keep typing the retired spelling and nothing past this point has to
+// know that — without it, each call site has to hand-OR both spellings, which
+// means the NEXT alias silently fixes nothing. Unknown and adapter slugs pass
+// through untouched so validation still reports what the user actually typed.
+func canonicalFixSlugs(slugs []string) []string {
+	if len(slugs) == 0 {
+		return slugs
+	}
+	canonical := make([]string, 0, len(slugs))
+	for _, slug := range slugs {
+		if replacement, ok := DoctorCheckAliases[slug]; ok {
+			slug = replacement
+		}
+		canonical = append(canonical, slug)
+	}
+	return canonical
+}
+
 // getAvailableSlugs returns a sorted list of all registered check slugs.
 func getAvailableSlugs() []string {
-	var slugs []string
+	slugs := make([]string, 0, len(DoctorCheckRegistry)+len(DoctorCheckAliases))
 	for slug := range DoctorCheckRegistry {
 		slugs = append(slugs, slug)
+	}
+	for alias := range DoctorCheckAliases {
+		slugs = append(slugs, alias)
 	}
 	sort.Strings(slugs)
 	return slugs
@@ -686,11 +756,11 @@ func (p *doctorProgress) clear() {
 	fmt.Fprint(os.Stderr, "\r\033[K")
 }
 
-func runDoctorChecks(parent context.Context, opts doctorOptions) []checkCategory {
+func runDoctorChecks(parent context.Context, opts doctorOptions) ([]checkCategory, error) {
 	return runDoctorChecksWithState(parent, opts, detectDoctorState())
 }
 
-func runDoctorChecksWithState(parent context.Context, opts doctorOptions, state doctorState) []checkCategory {
+func runDoctorChecksWithState(parent context.Context, opts doctorOptions, state doctorState) ([]checkCategory, error) {
 	var categories []checkCategory
 	if parent == nil {
 		parent = context.Background()
@@ -766,11 +836,6 @@ func runDoctorChecksWithState(parent context.Context, opts doctorOptions, state 
 		checkAgentsIntegrationWithFix(os.Stdout, opts.shouldFix(CheckSlugClaudeCodeHooks)),
 		checkInstructionFileMarkers(),
 	}
-	// detect adapter rules drift across all rules-installing adapters (claude, droid);
-	// runs unconditionally and is skipped gracefully when no rules adapter is present
-	if rulesCheck := checkAdapterRules(opts.shouldFix(CheckSlugAdapterRules)); !rulesCheck.skipped {
-		integrationChecks = append(integrationChecks, rulesCheck)
-	}
 	if detectClaudeCode() {
 		integrationChecks = append(integrationChecks, checkClaudeCodeHooks(opts.shouldFix(CheckSlugClaudeCodeHooks)))
 		// validate hook commands after checking hooks exist
@@ -821,6 +886,9 @@ func runDoctorChecksWithState(parent context.Context, opts doctorOptions, state 
 	if legacyFix && legacyRoot != "" {
 		legacyPreflight = migrationBlocker(legacyRoot)
 	}
+	if check := GetDoctorCheck(CheckSlugSessionTrace); check != nil {
+		integrationChecks = append(integrationChecks, check.Run(opts.shouldFix(CheckSlugSessionTrace)))
+	}
 	integrationChecks = append(integrationChecks, checkClaudeSkills(opts.shouldFix(CheckSlugClaudeSkills)))
 	legacyCheck, legacyPending := checkLegacyOxFilesWithPreflight(legacyRoot, legacyFix, legacyPreflight)
 	// The ox-managed inventory: keep ox's own files ignored, report any that are
@@ -832,6 +900,12 @@ func runDoctorChecksWithState(parent context.Context, opts doctorOptions, state 
 		legacyCheck,
 		checkOxIgnoreRules(ignoreFix),
 		checkOxFilesNotTracked(opts.shouldFix(CheckSlugOxFilesUntracked)),
+		// The other side of those ignore rules: a hand-authored skill whose name
+		// ends in "-team" matches the Team Context glob and silently stops reaching
+		// git. Nothing above can see it — it is not ox-managed, so no plan mentions
+		// it — and it keeps working locally, so the author only finds out when a
+		// teammate asks where their skill went.
+		checkTeamSuffixShadow(opts.shouldFix(CheckSlugTeamSuffixShadow)),
 	)
 	if detectAmp() {
 		integrationChecks = append(integrationChecks, checkAmpHooks(opts.shouldFix(CheckSlugAmpHooks)))
@@ -879,6 +953,7 @@ func runDoctorChecksWithState(parent context.Context, opts doctorOptions, state 
 		checkGitRepoState(),
 		checkMergeConflicts(),
 		checkGitLockFiles(), // check for stale lock files
+		checkLedgerGitLockFiles(),
 	}
 	// slow checks only run with --fix
 	if opts.fix {
@@ -894,7 +969,11 @@ func runDoctorChecksWithState(parent context.Context, opts doctorOptions, state 
 
 	// git repo paths check - suppress individual warnings when not logged in
 	if state.isAuthenticated {
-		gitRepoChecks = append(gitRepoChecks, checkGitRepoPaths(opts.shouldFix(CheckSlugGitRepoPaths)))
+		check := checkGitRepoPaths(opts.shouldFix(CheckSlugGitRepoPaths))
+		if errors.Is(check.err, tea.ErrInterrupted) {
+			return categories, check.err
+		}
+		gitRepoChecks = append(gitRepoChecks, check)
 	} else {
 		gitRepoChecks = append(gitRepoChecks, SkippedCheck("git repo paths", "requires login", ""))
 	}
@@ -1191,7 +1270,7 @@ func runDoctorChecksWithState(parent context.Context, opts doctorOptions, state 
 	// enrich check results with fix metadata from registry
 	categories = enrichWithFixMetadata(categories)
 
-	return categories
+	return categories, nil
 }
 
 // enrichWithFixMetadata adds fixLevel and slug to check results from the DoctorCheckRegistry.
@@ -1440,9 +1519,7 @@ func displayJSONResults(cmd *cobra.Command, categories []checkCategory) bool {
 		AvailableFixes: jsonFixes,
 	}
 
-	encoder := json.NewEncoder(cmd.OutOrStdout())
-	encoder.SetIndent("", "  ")
-	_ = encoder.Encode(output)
+	_ = cli.PrintJSONTo(cmd.OutOrStdout(), output)
 
 	return hasFailed
 }

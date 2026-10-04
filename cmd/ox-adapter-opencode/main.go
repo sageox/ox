@@ -52,14 +52,7 @@ func handleInfo() (*adapterprotocol.InfoResponse, error) {
 		DisplayName:     adapterDisplay,
 		Version:         adapterVersion,
 		Type:            adapterprotocol.TypeSession,
-		Capabilities: []string{
-			adapterprotocol.CapSessionReader,
-			adapterprotocol.CapHookInstaller,
-			adapterprotocol.CapIncrementalReader,
-			adapterprotocol.CapSessionImporter,
-			adapterprotocol.CapServeMode,
-			adapterprotocol.CapSkillsInstaller,
-		},
+		Capabilities:    adapterprotocol.OpenCodeCapabilities,
 		// OpenCode walks .agents/skills, .claude/skills and .opencode/skills up to the worktree.
 		// One root, never a fan-out: a skill copied into several of an agent's
 		// discovery paths is several files to keep in sync and several answers

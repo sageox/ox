@@ -1,20 +1,22 @@
 ---
 title: "ox plan"
 description: "CLI reference for ox plan"
-sidebar_position: 59
+sidebar_position: 66
 ---
 
 ## ox plan
 
-Work with implementation plans (enrich, render, review)
+Work with plans (enrich, render, review)
 
 ### Synopsis
 
-Work with SageOx-enriched implementation plans.
+Work with SageOx-enriched plans: design, GTM, rollout, engineering — any
+plan your team executes against.
 
   enrich   compute team-context signals for a plan (JSON for AI coworkers)
   render   render a plan to a self-contained HTML page for human review
   review   serve a plan and collect human review feedback (the review loop)
+  save     save a plan/mockup/review page to the ledger and print its share link
   list     browse saved plans
   view     read a saved plan in the terminal
   status   show a saved plan's lifecycle timeline and current status
@@ -41,8 +43,9 @@ inline review loop — those are human-opt-in, never auto-run.
 ### Options inherited from parent commands
 
 ```
-  -c, --config string    config file path (default: .sageox/config.yaml)
+  -c, --config string    user config file (overrides OX_USER_CONFIG)
       --json             output in JSON format (default: false)
+      --no-input         disable prompts and terminal UI; provide required input with arguments or flags
       --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
       --profile          generate CPU profile and execution trace for performance analysis (default: false)
   -q, --quiet            suppress non-error output (default: false)
@@ -55,11 +58,12 @@ inline review loop — those are human-opt-in, never auto-run.
 * [ox](/)	 - Shared team context that makes agentic engineering multiplayer
 * [ox plan abandon](/plan/abandon)	 - Mark a saved plan abandoned
 * [ox plan approve](/plan/approve)	 - Mark a saved plan approved
-* [ox plan enrich](/plan/enrich)	 - Enrich an implementation plan with SageOx team context (JSON by default)
+* [ox plan enrich](/plan/enrich)	 - Enrich a plan with SageOx team context (JSON by default)
 * [ox plan list](/plan/list)	 - Browse saved ledger plans
 * [ox plan realize](/plan/realize)	 - Mark a saved plan realized (its intent was carried out)
 * [ox plan render](/plan/render)	 - Render a plan to a self-contained HTML page
 * [ox plan review](/plan/review)	 - Open a live review loop for a saved plan (serve, collect, auto-reload, approve)
+* [ox plan save](/plan/save)	 - Save a plan, mockup, or review page to the ledger and share it
 * [ox plan status](/plan/status)	 - Show a saved plan's lifecycle timeline and current status
 * [ox plan supersede](/plan/supersede)	 - Mark a saved plan superseded by a successor plan
 * [ox plan view](/plan/view)	 - Read a saved plan in the terminal

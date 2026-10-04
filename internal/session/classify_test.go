@@ -3,6 +3,7 @@ package session
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -187,32 +188,6 @@ func TestHasSubstantiveEntries(t *testing.T) {
 	}
 }
 
-func TestCountSubstantiveEntries(t *testing.T) {
-	tests := []struct {
-		name    string
-		content string
-		want    int
-	}{
-		{"empty file", "", 0},
-		{"header only", `{"metadata":{}}` + "\n", 0},
-		{"header plus one", `{"metadata":{}}` + "\n" + `{"type":"user"}` + "\n", 1},
-		{"header plus three", `{"metadata":{}}` + "\n" + `{"type":"user"}` + "\n" + `{"type":"assistant"}` + "\n" + `{"entry_count":2}` + "\n", 3},
-		{"nonexistent", "", 0},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if tt.name == "nonexistent" {
-				assert.Equal(t, 0, CountSubstantiveEntries("/nonexistent/raw.jsonl"))
-				return
-			}
-			path := filepath.Join(t.TempDir(), "raw.jsonl")
-			require.NoError(t, os.WriteFile(path, []byte(tt.content), 0644))
-			assert.Equal(t, tt.want, CountSubstantiveEntries(path))
-		})
-	}
-}
-
 func TestRawJSONLHasData(t *testing.T) {
 	dir := t.TempDir()
 	sessionPath := filepath.Join(dir, "test-session")
@@ -346,4 +321,58 @@ func TestIsPIDAlive(t *testing.T) {
 
 	// very large PID — almost certainly dead
 	assert.False(t, isPIDAlive(99999999))
+}
+
+// TestClassifyRawFile_FramingLinesAreNotContent — failure prevented: the
+// SessionEnd door stamps a footer (StampRawCarrier) onto a recording that never
+// captured a turn, and a line count then classified header + footer as content,
+// so the daemon summarized, uploaded and committed empty sessions.
+func TestClassifyRawFile_FramingLinesAreNotContent(t *testing.T) {
+	// the footer bytes the real finalize door writes, not a retyped copy
+	stamped := filepath.Join(t.TempDir(), "raw.jsonl")
+	require.NoError(t, os.WriteFile(stamped, []byte(`{"type":"header","metadata":{"agent_id":"Ox1"}}`+"\n"), 0o600))
+	require.NoError(t, StampRawCarrier(stamped, CarrierStamp{StoppedAt: time.Date(2026, 9, 28, 4, 15, 30, 0, time.UTC)}))
+	data, err := os.ReadFile(stamped)
+	require.NoError(t, err)
+	lines := strings.SplitAfterN(string(data), "\n", 2)
+	require.Len(t, lines, 2)
+	header, footer := lines[0], lines[1]
+	require.Contains(t, footer, `"type":"footer"`)
+	user := `{"type":"user","content":"hello"}` + "\n"
+
+	tests := []struct {
+		name    string
+		content string
+		want    RawKind
+	}{
+		{"header plus carrier footer", header + footer, RawHeaderOnly},
+		{"header plus two footers", header + footer + footer, RawHeaderOnly},
+		{"header plus blank line", header + "\n", RawHeaderOnly},
+		{"header, footer, then a turn", header + footer + user, RawSubstantive},
+		{"header, turn, then footer", header + user + footer, RawSubstantive},
+		// fail safe: a line that is not JSON is content, never a deletable phantom
+		{"header plus a line that is not JSON", header + "not json\n", RawSubstantive},
+		{"header plus an entry of unknown type", header + `{"type":"message"}` + "\n", RawSubstantive},
+		// a hook can append a turn before any header exists; that turn is content
+		{"turn then footer, no header", user + footer, RawSubstantive},
+		// keys match exactly, as in the reader: a capitalized key is not the footer
+		{"capitalized Type key is content", header + `{"Type":"footer"}` + "\n", RawSubstantive},
+		{"imported _meta header plus footer", `{"_meta":{"schema_version":"1"}}` + "\n" + footer, RawHeaderOnly},
+		{"legacy typeless metadata header plus footer", `{"metadata":{"agent_id":"Ox1"}}` + "\n" + footer, RawHeaderOnly},
+		// a retried stop can append a second header (generic_jsonl.go tolerates it); still framing
+		{"duplicate header then footer", header + header + footer, RawHeaderOnly},
+		{"header, turn, duplicate header", header + user + header, RawSubstantive},
+		// a typed record is content even when it carries an _meta key
+		{"typed entry with _meta is content", header + `{"type":"user","_meta":{"x":1}}` + "\n", RawSubstantive},
+		// the type string is decoded, not compared as raw bytes
+		{"escaped header type is framing", `{"type":"\u0068eader"}` + "\n" + footer, RawHeaderOnly},
+		{"non-string type is content", header + `{"type":7}` + "\n", RawSubstantive},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "raw.jsonl")
+			require.NoError(t, os.WriteFile(path, []byte(tt.content), 0o600))
+			assert.Equal(t, tt.want, ClassifyRawFile(path))
+		})
+	}
 }

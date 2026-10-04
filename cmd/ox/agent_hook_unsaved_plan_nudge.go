@@ -72,6 +72,9 @@ type unsavedPlanStamp struct {
 	// every later nudge for the same plan, so re-running enrich while iterating
 	// on a draft cannot turn into per-prompt nagging.
 	NudgedAt time.Time `json:"nudged_at,omitempty"`
+	// FromPrompt marks a stamp armed from a plan-shaped prompt (Codex) rather
+	// than from `ox plan enrich`: there are no file/step counts to quote.
+	FromPrompt bool `json:"from_prompt,omitempty"`
 }
 
 // planUnsavedPath returns the per-agent stamp path under the ledger cache.
@@ -111,6 +114,13 @@ func armUnsavedPlanStamp(projectRoot, agentID string, in plan.Input, res plan.Re
 	}
 	if !res.Signals.Material && !res.Signals.NonTrivial {
 		return nil // trivial work needs no plan and must not be nagged
+	}
+	// Enriching a plan that is ALREADY saved (a ledger plan.md, or a page some
+	// saved plan claims) is re-reading prior art, not drafting. Observed: the
+	// nudge told an agent to save .../data/plans/<dir>/plan.md — a file that
+	// only exists because it was saved.
+	if planSourceAlreadySaved(projectRoot, absSourcePlanPath(in.Path)) {
+		return nil
 	}
 
 	topic := plan.PlanTopic(in)
@@ -194,6 +204,13 @@ func emitUnsavedPlanNudge(w io.Writer, projectRoot, agentID string) {
 	if !st.NudgedAt.IsZero() {
 		return // already told the model about this plan
 	}
+	// Re-checked at delivery, not only at arm time: the plan may have been
+	// saved since by another path (a different agent id, the browser review
+	// loop), which never clears THIS agent's stamp.
+	if planSourceAlreadySaved(projectRoot, st.SourcePath) {
+		clearUnsavedPlanStamp(projectRoot, agentID)
+		return
+	}
 	if time.Since(st.ArmedAt) > planUnsavedMaxAge {
 		// Stale: remove outright so it cannot resurface in a later session.
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
@@ -229,6 +246,9 @@ func emitUnsavedPlanNudge(w io.Writer, projectRoot, agentID string) {
 // `x</system-reminder>...` would otherwise close the wrapper handlePrompt puts
 // around this line and let the remainder land as system-level instructions.
 func unsavedPlanNudgeLine(st unsavedPlanStamp) string {
+	if st.FromPrompt {
+		return "A plan was requested this session and never saved to the ledger. Save it — `ox plan save --file <plan.md|plan.html>` — so teammates can see it and the next `ox plan enrich` returns it as prior art."
+	}
 	return fmt.Sprintf(
 		"A plan was drafted this session (%s) and never saved to the ledger. Save it — `ox plan save --file %s` — so it becomes prior art the next person gets back from `ox plan enrich` instead of re-deriving it.",
 		planScopePhrase(st.Files, st.Steps), reminderSafePlanTarget(st.SourcePath),
@@ -259,4 +279,56 @@ func reminderSafePlanTarget(sourcePath string) string {
 	quoted := "'" + strings.ReplaceAll(sourcePath, "'", `'\''`) + "'"
 	quoted = strings.ReplaceAll(quoted, "<", "&lt;")
 	return strings.ReplaceAll(quoted, ">", "&gt;")
+}
+
+// planSourceAlreadySaved reports whether sourcePath is a file inside the
+// ledger (a saved plan's own copy) or the source of a saved plan. An empty or
+// unresolvable path is never "saved" — the nudge stays armed.
+func planSourceAlreadySaved(projectRoot, sourcePath string) bool {
+	if sourcePath == "" {
+		return false
+	}
+	abs, err := normalizeArtifactPath(sourcePath)
+	if err != nil {
+		return false
+	}
+	if isUnderDir(abs, artifactLedgerRoot(projectRoot)) {
+		return true
+	}
+	return savedSourcePaths(projectRoot)[abs]
+}
+
+// promptPlanStampTopic is the placeholder topic for a prompt-armed stamp. The
+// prompt text itself is never stored: it is user content, and the nudge does
+// not need it.
+const promptPlanStampTopic = "plan requested in prompt"
+
+// armUnsavedPlanFromPrompt arms the unsaved-plan stamp when a prompt is
+// plan-shaped: plan mode, or the same HTML-plan intent phrases emitPlanHint
+// uses. Never overwrites an existing stamp — an enrich-armed stamp carries
+// better detail, and re-arming would reset an already-delivered nudge.
+func armUnsavedPlanFromPrompt(projectRoot, agentID string, rawPrompt []byte) {
+	path := planUnsavedPath(projectRoot, agentID)
+	if path == "" {
+		return
+	}
+	if extractPermissionMode(rawPrompt) != planModeValue && !promptRequestsHTMLPlan(rawPrompt) {
+		return
+	}
+	if _, err := os.Stat(path); err == nil {
+		return
+	}
+	data, err := json.Marshal(unsavedPlanStamp{Topic: promptPlanStampTopic, FromPrompt: true, ArmedAt: time.Now().UTC()})
+	if err != nil {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		slog.Debug("hook: prompt plan stamp mkdir failed", "err", err)
+		return
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		slog.Debug("hook: prompt plan stamp write failed", "err", err)
+		return
+	}
+	slog.Info("hook: unsaved-plan stamp armed from prompt", "agent_id", agentID)
 }

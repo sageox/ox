@@ -1,0 +1,5 @@
+{"t_utc":"2026-10-01T09:00:00.500Z","t_ms":500,"snapshot":"axs_1","reason":"interval","hit":"axn_win","node_count":1,"walk_ms":1}
+{"t_utc":"2026-10-01T09:00:00.500Z","snapshot":"axs_1","ax_ref":"axn_win","parent":null,"depth":0,"role":"AXWindow","title":"Checkout flow – Figma","desc":null,"value":null,"dom_id":null,"url":null}
+{"t_utc":"2026-10-01T09:00:04.000Z","t_ms":4000,"snapshot":"axs_2","reason":"click","hit":"axn_pay","node_count":2,"walk_ms":1}
+{"t_utc":"2026-10-01T09:00:04.000Z","snapshot":"axs_2","ax_ref":"axn_win","parent":null,"depth":0,"role":"AXWindow","title":"Checkout flow – Figma","desc":null,"value":null,"dom_id":null,"url":null}
+{"t_utc":"2026-10-01T09:00:04.000Z","snapshot":"axs_2","ax_ref":"axn_pay","parent":"axn_win","depth":1,"role":"AXButton","title":"Pay now","desc":null,"value":null,"dom_id":null,"url":null}

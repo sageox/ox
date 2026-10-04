@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"html"
 	"io"
@@ -183,9 +182,7 @@ func runVizSuggest(cmd *cobra.Command, intent string, limit int, jsonOut bool) e
 	out := cmd.OutOrStdout()
 	suggestions := viz.Suggest(intent, limit)
 	if jsonOut {
-		enc := json.NewEncoder(out)
-		enc.SetIndent("", "  ")
-		return enc.Encode(suggestions)
+		return cli.PrintJSONTo(out, suggestions)
 	}
 	if len(suggestions) == 0 {
 		fmt.Fprintln(out, "No confident visualization match. Browse the full catalog with `ox viz`.")
@@ -219,9 +216,7 @@ func runVizLint(cmd *cobra.Command, file string, strict, jsonOut bool) error {
 		findings = viz.Lint(raw, viz.LintOptions{})
 	}
 	if jsonOut {
-		enc := json.NewEncoder(cmd.OutOrStdout())
-		enc.SetIndent("", "  ")
-		if err := enc.Encode(findings); err != nil {
+		if err := cli.PrintJSONTo(cmd.OutOrStdout(), findings); err != nil {
 			return err
 		}
 	} else if len(findings) == 0 {
@@ -280,7 +275,7 @@ func runVizPRIntent(cmd *cobra.Command, intent string, jsonOut bool) error {
 			})
 		}
 		if jsonOut {
-			return json.NewEncoder(cmd.OutOrStdout()).Encode(prVisualSuggestions{
+			return cli.PrintJSONTo(cmd.OutOrStdout(), prVisualSuggestions{
 				Intent:       intent,
 				Suggestions:  suggestions,
 				Decision:     decision,
@@ -329,9 +324,7 @@ func runVizList(cmd *cobra.Command, jsonOut bool) error {
 	out := cmd.OutOrStdout()
 	patterns := viz.Catalog()
 	if jsonOut {
-		enc := json.NewEncoder(out)
-		enc.SetIndent("", "  ")
-		return enc.Encode(patterns)
+		return cli.PrintJSONTo(out, patterns)
 	}
 	fmt.Fprintln(out, cli.StyleBrand.Render("Visualization patterns"))
 	fmt.Fprintln(out, cli.StyleDim.Render("Use `ox viz suggest <intent>` or pull a recipe with `ox viz <id>`."))
@@ -356,9 +349,7 @@ func runVizOne(cmd *cobra.Command, id string, jsonOut bool) error {
 		return fmt.Errorf("no visualization pattern %q (run `ox viz` to list available ids)", id)
 	}
 	if jsonOut {
-		enc := json.NewEncoder(out)
-		enc.SetIndent("", "  ")
-		return enc.Encode(p)
+		return cli.PrintJSONTo(out, p)
 	}
 	fmt.Fprintln(out, cli.StyleBrand.Render(p.ID))
 	fmt.Fprintf(out, "%s %s · %s\n", cli.StyleBold.Render("Kind:"), p.Category, p.Authoring)

@@ -19,11 +19,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/codedb/store"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/glance"
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/lfs"
+	"github.com/sageox/ox/internal/paths"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/assert"
@@ -87,6 +89,18 @@ func hostedTestGit(t *testing.T, dir string, args ...string) string {
 }
 
 func newHostedReaderFixture(t *testing.T) *hostedReaderFixture {
+	t.Helper()
+	f := serveHostedLedger(t)
+	synced, _, err := runReadSyncInProc(t, "--read-only", "--repo", readSyncTestRepoID, "--timeout", "2m", "--json")
+	require.NoError(t, err)
+	require.True(t, synced.Ready, "%+v", synced)
+	f.path = synced.Path
+	return f
+}
+
+// serveHostedLedger serves the fixture ledger and selects it for the hosted
+// commands, without syncing it: the caller's data home starts empty.
+func serveHostedLedger(t *testing.T) *hostedReaderFixture {
 	t.Helper()
 	if testing.Short() {
 		t.Skip("short: native Git clone and checkout lifecycle")
@@ -204,11 +218,7 @@ func newHostedReaderFixture(t *testing.T) *hostedReaderFixture {
 	t.Setenv("SAGEOX_TOKEN", token)
 	t.Setenv("XDG_DATA_HOME", filepath.Join(root, "data-home"))
 	t.Setenv("OX_XDG_DISABLE", "")
-
-	synced, _, err := runReadSyncInProc(t, "--read-only", "--repo", readSyncTestRepoID, "--timeout", "2m", "--json")
-	require.NoError(t, err)
-	require.True(t, synced.Ready, "%+v", synced)
-	return &hostedReaderFixture{path: synced.Path, sessionName: session, now: now, corruptHour: corruptHour}
+	return &hostedReaderFixture{sessionName: session, now: now, corruptHour: corruptHour}
 }
 
 // Failure prevented: a hosted caller with no source checkout cannot read the
@@ -251,6 +261,57 @@ func TestHostedReadersServeTheMaterializedLedger(t *testing.T) {
 	checked, _, err := runReadSyncInProc(t, "--read-only", "--repo", readSyncTestRepoID, "--check", "--timeout", "30s", "--json")
 	require.NoError(t, err)
 	require.True(t, checked.Ready, "%+v", checked)
+}
+
+// Failure prevented: a hosted AI coworker that indexes code before its first
+// ledger read leaves the code index at the checkout path, and from then on
+// every `ox sync --read-only` fails in about a second as "interrupted" — the
+// class a consumer retries — so the whole fleet retries forever and never
+// reads its ledger (ox #1045).
+func TestHostedReadSyncKeepsACodeIndexBuiltBeforeTheFirstSync(t *testing.T) {
+	f := serveHostedLedger(t)
+	path, ep, class := selectHostedLedger(readSyncTestRepoID)
+	require.Empty(t, class)
+	// Where the code indexer writes, so this test follows it if it ever moves.
+	index := filepath.Join(paths.CodeDBSharedDir(readSyncTestRepoID, ep), store.MetadataDBFile)
+	require.NoError(t, os.MkdirAll(filepath.Dir(index), 0o700))
+	require.NoError(t, os.WriteFile(index, []byte("index built before the first sync"), 0o600))
+
+	synced, _, err := runReadSyncInProc(t, "--read-only", "--repo", readSyncTestRepoID, "--timeout", "2m", "--json")
+	require.NoError(t, err, "%+v", synced)
+	require.True(t, synced.Ready, "%+v", synced)
+	require.Equal(t, path, synced.Path)
+	indexed, err := os.ReadFile(index)
+	require.NoError(t, err)
+	require.Equal(t, "index built before the first sync", string(indexed), "the code index survives the sync")
+
+	stdout, stderr, err := runOxInProc(t, sessionListCmd, "--repo", readSyncTestRepoID, "--json")
+	require.NoError(t, err, stderr)
+	var listed sessionListOutput
+	require.NoError(t, json.Unmarshal([]byte(stdout), &listed), stdout)
+	require.Len(t, listed.Sessions, 1)
+	require.Equal(t, f.sessionName, listed.Sessions[0].Name)
+}
+
+// Failure prevented: a checkout path holding someone else's content is refused
+// as "interrupted", which a consumer cannot tell apart from a canceled sync, so
+// it retries a condition no retry changes — or ox clears the path to make room.
+func TestHostedReadSyncRefusesAnOccupiedPath(t *testing.T) {
+	serveHostedLedger(t)
+	path, _, class := selectHostedLedger(readSyncTestRepoID)
+	require.Empty(t, class)
+	notes := filepath.Join(path, "notes.md")
+	require.NoError(t, os.MkdirAll(path, 0o700))
+	require.NoError(t, os.WriteFile(notes, []byte("not ox's"), 0o600))
+
+	result, stderr, err := runReadSyncInProc(t, "--read-only", "--repo", readSyncTestRepoID, "--timeout", "2m", "--json")
+	require.Equal(t, 1, exitCodeOf(t, err))
+	require.Empty(t, stderr)
+	require.False(t, result.Ready)
+	require.Equal(t, "path_occupied", result.ErrorClass)
+	kept, err := os.ReadFile(notes)
+	require.NoError(t, err)
+	require.Equal(t, "not ox's", string(kept))
 }
 
 // Failure prevented: the guard verifies readiness, releases the lock, and only

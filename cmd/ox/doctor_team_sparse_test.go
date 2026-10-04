@@ -201,7 +201,7 @@ func TestRepairTeamSparseCheckout_MaterializesManifestIncludedDirectory(t *testi
 
 	cfg := manifest.ParseFile(filepath.Join(repo, ".sageox", "sync.manifest"), manifest.RepoKindTeamContext)
 	missing := missingSparseTopLevelDirs(repo, cfg)
-	if !strings.Contains(strings.Join(manifestIncludedMissingDirs(cfg, missing), ","), "agents/") {
+	if !strings.Contains(strings.Join(locallyRepairableMissingDirs(cfg, missing), ","), "agents/") {
 		t.Fatalf("fixture did not classify the omitted manifest directory as locally repairable: %v", missing)
 	}
 	if err := repairTeamSparseCheckout(repo); err != nil {

@@ -26,6 +26,7 @@ import (
 	"github.com/sageox/ox/internal/doctor"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/ephemeral"
+	"github.com/sageox/ox/internal/flags"
 	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/kb"
 	"github.com/sageox/ox/internal/ledger"
@@ -39,6 +40,7 @@ import (
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/internal/sessionid"
 	"github.com/sageox/ox/internal/teamdocs"
+	"github.com/sageox/ox/internal/teamrules"
 	"github.com/sageox/ox/internal/telemetry"
 	"github.com/sageox/ox/internal/tips"
 	"github.com/sageox/ox/internal/tokens"
@@ -79,6 +81,36 @@ func uniqueNonEmpty(vals ...string) []string {
 		out = append(out, v)
 	}
 	return out
+}
+
+// currentUserIdentity returns the name, aliases and kind prime reports as you=,
+// you_aliases= and you_kind=. A person's aliases collect ALL name forms from
+// ALL sources (OAuth, git config, derived) because sessions use DisplayName,
+// murmurs use Username, discussions use full Name, and git commits use git
+// config user.name/user.email — each may differ. The AI coworker a team token
+// acts as goes by its name and slug only: the git identity on its machine is
+// not its own. kind is "ai" for that coworker and "" for a person.
+func currentUserIdentity(ep string) (name string, aliases []string, kind string) {
+	attr := identity.ResolveAttribution(ep, config.GetDisplayName())
+	if attr.AI {
+		return attr.DisplayName, uniqueNonEmpty(attr.DisplayName, attr.Username), "ai"
+	}
+	aliasInputs := []string{
+		attr.DisplayName,
+		attr.Name,
+		attr.Username,
+		attr.Email,
+		identity.FirstNameFromSlug(attr.Username),
+	}
+	if gitIdent, err := repotools.DetectGitIdentity(); err == nil && gitIdent != nil {
+		aliasInputs = append(aliasInputs, gitIdent.Name, gitIdent.Email)
+	}
+	if ep != "" {
+		if token, err := auth.GetTokenForEndpoint(ep); err == nil && token != nil {
+			aliasInputs = append(aliasInputs, token.UserInfo.Name, token.UserInfo.Email)
+		}
+	}
+	return attr.DisplayName, uniqueNonEmpty(aliasInputs...), ""
 }
 
 // withAttributionGuidance delegates to prime.WithAttributionGuidance.
@@ -345,32 +377,18 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// anti-entropy: ensure Claude Code hooks are installed
 	hooksInstalled := ensureClaudeHooks(projectRoot)
 
+	// anti-entropy: retry plan commits/pushes a review session could not land
+	// (detached; a no-op ReadDir when nothing is pending — plan_push_pending.go)
+	if config.IsInitialized(projectRoot) {
+		kickPendingPlanPushes(projectRoot)
+	}
+
 	// get project-specific endpoint (single source of truth)
 	projectEndpoint := endpoint.GetForProject(projectRoot)
 
 	// resolve current user's identity early so all output paths (fresh, degraded, unavailable)
 	// can include it. Agents use this to distinguish self vs teammate in attribution.
-	// collect ALL name forms from ALL sources (OAuth, git config, derived) because
-	// sessions use DisplayName, murmurs use Username, discussions use full Name,
-	// and git commits use git config user.name/user.email — each may differ.
-	userAttribution := identity.ResolveAttribution(projectEndpoint, config.GetDisplayName())
-	currentUserName := userAttribution.DisplayName
-	aliasInputs := []string{
-		userAttribution.DisplayName,
-		userAttribution.Name,
-		userAttribution.Username,
-		userAttribution.Email,
-		identity.FirstNameFromSlug(userAttribution.Username),
-	}
-	if gitIdent, err := repotools.DetectGitIdentity(); err == nil && gitIdent != nil {
-		aliasInputs = append(aliasInputs, gitIdent.Name, gitIdent.Email)
-	}
-	if projectEndpoint != "" {
-		if token, err := auth.GetTokenForEndpoint(projectEndpoint); err == nil && token != nil {
-			aliasInputs = append(aliasInputs, token.UserInfo.Name, token.UserInfo.Email)
-		}
-	}
-	currentUserAliases := uniqueNonEmpty(aliasInputs...)
+	currentUserName, currentUserAliases, currentUserKind := currentUserIdentity(projectEndpoint)
 
 	// generate agentID and start recording BEFORE auth check — recording is local,
 	// auth is only needed for upload and cloud features
@@ -449,6 +467,9 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	phaseStart = time.Now()
 	continuedFromSessionID := recordingSessionIDFromMarker(existingMarker)
 	sessionStat := startSessionRecording(projectRoot, agentID, agentType, parentAgentID, continuedFromSessionID, agentSessionID)
+	// a prime that lands on an existing recording (CLAUDE.md-driven re-prime
+	// after /clear, hookless agents) is also a native session sighting
+	recordNativeSessionForRecording(projectRoot, agentID, agentSessionID, hookSource)
 	recordingSessionID := recordingSessionIDForMarker(projectRoot, agentID, continuedFromSessionID)
 	timing["session_start"] = time.Since(phaseStart).Milliseconds()
 
@@ -490,6 +511,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 				Session:            sessionStat,
 				CurrentUserName:    currentUserName,
 				CurrentUserAliases: currentUserAliases,
+				CurrentUserKind:    currentUserKind,
 				Message:            msg + " Session recording is active locally — data will be uploaded after authentication.",
 			}
 			if sessionStat != nil && sessionStat.UserNotification != "" {
@@ -502,7 +524,18 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// discover team context if configured
 	phaseStart = time.Now()
 	repoSlug := repoSlugFromRemoteOrDir(projectRoot)
-	teamCtx := discoverTeamContext(projectRoot, repoSlug)
+	// The directory-name fallback is useful display context, but it is not an
+	// authoritative identity for repos: filters. With no canonical origin, pass
+	// an unknown slug so targeted rules stay out instead of being misclassified
+	// against an unrelated local directory name.
+	ruleRepoSlug, _ := repotools.RepoSlugFromRemote(projectRoot)
+	teamCtx := discoverTeamContext(projectRoot, ruleRepoSlug)
+	if teamCtx != nil {
+		// A rule current in this agent's native rule root is omitted here; every
+		// other rule retains its prime fallback. This is the exactly-once seam
+		// between background projection and session-start delivery.
+		teamCtx.TeamRules = teamrules.ForPrime(projectRoot, agentType, teamCtx.TeamRules)
+	}
 
 	// check team context staleness
 	checkTeamContextStaleness(teamCtx, projectRoot)
@@ -693,6 +726,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		HooksInstalled:     hooksInstalled,
 		CurrentUserName:    currentUserName,
 		CurrentUserAliases: currentUserAliases,
+		CurrentUserKind:    currentUserKind,
 	}
 
 	// Hook cap: Claude Code injects at most claudeHookOutputCap characters
@@ -838,7 +872,14 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		output.MurmurDirective = "Murmuring is ENABLED. Proactively publish WIP to teammates:\n" +
 			"  • At START of significant work — say what you're about to do\n" +
 			"  • After architectural decisions — what you decided and why\n" +
-			"  • Command: ox murmur --topic=wip \"concise description (≤500 bytes)\"\n" +
+			// Say WHERE the write lands, not that there isn't one. A murmur is
+			// written — to the Ledger or Team Context checkout, which the daemon then
+			// commits — so calling it read-only would be false. What matters to an
+			// agent deciding whether it may run: your project is untouched. Agents in
+			// plan mode classify any unfamiliar command as a mutation and skip it, so
+			// the signal goes missing in exactly the sessions that are planning work
+			// other people need to know about.
+			"  • Command: ox murmur --topic=wip \"concise description (≤500 bytes)\" — the note goes to the Ledger, never your project's files or git history, so it is safe in plan mode\n" +
 			fmt.Sprintf("  • Stay in sync: run `ox agent %s heartbeat` every ~20 tool calls during long tasks\n", agentID) +
 			"Run your first murmur NOW: describe what the user asked and which code areas you expect to touch."
 	}
@@ -1189,6 +1230,7 @@ func buildGuidance(agentID, projectRoot string, teamCtx *teamContextInfo, ledger
 		CodeDBExists:     statErr == nil,
 		MemoryEnabled:    auth.IsMemoryEnabled(),
 		MurmuringEnabled: config.MurmuringEnabled(projectRoot),
+		BulletinEnabled:  flags.Get().BulletinEnabled,
 		AgentType:        agentType,
 		HasKB:            hasKB,
 	})
@@ -1418,6 +1460,7 @@ func startSessionRecording(projectRoot, agentID, agentType, parentAgentID, conti
 			s.InheritedPause = true
 			s.InheritedFromSession = priorSession
 			s.PauseCount++
+			s.RecordTraceBoundary("pause", now)
 			s.Lifecycle = append(s.Lifecycle, session.LifecycleEvent{
 				Action: session.LifecycleActionPause,
 				At:     now,
@@ -1583,14 +1626,15 @@ func outputAgentPrime(cmd *cobra.Command, textMode, reviewMode bool, output agen
 	switch formatFlag {
 	case "json":
 		// legacy JSON output for debugging and programmatic consumers
-		cw := agentinstance.NewCountingWriter(cmd.OutOrStdout())
-		encoder := json.NewEncoder(cw)
-		encoder.SetIndent("", "  ")
-		if err := encoder.Encode(output); err != nil {
+		jsonOut, err := cli.MarshalJSONIndent(output)
+		if err != nil {
+			return err
+		}
+		if err := cli.WriteJSONBytes(cmd.OutOrStdout(), jsonOut); err != nil {
 			return err
 		}
 		// prime is not dispatched via runWithAgentID, send heartbeat directly
-		if bytes := cw.BytesWritten(); bytes > 0 && output.AgentID != "" {
+		if bytes := int64(len(jsonOut)); bytes > 0 && output.AgentID != "" {
 			sendContextHeartbeat(output.AgentID, bytes, "prime")
 		}
 		return nil
@@ -1825,6 +1869,10 @@ func outputAgentPrimeText(cmd *cobra.Command, output agentPrimeOutput) error {
 		fmt.Fprintln(cmd.OutOrStdout())
 		fmt.Fprintln(cmd.OutOrStdout(), "---TEAM_CONTEXT---")
 		teamJSON, _ := json.Marshal(output.TeamContext)
+		// Deliberately NOT themed: this is a compact machine payload between
+		// parse markers, read by the adapter, not a document a human scans.
+		// Color would buy nothing and risks feeding escape bytes to the parser
+		// if this ever runs on a pty. See .claude/rules/json-output.md.
 		fmt.Fprintln(cmd.OutOrStdout(), string(teamJSON))
 		fmt.Fprintln(cmd.OutOrStdout(), "---END_TEAM_CONTEXT---")
 
@@ -1921,6 +1969,17 @@ func outputAgentPrimeText(cmd *cobra.Command, output agentPrimeOutput) error {
 					fmt.Fprintf(cmd.OutOrStdout(), "    Path: %s\n", doc.Path)
 				}
 			}
+		}
+
+		// team bulletin board — a pointer plus the reading rules. Post bodies
+		// are never read or printed here; the coworker lists the directory
+		// and opens a post on demand.
+		if output.TeamContext.BulletinHint != "" {
+			fmt.Fprintln(cmd.OutOrStdout())
+			fmt.Fprintln(cmd.OutOrStdout(), "## Team Bulletin Board (read on demand — not preloaded)")
+			fmt.Fprintln(cmd.OutOrStdout())
+			fmt.Fprintf(cmd.OutOrStdout(), "  Dir: %s\n", output.TeamContext.BulletinHint)
+			fmt.Fprintf(cmd.OutOrStdout(), "  %s\n", prime.BulletinReadingHint)
 		}
 
 		// always emit team context guidance — may sync after prime runs
@@ -2227,6 +2286,16 @@ func loadTeamMemory(info *teamContextInfo, teamDir string) {
 	guidePath := filepath.Join(teamDir, "memory", "GUIDE.md")
 	if _, err := os.Stat(guidePath); err == nil {
 		info.ObservationGuideHint = guidePath
+	}
+
+	// bulletin/<board>/posts — team bulletin board, reference pointer only.
+	// Post bodies are teammates' unreviewed, time-limited notes and are never
+	// read here. The gate is the board folder itself: the posts dir may be
+	// absent after every post expired, and the hint still points there so a
+	// coworker knows where the next post will land. Not gated on the publish
+	// flag — reads continue when publishing is off.
+	if st, err := os.Stat(filepath.Join(teamDir, "bulletin")); err == nil && st.IsDir() {
+		info.BulletinHint = filepath.Join(teamDir, filepath.FromSlash(prime.BulletinPostsRelDir(prime.BulletinDefaultBoard)))
 	}
 
 	// discover memory timeline files for progressive disclosure

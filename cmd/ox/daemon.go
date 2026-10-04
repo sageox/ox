@@ -249,8 +249,7 @@ var daemonStatusCmd = &cobra.Command{
 			if err := enc.Encode(jsonStatus); err != nil {
 				return fmt.Errorf("failed to marshal status: %w", err)
 			}
-			fmt.Print(buf.String())
-			return nil
+			return cli.WriteJSONBytes(os.Stdout, buf.Bytes())
 		}
 
 		// always fetch history for sparkline; verbose adds sync history table

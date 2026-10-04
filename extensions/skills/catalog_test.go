@@ -36,9 +36,26 @@ func TestCanonicalCatalogValidAndDeterministic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// No RETIRED name may reappear in the default selection. A retired skill
+	// that leaks back gets reinstalled on every reconcile, which is how a file
+	// ox promised to remove survives forever.
+	//
+	// This used to be `strings.Contains(skill.Name, "attest")`, which was too
+	// blunt in a way that mattered: the Attest CLI removal retired
+	// ox-cli-attest-goal and ox-cli-attest-create, because `ox attest goal` and
+	// `ox attest create` were deleted. `ox attest publish` SURVIVED, so a skill
+	// documenting it is legitimate — and the substring guard refused it purely
+	// for sharing five letters with two unrelated retired names.
+	//
+	// Checking the actual Retired list is both narrower and stronger: it now
+	// covers every retired name rather than one hand-picked substring.
+	retired := make(map[string]bool, len(Retired))
+	for _, name := range Retired {
+		retired[name] = true
+	}
 	for _, skill := range defaults {
-		if strings.Contains(skill.Name, "attest") {
-			t.Fatalf("retired skill %s leaked into catalog", skill.Name)
+		if retired[skill.Name] {
+			t.Fatalf("retired skill %s leaked back into the default catalog — it would be reinstalled on every reconcile", skill.Name)
 		}
 	}
 }

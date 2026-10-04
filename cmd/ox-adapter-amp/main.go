@@ -84,15 +84,7 @@ func handleInfo() (*adapterprotocol.InfoResponse, error) {
 		DisplayName:     adapterDisplay,
 		Version:         adapterVersion,
 		Type:            adapterprotocol.TypeSession,
-		Capabilities: []string{
-			adapterprotocol.CapSessionReader,
-			adapterprotocol.CapSessionImporter,
-			adapterprotocol.CapHookInstaller,
-			adapterprotocol.CapIncrementalReader,
-			adapterprotocol.CapFileWatcher,
-			adapterprotocol.CapServeMode,
-			adapterprotocol.CapSkillsInstaller,
-		},
+		Capabilities:    adapterprotocol.AmpCapabilities,
 		// Amp reads .agents/skills and .claude/skills; the canonical root is the one we write.
 		// One root, never a fan-out: a skill copied into several of an agent's
 		// discovery paths is several files to keep in sync and several answers

@@ -8,11 +8,6 @@
     ],
     "exceptions": [
       {
-        "path": "cmd/ox/agent_session.go",
-        "reason": "Durable score write and retry preservation are directly tested; the orchestration call site awaits the ox-ilrr.7 lifecycle seam",
-        "expires": "2026-09-30"
-      },
-      {
         "path": "cmd/ox/doctor_ledger_git.go",
         "reason": "PR #868 (ADR-030 per-clone git locking): the new WithRepoLock wrapper and D3 own-rebase guard in fixLedgerBranchBehind are directly tested (TestFixLedgerBranchBehind_LockBusy_FailsFastInsteadOfRacing, TestFixLedgerBranchBehind_ForeignRebase_NeverTouched). The remaining uncovered lines are the pre-existing LLM-resolver/AuditAndAbort conflict-resolution ladder, unchanged in behavior but re-indented into the diff by the new wrapper. Covering it needs a mock for automerge's external-binary resolver contract, tracked as bd ox-baz5.7.",
         "expires": "2026-10-17"
@@ -30,6 +25,16 @@
       {
         "path": "cmd/ox/doctor_ledger_invalid_head.go",
         "reason": "ox-baz5.6 (doctor ledger-HEAD-integrity repair): the reachable repair, conflict-detection, and rollback branches are directly tested (12 tests including TestRepairInvalidHead_RefusesConflictingContent, _RestoreErrorTriggersRollback, _RenameAsideFails, TestRestoreLedgerDir_WalkErrorOnUnreadableSubdir/_ConflictCheckReadFailure, TestFilesIdentical_ReadErrors, TestFixLedgerInvalidHead_SerializesWithPreCloneLock). The remaining 7 lines are genuinely unreachable without a race or root: rollback()'s own restore-rename failing after its paired rename into the same parent dir already succeeded (no hook to fail only the second); filepath.Rel erroring on a path WalkDir itself produced from the same root (dead defensive code); and a file-copy's parent-dir MkdirAll failing after WalkDir already visited and created that same directory moments earlier in the traversal. Tracked as bd ox-baz5.6.1.",
+        "expires": "2026-10-17"
+      },
+      {
+        "path": "cmd/ox/status.go",
+        "reason": "PR #979 (fix ox#866: `ox status` always exited 0, `--quiet` silently ignored): the new statusExitError connectivity-vs-credential split and every branch of the extracted renderStatusHumanOutput (auth hints, ox init/ox code index action hints, the git-repo block, the calm-update-notice line) are directly unit-tested (TestStatusExitError, TestRenderStatusHumanOutput_AuthHints, _GitRootBranches, _CalmUpdateNoticeRendersWhenDue). The remaining uncovered lines are the isQuiet gate and the exit-code dispatch inline in statusCmd.RunE, which only execute through the real cobra command -- covered by TestStatusE2E_UnauthenticatedOutsideGitRepo_ExitsNonZero, _JSONModeStaysExitZero, and _Quiet_SuppressesInformationalBody_KeepsExitCode (build tag integration, compiled-binary proof), but those aren't in ACCEPTANCE_INTEGRATION_TESTS so coverage-integration's merged profile never counts them. Tracked as bd ox-xbq5.",
+        "expires": "2026-10-17"
+      },
+      {
+        "path": "internal/ui/markdown.go",
+        "reason": "PR #1110 (markdown theming hang on redirected input, from the #1061 split): the new terminalHasDarkBackground guard is directly tested on its guarded path (TestGetSageOxStyle_NonConsoleStdinDoesNotQueryTerminal proves a non-console stdin returns the dark default instead of hanging, bounded at 20s). The remaining uncovered statement is the real console query lipgloss.HasDarkBackground(in, out) itself, which requires an interactive terminal on the calling process's stdin. Headless CI runners have no console, and on a development machine the test binary inherits the harness's stdin rather than an interactive one, so the line cannot be exercised through the coverage profile. It is the happy path this PR protects; the behavior was verified with the standalone hangprobe reproducer documented in the PR (dark=true returned in the guarded build, HUNG in the unguarded one).",
         "expires": "2026-10-17"
       }
     ]

@@ -38,11 +38,27 @@ func TestConversationReferenceDocs_Committed(t *testing.T) {
 				`title: "ox conversation"`,
 				"## ox conversation",
 				"[ox conversation list](/conversation/list)",
+				"[ox conversation search](/conversation/search)",
 				"[ox conversation show](/conversation/show)",
 				"[ox conversation topics](/conversation/topics)",
 				"[ox conversation topic](/conversation/topic)",
 				"[ox conversation transcript](/conversation/transcript)",
+				"[ox conversation walkthrough](/conversation/walkthrough)",
 			},
+		},
+		{
+			file: "search.mdx",
+			musts: []string{
+				`title: "ox conversation search"`,
+				"ox conversation search [keywords] [flags]",
+				"--participant stringArray",
+				"--speaker string",
+				"--since string",
+				"--until string",
+				"--limit int",
+			},
+			// single-team by design (plan D18), same as every sibling.
+			absent: []string{"--team", "--all-teams"},
 		},
 		{
 			file: "list.mdx",
@@ -102,11 +118,28 @@ func TestConversationReferenceDocs_Committed(t *testing.T) {
 				"--from string",
 				"--to string",
 				"--full",
+				"--frames",
 				// the --full escape hatch must keep telling agents it is
 				// meant for humans (plan D15).
 				"intended for humans",
 			},
 			absent: []string{"--team"},
+		},
+		{
+			file: "walkthrough.mdx",
+			musts: []string{
+				`title: "ox conversation walkthrough"`,
+				"## ox conversation walkthrough",
+				"ox conversation walkthrough <id> [flags]",
+				"--cues string",
+				"--from string",
+				"--to string",
+				"--limit int",
+				"--format string",
+				// the docs must keep telling readers screen text is data.
+				"never instructions",
+			},
+			absent: []string{"--team", "--full"},
 		},
 	}
 

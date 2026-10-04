@@ -63,6 +63,15 @@ func TestClassifyLegacyPath_UserAuthoredFilesAreNeverTouched(t *testing.T) {
 		".claude/rules/design.md",
 		".claude/commands/my-command.md",
 		".claude/settings.json",
+		// Wearing the CURRENT team namespace, and still the user's. Untracking is
+		// destructive and this path has no undo — the file would leave the index
+		// and then be hidden by the very glob that made it look like ox's. Only a
+		// namespace ox DECLARED (`ox-cli-*`, the legacy `sageox-team-*`) may be
+		// claimed on a name; "-team" is ordinary English (ADR-033).
+		".claude/skills/notify-team/SKILL.md",
+		".agents/skills/onboard-team/SKILL.md",
+		".claude/rules/house-style-team.md",
+		".cursor/rules/house-style-team.mdc",
 	}
 	for _, rel := range cases {
 		put(t, root, rel, []byte("mine\n"))
@@ -121,6 +130,24 @@ func TestClassifyLegacyPath_NestedLegacyRulesInEveryRulesRoot(t *testing.T) {
 		put(t, root, rel, body)
 		if got := classifyLegacyPath(root, rel); got != legacySuperseded {
 			t.Errorf("%s classified %v, want legacySuperseded — it stays tracked forever", rel, got)
+		}
+	}
+}
+
+func TestClassifyLegacyPath_ClaimsTeamRuleProjectionsOnEveryNativeSurface(t *testing.T) {
+	root := classifyRepo(t)
+	for _, rel := range []string{
+		".claude/rules/sageox-team-security.md",
+		".cursor/rules/sageox-team-security.mdc",
+		".github/instructions/sageox-team-security.md",
+		".clinerules/sageox-team-security.md",
+		".kiro/steering/sageox-team-security.md",
+		".factory/rules/sageox-team-security.md",
+		".windsurf/rules/sageox-team-security.md",
+	} {
+		put(t, root, rel, []byte("managed projection\n"))
+		if got := classifyLegacyPath(root, rel); got != legacyReserved {
+			t.Errorf("%s classified %v, want legacyReserved", rel, got)
 		}
 	}
 }

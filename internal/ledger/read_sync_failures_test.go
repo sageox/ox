@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -21,7 +24,9 @@ import (
 )
 
 // Failure prevented: malformed destinations overwrite unrelated local data or
-// become a published checkout after validation fails.
+// become a published checkout after validation fails, or a path ox cannot
+// claim is refused as "interrupted" — the class a consumer retries — so a
+// condition no retry changes is retried forever (ox #1045).
 func TestReadSyncRejectsUnownedDestinations(t *testing.T) {
 	f := newReadFixture(t)
 	for _, tc := range []struct {
@@ -30,25 +35,85 @@ func TestReadSyncRejectsUnownedDestinations(t *testing.T) {
 	}{
 		{"relative path", "invalid_arguments", func(t *testing.T, opts *ReadSyncOptions) { opts.Path = "relative" }},
 		{"wrong authority", "invalid_arguments", func(t *testing.T, opts *ReadSyncOptions) { opts.ReadURL = "https://example.invalid/ledger.git" }},
-		{"regular file", "interrupted", func(t *testing.T, opts *ReadSyncOptions) {
+		{"regular file", "path_occupied", func(t *testing.T, opts *ReadSyncOptions) {
 			require.NoError(t, os.WriteFile(opts.Path, []byte("owned by someone else"), 0600))
 		}},
-		{"empty directory", "interrupted", func(t *testing.T, opts *ReadSyncOptions) { require.NoError(t, os.Mkdir(opts.Path, 0700)) }},
-		{"parent is a file", "interrupted", func(t *testing.T, opts *ReadSyncOptions) {
+		{"parent is a file", "path_occupied", func(t *testing.T, opts *ReadSyncOptions) {
 			require.NoError(t, os.WriteFile(opts.Path, []byte("parent"), 0600))
 			opts.Path = filepath.Join(opts.Path, "checkout")
+		}},
+		{"symlink to a directory", "path_occupied", func(t *testing.T, opts *ReadSyncOptions) {
+			require.NoError(t, os.Symlink(t.TempDir(), opts.Path))
+		}},
+		{"someone else's files", "path_occupied", func(t *testing.T, opts *ReadSyncOptions) {
+			writeReadTestFile(t, filepath.Join(opts.Path, "notes.md"), "not ox's")
+		}},
+		{"cache beside someone else's files", "path_occupied", func(t *testing.T, opts *ReadSyncOptions) {
+			writeReadTestFile(t, filepath.Join(opts.Path, ".sageox/cache/codedb/metadata.db"), "index")
+			writeReadTestFile(t, filepath.Join(opts.Path, "sessions/draft/session.md"), "not ox's")
+		}},
+		{"cache beside other .sageox content", "path_occupied", func(t *testing.T, opts *ReadSyncOptions) {
+			writeReadTestFile(t, filepath.Join(opts.Path, ".sageox/cache/codedb/metadata.db"), "index")
+			writeReadTestFile(t, filepath.Join(opts.Path, ".sageox/config.json"), "{}")
+		}},
+		{"cache is a symlink", "path_occupied", func(t *testing.T, opts *ReadSyncOptions) {
+			require.NoError(t, os.MkdirAll(filepath.Join(opts.Path, ".sageox"), 0700))
+			require.NoError(t, os.Symlink(t.TempDir(), filepath.Join(opts.Path, ".sageox/cache")))
+		}},
+		{"Git worktree link", "path_occupied", func(t *testing.T, opts *ReadSyncOptions) {
+			writeReadTestFile(t, filepath.Join(opts.Path, ".git"), "gitdir: /elsewhere/.git/worktrees/checkout\n")
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			opts := f.opts
-			opts.Path = filepath.Join(t.TempDir(), "checkout")
+			root := t.TempDir()
+			opts.Path = filepath.Join(root, "checkout")
 			tc.prepare(t, &opts)
+			before := readTestTree(t, root)
 			result := ReadSync(context.Background(), opts)
 			require.False(t, result.Ready)
 			require.Equal(t, tc.errorClass, result.ErrorClass)
 			require.Nil(t, result.LastSuccessfulSync)
+			require.Equal(t, before, readTestTree(t, root), "a refused path, and everything beside it, stays exactly as it was")
 		})
 	}
+}
+
+// writeReadTestFile writes content to path, creating its parent directories.
+func writeReadTestFile(t *testing.T, path, content string) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0700))
+	require.NoError(t, os.WriteFile(path, []byte(content), 0600))
+}
+
+// readTestTree records every entry under root: each file's content, each
+// symlink's target, and each directory.
+func readTestTree(t *testing.T, root string) map[string]string {
+	t.Helper()
+	tree := map[string]string{}
+	require.NoError(t, filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		switch {
+		case d.Type()&fs.ModeSymlink != 0:
+			target, err := os.Readlink(path)
+			tree[rel] = "symlink " + target
+			return err
+		case d.IsDir():
+			tree[rel] = "dir"
+		default:
+			data, err := os.ReadFile(path)
+			tree[rel] = "file " + string(data)
+			return err
+		}
+		return nil
+	}))
+	return tree
 }
 
 // Failure prevented: cancellation while another creator holds the lock poisons
@@ -184,26 +249,110 @@ func TestReadSyncRejectsBrokenCommitHistory(t *testing.T) {
 	require.True(t, ReadSync(ctx, f.opts).Ready)
 }
 
+// Failure prevented: the budget runs out or a signal lands while verification
+// asks Git about history, and the killed check is read as Git's answer. The
+// result claims a whole history is missing (incomplete_history, and history
+// "shallow" for the shallow check), so a consumer escalates what a retry
+// fixes and an operator is told the checkout lost history it still has
+// (ox #1007).
+func TestReadSyncHistoryCheckCutShortIsInterrupted(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("stands in for Git with a POSIX shell script on PATH")
+	}
+	f := newReadFixture(t)
+	require.True(t, ReadSync(context.Background(), f.opts).Ready)
+	for _, tc := range []struct {
+		entry, arg string
+		// before counts the calls naming arg that run ahead of the one that hangs.
+		before int
+	}{
+		{"check", "--is-shallow-repository", 0},
+		{"cold sync", "--is-shallow-repository", 0},
+		// A refresh asks once before it fetches, then again in verification.
+		{"refresh before fetch", "--is-shallow-repository", 0},
+		{"refresh", "--is-shallow-repository", 1},
+		{"check", "--count", 0},
+		{"cold sync", "--count", 0},
+		{"refresh", "--count", 0},
+	} {
+		t.Run(tc.entry+" "+tc.arg, func(t *testing.T) {
+			opts := f.opts
+			if tc.entry == "cold sync" {
+				opts.Path = filepath.Join(t.TempDir(), "checkout")
+			}
+			run := func(ctx context.Context) ReadSyncResult {
+				if tc.entry == "check" {
+					return CheckReadiness(ctx, opts.Path, opts.RepoID, opts.Endpoint)
+				}
+				return ReadSync(ctx, opts)
+			}
+			reached := filepath.Join(t.TempDir(), "reached")
+			hangReadGitCall(t, tc.arg, tc.before, reached)
+
+			// The budget running out and a signal both end ctx, and either kills
+			// the check. End it once the check is hanging.
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			finished := make(chan ReadSyncResult, 1)
+			go func() { finished <- run(ctx) }()
+			require.Eventually(t, func() bool {
+				_, err := os.Stat(reached)
+				return err == nil
+			}, 30*time.Second, 5*time.Millisecond, "the check never ran")
+			cancel()
+			result := <-finished
+			require.False(t, result.Ready)
+			require.Equal(t, "interrupted", result.ErrorClass, "%+v", result)
+			require.Equal(t, "unknown", result.History, "a killed check says nothing about history")
+
+			// Nothing is wrong with the history, so the retry "interrupted" asks for succeeds.
+			retried := run(context.Background())
+			require.True(t, retried.Ready, "%+v", retried)
+			require.Equal(t, "full", retried.History)
+		})
+	}
+}
+
+// hangReadGitCall puts a Git on PATH that runs every call as the fixture's Git,
+// except the call naming arg that follows before others: that one creates
+// reached and hangs until its process group is killed.
+func hangReadGitCall(t *testing.T, arg string, before int, reached string) {
+	t.Helper()
+	fixtureGit, err := exec.LookPath("git")
+	require.NoError(t, err)
+	bin, calls := t.TempDir(), filepath.Join(t.TempDir(), "calls")
+	quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
+	script := "#!/bin/sh\nfor arg in \"$@\"; do\n" +
+		"\tif [ \"$arg\" = " + quote(arg) + " ]; then\n" +
+		"\t\techo >> " + quote(calls) + "\n" +
+		"\t\tif [ $(wc -l < " + quote(calls) + ") -eq " + strconv.Itoa(before+1) + " ]; then : > " + quote(reached) + "; exec sleep 60; fi\n" +
+		"\tfi\ndone\nexec " + quote(fixtureGit) + " \"$@\"\n"
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0700))
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
 // Failure prevented: non-regular or unexpectedly missing tracked content is
 // silently overwritten instead of preserving local changes for the coworker.
 func TestReadSyncRejectsDamagedTrackedContent(t *testing.T) {
+	const tracked = "sessions/old/session.md"
 	for _, tc := range []struct {
 		name, errorClass string
+		detail           *ReadFailureDetail
 		damage           func(*testing.T, *readFixture, string)
 	}{
-		{"missing file", "dirty", func(t *testing.T, f *readFixture, path string) { require.NoError(t, os.Remove(path)) }},
-		{"directory replaces file", "dirty", func(t *testing.T, f *readFixture, path string) {
+		{"missing file", "dirty", nil, func(t *testing.T, f *readFixture, path string) { require.NoError(t, os.Remove(path)) }},
+		{"directory replaces file", "dirty", nil, func(t *testing.T, f *readFixture, path string) {
 			require.NoError(t, os.Remove(path))
 			require.NoError(t, os.Mkdir(path, 0700))
 		}},
-		{"staged work", "dirty", func(t *testing.T, f *readFixture, path string) {
+		{"staged work", "dirty", nil, func(t *testing.T, f *readFixture, path string) {
 			require.NoError(t, os.WriteFile(path, []byte("staged local work"), 0600))
 			readTestGit(t, f.opts.Path, "add", "--", path)
 		}},
-		{"malformed stub", "missing_hydration", func(t *testing.T, f *readFixture, path string) {
+		{"malformed stub", "missing_hydration", &ReadFailureDetail{Reason: "malformed_pointer", Path: tracked}, func(t *testing.T, f *readFixture, path string) {
 			require.NoError(t, os.WriteFile(path, []byte("version https://git-lfs.github.com/spec/v1\noid sha256:invalid\nsize not-a-number\n"), 0600))
 		}},
-		{"different stub", "missing_hydration", func(t *testing.T, f *readFixture, path string) {
+		{"different stub", "missing_hydration", &ReadFailureDetail{Reason: "nested_stub", Path: tracked}, func(t *testing.T, f *readFixture, path string) {
 			require.NoError(t, os.WriteFile(path, []byte(lfs.FormatPointer("sha256:"+lfs.ComputeOID([]byte("new")), 3)), 0600))
 		}},
 	} {
@@ -211,11 +360,12 @@ func TestReadSyncRejectsDamagedTrackedContent(t *testing.T) {
 			f := newReadFixture(t)
 			ctx := context.Background()
 			require.True(t, ReadSync(ctx, f.opts).Ready)
-			path := filepath.Join(f.opts.Path, "sessions/old/session.md")
+			path := filepath.Join(f.opts.Path, tracked)
 			tc.damage(t, f, path)
 			result := ReadSync(ctx, f.opts)
 			require.False(t, result.Ready)
 			require.Equal(t, tc.errorClass, result.ErrorClass)
+			require.Equal(t, tc.detail, result.ErrorDetail)
 		})
 	}
 }
@@ -250,8 +400,9 @@ func TestReadSyncObjectMaterializationFailuresLeaveDestinationUntouched(t *testi
 			localRef := ref
 			rel := tc.prep(t, root, &localRef)
 			path := filepath.Join(root, rel)
-			err := materializeReadObject(context.Background(), action, root, rel, localRef)
+			landed, err := materializeReadObject(context.Background(), newReadLimiter(), action, root, rel, localRef)
 			require.Error(t, err)
+			require.False(t, landed, "nothing reached the destination")
 			if tc.name == "size mismatch" {
 				require.EqualError(t, err, "missing_hydration")
 				var failure *readFailure
@@ -318,6 +469,31 @@ func TestReadSyncDehydrationRetainsVerifiedObjectsAcrossRetries(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Failure prevented: a refresh that cannot list the revision it is moving to
+// still turns hydrated files back into pointers, so the failed refresh costs
+// every one of those objects a download again.
+func TestReadSyncDehydrationStopsWhenItsTargetCannotBeListed(t *testing.T) {
+	const path = "sessions/kept/raw.jsonl"
+	content := []byte("hydrated before the refresh\n")
+	f := newReadLFSFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/batch") {
+			grantReadLFSBatch(t, w, r)
+			return
+		}
+		_, _ = w.Write(content)
+	})
+	commitReadLFSPointer(t, f, path, content)
+	ctx := context.Background()
+	require.True(t, ReadSync(ctx, f.opts).Ready)
+	transport, err := gitserver.NewReadTransport(f.opts.Endpoint, f.opts.RepoID, f.opts.ReadURL)
+	require.NoError(t, err)
+
+	require.Error(t, dehydrateReadFiles(ctx, transport, f.opts.Path, "refs/ox/missing", sparseCheckoutDirs()))
+	kept, err := os.ReadFile(filepath.Join(f.opts.Path, path))
+	require.NoError(t, err)
+	require.Equal(t, content, kept, "the hydrated object stays in place")
 }
 
 // Failure prevented: Git's stat cache or the pointer-size optimization hides

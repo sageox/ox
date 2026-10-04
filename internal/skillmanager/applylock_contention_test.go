@@ -95,3 +95,24 @@ func TestAcquireApplyLock_RefusesASymlinkedLockPath(t *testing.T) {
 		t.Error("ox created a lock file outside the repository")
 	}
 }
+
+func TestAcquireApplyLock_RejectsUnusableRepositoryRoots(t *testing.T) {
+	t.Run("missing repository", func(t *testing.T) {
+		missing := filepath.Join(t.TempDir(), "missing")
+		_, acquired, err := acquireApplyLock(missing)
+		if err == nil || acquired {
+			t.Fatalf("acquireApplyLock(%q) = acquired %v, err %v; want an open-root error", missing, acquired, err)
+		}
+	})
+
+	t.Run("lock parent is a regular file", func(t *testing.T) {
+		repo := t.TempDir()
+		if err := os.WriteFile(filepath.Join(repo, ".sageox"), []byte("not a directory\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, acquired, err := acquireApplyLock(repo)
+		if err == nil || acquired {
+			t.Fatalf("acquireApplyLock with a regular .sageox = acquired %v, err %v; want refusal", acquired, err)
+		}
+	})
+}

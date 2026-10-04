@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/teamaccess"
 	"github.com/stretchr/testify/require"
 )
 
@@ -491,8 +492,15 @@ func setupConversationE2E(t *testing.T) *conversationE2E {
 }
 
 // removeConversationAuth deletes the fake auth.json so the harness models a
-// fully logged-out machine (D14: local reads never touch auth).
+// logged-out machine whose team checkout is still on disk.
 func removeConversationAuth(t *testing.T, e2e *conversationE2E) {
 	t.Helper()
 	require.NoError(t, os.Remove(filepath.Join(e2e.configHome, "sageox", "auth.json")))
+}
+
+// removeConversationAccessCache deletes the seeded membership confirmation,
+// so the next read has to ask the server.
+func removeConversationAccessCache(t *testing.T, e2e *conversationE2E) {
+	t.Helper()
+	require.NoError(t, os.Remove(filepath.Join(e2e.cacheHome, "sageox", teamaccess.CacheFileName)))
 }

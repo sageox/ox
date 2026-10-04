@@ -42,6 +42,14 @@ type SessionEntry struct {
 	// IsError indicates the tool call failed (for tool entries)
 	IsError bool `json:"is_error,omitempty"`
 
+	// CallID correlates a tool call with its result (for tool entries). It is
+	// the agent's own identifier for the invocation — Claude Code's
+	// tool_use.id / tool_result.tool_use_id, Codex's call_id — and the one key
+	// shared by the recording, the native transcript, and the agent's trace,
+	// so the call entry and its result entry carry the same value. Empty when
+	// the adapter's format has no such id.
+	CallID string `json:"call_id,omitempty"`
+
 	// CoworkerName identifies the coworker or subagent that contributed to this entry.
 	// This includes both team coworkers (loaded via ox coworker load) and built-in
 	// Claude Code subagents (invoked via Task tool, e.g., code-reviewer, debugger).

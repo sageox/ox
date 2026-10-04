@@ -109,6 +109,7 @@ func ensureSageoxConfig(gitRoot string) configResult {
 
 var initCmd = &cobra.Command{
 	Use:   "init",
+	Args:  cobra.NoArgs,
 	Short: "Initialize SageOx for this repository",
 	Long: `Initialize SageOx for this repository.
 
@@ -164,7 +165,8 @@ func hasCommits(gitRoot string) bool {
 
 // ensureInitialCommit creates a seed commit in an empty git repository so that
 // ox init can compute a fingerprint. It writes .sageox/README.md and commits
-// it. If the repo already has commits this is a no-op.
+// only that file, preserving unrelated staged work. If the repo already has
+// commits this is a no-op.
 //
 // The commit uses -c flags to supply a fallback author identity so it succeeds
 // even when the user has not configured git user.name / user.email.
@@ -194,12 +196,14 @@ func ensureInitialCommit(gitRoot string) error {
 		return fmt.Errorf("git add .sageox/README.md: %w (%s)", err, strings.TrimSpace(string(out)))
 	}
 
-	// commit with fallback identity so it works even without git config
+	// Scope the commit to the generated README so existing staged work stays staged.
+	// Use fallback identity so it works even without git config.
 	commitCmd := exec.Command(
 		"git",
 		"-c", "user.name="+constants.SageOxGitName,
 		"-c", "user.email="+constants.SageOxGitEmail,
-		"commit", "-m", "Initialize SageOx configuration",
+		"commit", "--only", "-m", "Initialize SageOx configuration",
+		"--", filepath.Join(".sageox", "README.md"),
 	)
 	commitCmd.Dir = gitRoot
 	if out, err := commitCmd.CombinedOutput(); err != nil {
@@ -318,26 +322,6 @@ func runInit() error {
 		return fmt.Errorf("not a git repository\n\nox init requires a git repository. Run:\n  git init\n  git commit --allow-empty -m \"Initial commit\"\n  ox init")
 	}
 
-	// ensure the repo has at least one commit (required for fingerprinting)
-	if err := ensureInitialCommit(gitRoot); err != nil {
-		return fmt.Errorf("failed to create initial commit: %w", err)
-	}
-
-	// compute fingerprint (now guaranteed to have at least one commit)
-	fingerprint, err := repotools.ComputeFingerprint()
-	if err != nil {
-		fmt.Fprintln(os.Stderr)
-		cli.PrintError("git repository has no commits")
-		fmt.Fprintln(os.Stderr)
-		fmt.Fprintln(os.Stderr, cli.StyleDim.Render(fmt.Sprintf("%s requires at least one commit for repository fingerprinting.", cli.StyleCommand.Render("ox init"))))
-		return cli.ErrSilent
-	}
-
-	// offline-safe: remote hashes are optional; registration works for local-only repos
-	if hashErr := fingerprint.WithRemoteHashes(); hashErr != nil {
-		cli.PrintWarning(fmt.Sprintf("Could not add remote hashes: %v", hashErr))
-	}
-
 	// check if remote already has .sageox/ (prevents duplicate init race condition)
 	if !initForce {
 		found, stale, err := checkRemoteSageoxExists(gitRoot)
@@ -376,7 +360,10 @@ func runInit() error {
 			fmt.Printf("Using endpoint: %s\n", cli.StyleBold.Render(endpoint.NormalizeSlug(resolvedEndpoint)))
 		}
 	} else if os.Getenv(endpoint.EnvVar) == "" {
-		selectedEndpoint, needsLogin := selectInitEndpoint()
+		selectedEndpoint, needsLogin, err := selectInitEndpoint()
+		if err != nil {
+			return err
+		}
 		if selectedEndpoint != "" {
 			if needsLogin {
 				fmt.Println()
@@ -455,12 +442,32 @@ func runInit() error {
 		} else if reposResp != nil {
 			proceed, promptErr := promptNoTeams()
 			if promptErr != nil {
-				return fmt.Errorf("team selection canceled")
+				return fmt.Errorf("team selection canceled: %w", promptErr)
 			}
 			if !proceed {
 				return nil
 			}
 		}
+	}
+
+	// Resolve required input before creating the seed commit or touching the index.
+	if err := ensureInitialCommit(gitRoot); err != nil {
+		return fmt.Errorf("failed to create initial commit: %w", err)
+	}
+
+	// compute fingerprint (now guaranteed to have at least one commit)
+	fingerprint, err := repotools.ComputeFingerprint()
+	if err != nil {
+		fmt.Fprintln(os.Stderr)
+		cli.PrintError("git repository has no commits")
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprintln(os.Stderr, cli.StyleDim.Render(fmt.Sprintf("%s requires at least one commit for repository fingerprinting.", cli.StyleCommand.Render("ox init"))))
+		return cli.ErrSilent
+	}
+
+	// offline-safe: remote hashes are optional; registration works for local-only repos
+	if hashErr := fingerprint.WithRemoteHashes(); hashErr != nil {
+		cli.PrintWarning(fmt.Sprintf("Could not add remote hashes: %v", hashErr))
 	}
 
 	sageoxDir := filepath.Join(gitRoot, ".sageox")
@@ -783,8 +790,8 @@ func runInit() error {
 		tracker.trackForceStage(hookFile)
 	}
 
-	// commands and rules are installed by external adapters via CapCommandsInstaller/CapRulesInstaller
-	// (see installAgentHooks → ea.InstallCommands / ea.InstallRules)
+	// Commands remain an adapter compatibility surface. Skills and ox-owned
+	// rules are projected together by the central inventory reconciler.
 
 	// single summary line for the entire integration section
 	if !initQuiet {
@@ -2208,7 +2215,7 @@ func installAgentHooks(gitRoot string, quiet bool, selectedAgents map[string]boo
 		}
 	}
 
-	// install hooks + rules only for agents the user selected
+	// Install integrations only for AI coworkers the user selected.
 	externalAdapters := adapters.DiscoverExternalAdapters()
 	var selectedSkillAdapters []*adapters.ExternalAdapter
 	for _, ea := range externalAdapters {
@@ -2218,8 +2225,8 @@ func installAgentHooks(gitRoot string, quiet bool, selectedAgents map[string]boo
 		// OpenCode hooks are already installed above: InstallProjectOpenCodeHooks
 		// resolves this same adapter and calls InstallHooks on it, so running the
 		// generic path too would repeat the identical call and double-report the
-		// plugin in installedHooks. Rules/commands/skills below are not installed
-		// by the built-in helper, so they still run for opencode.
+		// plugin in installedHooks. Commands and inventory targets below are not
+		// installed by the built-in helper, so they still run for opencode.
 		if ea.HasCapability(adapterprotocol.CapHookInstaller) && ea.Name() != "opencode" {
 			result, err := ea.InstallHooks(gitRoot, "project")
 			if err != nil {
@@ -2229,20 +2236,6 @@ func installAgentHooks(gitRoot string, quiet bool, selectedAgents map[string]boo
 			} else if result.Installed {
 				if !quiet {
 					cli.PrintSuccess(fmt.Sprintf("Installed %s hooks", ea.Name()))
-				}
-				installedHooks = append(installedHooks, result.FilesWritten...)
-			}
-		}
-
-		if ea.HasCapability(adapterprotocol.CapRulesInstaller) {
-			result, err := ea.InstallRules(gitRoot, version.Version)
-			if err != nil {
-				if !quiet {
-					cli.PrintWarning(fmt.Sprintf("Could not install %s rules: %v", ea.Name(), err))
-				}
-			} else if result.Installed {
-				if !quiet {
-					cli.PrintSuccess(fmt.Sprintf("Installed %s rules", ea.Name()))
 				}
 				installedHooks = append(installedHooks, result.FilesWritten...)
 			}
@@ -2269,32 +2262,52 @@ func installAgentHooks(gitRoot string, quiet bool, selectedAgents map[string]boo
 			}
 		}
 
-		if ea.HasCapability(adapterprotocol.CapSkillsInstaller) {
-			if len(ea.Info().SkillTargets) > 0 {
-				selectedSkillAdapters = append(selectedSkillAdapters, ea)
-			} else {
-				// One-release compatibility for third-party adapters that have not
-				// adopted target descriptors yet.
-				result, err := ea.InstallSkills(gitRoot, version.Version)
-				if err != nil {
-					if !quiet {
-						cli.PrintWarning(fmt.Sprintf("Could not install legacy %s skills: %v", ea.Name(), err))
-					}
-				} else {
-					installedHooks = append(installedHooks, result.FilesWritten...)
+		info := ea.Info()
+		if (info == nil || len(info.RuleTargets) == 0) && ea.HasCapability(adapterprotocol.CapRulesInstaller) {
+			// One-release compatibility for third-party protocol-v1 adapters.
+			// Built-in adapters declare rule targets and are reconciled below.
+			// Scheduled removal in ox 0.18.0 — see the deprecation note on
+			// adapterprotocol.CapRulesInstaller.
+			result, err := ea.InstallRules(gitRoot, version.Version)
+			if err != nil {
+				if !quiet {
+					cli.PrintWarning(fmt.Sprintf("Could not install legacy %s rules: %v", ea.Name(), err))
 				}
+			} else {
+				installedHooks = append(installedHooks, result.FilesWritten...)
+			}
+		}
+
+		if info != nil && (len(info.SkillTargets) > 0 || len(info.RuleTargets) > 0) {
+			selectedSkillAdapters = append(selectedSkillAdapters, ea)
+		}
+		if (info == nil || len(info.SkillTargets) == 0) && ea.HasCapability(adapterprotocol.CapSkillsInstaller) {
+			// Compatibility for third-party adapters that have not adopted
+			// target descriptors yet. Deliberately undated, unlike the rules
+			// branch above: every bundled adapter that declares
+			// CapSkillsInstaller also declares skill_targets, so this branch is
+			// third-party-only — and ox cannot observe how many such adapters
+			// exist. See the skill_targets section of
+			// docs/guides/adapter-authoring.md.
+			result, err := ea.InstallSkills(gitRoot, version.Version)
+			if err != nil {
+				if !quiet {
+					cli.PrintWarning(fmt.Sprintf("Could not install legacy %s skills: %v", ea.Name(), err))
+				}
+			} else {
+				installedHooks = append(installedHooks, result.FilesWritten...)
 			}
 		}
 	}
 	if targets, err := skillTargetsForAdapters(gitRoot, selectedSkillAdapters); err != nil {
 		if !quiet {
-			cli.PrintWarning(fmt.Sprintf("Could not resolve Agent Skills targets: %v", err))
+			cli.PrintWarning(fmt.Sprintf("Could not resolve AI coworker inventory targets: %v", err))
 		}
 	} else if len(targets) > 0 {
 		plan, err := reconcileSelectedSkills(gitRoot, targets)
 		if err != nil {
 			if !quiet {
-				cli.PrintWarning(fmt.Sprintf("Could not reconcile Agent Skills: %v", err))
+				cli.PrintWarning(fmt.Sprintf("Could not reconcile AI coworker assets: %v", err))
 			}
 		} else {
 			written := plan.WrittenPaths()
@@ -2305,11 +2318,11 @@ func installAgentHooks(gitRoot string, quiet bool, selectedAgents map[string]boo
 			if !quiet {
 				switch {
 				case len(plan.Conflicts) > 0:
-					cli.PrintWarning(fmt.Sprintf("Reconciled Agent Skills with %d preserved conflict(s)", len(plan.Conflicts)))
+					cli.PrintWarning(fmt.Sprintf("Reconciled AI coworker assets with %d preserved conflict(s)", len(plan.Conflicts)))
 				case len(written) > 0:
-					cli.PrintSuccess(fmt.Sprintf("Installed %d Agent Skills file(s) across %d native target(s)", len(written), len(targets)))
+					cli.PrintSuccess(fmt.Sprintf("Installed %d AI coworker asset file(s) across %d native target(s)", len(written), len(targets)))
 				default:
-					cli.PrintPreserved("Agent Skills already up to date")
+					cli.PrintPreserved("AI coworker assets already up to date")
 				}
 			}
 		}
@@ -2470,9 +2483,9 @@ type initEndpointInfo struct {
 }
 
 // selectInitEndpoint shows endpoint selection UI for ox init.
-// Returns (selectedEndpoint, needsLogin) where needsLogin is true if user must login first.
-// Returns ("", false) if only one valid endpoint or user cancels.
-func selectInitEndpoint() (string, bool) {
+// needsLogin is true if the user must log in first. Cancellation returns an
+// empty endpoint; --no-input returns an error when a choice is needed.
+func selectInitEndpoint() (string, bool, error) {
 	// get all endpoints with stored tokens (including expired)
 	storedEndpoints, err := auth.ListEndpoints()
 	if err != nil {
@@ -2510,13 +2523,16 @@ func selectInitEndpoint() (string, bool) {
 
 	// if only one endpoint and it's valid, use it without prompting
 	if len(endpoints) == 1 && endpoints[0].IsValid {
-		return endpoints[0].URL, false
+		return endpoints[0].URL, false, nil
 	}
 
 	// if only one endpoint and it's not valid, still need to show it so user knows to login
 	// but if there are no endpoints at all, return empty (will be caught by auth gate later)
 	if len(endpoints) == 0 {
-		return "", false
+		return "", false, nil
+	}
+	if cli.NoInput() {
+		return "", false, fmt.Errorf("--no-input requires --endpoint <endpoint> to choose where to initialize")
 	}
 
 	// show endpoint selection
@@ -2541,20 +2557,20 @@ func selectInitEndpoint() (string, bool) {
 
 	selected, err := cli.SelectOne("Endpoint:", options, 0)
 	if err != nil {
-		return "", false // canceled
+		return "", false, nil // canceled
 	}
 	if selected < 0 || selected >= len(endpoints) {
-		return "", false
+		return "", false, nil
 	}
 
 	selectedEp := endpoints[selected]
 
 	// if selected endpoint is not valid, tell user to login first
 	if !selectedEp.IsValid {
-		return selectedEp.URL, true
+		return selectedEp.URL, true, nil
 	}
 
-	return selectedEp.URL, false
+	return selectedEp.URL, false, nil
 }
 
 // teamNameForID best-effort resolves a team ID to its display name via the
@@ -2692,6 +2708,9 @@ func selectTeam(teams []api.TeamMembership, currentTeamID string) (string, strin
 // promptNoTeams handles the case where the API returns zero teams.
 // Offers to continue (server will auto-create a team) or open the dashboard.
 func promptNoTeams() (bool, error) {
+	if cli.NoInput() {
+		return false, fmt.Errorf("%w: no teams available; create a team first, or omit --no-input to choose how to continue", cli.ErrNoInteractiveInput)
+	}
 	ep := endpoint.Get()
 	fmt.Println()
 	fmt.Println(ui.RenderCategory("Team Setup"))

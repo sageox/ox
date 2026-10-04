@@ -1,7 +1,7 @@
 ---
 title: "ox session prune"
 description: "CLI reference for ox session prune"
-sidebar_position: 81
+sidebar_position: 89
 ---
 
 ## ox session prune
@@ -49,8 +49,9 @@ ox session prune [flags]
 ### Options inherited from parent commands
 
 ```
-  -c, --config string    config file path (default: .sageox/config.yaml)
+  -c, --config string    user config file (overrides OX_USER_CONFIG)
       --json             output in JSON format (default: false)
+      --no-input         disable prompts and terminal UI; provide required input with arguments or flags
       --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
       --profile          generate CPU profile and execution trace for performance analysis (default: false)
   -q, --quiet            suppress non-error output (default: false)

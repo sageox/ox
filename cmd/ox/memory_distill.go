@@ -16,6 +16,7 @@ import (
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/facts"
 	"github.com/spf13/cobra"
 )
@@ -134,7 +135,7 @@ func runAgentDistill(inst *agentinstance.Instance, cmd *cobra.Command) error {
 		return fmt.Errorf("authentication required: %w", err)
 	}
 	if token == nil || token.AccessToken == "" {
-		return fmt.Errorf("not authenticated — run 'ox login' first")
+		return errkind.Errorf(errkind.NotLoggedIn, "not authenticated — run 'ox login' first")
 	}
 
 	// build API request

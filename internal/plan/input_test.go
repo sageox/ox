@@ -391,3 +391,35 @@ func TestNormalizeExplicitFiles(t *testing.T) {
 		})
 	}
 }
+
+// TestLooksLikeHTML_NeverMisroutesPageOrMarkdown: without it a .html page with no
+// doctype saves as markdown (ox#1070), or a markdown plan that embeds html is read as a page.
+func TestLooksLikeHTML_NeverMisroutesPageOrMarkdown(t *testing.T) {
+	const fragment = `<title>My Plan</title><style>body{color:#111}</style><h1>Real title</h1><p>Body.</p>`
+	tests := []struct {
+		name string
+		path string
+		raw  string
+		want bool
+	}{
+		{"fragment opening with title", "plan.html", fragment, true},
+		{"fragment opening with a div", "plan.html", `<div class="app"><h1>Plan</h1></div>`, true},
+		{"document behind a byte order mark", "plan.html", "\ufeff<!DOCTYPE html><html><body></body></html>", true},
+		{"document behind a leading comment", "plan.html", "<!-- generated -->\n<!doctype html><html><body></body></html>", true},
+		{"xhtml behind an xml prolog", "plan.htm", "<?xml version=\"1.0\"?>\n<!DOCTYPE html>\n<html><body></body></html>", true},
+		{"upper-case extension", "PLAN.HTML", fragment, true},
+		{"piped full document", "", "\n  <!DOCTYPE html>\n<html><body></body></html>", true},
+		{"piped markdown opening with a tag", "", "<p align=\"center\">Logo</p>\n\n# Plan\n", false},
+		{"markdown file opening with a tag", "plan.md", "<div align=\"center\"><img src=\"logo.png\"></div>\n\n# Plan\n", false},
+		{"markdown file embedding an html fence", "plan.md", "# Plan\n\n```html-interactive\n<!doctype html><html><body>demo</body></html>\n```\n", false},
+		// Empty input stays on the markdown path, which owns the empty-plan handling.
+		{"whitespace-only page", "plan.html", " \n\t", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := LooksLikeHTML(tt.path, tt.raw); got != tt.want {
+				t.Errorf("LooksLikeHTML(%q, %.40q) = %v, want %v", tt.path, tt.raw, got, tt.want)
+			}
+		})
+	}
+}

@@ -6,8 +6,23 @@ import (
 	"testing"
 
 	"github.com/sageox/agentx"
+	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/pkg/adapterprotocol"
+	"github.com/stretchr/testify/require"
 )
+
+func TestDeclaredRuleTargetsRejectsInvalidDescriptor(t *testing.T) {
+	external := adapters.NewExternalAdapterWithInfo("unused", &adapterprotocol.InfoResponse{
+		Name: "invalid-rules",
+		RuleTargets: []adapterprotocol.SkillTarget{{
+			Key: "escape", Root: "../escape", Format: adapterprotocol.RuleFormatMarkdownV1,
+			Scope: adapterprotocol.SkillScopeProject, LinkPolicy: adapterprotocol.SkillLinkPolicyReject,
+		}},
+	})
+
+	_, err := declaredRuleTargetsFromAdapters(t.TempDir(), []*adapters.ExternalAdapter{external})
+	require.ErrorContains(t, err, "escapes repository")
+}
 
 func TestCleanupLegacyClaudeCommandsPreservesUserFiles(t *testing.T) {
 	repo := retireCommandsRepo(t)

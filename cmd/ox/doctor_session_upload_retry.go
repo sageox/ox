@@ -166,6 +166,20 @@ func findOrphanedSessionsInDir(cacheSessionsDir, ledgerPath string) ([]orphanedS
 				continue // genuinely active recording, skip
 			}
 
+			recState.SessionPath = sessionDir
+			stoppedAt := session.ResolveStoppedAt(recState.StoppedAt, filepath.Join(sessionDir, ledgerFileRaw), time.Now())
+			// Reclaim can happen hours after the recording died. A stop timestamp
+			// cannot identify its spool EOF: another recording may already share
+			// the native session. Preserve only boundaries captured while live;
+			// a missing durable stop makes trace materialization fail closed.
+			if err := session.StampRawCarrier(filepath.Join(sessionDir, ledgerFileRaw), session.CarrierStamp{
+				NativeSessions: recState.NativeSessions,
+				StoppedAt:      stoppedAt,
+				TraceCapture:   recState.Trace,
+			}); err != nil && recState.Trace != nil {
+				slog.Warn("trace recovery carrier not persisted", "session", sessionName, "error", err)
+				continue
+			}
 			_ = os.Remove(recordingPath)
 			// also clean up lock files
 			lockFiles, _ := filepath.Glob(filepath.Join(sessionDir, "*.lock"))
@@ -270,6 +284,18 @@ func readCacheSessionMeta(rawPath string) (*session.StoreMeta, int, error) {
 			// trailing append must not hide the valid turns already fsynced.
 			continue
 		}
+		if line["type"] == "footer" {
+			carrier := session.ParseStoreMeta(line)
+			if carrier.TraceCapture != nil {
+				meta.TraceCapture = carrier.TraceCapture
+			}
+			if carrier.NativeSessions != nil {
+				meta.NativeSessions = carrier.NativeSessions
+			}
+			if carrier.StoppedAt != nil {
+				meta.StoppedAt = carrier.StoppedAt
+			}
+		}
 		if v, ok := line["entry_count"].(float64); ok && v >= 0 {
 			footerCount = int(v)
 			continue
@@ -356,6 +382,8 @@ func retrySessionUploadWithEffects(projectRoot, ledgerPath string, orphan orphan
 		return fmt.Errorf("%s validation failed (skipping corrupt session): %w", ledgerFileRaw, err)
 	}
 
+	traceCache, traceMeta := prepareRetryTraces(ledgerPath, orphan)
+
 	// Record retry ownership before mutating the ledger. Once meta.json becomes
 	// final, ordinary orphan discovery skips it to avoid replaying an already
 	// published session. This cache-side marker is what keeps failures from any
@@ -423,9 +451,37 @@ func retrySessionUploadWithEffects(projectRoot, ledgerPath string, orphan orphan
 		return fmt.Errorf("LFS upload: %w", err)
 	}
 
+	if traceMeta != nil && effects.uploadTraces != nil {
+		traceRefs, traceErr := effects.uploadTraces(projectRoot, traceCache, sessionDir)
+		if traceErr != nil {
+			slog.Warn("trace retry upload skipped", "error", traceErr)
+		}
+		if traceErr == nil && len(traceRefs) == 2 {
+			if fileRefs == nil {
+				fileRefs = make(map[string]lfs.FileRef)
+			}
+			for name, ref := range traceRefs {
+				fileRefs[name] = ref
+			}
+		} else {
+			traceMeta = nil
+		}
+	} else {
+		traceMeta = nil
+	}
+
 	meta, err := writeRetryUploadMeta(sessionDir, projectRoot, orphan, sessionID, fileRefs)
 	if err != nil {
 		return err
+	}
+
+	if traceMeta != nil {
+		if err := lfs.MutateSessionMeta(context.Background(), sessionDir, func(current *lfs.SessionMeta) (*lfs.SessionMeta, error) {
+			current.Trace = traceMeta
+			return current, nil
+		}); err != nil {
+			return fmt.Errorf("write trace retry metadata: %w", err)
+		}
 	}
 
 	// ensure .gitignore

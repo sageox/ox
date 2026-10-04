@@ -504,3 +504,49 @@ func TestStageSessionInLedger_LeavesFinalizedSessionAlone(t *testing.T) {
 		"a finalized session's artifacts must not be purged")
 	assert.Empty(t, payload.PreservedSessionID, "no draft was superseded, so nothing to carry")
 }
+
+// A failed publication is retried with a new payload. Draft identity must be
+// durable before purge, without replacing an identity already in the cache.
+func TestStageSessionInLedger_DurablyPreservesDraftIdentity(t *testing.T) {
+	for _, mode := range []string{"missing identity", "existing identity", "corrupt metadata"} {
+		t.Run(mode, func(t *testing.T) {
+			ledgerPath := initTestGitRepo(t)
+			const sessionName = "2026-01-01T00-00-testuser-OxDraftRetry"
+			destDir := filepath.Join(ledgerPath, "sessions", sessionName)
+			writeDraftMeta(t, destDir)
+			cacheDir := filepath.Join(ledgerPath, ".sageox", "cache", "sessions", sessionName)
+			require.NoError(t, os.MkdirAll(cacheDir, 0700))
+			require.NoError(t, os.WriteFile(filepath.Join(cacheDir, "raw.jsonl"), []byte(testRawContent), 0600))
+			const cacheID = "ses_01950000-0000-7000-8000-0000000000cc"
+			meta := &lfs.SessionMeta{Title: "Preserve the real recording"}
+			if mode == "existing identity" {
+				meta.SessionID = cacheID
+			}
+			require.NoError(t, lfs.WriteSessionMetaOnly(cacheDir, meta))
+			if mode == "corrupt metadata" {
+				require.NoError(t, os.WriteFile(filepath.Join(cacheDir, "meta.json"), []byte("broken JSON"), 0600))
+			}
+			h := newGitBackedHandler()
+			_, err := h.stageSessionInLedger(&SessionFinalizePayload{SessionDir: cacheDir, LedgerPath: ledgerPath})
+			if mode == "corrupt metadata" {
+				require.ErrorContains(t, err, "preserve draft session identity")
+				draft, err := lfs.ReadSessionMeta(destDir)
+				require.NoError(t, err)
+				require.True(t, draft.Draft)
+				require.Equal(t, draftTestSessionID, draft.SessionID, "failed persistence must not purge the only carrier")
+				return
+			}
+			require.NoError(t, err)
+			for _, dir := range []string{cacheDir, destDir} {
+				persisted, err := lfs.ReadSessionMeta(dir)
+				require.NoError(t, err)
+				expected := draftTestSessionID
+				if mode == "existing identity" {
+					expected = cacheID
+				}
+				require.Equal(t, expected, persisted.SessionID)
+				require.Equal(t, meta.Title, persisted.Title)
+			}
+		})
+	}
+}

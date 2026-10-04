@@ -103,12 +103,20 @@ func OxCapabilities() []Capability {
 					Command: "`ox query \"<question>\"` (semantic; default `--source=team` covers discussions, docs, and session history). Add `--source=all` to include code.",
 				},
 				{
+					Cue:     `Who/when in a recorded conversation`,
+					Command: "`ox conversation search --participant NAME --since DATE`",
+				},
+				{
 					Cue:     `"Who or what touched this code?"`,
 					Command: "`ox code search \"<pattern>\"` / `ox code insights`.",
 				},
 				{
 					Cue:     `A decision record (ADR/DDR) is being created, edited, or cited by number`,
 					Command: "`ox decision enrich --topic \"<subject>\"` (new) / `--file <dr.md>` (edit) — related DRs, numbering, ref verification.",
+				},
+				{
+					Cue:     `A pasted sageox.ai recording link (…/c/rec_…, …/recordings/rec_…)`,
+					Command: "`ox conversation show <link>` — never web-fetch it (sign-in wall). Requires `ox login` and team membership; on `not_authenticated` / `no_team_access`, stop and tell the user. A screen walkthrough: then `ox conversation walkthrough <link>` (what was on screen, clicked, and pointed at, with keyframes).",
 				},
 			},
 		},
@@ -167,25 +175,39 @@ func OxCapabilities() []Capability {
 		// deterministic floor for citation-walking is prime's KB guidance,
 		// which names `ox conversation` for every adapter).
 		{ID: "ox-cli-conversation", MechanismClass: MechanismSkill, Supports: CapabilitySupport{Slash: true, AutoActivate: true}},
+		// ox-cli-walkthrough is a fat playbook: reading a screen walkthrough
+		// spans walkthrough, transcript, and ox fetch plus opening images,
+		// which no single subcommand backs. Its deterministic floor is the
+		// consult-first recording-link route above, which names
+		// `ox conversation walkthrough` for every adapter.
+		{ID: "ox-cli-walkthrough", MechanismClass: MechanismSkill, Supports: CapabilitySupport{Slash: true, AutoActivate: true}},
 	}
 }
 
 // additiveSkills names on-disk skills that are intentionally OUTSIDE the
-// conformance table in OxCapabilities(). They are additive Layer-2 ergonomics:
-// a Claude-only skill whose deterministic floor is already carried by a separate
-// floor-class entry, so the skill itself is not a conformance surface (its
-// absence on Codex/Droid is the documented additive case, not a regression).
+// conformance table in OxCapabilities(). Most are additive Layer-2 ergonomics:
+// a skill whose deterministic floor is already carried by a separate floor-class
+// entry. The allowlist also holds explicitly opt-in catalog skills, whose absence
+// from an adapter is a project choice rather than a conformance regression.
 //
-// Keeping the allowlist explicit closes the disk→table direction of the
-// conformance contract: TestEveryOnDiskSurfaceIsAccounted walks the commands and
-// skills directories and fails if any on-disk surface is neither an
-// OxCapabilities() row NOR listed here — so a future un-accounted skill/command
-// can never silently escape the contract.
+// Keeping the allowlist explicit closes BOTH directions of the conformance
+// contract:
+//
+//   - disk→table: TestEveryOnDiskSurfaceIsAccounted walks the commands and
+//     skills directories and fails if any on-disk surface is neither an
+//     OxCapabilities() row NOR listed here, so a future un-accounted
+//     skill/command can never silently escape the contract.
+//   - table→disk: TestAdditiveSkillsAllExistOnDisk fails on an entry naming a
+//     skill that is no longer there. That direction was open until `post-cutoff`
+//     moved to extensions/addons/ (ADR-032 D6) and left an allowlist entry
+//     excusing a surface that had ceased to exist — an allowlist nobody checks
+//     back is how a dead exemption outlives the thing it exempted.
 //
 // The map value documents WHY each skill is additive rather than a table row.
 var additiveSkills = map[string]string{
 	"ox-cli-consult":       "additive Layer-2 ergonomics; its deterministic floor is the consult-first floor entry (ConsultRoutes), so it is not a separate conformance surface",
 	"ox-cli-decision":      "additive Layer-2 ergonomics; its deterministic floor is the decision-record-guidance floor entry plus the consult-first decision route, so it is not a separate conformance surface",
+	"ox-cli-attest":        "thin relay over `ox attest publish`; the deterministic behavior (frozen-export-only, resume journal, deterministic ZIP) lives in the command, so the skill is guidance rather than a separate conformance surface",
 	"ox-cli-skill-manager": "native Agent Skills lifecycle guidance; the deterministic installer and ownership rules live in ox CLI code rather than this playbook",
 	"ox-cli-viz":           "additive Layer-2 ergonomics; its deterministic floor is the visualization-guidance entry and the live ox viz pr output, so it is not a separate conformance surface",
 	"ox-cli-pr-header":     "additive Layer-2 ergonomics; its deterministic floor is the `ox pr header` command output plus the PR-header pointer in the prime attribution guidance, so the skill itself is not a separate conformance surface",

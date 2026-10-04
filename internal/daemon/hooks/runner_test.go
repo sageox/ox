@@ -427,7 +427,7 @@ func TestRunnerEnvironmentVariables(t *testing.T) {
 		Name:      hooks.EventDaemonStarted,
 		Timestamp: ts,
 	})
-	time.Sleep(300 * time.Millisecond)
+	runner.Wait()
 
 	data, err := os.ReadFile(envFile)
 	if err != nil {

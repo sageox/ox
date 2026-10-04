@@ -187,6 +187,14 @@ func hydrateFromLedger(projectRoot, sessionsDir, nameArg string, quiet bool) err
 	}
 	slog.Info("hydrate: batch response", "objects", len(resp.Objects))
 
+	// Mark the folder as a read-only download before the transcript lands.
+	// Without it the daemon's finalize scan takes the copy for this
+	// machine's unfinished work, re-summarizes it, and pushes the result
+	// over the teammate's summary (GH #1107).
+	if err := lfs.MarkCacheDownload(cacheBase); err != nil {
+		return err
+	}
+
 	// stream each object to cache with atomic writes
 	var hydratedCount int
 	var errors []string

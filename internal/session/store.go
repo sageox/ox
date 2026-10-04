@@ -31,6 +31,7 @@ import (
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/sessionid"
+	"github.com/sageox/ox/internal/trace/model"
 )
 
 const (
@@ -199,6 +200,20 @@ type StoreMeta struct {
 	Username               string `json:"username,omitempty"`      // privacy-safe display name — via identity.AttributionDisplayName(). NOT an email.
 	RepoID                 string `json:"repo_id,omitempty"`
 	OxVersion              string `json:"ox_version,omitempty"` // version of ox that created this session
+
+	// NativeSessions and StoppedAt make raw.jsonl a crash-safe carrier for
+	// the two recording fields that only exist in .recording.json while a
+	// session is live. The SessionEnd hook, /clear, and the daemon's orphan
+	// sweep all finalize AFTER that state file is gone, so they append these
+	// on a footer record (StampRawCarrier) before clearing it — a live file
+	// is never rewritten, its appenders may still be open — and the reader
+	// folds the footer's values in here (foldFooterCarrier), where the
+	// daemon's meta.json writer picks them up. A file written whole at stop
+	// carries them on the header directly. Both omitempty: recordings
+	// started under an older binary carry neither.
+	NativeSessions []lfs.NativeSession `json:"native_sessions,omitempty"`
+	TraceCapture   *model.Capture      `json:"trace_capture,omitempty"`
+	StoppedAt      *time.Time          `json:"stopped_at,omitempty"`
 }
 
 // Writable is an interface for entries that can be written to a session.
@@ -913,7 +928,8 @@ func (s *Store) readSessionFile(filePath, sessionType, sessionName string) (*Sto
 				session.Meta = ParseStoreMeta(metadata)
 			}
 		case "footer":
-			session.Footer = entry
+			session.Footer = mergeFooter(session.Footer, entry)
+			foldFooterCarrier(session.Meta, entry)
 		default:
 			// check for _meta header format (alternative header style)
 			if meta, ok := entry["_meta"].(map[string]any); ok {
@@ -985,7 +1001,8 @@ func ReadSessionFromPath(filePath string) (*StoredSession, error) {
 				session.Meta = ParseStoreMeta(metadata)
 			}
 		case "footer":
-			session.Footer = entry
+			session.Footer = mergeFooter(session.Footer, entry)
+			foldFooterCarrier(session.Meta, entry)
 		default:
 			// check for _meta header format (alternative header style)
 			if meta, ok := entry["_meta"].(map[string]any); ok {
@@ -1063,6 +1080,69 @@ func ReadHeaderSessionID(path string) string {
 	return meta.SessionID
 }
 
+// mergeFooter folds a footer record into the footer accumulated so far. A
+// file can carry more than one footer — the close-time footer with
+// entry_count or exit_reason, then a carrier footer a finalize door appended
+// (StampRawCarrier) — and the documented rule is last value per FIELD, so a
+// later footer must never erase fields it does not itself carry.
+func mergeFooter(acc, footer map[string]any) map[string]any {
+	if acc == nil {
+		acc = make(map[string]any, len(footer))
+	}
+	for k, v := range footer {
+		acc[k] = v
+	}
+	return acc
+}
+
+// foldFooterCarrier copies the recording-carrier fields a finalize door
+// appended on a footer record (StampRawCarrier) into meta: native_sessions
+// and stopped_at. A later footer wins per field; a footer without them
+// leaves meta untouched. Presence is what counts, not length: a footer that
+// carries an explicit empty list is a statement that the recording observed
+// no ids and overrides an earlier list, while a footer that omits the key —
+// or carries one that does not decode — leaves the earlier list alone.
+// Nothing is folded into a nil meta — a raw.jsonl with no header is already
+// unusable to every consumer of these fields.
+func foldFooterCarrier(meta *StoreMeta, footer map[string]any) {
+	if meta == nil {
+		return
+	}
+	if sessions, present := decodeNativeSessions(footer); present {
+		meta.NativeSessions = sessions
+	}
+	carrier := ParseStoreMeta(footer)
+	if carrier.TraceCapture != nil {
+		meta.TraceCapture = carrier.TraceCapture
+	}
+	if carrier.StoppedAt != nil {
+		meta.StoppedAt = carrier.StoppedAt
+	}
+}
+
+// decodeNativeSessions returns the native_sessions list carried by m and
+// whether the key was present AND decoded. Decoding goes through JSON so the
+// same struct tags that wrote the list read it back; a malformed list reports
+// absent so the rest of the metadata is still usable.
+func decodeNativeSessions(m map[string]any) ([]lfs.NativeSession, bool) {
+	raw, ok := m["native_sessions"]
+	if !ok || raw == nil {
+		return nil, false
+	}
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return nil, false
+	}
+	var sessions []lfs.NativeSession
+	if err := json.Unmarshal(data, &sessions); err != nil {
+		return nil, false
+	}
+	if sessions == nil {
+		sessions = []lfs.NativeSession{}
+	}
+	return sessions, true
+}
+
 // ParseStoreMeta converts a map to StoreMeta struct.
 // Supports both standard format (version, agent_id, created_at) and
 // alternative format (schema_version, session_id, started_at).
@@ -1116,6 +1196,29 @@ func ParseStoreMeta(m map[string]any) *StoreMeta {
 	}
 	if v, ok := m["ox_version"].(string); ok {
 		meta.OxVersion = v
+	}
+
+	// native_sessions / stopped_at: decode through JSON so the same struct
+	// tags that wrote them read them back (no hand-rolled field mapping to
+	// drift). A malformed list is dropped rather than failing the whole
+	// header — the rest of the metadata is still worth having.
+	if sessions, present := decodeNativeSessions(m); present && len(sessions) > 0 {
+		meta.NativeSessions = sessions
+	}
+	if raw, ok := m["trace_capture"]; ok && raw != nil {
+		if data, err := json.Marshal(raw); err == nil {
+			var capture model.Capture
+			if json.Unmarshal(data, &capture) == nil {
+				meta.TraceCapture = &capture
+			}
+		}
+	}
+	// RFC3339Nano also accepts a plain RFC3339 value, so one parse covers
+	// both the nanosecond form ox writes and a hand-written second-precision one.
+	if v, ok := m["stopped_at"].(string); ok && v != "" {
+		if t, err := time.Parse(time.RFC3339Nano, v); err == nil {
+			meta.StoppedAt = &t
+		}
 	}
 
 	// created_at (or started_at)

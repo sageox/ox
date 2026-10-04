@@ -95,7 +95,7 @@ var (
 	ErrInviteUnsupported = errors.New("this SageOx server does not support CLI invitations yet")
 )
 
-// serverError models the two mutually incompatible error envelopes api-go
+// serverError models the two mutually incompatible error envelopes the server
 // returns on this one route. The handler's own failures use {success, error};
 // the middleware's and the personal-team guard's use {error:{code,message}}.
 // Both shapes arrive on the same request path depending on how far into the
@@ -109,6 +109,12 @@ type serverError struct {
 	Code       string `json:"-"`
 	NestedMsg  string `json:"-"`
 	wasDecoded bool
+	// nested records WHICH envelope decoded. The two shapes come from
+	// different layers of the server — the nested one from middleware, the
+	// flat one from a handler or from the router's own not-found answer — so
+	// a mapper that must tell "you are not a member" from "no such route"
+	// needs the shape, not just the fact that something decoded.
+	nested bool
 }
 
 // parseServerError decodes whichever envelope the body carries. It reports
@@ -152,6 +158,7 @@ func parseServerError(body []byte) serverError {
 		se.Code = nested.Code
 		se.NestedMsg = nested.Message
 		se.wasDecoded = true
+		se.nested = true
 	}
 	return se
 }
@@ -182,7 +189,7 @@ func parseInviteError(status int, body []byte) error {
 
 	case http.StatusNotFound:
 		// A deliberate "you are not a member" 404 carries a JSON error body.
-		// An unrouted request does not — chi answers with plain text. That
+		// An unrouted request does not — the router answers with plain text. That
 		// difference is the only way to tell "you can't see this team" from
 		// "this server is too old", and they need opposite handling: the
 		// first is one recipient's outcome, the second aborts the command.
@@ -251,7 +258,7 @@ func (c *RepoClient) inviteIDURL(teamRef, inviteID string) string {
 //
 // Go's default policy rewrites a redirected POST into a GET and drops the body.
 // A canonicalizing redirect in front of the API (http→https, host
-// canonicalization, chi's RedirectSlashes) would therefore turn "create this
+// canonicalization, a trailing-slash redirect) would therefore turn "create this
 // invitation" into a plain GET of some other resource — which can answer 200
 // with a body that happens to unmarshal, making ox report an invitation as sent
 // when no handler ever saw the email address. Surfacing the 3xx as an error is

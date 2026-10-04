@@ -39,6 +39,12 @@ var teamContextFallbackIncludes = []string{
 	"coworkers/",
 	"discussions/", // all discussion artifacts synced by cloud pipeline
 	"agent-context/",
+	// The bulletin board: active posts only. The tracked .sageox/sync.manifest
+	// wins whenever it parses; this list covers only a missing or unparseable
+	// manifest. The nested path is deliberate — bulletin/<board>/archive/ holds
+	// expired posts and must never sync, so the include names the posts/
+	// subtree rather than bulletin/ as a whole.
+	"bulletin/general/posts/",
 }
 
 // kbFallbackIncludes is the hardcoded sparse set for knowledge bubbles.

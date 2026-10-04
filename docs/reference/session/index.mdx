@@ -1,7 +1,7 @@
 ---
 title: "ox session"
 description: "CLI reference for ox session"
-sidebar_position: 77
+sidebar_position: 85
 ---
 
 ## ox session
@@ -22,6 +22,10 @@ Commands:
   ox session status    Check recording status
   ox session score     Report SageOx contribution score
 
+```
+ox session [flags]
+```
+
 ### Options
 
 ```
@@ -31,8 +35,9 @@ Commands:
 ### Options inherited from parent commands
 
 ```
-  -c, --config string    config file path (default: .sageox/config.yaml)
+  -c, --config string    user config file (overrides OX_USER_CONFIG)
       --json             output in JSON format (default: false)
+      --no-input         disable prompts and terminal UI; provide required input with arguments or flags
       --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
       --profile          generate CPU profile and execution trace for performance analysis (default: false)
   -q, --quiet            suppress non-error output (default: false)

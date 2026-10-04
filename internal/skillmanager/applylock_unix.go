@@ -13,11 +13,7 @@ import (
 	"syscall"
 )
 
-func platformAcquireApplyLock(path string) (unlock func(), acquired bool, err error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return nil, false, fmt.Errorf("open skills apply lock: %w", err)
-	}
+func platformAcquireApplyLock(f *os.File) (unlock func(), acquired bool, err error) {
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		_ = f.Close()
 		// EWOULDBLOCK and EAGAIN both mean "another holder"; they are the same

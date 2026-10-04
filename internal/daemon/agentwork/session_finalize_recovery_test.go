@@ -293,6 +293,9 @@ func TestNativeRecovery_ReachesFinalization(t *testing.T) {
 					StartedAt:              time.Now().Add(-72 * time.Hour),
 					ContinuedFromSessionID: "ses_01890a5d-ac96-774b-bcce-b302099a8000",
 				}
+				// the native id the recording observed: the rewrite must carry it,
+				// plus a stop time, because the marker goes away right after
+				state.RecordNativeSession("codex-thread-tail", "startup", state.StartedAt)
 				header := `{"_meta":{"schema_version":"1","agent_id":"OxTail","agent_type":"codex","session_id":"` + state.SessionID + `","continued_from_session_id":"` + state.ContinuedFromSessionID + `","username":"coworker","model":"gpt-test"}}` + "\n"
 				if rawState == "legacy" {
 					header = strings.Replace(header, `"_meta":`, `"type":"header","metadata":`, 1)
@@ -338,6 +341,12 @@ func TestNativeRecovery_ReachesFinalization(t *testing.T) {
 				assert.Equal(t, "last response before process exit", stored.Entries[1]["content"])
 				assert.Equal(t, state.SessionID, stored.Meta.SessionID)
 				assert.Equal(t, state.ContinuedFromSessionID, stored.Meta.ContinuedFromSessionID)
+				require.Len(t, stored.Meta.NativeSessions, 1, "the rewritten raw.jsonl must carry the native id the marker held")
+				assert.Equal(t, "codex-thread-tail", stored.Meta.NativeSessions[0].ID)
+				assert.Equal(t, "startup", stored.Meta.NativeSessions[0].Source)
+				require.NotNil(t, stored.Meta.StoppedAt, "the rewritten raw.jsonl must carry a stop time")
+				assert.False(t, stored.Meta.StoppedAt.After(time.Now()), "stop time must not be in the future")
+				assert.False(t, stored.Meta.StoppedAt.Before(state.StartedAt), "stop time must not precede the start")
 				assert.NoFileExists(t, recPath)
 				if rawState != "missing" {
 					assert.Equal(t, "coworker", stored.Meta.Username, "existing metadata must survive recovery")
@@ -652,22 +661,43 @@ func TestNativeRecovery_HonorsPauseAndRedaction(t *testing.T) {
 }
 
 // Stopped recordings already applied masks and selected the recording window;
-// recovery must never import later native activity back into them.
+// recovery must never import later native activity back into them. The one
+// thing the sweep does add is a footer record carrying the recording's native
+// session ids and stop time, because the marker it read them from is removed
+// right after and the finalize handler has nowhere else to look. Appended,
+// never rewritten: the tail watcher may still hold the file open.
 func TestNativeRecovery_LeavesStoppedRecordingUnchanged(t *testing.T) {
 	ledgerPath := t.TempDir()
 	sessionDir := filepath.Join(ledgerPath, ".sageox", "cache", "sessions", "stopped-OxStop")
 	require.NoError(t, os.MkdirAll(sessionDir, 0700))
-	stopped := time.Now()
-	state := session.RecordingState{AgentID: "OxStop", AdapterName: "codex", WatchMode: "tail", StoppedAt: &stopped}
+	stopped := time.Now().UTC().Truncate(time.Second)
+	state := session.RecordingState{
+		AgentID: "OxStop", AdapterName: "codex", WatchMode: "tail", StoppedAt: &stopped,
+		NativeSessions: []session.NativeSession{{ID: "codex-thread-1", Source: "startup", FirstSeen: stopped.Add(-time.Hour), LastSeen: stopped.Add(-time.Hour)}},
+	}
 	writeRecordingState(t, filepath.Join(sessionDir, recordingMarker), state)
-	const raw = "{\"_meta\":{\"agent_type\":\"codex\"}}\n{\"type\":\"assistant\",\"content\":\"captured\"}\n"
+	const header = "{\"_meta\":{\"agent_type\":\"codex\"}}\n"
+	const body = "{\"type\":\"assistant\",\"content\":\"captured\"}\n"
 	rawPath := filepath.Join(sessionDir, artifactRaw)
-	require.NoError(t, os.WriteFile(rawPath, []byte(raw), 0600))
+	require.NoError(t, os.WriteFile(rawPath, []byte(header+body), 0600))
 	handler := NewSessionFinalizeHandlerForTest(nil)
 	require.Len(t, handler.DetectOrphanedForAgent(ledgerPath, state.AgentID, 0), 1)
 	data, err := os.ReadFile(rawPath)
 	require.NoError(t, err)
-	assert.Equal(t, raw, string(data))
+	require.True(t, strings.HasPrefix(string(data), header+body), "captured bytes must be untouched: no rewrite, no import, no second mask")
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	require.Len(t, lines, 3, "exactly one footer record is appended:\n%s", string(data))
+	assert.Contains(t, lines[2], `"type":"footer"`, "the carrier is a footer, appended — never a header rewrite")
+
+	stored, err := session.ReadSessionFromPath(rawPath)
+	require.NoError(t, err)
+	require.NotNil(t, stored.Meta, "header must still parse")
+	assert.Equal(t, "codex", stored.Meta.AgentType, "existing header keys must survive the stamp")
+	require.NotNil(t, stored.Meta.StoppedAt, "the sweep must hand the stop time to the finalize handler via the header")
+	assert.True(t, stored.Meta.StoppedAt.Equal(stopped), "stopped_at=%s want %s", stored.Meta.StoppedAt, stopped)
+	require.Len(t, stored.Meta.NativeSessions, 1)
+	assert.Equal(t, "codex-thread-1", stored.Meta.NativeSessions[0].ID)
+	assert.Equal(t, "startup", stored.Meta.NativeSessions[0].Source)
 }
 
 // A successful read proving the native log empty must still release the stub

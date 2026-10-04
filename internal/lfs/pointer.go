@@ -7,10 +7,10 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/sageox/ox/internal/fileutil"
+	"github.com/sageox/ox/internal/lfs/pointer"
 )
 
 // pointerVersion is the Git LFS pointer spec version string.
@@ -34,45 +34,7 @@ func FormatPointer(oid string, size int64) string {
 // are in alphabetical order. Unknown keys (e.g. "ext-0-*") are silently
 // ignored, allowing forward compatibility with spec extensions.
 func ParsePointer(content string) (oid string, size int64, err error) {
-	lines := strings.Split(strings.TrimSpace(content), "\n")
-
-	if len(lines) < 3 {
-		return "", 0, fmt.Errorf("not an LFS pointer: expected at least 3 lines, got %d", len(lines))
-	}
-
-	if !strings.HasPrefix(lines[0], "version ") || !strings.Contains(lines[0], "git-lfs") {
-		return "", 0, fmt.Errorf("not an LFS pointer: missing version line")
-	}
-
-	sawSize := false
-	for _, line := range lines[1:] {
-		switch {
-		case strings.HasPrefix(line, "oid "):
-			oid = strings.TrimPrefix(line, "oid ")
-		case strings.HasPrefix(line, "size "):
-			if _, err := fmt.Sscanf(line, "size %d", &size); err != nil {
-				return "", 0, fmt.Errorf("parse size: %w", err)
-			}
-			sawSize = true
-		}
-	}
-
-	if oid == "" {
-		return "", 0, fmt.Errorf("not an LFS pointer: missing oid")
-	}
-	// size 0 is a real pointer: an empty artifact (an unwritten context-trace.jsonl)
-	// is tracked like any other, and rejecting it made one empty file fail a whole
-	// ledger read. Only an absent or negative size is malformed.
-	if !sawSize || size < 0 {
-		return "", 0, fmt.Errorf("not an LFS pointer: missing or invalid size")
-	}
-
-	maxSize := MaxObjectSize()
-	if size > maxSize {
-		return "", 0, fmt.Errorf("LFS object size %d exceeds maximum %d (set OX_LFS_MAX_OBJECT_SIZE to override)", size, maxSize)
-	}
-
-	return oid, size, nil
+	return pointer.Parse(content)
 }
 
 // NestedPointer reports whether content is a valid LFS pointer stored as the
@@ -273,21 +235,11 @@ func WritePointerFiles(dir string, files map[string]UploadedRef) (paths []string
 // for long OIDs while skipping content files without reading them.
 const maxPointerSize = 200
 
-// DefaultMaxObjectSize is the upper bound for LFS objects we accept. Prevents
-// malicious pointers from triggering unbounded disk writes. Override
-// with OX_LFS_MAX_OBJECT_SIZE env var for legitimate large files.
-const DefaultMaxObjectSize int64 = 5 * 1024 * 1024 * 1024 // 5 GiB
+// DefaultMaxObjectSize is the default accepted LFS object size limit.
+const DefaultMaxObjectSize = pointer.DefaultMaxObjectSize
 
 // MaxObjectSize returns the configured maximum LFS object size.
-// Reads OX_LFS_MAX_OBJECT_SIZE env var, falling back to DefaultMaxObjectSize.
-func MaxObjectSize() int64 {
-	if v := os.Getenv("OX_LFS_MAX_OBJECT_SIZE"); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
-			return n
-		}
-	}
-	return DefaultMaxObjectSize
-}
+func MaxObjectSize() int64 { return pointer.MaxObjectSize() }
 
 // IsPointerFile reports whether the file at path is an LFS pointer.
 // Returns false for missing files, content files, or read errors.
@@ -304,6 +256,24 @@ func IsPointerFile(path string) bool {
 	}
 	_, _, err = ParsePointer(string(data))
 	return err == nil
+}
+
+// isVersionLine reports whether line is an LFS pointer's version line, as
+// ParsePointer reads one: a line split on LF may still end in CR.
+func isVersionLine(line string) bool {
+	return pointer.IsVersionLine(line)
+}
+
+// pointerShaped reports whether content has the shape of an LFS pointer: a
+// version line first, in under the 1024 bytes the spec requires a pointer to
+// be. Whether it parses is not asked. A pointer ParsePointer refuses, such as
+// one naming an object above MaxObjectSize, is still no file's content.
+func pointerShaped(content []byte) bool {
+	if len(content) >= 1024 {
+		return false
+	}
+	first, _, _ := strings.Cut(strings.TrimSpace(string(content)), "\n")
+	return isVersionLine(first)
 }
 
 // ReadPointerFile reads and parses an LFS pointer file, returning the FileRef.

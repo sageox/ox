@@ -67,6 +67,11 @@ Thumbs.db
 coverage/
 coverage.html
 
+# CI test artifacts — written at the repo root by the PR gate
+# (TEST_JUNIT / TEST_TIMINGS), so reproducing it locally leaves them behind
+test-results.xml
+test-timings.json
+
 # test session artifacts
 internal/session/sessions/
 

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/cli"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/repotools"
 	"github.com/spf13/cobra"
 )
@@ -121,6 +122,20 @@ func runSessionCommit(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// refuse before `git add`, which would mark a conflict resolved with its markers (#1055)
+	if unmerged := parseUnmergedPaths(string(output)); len(unmerged) > 0 {
+		return fmt.Errorf("refusing to commit: %d unresolved conflict(s) in %s, e.g. %s; resolve them by hand (git status, then git checkout --ours/--theirs <file>) and rerun",
+			len(unmerged), sessionsDir, unmerged[0].Path)
+	}
+	// a conflict already `git add`ed by hand is stage-0 but still carries its markers
+	marked, err := sessionFileWithConflictMarkers(projectRoot, sessionsDir)
+	if err != nil {
+		return fmt.Errorf("failed to check session files for conflict markers: %w", err)
+	}
+	if marked != "" {
+		return fmt.Errorf("refusing to commit: %s still contains conflict markers; remove them by hand and rerun", marked)
+	}
+
 	// stage session files
 	addCmd := exec.Command("git", "-C", projectRoot, "add", sessionsDir)
 	if err := addCmd.Run(); err != nil {
@@ -144,8 +159,8 @@ func runSessionCommit(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// commit
-	commitCmd := exec.Command("git", "-C", projectRoot, "commit", "-m", commitMsg)
+	// commit only the sessions dir, so the user's other staged files stay staged
+	commitCmd := exec.Command("git", "-C", projectRoot, "commit", "-m", commitMsg, "--", sessionsDir)
 	commitOutput, err := commitCmd.CombinedOutput()
 	if err != nil {
 		// check if nothing to commit
@@ -174,6 +189,42 @@ func runSessionCommit(cmd *cobra.Command, args []string) error {
 	cli.PrintHint("Run 'ox sync' to push changes to remote")
 
 	return nil
+}
+
+// sessionFileWithConflictMarkers returns the first session file `git add` would stage whose
+// working-tree content has conflict markers: changed and untracked files, plus files already
+// staged by hand. git lists them relative to projectRoot, which need not be the repo root,
+// and -z keeps unusual names unquoted.
+func sessionFileWithConflictMarkers(projectRoot, sessionsDir string) (string, error) {
+	listings := [][]string{
+		{"ls-files", "-z", "--modified", "--others", "--exclude-standard", "--", sessionsDir},
+		{"diff", "--cached", "--name-only", "-z", "--relative", "--diff-filter=d", "--", sessionsDir},
+	}
+	for _, args := range listings {
+		out, err := exec.Command("git", append([]string{"-C", projectRoot}, args...)...).Output()
+		if err != nil {
+			return "", fmt.Errorf("git %s: %w", args[0], err)
+		}
+		for _, rel := range strings.Split(string(out), "\x00") {
+			if rel == "" {
+				continue
+			}
+			path := filepath.Join(projectRoot, rel)
+			// regular files only: a deleted file has nothing to scan, git commits a symlink as
+			// the link itself, and a FIFO or device must never be read
+			if info, err := os.Lstat(path); err != nil || !info.Mode().IsRegular() {
+				continue
+			}
+			has, err := gitutil.HasConflictMarkers(path)
+			if err != nil {
+				return "", err
+			}
+			if has {
+				return path, nil
+			}
+		}
+	}
+	return "", nil
 }
 
 // contains checks if a string slice contains a value

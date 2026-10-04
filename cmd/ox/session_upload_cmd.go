@@ -93,7 +93,7 @@ Example:
 		case session.RawMissing:
 			return fmt.Errorf("session %s has no readable %s — nothing to upload", sessionName, ledgerFileRaw)
 		case session.RawHeaderOnly:
-			return fmt.Errorf("session %s has no substantive entries (only metadata header) — nothing to upload", sessionName)
+			return fmt.Errorf("session %s holds no conversation entries (only header/footer lines) — nothing to upload", sessionName)
 		case session.RawSubstantive:
 			// ok to upload
 		}

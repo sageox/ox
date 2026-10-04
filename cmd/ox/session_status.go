@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -630,9 +629,10 @@ func formatProcessStatus(status string) string {
 	}
 }
 
-// outputJSON writes JSON to w with 2-space indentation.
+// outputJSON writes JSON to w with 2-space indentation. Shared by every
+// command that reports a JSON result (session status, kb, murmur, session
+// list) — migrating this one implementation carries all of their call sites
+// through the themed printer without touching those files.
 func outputJSON(w io.Writer, v any) error {
-	encoder := json.NewEncoder(w)
-	encoder.SetIndent("", "  ")
-	return encoder.Encode(v)
+	return cli.PrintJSONTo(w, v)
 }

@@ -210,6 +210,14 @@ func (p *FileChangeMurmurPublisher) publish() {
 		return
 	}
 
+	// A team token with no AI coworker attached has no one to attribute the
+	// changes to; ox murmur refuses the same way.
+	coworker, err := auth.TeamCoworker(endpoint.GetForProject(p.projectRoot))
+	if err != nil {
+		p.logger.Warn("file change murmur skipped", "error", err)
+		return
+	}
+
 	now := time.Now()
 	branch := repotools.GetCurrentBranch(p.projectRoot)
 	content := formatFileChangeMurmur(changes, branch)
@@ -228,13 +236,19 @@ func (p *FileChangeMurmurPublisher) publish() {
 		ID:            id.String(),
 		Timestamp:     now.UTC(),
 		AgentID:       p.resolveAgentID(),
-		PrincipalID:   resolvePrincipal(p.projectRoot),
 		PrincipalType: "human",
 		Topic:         "file-changes",
 		Importance:    importance,
 		Content:       content,
 		Scope:         "ledger",
 		Metadata:      buildFileChangeMetadata(changes, branch, p.projectRoot),
+	}
+	if coworker != nil {
+		murmur.PrincipalID = coworker.Username()
+		murmur.PrincipalType = "ai"
+		murmur.PrincipalDisplay = coworker.Name()
+	} else {
+		murmur.PrincipalID = resolvePrincipal(p.projectRoot)
 	}
 
 	relPath := ledger.MurmurFilePath(now.UTC(), id.String())

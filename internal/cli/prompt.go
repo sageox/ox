@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -88,22 +89,17 @@ func (m selectModel) View() tea.View {
 	return tea.NewView(b.String())
 }
 
-// ErrNoInteractiveInput is returned by SelectOneRequired when a selection
-// could not be gathered from anyone — stdin is not a TTY and produced no
-// input at all (closed, empty, or unreadable), as opposed to a user who was
-// actually there and pressed Enter to accept the default. selectOneCore is
-// what tells these two apart; SelectOne (the original, widely-used API)
-// deliberately keeps its old behavior of silently falling back to
-// defaultIdx in both cases, so this error only ever surfaces through
-// SelectOneRequired. Use SelectOneRequired instead of SelectOne wherever
-// guessing wrong has a real cost — e.g. binding a repo to a team.
+// ErrNoInteractiveInput means a required answer could not be gathered, or
+// --no-input forbids prompting. Without --no-input, SelectOne still falls back
+// to its default on empty stdin; use SelectOneRequired when guessing has a cost.
 var ErrNoInteractiveInput = errors.New("no interactive input available to make this selection")
 
 // SelectOne displays an interactive selection menu with arrow key navigation.
 // Returns the index of the selected option (0-based) or -1 if canceled.
-// Falls back to numbered prompt when stdin is not a TTY or in non-interactive mode.
+// Falls back to a numbered prompt without a TTY or with --no-interactive.
+// With --no-input, returns ErrNoInteractiveInput without reading stdin.
 //
-// When no interactive input can be gathered at all (e.g. piped/CI/agent
+// Otherwise, when no interactive input can be gathered at all (e.g. piped/CI/agent
 // harness with nothing on stdin), this silently returns (defaultIdx, nil) —
 // unchanged from its long-standing behavior, preserved here for every
 // existing caller. Callers for whom that silent guess is unsafe should call
@@ -144,6 +140,9 @@ func SelectOneRequired(title string, options []string, defaultIdx int) (int, err
 func selectOneCore(title string, options []string, defaultIdx int) (idx int, explicit bool, err error) {
 	if len(options) == 0 {
 		return -1, false, errors.New("no options to select from")
+	}
+	if noInput {
+		return -1, false, fmt.Errorf("%w: --no-input requires an explicit selection argument or flag", ErrNoInteractiveInput)
 	}
 
 	cursor := 0
@@ -485,8 +484,12 @@ func (m inputModel) View() tea.View {
 
 // InputWithDefault prompts for text input with a placeholder showing the default.
 // If user enters empty string, returns the default value.
-// Falls back to simple text prompt when stdin is not a TTY or in non-interactive mode.
+// Falls back to a text prompt without a TTY or with --no-interactive.
+// With --no-input, returns ErrNoInteractiveInput without accepting the default.
 func InputWithDefault(title, defaultVal string) (string, error) {
+	if noInput {
+		return "", fmt.Errorf("%w: provide a value with an argument or flag when using --no-input", ErrNoInteractiveInput)
+	}
 	// fall back to simple prompt if non-interactive or stdin is not a TTY
 	if !IsInteractive() || (!isatty.IsTerminal(os.Stdin.Fd()) && !isatty.IsCygwinTerminal(os.Stdin.Fd())) {
 		return inputWithDefaultSimple(title, defaultVal)
@@ -521,8 +524,8 @@ func inputWithDefaultSimple(title, defaultVal string) (string, error) {
 
 	reader := bufio.NewReader(os.Stdin)
 	input, err := reader.ReadString('\n')
-	if err != nil {
-		return defaultVal, nil
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", err
 	}
 
 	input = strings.TrimSpace(input)

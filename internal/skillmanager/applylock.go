@@ -29,7 +29,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 )
 
 // ErrApplyInProgress reports that another ox process (or another goroutine in
@@ -41,10 +40,6 @@ var ErrApplyInProgress = errors.New("skills: another ox process is reconciling t
 // gitignored .sageox/cache/, so the lock never becomes a tracked file.
 const applyLockRelativePath = ".sageox/cache/skills-apply.lock"
 
-func applyLockPath(repoRoot string) string {
-	return filepath.Join(repoRoot, filepath.FromSlash(applyLockRelativePath))
-}
-
 // acquireApplyLock takes the per-repository apply lock without blocking.
 //
 // Returns (unlock, true, nil) on success; the caller must invoke unlock.
@@ -55,22 +50,53 @@ func applyLockPath(repoRoot string) string {
 // while another process holds a lock on it opens a TOCTOU window where two
 // processes hold locks on two different inodes with the same name.
 func acquireApplyLock(repoRoot string) (unlock func(), acquired bool, err error) {
-	path := applyLockPath(repoRoot)
-	// ensureDir, not os.MkdirAll: MkdirAll happily walks THROUGH a symlinked
-	// .sageox/cache, so a repository whose cache directory points elsewhere would
-	// have ox create and flock a file outside itself. ensureDir refuses a symlink
-	// at any component, matching every other write path in this package.
-	if err := ensureDir(repoRoot, filepath.Dir(path)); err != nil {
+	root, err := os.OpenRoot(repoRoot)
+	if err != nil {
+		return nil, false, fmt.Errorf("open repository root: %w", err)
+	}
+	defer func() { _ = root.Close() }()
+	return acquireApplyLockInRoot(root)
+}
+
+func acquireApplyLockInRoot(root *os.Root) (unlock func(), acquired bool, err error) {
+	parent, base, err := openRepoParent(root, applyLockRelativePath, true)
+	if err != nil {
 		return nil, false, fmt.Errorf("create skills lock dir: %w", err)
 	}
-	// The lock file itself gets the same treatment: os.OpenFile follows a symlink,
-	// so without this a symlinked skills-apply.lock redirects the open.
-	if info, statErr := os.Lstat(path); statErr == nil {
-		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			return nil, false, fmt.Errorf("refusing non-regular or symlink skills apply lock %s", path)
+	defer func() { _ = parent.Close() }()
+
+	var file *os.File
+	for range 2 {
+		info, statErr := parent.Lstat(base)
+		if os.IsNotExist(statErr) {
+			file, err = parent.OpenFile(base, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
+			if os.IsExist(err) {
+				continue
+			}
+			if err != nil {
+				return nil, false, fmt.Errorf("create skills apply lock: %w", err)
+			}
+			return platformAcquireApplyLock(file)
 		}
-	} else if !os.IsNotExist(statErr) {
-		return nil, false, fmt.Errorf("inspect skills apply lock: %w", statErr)
+		if statErr != nil {
+			return nil, false, fmt.Errorf("inspect skills apply lock: %w", statErr)
+		}
+		if !info.Mode().IsRegular() {
+			return nil, false, fmt.Errorf("refusing non-regular or symlink skills apply lock %s", base)
+		}
+		file, err = parent.OpenFile(base, os.O_RDWR, 0o600)
+		if err != nil {
+			return nil, false, fmt.Errorf("open skills apply lock: %w", err)
+		}
+		actual, statErr := file.Stat()
+		if statErr != nil || !actual.Mode().IsRegular() || !os.SameFile(info, actual) {
+			_ = file.Close()
+			if statErr != nil {
+				return nil, false, fmt.Errorf("inspect opened skills apply lock: %w", statErr)
+			}
+			return nil, false, fmt.Errorf("skills apply lock changed while opening")
+		}
+		return platformAcquireApplyLock(file)
 	}
-	return platformAcquireApplyLock(path)
+	return nil, false, fmt.Errorf("skills apply lock changed while creating")
 }

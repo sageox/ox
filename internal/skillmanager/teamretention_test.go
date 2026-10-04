@@ -2,6 +2,7 @@ package skillmanager
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -25,7 +26,7 @@ func TestTeamSkillsSurviveABlindTeamCheckout(t *testing.T) {
 	t.Parallel()
 
 	const skillName = "deploy"
-	installed := filepath.Join(".agents", "skills", TeamPrefix+skillName, "SKILL.md")
+	installed := filepath.Join(".agents", "skills", skillName+TeamSuffix, "SKILL.md")
 
 	blindings := map[string]func(t *testing.T, teamPath string){
 		// The daemon owns this checkout. A reclone, a GC, or a machine restore
@@ -52,6 +53,8 @@ func TestTeamSkillsSurviveABlindTeamCheckout(t *testing.T) {
 			_, err := Reconcile(repo, "1.0.0", desiredFor(target), []adapterprotocol.SkillTarget{target})
 			require.NoError(t, err)
 			require.FileExists(t, filepath.Join(repo, installed), "setup failed: the skill never installed")
+			require.NoError(t, os.Remove(StatePath(repo)),
+				"fixture must prove the reserved-namespace recovery scan also honors blindness")
 
 			blind(t, teamPath)
 
@@ -80,7 +83,7 @@ func TestRetiredTeamSkillIsStillRemovedWhenTheCheckoutIsVisible(t *testing.T) {
 	t.Parallel()
 
 	const skillName = "deploy"
-	installed := filepath.Join(".agents", "skills", TeamPrefix+skillName, "SKILL.md")
+	installed := filepath.Join(".agents", "skills", skillName+TeamSuffix, "SKILL.md")
 
 	repo := t.TempDir()
 	teamPath := t.TempDir()
@@ -103,6 +106,75 @@ func TestRetiredTeamSkillIsStillRemovedWhenTheCheckoutIsVisible(t *testing.T) {
 		"a readable checkout was misreported as blind, which would make retirement impossible")
 	require.NoFileExists(t, filepath.Join(repo, installed),
 		"a skill the team retired is still on disk; the mirror only adds")
+}
+
+// TestTeamSkillsSurviveRepositorySlugFallback covers a subtler form of
+// blindness than a missing checkout. RepoSlug deliberately falls back to the
+// directory name for offline/local repositories, but that fallback is not an
+// authoritative value for a repos: filter. Treating it as one makes every
+// targeted team skill disappear from discovery and turns "origin is briefly
+// unavailable" into a mass retirement.
+func TestTeamSkillsSurviveRepositorySlugFallback(t *testing.T) {
+	t.Parallel()
+
+	const skillName = "deploy"
+	installed := filepath.Join(".agents", "skills", skillName+TeamSuffix, "SKILL.md")
+
+	repo := t.TempDir()
+	teamPath := t.TempDir()
+	writeTeamSkill(t, teamPath, skillName, "repos: [\"acme/api\"]\n", nil)
+	stageTeamWiredProject(t, repo, teamPath)
+
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "git %v: %s", args, out)
+	}
+	target := sharedTarget()
+	_, err := Reconcile(repo, "1.0.0", desiredFor(target), []adapterprotocol.SkillTarget{target})
+	require.NoError(t, err)
+	require.FileExists(t, filepath.Join(repo, installed), "setup failed: targeted team skill never installed")
+
+	// Simulate a local clone whose canonical origin is temporarily unavailable.
+	// RepoSlug still returns the directory basename, but that must be reported as
+	// degraded rather than used as an authoritative negative repos: match.
+	git("remote", "remove", "origin")
+	plan, err := Reconcile(repo, "1.0.0", desiredFor(target), []adapterprotocol.SkillTarget{target})
+	require.NoError(t, err)
+
+	require.Contains(t, plan.RetainedTeamReason(), "slug",
+		"repository slug fallback was not surfaced as degraded")
+	require.Empty(t, plan.RemovedPaths(),
+		"repository slug fallback was treated as an authoritative retirement")
+	require.FileExists(t, filepath.Join(repo, installed),
+		"targeted team skill was deleted when the canonical repository slug disappeared")
+}
+
+// An unknown slug hides only repos:-targeted skills. Untargeted skills require
+// no repository identity and must still be added while removals stay guarded.
+func TestUntargetedTeamSkillsStillInstallWithoutRepositorySlug(t *testing.T) {
+	t.Parallel()
+
+	const skillName = "team-wide"
+	repo := t.TempDir()
+	teamPath := t.TempDir()
+	writeTeamSkill(t, teamPath, skillName, "", nil)
+	stageTeamWiredProject(t, repo, teamPath)
+
+	cmd := exec.Command("git", "remote", "remove", "origin")
+	cmd.Dir = repo
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "remove origin: %s", out)
+
+	target := sharedTarget()
+	plan, err := Reconcile(repo, "1.0.0", desiredFor(target), []adapterprotocol.SkillTarget{target})
+	require.NoError(t, err)
+	require.FileExists(t, filepath.Join(repo, ".agents", "skills", skillName+TeamSuffix, "SKILL.md"),
+		"an untargeted skill was withheld even though it needs no repository slug")
+	require.Contains(t, plan.RetainedTeamReason(), "slug",
+		"targeted removals were not guarded while repository identity was unknown")
 }
 
 // TestLegacyCoworkersRootIsNotBlindness is a regression test for a bug that

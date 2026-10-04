@@ -117,10 +117,17 @@ func handlePlanExit(ctx *HookContext, agentID string) {
 		slog.Debug("hook: plan-exit no plan text, skipping nudge")
 		return
 	}
+	capturePlanText(ctx, agentID, planText)
+}
 
+// capturePlanText is the shared plan-capture tail for every agent's plan-exit
+// signal (Claude Code's ExitPlanMode, Codex's <proposed_plan> on Stop): enrich
+// + persist through the one `ox plan enrich --json --persist` path, then stash
+// the render nudge for the next prompt. Reports whether enrichment ran.
+func capturePlanText(ctx *HookContext, agentID, planText string) bool {
 	res, ok := runPlanEnrichment(planText)
 	if !ok {
-		return
+		return false
 	}
 
 	// The render nudge fires on either axis: team-context signals (Material) or
@@ -133,7 +140,7 @@ func handlePlanExit(ctx *HookContext, agentID string) {
 			"expert_routes", res.Signals.ExpertRoutes,
 			"files", res.Signals.Files,
 			"steps", res.Signals.Steps)
-		return
+		return true
 	}
 
 	// plan.html=off means "never render, never nudge" (the config enum's own
@@ -142,13 +149,13 @@ func handlePlanExit(ctx *HookContext, agentID string) {
 	// is independent of the render recommendation, so it stands either way.
 	if config.PlanHTML(ctx.ProjectRoot) == config.PlanHTMLOff {
 		slog.Debug("hook: plan-exit plan.html=off, skipping nudge", "agent_id", agentID)
-		return
+		return true
 	}
 
 	nudge := formatPlanNudgeLine(res, config.PlanOpen(ctx.ProjectRoot))
 	if err := stashPlanNudge(ctx.ProjectRoot, agentID, nudge); err != nil {
 		slog.Debug("hook: plan-exit stash failed", "error", err)
-		return
+		return true
 	}
 	slog.Info("hook: plan-exit nudge stashed",
 		"agent_id", agentID,
@@ -157,6 +164,7 @@ func handlePlanExit(ctx *HookContext, agentID string) {
 		"expert_routes", res.Signals.ExpertRoutes,
 		"files", res.Signals.Files,
 		"steps", res.Signals.Steps)
+	return true
 }
 
 // extractExitPlanText pulls the plan markdown out of ExitPlanMode tool_input.

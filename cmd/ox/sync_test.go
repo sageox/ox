@@ -223,20 +223,25 @@ func TestNotReadyTeams(t *testing.T) {
 func TestSyncResultJSON(t *testing.T) {
 	// verify the struct serializes correctly
 	result := SyncResult{
-		Success: true,
-		Mode:    "daemon",
-		Ledger: &SyncLedgerResult{
-			Path:   "/path/to/ledger",
+		SchemaVersion: syncResultSchemaVersion,
+		Success:       true,
+		Mode:          "daemon",
+		Transport: SyncTransportResult{
 			Status: "synced",
-		},
-		TeamContexts: []TeamContextSyncResult{
-			{
-				TeamID:   "team-1",
-				TeamName: "Team One",
-				Path:     "/path/to/team-1",
-				Status:   "synced",
+			Ledger: &SyncLedgerResult{
+				Path:   "/path/to/ledger",
+				Status: "synced",
+			},
+			TeamContexts: []TeamContextSyncResult{
+				{
+					TeamID:   "team-1",
+					TeamName: "Team One",
+					Path:     "/path/to/team-1",
+					Status:   "synced",
+				},
 			},
 		},
+		Convergence: SyncConvergenceResult{Status: "converged"},
 	}
 
 	if !result.Success {
@@ -245,11 +250,11 @@ func TestSyncResultJSON(t *testing.T) {
 	if result.Mode != "daemon" {
 		t.Errorf("expected mode to be 'daemon', got %q", result.Mode)
 	}
-	if result.Ledger == nil {
+	if result.Transport.Ledger == nil {
 		t.Error("expected ledger to be non-nil")
 	}
-	if len(result.TeamContexts) != 1 {
-		t.Errorf("expected 1 team context, got %d", len(result.TeamContexts))
+	if len(result.Transport.TeamContexts) != 1 {
+		t.Errorf("expected 1 team context, got %d", len(result.Transport.TeamContexts))
 	}
 }
 
@@ -257,9 +262,12 @@ func TestSyncResultWithError(t *testing.T) {
 	result := SyncResult{
 		Success: false,
 		Mode:    "direct",
-		Ledger: &SyncLedgerResult{
-			Status: "error",
-			Error:  "sync failed",
+		Transport: SyncTransportResult{
+			Status: "failed",
+			Ledger: &SyncLedgerResult{
+				Status: "error",
+				Error:  "sync failed",
+			},
 		},
 		Error: "ledger sync failed",
 	}
@@ -267,8 +275,8 @@ func TestSyncResultWithError(t *testing.T) {
 	if result.Success {
 		t.Error("expected success to be false")
 	}
-	if result.Ledger.Status != "error" {
-		t.Errorf("expected ledger status to be 'error', got %q", result.Ledger.Status)
+	if result.Transport.Ledger.Status != "error" {
+		t.Errorf("expected ledger status to be 'error', got %q", result.Transport.Ledger.Status)
 	}
 	if result.Error == "" {
 		t.Error("expected error message to be set")

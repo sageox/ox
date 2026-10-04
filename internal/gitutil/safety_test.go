@@ -13,6 +13,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// deadPIDLockName uses the same deliberately impossible owner as the liveness
+// tests below. A realistic-looking hardcoded PID can belong to an unrelated CI
+// process, in which case production correctly preserves the lock and the stale
+// owner fixture becomes nondeterministic.
+const deadPIDLockName = "next-index-2147483647.lock"
+
 func TestHasLockFiles(t *testing.T) {
 	t.Run("no lock files", func(t *testing.T) {
 		gitDir := filepath.Join(t.TempDir(), ".git")
@@ -469,11 +475,11 @@ func TestLockSweep_PidSuffixedAndSelfHealing(t *testing.T) {
 
 	t.Run("pid-suffixed next-index lock is removable when stale", func(t *testing.T) {
 		_, gitDir := newGitDir(t)
-		p := writeLock(t, gitDir, "next-index-13088.lock", stale)
+		p := writeLock(t, gitDir, deadPIDLockName, stale)
 
 		removed, errs := RemoveStaleLockFiles(gitDir)
 		assert.Empty(t, errs)
-		assert.Contains(t, removed, "next-index-13088.lock")
+		assert.Contains(t, removed, deadPIDLockName)
 		assert.NoFileExists(t, p)
 	})
 

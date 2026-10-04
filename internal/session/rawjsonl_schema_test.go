@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/lfs"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 	"github.com/stretchr/testify/require"
 )
@@ -113,9 +114,10 @@ func TestRawJSONLSchema_ValidatesWriterOutput(t *testing.T) {
 	writer, err := store.CreateRaw("2026-01-06T14-32-tester-Ox7f3a")
 	require.NoError(t, err, "create raw session")
 
+	stoppedAt := time.Now().UTC()
 	require.NoError(t, writer.WriteHeader(&StoreMeta{
 		Version:      "1.0",
-		CreatedAt:    time.Now().UTC(),
+		CreatedAt:    stoppedAt.Add(-time.Hour),
 		AgentID:      "Ox7f3a",
 		AgentType:    "claude-code",
 		AgentVersion: "1.0.3",
@@ -123,13 +125,21 @@ func TestRawJSONLSchema_ValidatesWriterOutput(t *testing.T) {
 		Username:     "tester",
 		RepoID:       "repo_01JEYQ9Z8X",
 		OxVersion:    "0.9.0",
+		NativeSessions: []lfs.NativeSession{
+			{ID: "5a8f0c2e-1111-4222-8333-444455556666", Source: "startup", FirstSeen: stoppedAt.Add(-time.Hour), LastSeen: stoppedAt.Add(-time.Hour)},
+			{ID: "5a8f0c2e-7777-4888-8999-000011112222", Source: "clear", FirstSeen: stoppedAt.Add(-time.Minute), LastSeen: stoppedAt.Add(-time.Minute)},
+		},
+		StoppedAt: &stoppedAt,
 	}), "write header")
 
 	// One of each documented entry shape, exercising the eid/seq/timestamp
-	// injection path in WriteRaw.
+	// injection path in WriteRaw — including a tool call and its result
+	// joined by call_id.
 	for _, entry := range []map[string]any{
 		{"type": "user", "content": "Fix the failing test"},
 		{"type": "assistant", "content": "Reading the test file."},
+		{"type": "tool", "content": "", "tool_name": "bash", "tool_input": "go test ./...", "call_id": "toolu_01AbC"},
+		{"type": "tool", "content": "", "tool_output": "ok", "call_id": "toolu_01AbC"},
 		{"type": "tool", "content": "", "tool_name": "bash", "tool_input": "go test ./...", "tool_output": "ok"},
 		{"type": "system", "content": "Loaded coworker: code-reviewer", "coworker_name": "code-reviewer", "coworker_model": "sonnet"},
 	} {
@@ -140,7 +150,7 @@ func TestRawJSONLSchema_ValidatesWriterOutput(t *testing.T) {
 	require.NoError(t, writer.Close(), "close writer")
 
 	n := validateFileLines(t, sch, writer.FilePath())
-	require.Equal(t, 6, n, "expected header + 4 entries + footer")
+	require.Equal(t, 8, n, "expected header + 6 entries + footer")
 }
 
 // TestRawJSONLSchema_DocumentsEveryStoreMetaField is the anti-drift gate. The

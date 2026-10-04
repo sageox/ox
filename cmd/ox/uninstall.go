@@ -32,6 +32,7 @@ var (
 
 var uninstallCmd = &cobra.Command{
 	Use:   "uninstall",
+	Args:  cobra.NoArgs,
 	Short: "Remove SageOx from this repository",
 	Long: `Completely remove SageOx from this repository by removing the .sageox directory,
 git hooks, and agent integration files.
@@ -404,6 +405,9 @@ func selectEndpointForUninstall(gitRoot string, endpoints []string) (string, boo
 		// with --force, uninstall from all endpoints
 		return "", true, nil
 	}
+	if cli.NoInput() {
+		return "", false, fmt.Errorf("multiple endpoints configured: pass --all with --no-input to select all endpoints")
+	}
 
 	// build options for selection
 	options := make([]string, 0, len(endpoints)+1)
@@ -692,6 +696,10 @@ func cleanupAgentFiles(gitRoot string) error {
 				slog.Warn("failed to remove commands", "adapter", ea.Name(), "error", err)
 			}
 		}
+		// Teardown half of the rules-installer compatibility window: only a
+		// third-party protocol-v1 adapter still declares the capability, and it
+		// owns rule files ox's own reconciler never wrote. Scheduled removal in
+		// ox 0.18.0 — see the deprecation note on adapterprotocol.CapRulesInstaller.
 		if ea.HasCapability(adapterprotocol.CapRulesInstaller) {
 			if uninstallDryRun {
 				slog.Info("would remove rules", "adapter", ea.Name())
@@ -818,6 +826,9 @@ func confirmUninstallGate(gitRoot, selectedEndpoint string, allEndpoints, force 
 	if force {
 		slog.Info("uninstall confirmation", "skipped", "force flag enabled")
 		return true, nil
+	}
+	if cli.NoInput() {
+		return false, fmt.Errorf("uninstall requires confirmation: pass --force when using --no-input")
 	}
 
 	repoName := filepath.Base(gitRoot)

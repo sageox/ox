@@ -5,8 +5,8 @@ package prime
 // The two-tier-product risk this guards against: ox is rich on Claude Code
 // (Layer-2 commands + skills) but can silently become thin on Codex/Droid if a
 // behavior meant to be portable (Layer-1 "floor") ends up living only inside a
-// Claude-only command/skill body. Codex declares NEITHER a commands installer
-// NOR a rules installer, so anything not carried by Layer 1 (the `ox agent
+// Claude-only command/skill body. Codex declares no commands installer or
+// native rule target, so anything not carried by Layer 1 (the `ox agent
 // prime` output) is invisible to Codex users.
 //
 // The contract proven here:
@@ -16,8 +16,8 @@ package prime
 //     installer; skill-class only on a skills installer. Their ABSENCE on
 //     Codex/Droid is the documented Layer-2 additive case, NOT a failure.
 //   - Floor capabilities resolve on ALL adapters (they ride Layer 1).
-//   - Codex regression lock: Codex declares native skills but no command/rule
-//     installers, while every floor capability still reaches it via Layer 1.
+//   - Codex regression lock: Codex declares native skills but no command
+//     installer, while every floor capability still reaches it via Layer 1.
 
 import (
 	"sort"
@@ -28,76 +28,16 @@ import (
 	"github.com/sageox/ox/pkg/adapterprotocol"
 )
 
-// adapterCaps is a hermetic fixture mirroring each adapter's installed-surface
-// capability set as declared by its handleInfo() in cmd/ox-adapter-*/main.go.
-// package main is not importable here, so we encode the cap sets locally and
-// pin them to the real binaries via the per-adapter guard tests
-// (cmd/ox-adapter-*/main_test.go), which compare handleInfo().Capabilities
-// against these exact sets (order-insensitively, as sets). If a binary's caps
-// drift from this fixture, those guard tests fail — so this fixture cannot
-// silently rot.
-//
-// KEEP IN SYNC: each entry below must match the `want` set in the corresponding
-// cmd/ox-adapter-<name>/main_test.go pin test (claude-code / codex / droid).
-// Adding or removing a capability requires updating BOTH this fixture AND that
-// adapter's pin test.
-var adapterCaps = map[string][]string{
-	"claude-code": {
-		adapterprotocol.CapSessionReader,
-		adapterprotocol.CapHookInstaller,
-		adapterprotocol.CapRulesInstaller,
-		adapterprotocol.CapCommandsInstaller,
-		adapterprotocol.CapSkillsInstaller,
-		adapterprotocol.CapIncrementalReader,
-		adapterprotocol.CapFileWatcher,
-		adapterprotocol.CapServeMode,
-		adapterprotocol.CapSessionImporter,
-		adapterprotocol.CapCapturePrior,
-	},
-	"codex": {
-		adapterprotocol.CapSessionReader,
-		adapterprotocol.CapHookInstaller,
-		adapterprotocol.CapSkillsInstaller,
-		adapterprotocol.CapIncrementalReader,
-		adapterprotocol.CapFileWatcher,
-		adapterprotocol.CapServeMode,
-		adapterprotocol.CapSessionImporter,
-	},
-	"omp": {
-		adapterprotocol.CapSessionReader,
-		adapterprotocol.CapHookInstaller,
-		adapterprotocol.CapSkillsInstaller,
-		adapterprotocol.CapIncrementalReader,
-		adapterprotocol.CapFileWatcher,
-		adapterprotocol.CapServeMode,
-		adapterprotocol.CapSessionImporter,
-	},
-	"droid": {
-		adapterprotocol.CapSkillsInstaller,
-		adapterprotocol.CapSessionReader,
-		adapterprotocol.CapHookInstaller,
-		adapterprotocol.CapRulesInstaller,
-		adapterprotocol.CapIncrementalReader,
-		adapterprotocol.CapFileWatcher,
-		adapterprotocol.CapServeMode,
-		adapterprotocol.CapSessionImporter,
-	},
-	// No CapFileWatcher: Goose sessions are SQLite rows behind a virtual
-	// "goose:<id>" handle, so there is no path for fsnotify to watch.
-	"goose": {
-		adapterprotocol.CapSkillsInstaller,
-		adapterprotocol.CapSessionReader,
-		adapterprotocol.CapHookInstaller,
-		adapterprotocol.CapIncrementalReader,
-		adapterprotocol.CapServeMode,
-		adapterprotocol.CapSessionImporter,
-		adapterprotocol.CapCapturePrior,
-	},
-}
-
-// hasCap reports whether the adapter declares the given capability.
+// hasCap reports whether the adapter declares the given capability, resolving
+// from adapterprotocol.BundledAdapterCapabilities — the single source of
+// truth for adapter capability sets. This
+// package used to carry its own hand-copied adapterCaps fixture that only
+// covered five of the ten bundled adapters and rotted at least once (it kept
+// commands_installer for claude-code long after the adapter stopped declaring
+// it); resolving from the shared source instead of a local copy makes that
+// drift structurally impossible.
 func hasCap(adapter, cap string) bool {
-	for _, c := range adapterCaps[adapter] {
+	for _, c := range adapterprotocol.BundledAdapterCapabilities[adapter] {
 		if c == cap {
 			return true
 		}
@@ -220,7 +160,7 @@ func TestResolution(t *testing.T) {
 }
 
 // TestCodexFloorLock is the explicit "Codex users get the floor" regression
-// lock. Codex has native Agent Skills but no command/rule installer, and every
+// lock. Codex has native Agent Skills but no command installer, and every
 // floor capability still reaches it via Layer 1 (Layer1Source set).
 func TestCodexFloorLock(t *testing.T) {
 	const codex = "codex"
@@ -255,10 +195,11 @@ func TestCodexFloorLock(t *testing.T) {
 	}
 }
 
-// sortedAdapters returns the fixture adapter names in deterministic order.
+// sortedAdapters returns every bundled adapter's name, in deterministic
+// order, from adapterprotocol.BundledAdapterCapabilities.
 func sortedAdapters() []string {
-	names := make([]string, 0, len(adapterCaps))
-	for name := range adapterCaps {
+	names := make([]string, 0, len(adapterprotocol.BundledAdapterCapabilities))
+	for name := range adapterprotocol.BundledAdapterCapabilities {
 		names = append(names, name)
 	}
 	sort.Strings(names)

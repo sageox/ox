@@ -111,6 +111,24 @@ func TestApprovalStore_RoundTripsThroughDisk(t *testing.T) {
 	}
 }
 
+func TestApprovalStore_RevokeRemovesEveryMatchingEntry(t *testing.T) {
+	store := &ApprovalStore{Approvals: []Approval{
+		{Name: "deploy", Digest: "sha256:first"},
+		{Name: "notes", Digest: "sha256:notes"},
+		{Name: "deploy", Digest: "sha256:duplicate"},
+	}}
+
+	if !store.Revoke("deploy") {
+		t.Fatal("existing approval was reported absent")
+	}
+	if len(store.Approvals) != 1 || store.Approvals[0].Name != "notes" {
+		t.Fatalf("revoke left matching approvals behind: %+v", store.Approvals)
+	}
+	if store.Revoke("deploy") {
+		t.Fatal("repeating revoke reported a change")
+	}
+}
+
 // TestLoadApprovals_CorruptStoreIsAnErrorNotAnEmptyOne.
 //
 // Returning an empty store would silently revoke every approval, and a caller

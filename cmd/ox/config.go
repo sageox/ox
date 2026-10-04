@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 
+	"github.com/sageox/ox/internal/cli"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -11,6 +12,14 @@ var configCmd = &cobra.Command{
 	Use:   "config",
 	Short: "Manage ox configuration",
 	Long: `View and modify ox configuration settings.
+
+Without a subcommand, opens the editor when stdin and stdout are terminals.
+With --no-interactive, in CI, or with redirected input/output, lists settings
+instead. With --json, prints the settings as JSON.
+
+Use --config <file> to select an existing user preferences file for reads and
+user-level writes. It overrides OX_USER_CONFIG and normal user config discovery.
+Repo and team files are still selected by the current project and --repo/--team.
 
 Commands:
   ox config                            Interactive config editor (TUI)
@@ -42,11 +51,10 @@ Priority: user > repo > team > default. User-level preferences apply even in
 repositories that have not run ox init; install the user-level integration
 for your AI coworker to receive the guidance everywhere.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// if terminal is interactive, launch TUI
-		if term.IsTerminal(int(os.Stdout.Fd())) && len(args) == 0 {
+		jsonOutput := cfg != nil && cfg.JSON
+		if !jsonOutput && cli.IsInteractive() && term.IsTerminal(int(os.Stdout.Fd())) && len(args) == 0 {
 			return runConfigTUI()
 		}
-		// otherwise show list
 		return runConfigList(cmd, args)
 	},
 }

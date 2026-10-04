@@ -120,7 +120,10 @@ func TestPullManagedRepo_SessionMetaConflict_ClassifiesAsSessionConflictWedge(t 
 
 // A canceled resolver still aborts the rebase using a fresh context. The
 // subsequent autostash inspection then fails on cancellation; it must not
-// replace the pull failure or the divergence issue already reported.
+// replace the pull failure or the divergence issue already reported — and
+// since #962 it must not contribute anything of its own either, because the
+// re-read of the index that follows finds it clean, so the inspection failure
+// described the probe rather than the repo.
 func TestPullManagedRepo_AutostashInspectionPreservesPullFailure(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: git clone operations")
@@ -149,8 +152,9 @@ func TestPullManagedRepo_AutostashInspectionPreservesPullFailure(t *testing.T) {
 	assert.Equal(t, IssueTypeDiverged, result.Issue.Type)
 	require.Error(t, result.Err)
 	assert.ErrorContains(t, result.Err, "pull failed")
-	assert.ErrorContains(t, result.Err, "inspect unmerged index")
-	assert.ErrorIs(t, result.Err, context.Canceled)
+	assert.NotErrorIs(t, result.Err, gitutil.ErrConflictProbeFailed,
+		"a probe that never determined the index state must not join the pull failure")
+	assert.NotContains(t, result.Err.Error(), "could not determine index state")
 	var pullExit *exec.ExitError
 	assert.ErrorAs(t, result.Err, &pullExit, "the original git pull error must remain in the error chain")
 }

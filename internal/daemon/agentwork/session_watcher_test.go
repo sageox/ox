@@ -978,7 +978,7 @@ func TestSessionWatcherManager_PersistOffset_UpdatesRecordingState(t *testing.T)
 	data, _ := json.Marshal(state)
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ".recording.json"), data, 0644))
 
-	mgr.persistOffset(aw, 12345, 3)
+	require.NoError(t, mgr.persistOffset(aw, 12345, 3))
 
 	// read back and verify
 	recData, err := os.ReadFile(filepath.Join(dir, ".recording.json"))
@@ -1084,7 +1084,10 @@ func TestSessionWatcherManager_PersistOffset_AtomicWrite(t *testing.T) {
 	go func() {
 		defer close(done)
 		for i := 0; i < iterations; i++ {
-			mgr.persistOffset(aw, int64(i*100), 1)
+			if err := mgr.persistOffset(aw, int64(i*100), 1); err != nil {
+				t.Errorf("persist offset: %v", err)
+				return
+			}
 		}
 	}()
 
@@ -1134,7 +1137,7 @@ func TestSessionWatcherManager_PersistOffset_PreservesCLIFields(t *testing.T) {
 	require.NoError(t, os.WriteFile(recPath, data, 0644))
 
 	// daemon persists offset
-	mgr.persistOffset(aw, 5000, 2)
+	require.NoError(t, mgr.persistOffset(aw, 5000, 2))
 
 	// read back — StoppedAt and other CLI fields must survive
 	raw, err := os.ReadFile(recPath)
@@ -1358,8 +1361,8 @@ func TestSessionWatcherManager_CatchUpReadFailure_LiveTailStillStarts(t *testing
 }
 
 // TestSessionWatcherManager_PersistOffset_MissingRecordingJSON verifies that
-// persistOffset silently returns when .recording.json has been deleted.
-// Failure prevented: watcher crashes mid-tail when .recording.json is removed externally.
+// a missing marker stops capture before uncheckpointed entries accumulate.
+// Failure prevented: restarting the watcher duplicates an uncheckpointed batch.
 func TestSessionWatcherManager_PersistOffset_MissingRecordingJSON(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: fsnotify watcher test")
@@ -1393,21 +1396,18 @@ func TestSessionWatcherManager_PersistOffset_MissingRecordingJSON(t *testing.T) 
 	require.NoError(t, f.Close())
 
 	require.Eventually(t, func() bool {
-		info, err := os.Stat(filepath.Join(dir, "raw.jsonl"))
-		return err == nil && info.Size() > 0
-	}, 5*time.Second, 10*time.Millisecond, "capture must reach persistOffset with the marker absent")
-	// watcher should still be running (persistOffset didn't crash)
-	require.Eventually(t, func() bool {
-		return len(mgr.ActiveSessions()) == 1
-	}, 2*time.Second, 10*time.Millisecond, "watcher must survive missing .recording.json during persistOffset")
+		return len(mgr.ActiveSessions()) == 0
+	}, 5*time.Second, 10*time.Millisecond, "failed checkpoint must stop capture")
+	data, err := os.ReadFile(filepath.Join(dir, "raw.jsonl"))
+	require.NoError(t, err)
+	require.Empty(t, data, "failed batch must be rolled back for a safe retry")
 
 	mgr.StopAll()
 }
 
 // TestSessionWatcherManager_PersistOffset_CorruptRecordingJSON verifies that
-// persistOffset silently returns when .recording.json contains invalid JSON.
-// Failure prevented: watcher crashes when .recording.json is corrupted by
-// concurrent write or disk issue.
+// a corrupt marker stops capture before uncheckpointed entries accumulate.
+// Failure prevented: restarting after marker repair duplicates the last batch.
 func TestSessionWatcherManager_PersistOffset_CorruptRecordingJSON(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: fsnotify watcher test")
@@ -1441,13 +1441,38 @@ func TestSessionWatcherManager_PersistOffset_CorruptRecordingJSON(t *testing.T) 
 	require.NoError(t, f.Close())
 
 	require.Eventually(t, func() bool {
-		info, err := os.Stat(filepath.Join(dir, "raw.jsonl"))
-		return err == nil && info.Size() > 0
-	}, 5*time.Second, 10*time.Millisecond, "capture must reach persistOffset with a corrupt marker")
-	// watcher should still be running (persistOffset didn't crash)
-	require.Eventually(t, func() bool {
-		return len(mgr.ActiveSessions()) == 1
-	}, 2*time.Second, 10*time.Millisecond, "watcher must survive corrupt .recording.json during persistOffset")
+		return len(mgr.ActiveSessions()) == 0
+	}, 5*time.Second, 10*time.Millisecond, "failed checkpoint must stop capture")
+	data, err := os.ReadFile(filepath.Join(dir, "raw.jsonl"))
+	require.NoError(t, err)
+	require.Empty(t, data, "failed batch must be rolled back for a safe retry")
 
 	mgr.StopAll()
+}
+
+type nonAdvancingAdapter struct{ testAdapter }
+
+func (a *nonAdvancingAdapter) ReadFromOffset(_ string, offset int64) ([]adapters.RawEntry, int64, error) {
+	return []adapters.RawEntry{{Role: "assistant", Content: "must not append"}}, offset, nil
+}
+
+func TestWatcherRejectsNonAdvancingCatchUpCursor(t *testing.T) {
+	mgr := newTestWatcherManager(t)
+	dir := t.TempDir()
+	raw := filepath.Join(dir, "raw.jsonl")
+	writeRecordingState(t, filepath.Join(dir, recordingMarker), session.RecordingState{SessionPath: dir, SourceOffset: 10})
+	aw := &activeWatcher{done: make(chan struct{}), sessionName: "bad-cursor", cachePath: dir, startOffset: 10}
+	mgr.wg.Add(1)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	mgr.runWatcher(ctx, aw, &nonAdvancingAdapter{}, raw)
+	data, err := os.ReadFile(raw)
+	require.NoError(t, err)
+	require.NotContains(t, string(data), "must not append")
+	stateData, err := os.ReadFile(filepath.Join(dir, recordingMarker))
+	require.NoError(t, err)
+	var state session.RecordingState
+	require.NoError(t, json.Unmarshal(stateData, &state))
+	require.Equal(t, int64(10), state.SourceOffset)
+	require.Zero(t, state.EntryCount)
 }

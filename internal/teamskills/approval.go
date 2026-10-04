@@ -22,8 +22,14 @@ type Approval struct {
 	// changed.
 	Capabilities []Capability `json:"capabilities,omitempty"`
 	// AllowScripts records that the approver explicitly accepted bundled scripts
-	// becoming executable on disk. Without it, scripts materialize non-executable.
-	AllowScripts bool `json:"allow_scripts,omitempty"`
+	// being written to disk at all. Without it they are DROPPED, not written
+	// non-executable: a runnable file an agent can be told to `sh` is dangerous
+	// whatever its mode, so presence is the boundary.
+	//
+	// Deliberately not omitempty. This store is committed and reviewed in pull
+	// requests; a reviewer must be able to see that scripts were withheld, not
+	// have to infer it from a missing key.
+	AllowScripts bool `json:"allow_scripts"`
 }
 
 // ApprovalStore is the committed record of which executable team skills this
@@ -110,6 +116,23 @@ func (s *ApprovalStore) Approve(name string, v Verdict, allowScripts bool) {
 	})
 }
 
+// Revoke removes every approval recorded for name and reports whether the
+// store changed. Removing all matches also repairs a hand-edited store that
+// accidentally contains duplicate entries.
+func (s *ApprovalStore) Revoke(name string) bool {
+	next := s.Approvals[:0]
+	revoked := false
+	for _, approval := range s.Approvals {
+		if approval.Name == name {
+			revoked = true
+			continue
+		}
+		next = append(next, approval)
+	}
+	s.Approvals = next
+	return revoked
+}
+
 // Decision is what ox should do with one discovered team skill.
 type Decision int
 
@@ -139,8 +162,9 @@ func (s *ApprovalStore) Decide(name string, v Verdict) Decision {
 	return DecisionNeedsApproval
 }
 
-// ScriptsExecutable reports whether bundled scripts may be written with the
-// executable bit set.
+// ScriptsExecutable reports whether the skill's bundled scripts may be written
+// to disk at all. The name is historical; the decision it carries is presence,
+// not file mode — see the AllowScripts field.
 //
 // Separate from Decide on purpose. Approving a skill so an agent can READ its
 // instructions is a smaller decision than making its scripts directly runnable,

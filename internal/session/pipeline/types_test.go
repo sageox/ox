@@ -293,3 +293,26 @@ func TestStopOutputContextTraceOmitEmpty(t *testing.T) {
 		t.Error("context_trace_path should be omitted when empty")
 	}
 }
+
+// Trace content has a dedicated cache-only publication path. Classifying it as
+// an ordinary secondary artifact would copy compressed content into Git before
+// upload confirmation, so protect both sides of this registry contract.
+func TestTraceArtifactsUseDedicatedPublication(t *testing.T) {
+	secondary := (&Result{}).SecondaryArtifacts()
+	for _, name := range LedgerContentFiles {
+		trace := name == "trace-spans.jsonl.gz" || name == "trace-events.jsonl.gz"
+		if IsTraceFile(name) != trace {
+			t.Errorf("artifact %q has incorrect publication classification", name)
+		}
+		if trace {
+			if _, copied := secondary[name]; copied {
+				t.Errorf("trace artifact %q must not enter the generic copy path", name)
+			}
+		}
+	}
+	for _, name := range []string{"", "trace-spans.jsonl.gz.backup", "nested/trace-events.jsonl.gz"} {
+		if IsTraceFile(name) {
+			t.Errorf("noncanonical artifact %q classified as trace", name)
+		}
+	}
+}

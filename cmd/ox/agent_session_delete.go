@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -155,12 +154,7 @@ func runAgentSessionDelete(inst *agentinstance.Instance, cmd *cobra.Command, arg
 		}
 	}
 
-	jsonOut, err := json.MarshalIndent(output, "", "  ")
-	if err != nil {
-		return fmt.Errorf("format delete JSON: %w", err)
-	}
-	fmt.Println(string(jsonOut))
-	return nil
+	return cli.PrintJSONTo(os.Stdout, output)
 }
 
 // deleteSessionFromLedger removes the session folder from the ledger git repo,

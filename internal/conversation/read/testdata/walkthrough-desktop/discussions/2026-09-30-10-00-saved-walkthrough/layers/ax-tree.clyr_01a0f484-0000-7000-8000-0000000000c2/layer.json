@@ -1,0 +1,20 @@
+{
+  "$schema_version": 1,
+  "layer_id": "clyr_01a0f484-0000-7000-8000-0000000000c2",
+  "conversation_id": "cnv_01a0f488-0000-7000-8000-0000000000b1",
+  "kind": "ax-tree",
+  "modality": "json",
+  "mime": "application/x-ndjson",
+  "label": "Accessibility — Browser · Team",
+  "origin": "captured",
+  "revision": 1,
+  "status": "active",
+  "supersedes": null,
+  "clock": {"t0": "2026-09-30T10:00:00.500Z", "class": "wall-clock", "offset_ms": 0},
+  "content": {
+    "kind": "ax-tree",
+    "coord_space": "target",
+    "refs": [{"ref": "git-file", "path": "ax.jsonl", "mime": "application/x-ndjson"}],
+    "target_initial": {"kind": "window", "app": "Browser", "title": "Team", "size": {"w": 1440, "h": 900}}
+  }
+}

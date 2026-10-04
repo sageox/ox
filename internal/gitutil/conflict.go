@@ -10,9 +10,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 
 	"github.com/sageox/ox/internal/fileutil"
+	"github.com/sageox/ox/internal/lfs/pointer"
+	"github.com/sageox/ox/internal/session/pipeline"
 )
 
 // ConflictMarkerStart is git's textual conflict marker. We look for it as a
@@ -20,6 +23,29 @@ import (
 // contain the literal characters mid-line — a quoted diff in a session
 // transcript, for instance — doesn't false-positive.
 const ConflictMarkerStart = "<<<<<<<"
+
+// conflictMarkerSeparator and conflictMarkerEnd finish a conflict hunk. Either
+// line can appear alone in real content, so the scan only trusts them in order.
+const (
+	conflictMarkerSeparator = "======="
+	conflictMarkerEnd       = ">>>>>>>"
+)
+
+// ErrConflictProbeFailed marks an error as "we could not determine whether the
+// index holds conflicts", which is a different fact from "the index holds
+// conflicts". The distinction is load-bearing: a context deadline or a canceled
+// daemon kills `git ls-files --unmerged` before it produces any output, so the
+// resulting error carries ZERO information about index state. Reporting such an
+// error as a conflict suspended sync on provably clean clones and minted a
+// RequiresConfirm issue nothing could clear (#962).
+//
+// It exists to keep the MESSAGE honest — the wrapper must not assert a
+// conclusion the probe never reached. It is NOT a reliable transient/durable
+// discriminator, and callers must not use it as one: an unreadable .git/index
+// carries it too and fails identically forever. A caller that has to know the
+// index state must re-read it (HasUnmergedEntries) rather than classify this
+// error, because the error text cannot distinguish the two.
+var ErrConflictProbeFailed = errors.New("could not determine index state")
 
 // HasConflictMarkers reports whether the file at path contains an unresolved
 // git conflict marker.
@@ -43,9 +69,18 @@ func HasConflictMarkers(path string) (bool, error) {
 // content directly. Use this when the content under inspection isn't (or
 // might not be) the working-tree file — e.g. a staged git blob read via
 // `git show :<path>`, which can differ from what's currently on disk.
+//
+// It also catches an orphaned tail whose opening marker is gone: a ">>>>>>>"
+// line anywhere below a line that is exactly "=======".
 func HasConflictMarkersBytes(data []byte) bool {
+	sawSeparator := false
 	for _, line := range strings.Split(string(data), "\n") {
-		if strings.HasPrefix(line, ConflictMarkerStart) {
+		switch {
+		case strings.HasPrefix(line, ConflictMarkerStart):
+			return true
+		case strings.TrimSuffix(line, "\r") == conflictMarkerSeparator:
+			sawSeparator = true
+		case sawSeparator && strings.HasPrefix(line, conflictMarkerEnd):
 			return true
 		}
 	}
@@ -55,12 +90,24 @@ func HasConflictMarkersBytes(data []byte) bool {
 // ValidateLedgerBlob rejects bytes that an automatic Ledger writer must never
 // publish. Conflict markers are invalid in every Ledger artifact; session
 // metadata additionally has a structural JSON contract that Git cannot enforce.
+// Canonical LFS artifact names must contain pointers. Storage=git exceptions
+// are applied only by the tree validator after reading the committed manifest.
 //
 // Keep this check content-only so both staged-index validators and immutable
 // tree commits can enforce the same invariant without re-reading the worktree.
 func ValidateLedgerBlob(path string, data []byte) error {
+	return validateLedgerBlob(path, data, "")
+}
+
+// storage must come from meta.json in the immutable tree being validated.
+func validateLedgerBlob(path string, data []byte, storage string) error {
 	if HasConflictMarkersBytes(data) {
 		return fmt.Errorf("%s contains an unresolved conflict", path)
+	}
+	if isSessionContentPath(path) && storage != "git" {
+		if _, _, err := pointer.Parse(string(data)); err != nil {
+			return fmt.Errorf("%s must contain an LFS pointer (upload content before committing): %w", path, err)
+		}
 	}
 	if isSessionMetaPath(path) {
 		var object map[string]json.RawMessage
@@ -154,11 +201,60 @@ func validateLedgerTree(ctx context.Context, repoPath, parent, tree string, path
 		if err != nil {
 			return fmt.Errorf("inspect staged Ledger blob %s: %w", entry.path, err)
 		}
-		if err := ValidateLedgerBlob(entry.path, blob); err != nil {
+		storage := ""
+		if isSessionContentPath(entry.path) {
+			storage, err = ledgerContentStorage(ctx, repoPath, tree, entry.path)
+			if err != nil {
+				return fmt.Errorf("inspect staged Ledger storage for %s: %w", entry.path, err)
+			}
+		}
+		if err := validateLedgerBlob(entry.path, blob, storage); err != nil {
 			return fmt.Errorf("refusing automatic Ledger commit: %w", err)
 		}
 	}
 	return nil
+}
+
+// ledgerContentStorage reads the sibling manifest from the exact commit tree.
+// Looking at the worktree (or even the mutable index) here would let an
+// uncommitted storage=git declaration bypass the content guard.
+func ledgerContentStorage(ctx context.Context, repoPath, tree, contentPath string) (string, error) {
+	parts := strings.Split(filepath.ToSlash(filepath.Clean(contentPath)), "/")
+	metaPath := strings.Join(parts[:2], "/") + "/meta.json"
+	raw, err := cleanGitOutput(ctx, repoPath, "ls-tree", "-z", tree, "--", metaPath)
+	if err != nil {
+		return "", err
+	}
+	if len(raw) == 0 {
+		return "", nil
+	}
+	fields := strings.Fields(strings.SplitN(string(raw), "\t", 2)[0])
+	if len(fields) != 3 {
+		return "", fmt.Errorf("invalid metadata tree entry")
+	}
+	if err := ValidateLedgerEntryMode(metaPath, fields[0]); err != nil {
+		return "", err
+	}
+	data, err := cleanGitOutput(ctx, repoPath, "cat-file", "blob", fields[2])
+	if err != nil {
+		return "", err
+	}
+	if err := ValidateLedgerBlob(metaPath, data); err != nil {
+		return "", err
+	}
+	var meta struct {
+		Files map[string]struct {
+			Storage string `json:"storage"`
+		} `json:"files"`
+	}
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return "", err
+	}
+	return meta.Files[strings.Join(parts[2:], "/")].Storage, nil
+}
+
+func isSessionContentPath(path string) bool {
+	return isSessionPath(path) && slices.Contains(pipeline.LedgerContentFiles, filepath.Base(path))
 }
 
 // treeEntry is one non-deleted path in a tree delta: its destination mode and
@@ -302,13 +398,19 @@ func runPlumbing(ctx context.Context, repoPath string, stdin []byte, extraEnv []
 
 // ResolveAutostashConflicts clears formatting-only session metadata conflicts
 // left by pull --autostash, which can exit successfully with an unmerged index.
-// It preserves every field from both sides and refuses differing values,
-// deletions, other paths, active git operations, or edits made after the conflict.
+// It preserves every field from both sides and refuses differing values —
+// except for the small allowlist of ox-owned bookkeeping fields in
+// sessionMetaBookkeepingMerges, whose merge is mechanical rather than a choice
+// between two authors' content. Deletions, other paths, active git operations,
+// and edits made after the conflict are always refused.
 // The caller must hold WithRepoLock. No commits are made or stashes removed.
 func ResolveAutostashConflicts(ctx context.Context, repoPath string, safePrefixes, denyPrefixes []string) (bool, error) {
 	entries, err := listUnmergedEntries(ctx, repoPath)
 	if err != nil {
-		return false, fmt.Errorf("inspect unmerged index: %w", err)
+		// Deliberately unwrapped: listUnmergedEntries already tags this with
+		// ErrConflictProbeFailed and names the command, and any prefix added
+		// here would re-assert the conclusion the probe never reached.
+		return false, err
 	}
 	if len(entries) == 0 {
 		return false, nil
@@ -363,7 +465,18 @@ func ResolveAutostashConflicts(ctx context.Context, repoPath string, safePrefixe
 		}
 		for key, value := range fields[3] {
 			if ours, exists := fields[2][key]; exists && !reflect.DeepEqual(ours, value) {
-				return false, fmt.Errorf("field %s differs in %s; manual resolution required", key, path)
+				// Differing values refuse by default. The narrow exception is
+				// ox's own bookkeeping, where the merge is mechanical rather
+				// than a choice between two authors' content — see
+				// sessionMetaBookkeepingMerges. Reached only for a path the
+				// guard above already confined to sessions/<name>/meta.json
+				// inside safePrefixes, so the policy cannot escape that tree.
+				merged, ok := mergeSessionMetaBookkeeping(key, ours, value)
+				if !ok {
+					return false, fmt.Errorf("field %s differs in %s; manual resolution required", key, path)
+				}
+				fields[2][key] = merged
+				continue
 			}
 			fields[2][key] = value
 		}
@@ -414,4 +527,127 @@ func ResolveAutostashConflicts(ctx context.Context, repoPath string, safePrefixe
 		}
 	}
 	return true, nil
+}
+
+// sessionMetaBookkeepingMerges is the complete allowlist of sessions/*/meta.json
+// fields whose two sides ox reconciles itself instead of refusing. It is
+// deliberately tiny and must stay that way: the blanket refusal above is what
+// stops a real content field — a summary body, a validation_error string, a
+// title — from being silently half-discarded, so this is not a general
+// "pick a side" heuristic and must never be widened into one.
+//
+// A field earns a place here only when a merge rule is mechanically correct
+// from the field's own semantics, not merely convenient.
+//
+// Deliberately absent: summary_status. #897 named it daemon-written bookkeeping
+// alongside summary_attempts, but it is a state label with no total order —
+// nothing picks between "failed" and "pending" without inventing policy — so it
+// keeps refusing.
+var sessionMetaBookkeepingMerges = map[string]func(ours, theirs any) (any, bool){
+	// summary_attempts is ox's own retry counter. Both sides of a
+	// pull --autostash have been counting the same session's attempts, which
+	// makes this the one conflict class ox reliably generates against itself
+	// (#956) — and, before this rule, the one class auto-resolve refused,
+	// wedging the index until a human ran git by hand in the ledger clone.
+	//
+	// max is a safe LOWER BOUND on the attempts made, not their true total.
+	// Every ledger clone runs autofix over the whole sessions/ tree
+	// (daemon checkSessionMetaTitles), so two clones retry the SAME session
+	// independently and their bumps are distinct attempts, not two views of
+	// one serialized counter: from a common base of 1, ours=2 with theirs=3
+	// is four attempts recorded as three.
+	//
+	// That undercount is chosen, not overlooked. It is bounded by the number
+	// of clones racing one session, it buys at most a few extra LLM calls
+	// before MaxSummaryAttempts bites, and checkSessionInlineSummaryRetry
+	// re-arms the cap daily regardless. The opposite error is far more
+	// expensive: a rule that can overshoot flips a still-summarizable session
+	// to "unrecoverable", which permanently demotes a teammate-visible title
+	// to the session-name slug. Spend tokens; do not discard summaries.
+	// TestAutostashRecoveryMergesBookkeepingCounters pins the undercount with
+	// "divergent clones undercount: max is a lower bound, not the total", so
+	// changing this rule is a deliberate policy change, not a bug fix.
+	//
+	// An exact rule does exist and is deliberately not used: stage 1 is the
+	// stash base, so ours+theirs-base would count both sides' bumps. It is
+	// exact only while stage 1 really is the common ancestor of both counters,
+	// and wherever that assumption slips the error flips to overcounting — the
+	// expensive direction above.
+	//
+	// Resets are a different hazard, and they are structurally out of reach
+	// twice over. summary_attempts is omitempty, so resetting it to 0 DELETES
+	// the key (meta_repair.go patches it exactly that way), and the deletion
+	// guard above refuses any base key missing from either side. Independently,
+	// all three resetting writers — session_finalize.go on a successful
+	// summarization, meta_repair.go RecoverEmptyTitleMeta on a recovered title,
+	// and ResetInlineSummaryEligible on a re-arm — write the counter atomically
+	// alongside summary_status and/or validation_error and/or title, none of
+	// which have a merge rule, so the loop above refuses on that key first.
+	// Both guards matter, because across a reset max is actively WRONG: the
+	// lower side is the LATER observation, and taking the higher resurrects a
+	// stale count that re-trips MaxSummaryAttempts a try early. The test cases
+	// "deleted counter refuses before any merge rule applies" and "a counter
+	// RESET paired with its status write still refuses" pin one guard each.
+	//
+	// Writers that BUMP the counter alone existed before GH #1107 —
+	// RecoverEmptyTitleMeta below the cap, and `ox session repair-meta-summary`
+	// on a session already marked failed_validation. Teammates on those ox
+	// versions keep producing such edits until they upgrade, which is precisely
+	// why this merge is still reachable. A writer that RESETS it alone would invalidate the analysis
+	// above; give the counter a reset-aware merge (or an episode id) first.
+	"summary_attempts": mergeMonotonicCounter,
+}
+
+// mergeSessionMetaBookkeeping resolves one differing session-metadata field
+// when an ox-owned merge rule covers it. ok is false for every field outside
+// the allowlist and for any value the rule does not recognize, which returns
+// the caller to its refusal.
+func mergeSessionMetaBookkeeping(key string, ours, theirs any) (any, bool) {
+	merge, covered := sessionMetaBookkeepingMerges[key]
+	if !covered {
+		return nil, false
+	}
+	return merge(ours, theirs)
+}
+
+// mergeMonotonicCounter resolves two sides of a counter that never decreases
+// within one failure episode to the larger. The two sides may be independent
+// counts rather than two readings of one count, so the result is a lower bound
+// on the total — see sessionMetaBookkeepingMerges for why that direction is the
+// one worth erring in. The winning side is returned as-is (a json.Number from
+// the stage that produced it) so the merged file re-encodes the original
+// literal rather than a value round-tripped through float64.
+//
+// Anything that is not a non-negative JSON integer — a float, a string, a null
+// from an older writer — is not a counter this rule understands. Refusing there
+// costs only a manual resolution; guessing could overwrite a field that merely
+// shares the name.
+func mergeMonotonicCounter(ours, theirs any) (any, bool) {
+	left, ok := counterValue(ours)
+	if !ok {
+		return nil, false
+	}
+	right, ok := counterValue(theirs)
+	if !ok {
+		return nil, false
+	}
+	if right > left {
+		return theirs, true
+	}
+	return ours, true
+}
+
+// counterValue reads a counter from a conflict stage decoded with
+// json.Decoder.UseNumber, so an integral value arrives as json.Number and a
+// non-integral one is rejected by Int64 rather than silently truncated.
+func counterValue(value any) (int64, bool) {
+	number, ok := value.(json.Number)
+	if !ok {
+		return 0, false
+	}
+	n, err := number.Int64()
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	return n, true
 }
