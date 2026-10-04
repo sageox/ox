@@ -76,6 +76,10 @@ const (
 	MaxGracefulShutdown = shutdownCodeDBDrainTimeout + shutdownGoroutineWaitTimeout
 )
 
+// daemonMaxProcs bounds how many cores the daemon's Go code runs on at once.
+// Indexing and reconcile finish later, never hotter.
+const daemonMaxProcs = 2
+
 // ErrNotRunning indicates the daemon is not running.
 var ErrNotRunning = errors.New("daemon not running")
 
@@ -387,6 +391,11 @@ func (d *Daemon) Start() error {
 	// spawn inherit the lower priority.
 	if err := lowerDaemonPriority(); err != nil {
 		d.logger.Debug("could not lower daemon priority", "error", err)
+	}
+	// Cap parallelism too: the daemon's work is batch work, and an unbounded
+	// index pass used every core it could get (185% measured).
+	if runtime.GOMAXPROCS(0) > daemonMaxProcs {
+		runtime.GOMAXPROCS(daemonMaxProcs)
 	}
 
 	// write PID file (informational only)

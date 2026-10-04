@@ -237,6 +237,9 @@ func TestGitCommitAndPush_ReturnsPromptlyWhenContextCancelledMidPush(t *testing.
 				}
 			}
 		}
+		// belt and braces: anything still running from helperDir (a killed git
+		// orphans its helper) — leaked helpers outlived a test run for hours
+		_ = exec.Command("pkill", "-f", helperDir).Run()
 	})
 	runGitCmd(t, ledger, "remote", "set-url", "--push", "origin", "hang::nowhere")
 

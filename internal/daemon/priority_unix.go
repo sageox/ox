@@ -35,10 +35,13 @@ const daemonNiceness = 10
 // refuse it, and the daemon is fully functional either way. The error is
 // returned so the caller can log it at debug level.
 func lowerDaemonPriority() error {
+	var niceErr error
 	if runtime.GOOS == "linux" {
-		return lowerPriorityAllThreads(daemonNiceness)
+		niceErr = lowerPriorityAllThreads(daemonNiceness)
+	} else {
+		niceErr = syscall.Setpriority(syscall.PRIO_PROCESS, 0, daemonNiceness)
 	}
-	return syscall.Setpriority(syscall.PRIO_PROCESS, 0, daemonNiceness)
+	return errors.Join(niceErr, enterBackgroundBand())
 }
 
 // lowerPriorityAllThreads applies nice to every thread listed in
