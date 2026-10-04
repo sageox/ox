@@ -16,9 +16,12 @@ Fix Claude and Pi adapter discovery for sessions stored in a different native pr
 - [x] Validate after the non-incremental read so turns appended while reading cannot be imported unchecked.
 - [x] Allow legacy daemon recovery without WorkspacePath only if the captured header repo ID matches the daemon project; otherwise preserve data for manual ownership review.
 - [x] Quarantine confirmed untrusted Claude sources without deleting recordings; skip repeated watcher, hook, and daemon scans.
-- [x] Apply per-turn ownership checks during full-file validation too; reject nested repositories and deleted cwd paths.
+- [x] Apply per-turn ownership checks during full-file validation too; reject nested repositories. A deleted cwd is judged by where it stood: inside the repo is accepted (a submodule of this repo's own is too), outside is foreign.
 - [x] Guard native reads against source replacement and prevent stop/recover from publishing quarantined caches.
-- [x] Recheck dead hook-mode sources before daemon finalization; quarantine proven foreign turns and keep unverifiable deleted cwd paths retryable.
+- [x] Recheck dead hook-mode sources before daemon finalization; quarantine proven foreign turns, but finalize the already-validated capture when the source can no longer be checked (transcript pruned, workspace archived) instead of retrying forever.
+- [x] Validate stop, final drain, daemon recovery and watcher restart from the recording's start offset, so directories visited before it began do not condemn it.
+- [x] Keep quarantined recordings through SessionEnd and `/clear`; recheck the quarantine under the recovery lock before publishing; list them in `ox doctor`; `ox agent <id> session recover --release-quarantine` re-runs the ownership check without deleting anything.
+- [ ] Decide whether a foreign turn should quarantine the whole session or be skipped, with the clean part uploaded (author's call).
 - [x] Refuse daemon Pi recovery and watcher restart when repository ownership is absent.
 - [x] Preserve undiscovered Claude hook recordings through daemon recovery, explicit recover, and stale/ghost cleanup; test the header-only case.
 - [x] Pass full `make lint` and focused adapter/capture/daemon tests.

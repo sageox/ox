@@ -268,7 +268,10 @@ func TestFindSessionFile_MtimeBuffer(t *testing.T) {
 	// file mtime is 60 seconds before sinceTime — outside the 30s buffer
 	_ = os.Remove(atBoundary)
 	outsideBuffer := filepath.Join(projectDir, "outside-buffer.jsonl")
-	if err := os.WriteFile(outsideBuffer, content, 0o644); err != nil {
+	// own sessionId: ownership validation must pass, so only the mtime window
+	// can reject this file
+	outsideContent := []byte(fmt.Sprintf(`{"type":"user","sessionId":%q,"cwd":%q,"timestamp":"2026-04-08T06:29:05Z","message":{"role":"user","content":"hello"}}`+"\n", "outside-buffer", repoRoot))
+	if err := os.WriteFile(outsideBuffer, outsideContent, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	oldMtime := sinceTime.Add(-60 * time.Second)

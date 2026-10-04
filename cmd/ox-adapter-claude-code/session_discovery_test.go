@@ -188,7 +188,7 @@ func TestFindSessionFile_AgentScopedLookupKeepsTheRecordingBoundary(t *testing.T
 	since := time.Now().Add(-time.Minute).UTC().Truncate(time.Second)
 	const id = "77b16b24-5b7d-4598-aacf-4c9afeb4b5ca"
 	before := fmt.Sprintf("{\"type\":\"user\",\"sessionId\":%q,\"cwd\":%q,\"timestamp\":%q,\"message\":{\"role\":\"user\",\"content\":\"older turn\"}}\n", id, repo, since.Add(-time.Minute).Format(time.RFC3339))
-	after := fmt.Sprintf("{\"type\":\"assistant\",\"sessionId\":%q,\"cwd\":%q,\"timestamp\":%q,\"message\":{\"role\":\"assistant\",\"content\":\"Agent OxSelected is working\"}}\n", id, repo, since.Add(10*time.Second).Format(time.RFC3339))
+	after := fmt.Sprintf("{\"type\":\"assistant\",\"sessionId\":%q,\"cwd\":%q,\"timestamp\":%q,\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Agent OxSelected is working\"}]}}\n", id, repo, since.Add(10*time.Second).Format(time.RFC3339))
 	owned := filepath.Join(bucket, id+".jsonl")
 	if err := os.WriteFile(owned, []byte(before+after), 0o600); err != nil {
 		t.Fatal(err)
@@ -200,6 +200,11 @@ func TestFindSessionFile_AgentScopedLookupKeepsTheRecordingBoundary(t *testing.T
 	got, offset, err := findSessionFile(repo, "OxSelected", since.Format(time.RFC3339), "")
 	if err != nil || got != owned || offset != int64(len(before)) {
 		t.Fatalf("agent-scoped lookup: got %q at %d, error %v; want %q at %d", got, offset, err, owned, len(before))
+	}
+	// the offset must land where the recording's own turn can actually be read
+	entries, _, readErr := readFromOffset(got, offset)
+	if readErr != nil || len(entries) != 1 || entries[0].Content != "Agent OxSelected is working" {
+		t.Fatalf("turn at the selected offset: entries=%+v, error=%v", entries, readErr)
 	}
 }
 
