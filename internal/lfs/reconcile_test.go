@@ -103,7 +103,7 @@ func unpushedCount(t *testing.T, dir string) int {
 
 func TestReconcile_EmptyLedger_Unaffected(t *testing.T) {
 	dir := t.TempDir() // not even a git repo
-	result, err := ReconcileUnpushedPointers(context.Background(), dir, "", nil)
+	result, err := ReconcileAllPointers(context.Background(), dir, "", nil)
 	require.NoError(t, err)
 	assert.Zero(t, result.ScannedPointers)
 	assert.Zero(t, result.Replaced)
@@ -112,7 +112,7 @@ func TestReconcile_EmptyLedger_Unaffected(t *testing.T) {
 func TestReconcile_NoSessions_Unaffected(t *testing.T) {
 	dir := initLedgerRepo(t)
 	// sessions/ exists but is empty
-	result, err := ReconcileUnpushedPointers(context.Background(), dir, "", nil)
+	result, err := ReconcileAllPointers(context.Background(), dir, "", nil)
 	require.NoError(t, err)
 	assert.Zero(t, result.ScannedPointers)
 }
@@ -152,7 +152,7 @@ func TestReconcile_OnlyRegularContent_Unaffected(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(sessDir, "summary.md"),
 		[]byte("# Session summary\nThis is real content."), 0o644))
 
-	result, err := ReconcileUnpushedPointers(context.Background(), dir, "", nil)
+	result, err := ReconcileAllPointers(context.Background(), dir, "", nil)
 	require.NoError(t, err)
 	assert.Zero(t, result.ScannedPointers, "regular content should not be detected as pointers")
 
@@ -174,7 +174,7 @@ func TestReconcile_LargeFiles_Ignored(t *testing.T) {
 	copy(bigContent, []byte("version https://git-lfs.github.com/spec/v1\noid sha256:aaa\nsize 999\n"))
 	require.NoError(t, os.WriteFile(filepath.Join(sessDir, "big.jsonl"), bigContent, 0o644))
 
-	result, err := ReconcileUnpushedPointers(context.Background(), dir, "", nil)
+	result, err := ReconcileAllPointers(context.Background(), dir, "", nil)
 	require.NoError(t, err)
 	assert.Zero(t, result.ScannedPointers, "files exceeding pointer size limit should be skipped")
 
@@ -192,7 +192,7 @@ func TestReconcile_MalformedPointer_Ignored(t *testing.T) {
 	malformed := "version https://git-lfs.github.com/spec/v1\noid sha256:abc123\n"
 	require.NoError(t, os.WriteFile(filepath.Join(sessDir, "broken.jsonl"), []byte(malformed), 0o644))
 
-	result, err := ReconcileUnpushedPointers(context.Background(), dir, "", nil)
+	result, err := ReconcileAllPointers(context.Background(), dir, "", nil)
 	require.NoError(t, err)
 	assert.Zero(t, result.ScannedPointers, "malformed pointers should not be counted")
 
@@ -217,7 +217,7 @@ func TestReconcile_DetectsValidPointerFiles(t *testing.T) {
 		[]byte(lfsPointerContent(oid2, 67890)), 0o644))
 
 	// will fail at LFS client creation (no credentials) but should have counted pointers
-	result, err := ReconcileUnpushedPointers(context.Background(), dir, "https://example.com", nil)
+	result, err := ReconcileAllPointers(context.Background(), dir, "https://example.com", nil)
 	assert.Error(t, err, "should fail when LFS client can't be created")
 	assert.Equal(t, 2, result.ScannedPointers, "should detect both pointer files before failing")
 }
@@ -239,7 +239,7 @@ func TestReconcile_NestedSessionDirectories(t *testing.T) {
 			[]byte(lfsPointerContent(oid, 100)), 0o644))
 	}
 
-	result, err := ReconcileUnpushedPointers(context.Background(), dir, "https://example.com", nil)
+	result, err := ReconcileAllPointers(context.Background(), dir, "https://example.com", nil)
 	assert.Error(t, err) // LFS client fails
 	assert.Equal(t, 3, result.ScannedPointers, "should scan all nested session dirs")
 }
@@ -253,16 +253,18 @@ func TestReconcile_PreservesRecoverableSessionCache(t *testing.T) {
 	raw := []byte("{\"type\":\"user\",\"content\":\"keep this recording\"}\n")
 	pointer := []byte(FormatPointer("sha256:"+ComputeOID(raw), int64(len(raw))))
 	for _, tc := range []struct {
-		name      string
-		cache     []byte
-		protect   bool
-		statError bool
+		name        string
+		cache       []byte
+		protect     bool
+		recover     bool
+		statError   bool
+		wantProtect string
 	}{
-		{name: "recoverable content", cache: raw, protect: true},
-		{name: "cache lookup error", protect: true, statError: true},
+		{name: "recoverable content", cache: raw, recover: true},
+		{name: "cache lookup error", protect: true, statError: true, wantProtect: "inspect session recovery cache"},
 		{name: "missing cache"},
-		{name: "empty cache", cache: []byte{}},
-		{name: "pointer stub cache", cache: pointer},
+		{name: "empty cache", cache: []byte{}, protect: true, wantProtect: "does not match pointer OID and size"},
+		{name: "pointer stub cache", cache: pointer, protect: true, wantProtect: "contains an LFS pointer"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ledger, _ := initLedgerWithRemote(t)
@@ -300,13 +302,11 @@ func TestReconcile_PreservesRecoverableSessionCache(t *testing.T) {
 
 			assert.Equal(t, 2, result.MissingOnRemote)
 			if tc.protect {
+				require.ErrorContains(t, err, tc.wantProtect)
 				if tc.statError {
-					require.ErrorContains(t, err, "inspect session recovery cache")
 					var pathErr *os.PathError
 					require.ErrorAs(t, err, &pathErr)
 					assert.Equal(t, cachePath, pathErr.Path)
-				} else {
-					require.ErrorContains(t, err, "retry session upload")
 				}
 				assert.Zero(t, result.Replaced)
 				assert.False(t, result.Squashed)
@@ -325,6 +325,15 @@ func TestReconcile_PreservesRecoverableSessionCache(t *testing.T) {
 					require.NoError(t, readErr)
 					assert.Equal(t, expected, content, "abort before modifying any pointer or cache")
 				}
+			} else if tc.recover {
+				require.NoError(t, err)
+				assert.Equal(t, 1, result.RecoveredUploads)
+				assert.Equal(t, 1, result.Replaced)
+				assert.True(t, result.Changed())
+				assert.FileExists(t, rawPath)
+				assert.Equal(t, pointer, mustReadFile(t, rawPath))
+				assert.Equal(t, raw, mustReadFile(t, cachePath))
+				assert.NoFileExists(t, planPath)
 			} else {
 				require.NoError(t, err)
 				assert.Equal(t, 2, result.Replaced, "unrecoverable missing objects must still be reconciled")
@@ -396,10 +405,10 @@ func TestReconcile_RefusesConflictInUnpushedHistory(t *testing.T) {
 	client := fakeLFSDownloadServer(t, map[string]int{oid: http.StatusNotFound})
 	result, err := reconcileUnpushedPointers(context.Background(), ledger, nil,
 		func() (*Client, error) { return client, nil })
-	require.ErrorContains(t, err, "validate squash")
-	assert.Equal(t, 1, result.Replaced)
+	require.ErrorContains(t, err, "validate unpushed Ledger")
+	assert.Zero(t, result.Replaced)
 	assert.False(t, result.Squashed)
-	assert.Equal(t, 3, unpushedCount(t, ledger), "failed validation must restore the pre-squash commit chain")
+	assert.Equal(t, 2, unpushedCount(t, ledger), "preflight validation must preserve the original commit chain")
 	content, readErr := os.ReadFile(metaPath)
 	require.NoError(t, readErr)
 	assert.Equal(t, markers, content, "failed squash must preserve corrupt metadata for doctor recovery")
@@ -416,7 +425,7 @@ func TestReconcile_AlreadyEmpty_Idempotent(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(sessDir, "raw.jsonl"), []byte{}, 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(sessDir, "summary.md"), []byte{}, 0o644))
 
-	result, err := ReconcileUnpushedPointers(context.Background(), dir, "", nil)
+	result, err := ReconcileAllPointers(context.Background(), dir, "", nil)
 	require.NoError(t, err)
 	assert.Zero(t, result.ScannedPointers, "empty files should not be detected as pointers")
 	assert.Zero(t, result.Replaced, "nothing to replace")
@@ -550,7 +559,7 @@ func TestReconcile_MixedContent_OnlyPointersScanned(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(sessDir, "context-trace.jsonl"),
 		[]byte(`{"type":"provided","ts":"2026-04-07T05:01:26Z"}`), 0o644))
 
-	result, err := ReconcileUnpushedPointers(context.Background(), dir, "https://example.com", nil)
+	result, err := ReconcileAllPointers(context.Background(), dir, "https://example.com", nil)
 	assert.Error(t, err) // LFS client creation fails
 	assert.Equal(t, 1, result.ScannedPointers,
 		"only the actual pointer file should be scanned, not metadata or regular content")

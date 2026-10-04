@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/config"
+	"github.com/stretchr/testify/assert"
 )
 
 // TestScheduler_RunOnce_FixesInitReverted exercises the structural
@@ -209,4 +210,46 @@ func TestRegistry_Register_OverwritesSlug(t *testing.T) {
 	if first.Load() != 0 || second.Load() != 1 {
 		t.Errorf("overwrite did not replace the original: first=%d second=%d", first.Load(), second.Load())
 	}
+}
+
+// Failure prevented: adding endpoint-wide Ledger checks accidentally runs
+// workspace checks against Ledger paths (or runs every Ledger once per daemon),
+// causing unrelated project files to be rewritten and multiplying repair work.
+func TestScheduler_RoutesChecksByScope(t *testing.T) {
+	reg := NewRegistry()
+	var workspaceTargets, ledgerTargets []string
+	reg.Register(&Check{Slug: "workspace", Run: func(_ context.Context, path string) CheckResult {
+		workspaceTargets = append(workspaceTargets, path)
+		return CheckResult{Status: StatusClean, Repo: path}
+	}})
+	reg.Register(&Check{Slug: "ledger", Scope: ScopeLedger, Run: func(_ context.Context, path string) CheckResult {
+		ledgerTargets = append(ledgerTargets, path)
+		return CheckResult{Status: StatusClean, Repo: path}
+	}})
+
+	s := NewScheduler(reg, nil, func() []string { return []string{"/work/a", "/work/b"} }, nil)
+	s.SetLedgerPaths(func() []string { return []string{"/ledger/one", "/ledger/two"} })
+	results := s.RunOnce(context.Background())
+
+	assert.Equal(t, []string{"/work/a", "/work/b"}, workspaceTargets)
+	assert.Equal(t, []string{"/ledger/one", "/ledger/two"}, ledgerTargets)
+	assert.Len(t, results, 4)
+}
+
+// A follower daemon installs an explicit empty Ledger provider. Ledger checks
+// must not fall back to its current workspace and duplicate the owner's sweep.
+func TestScheduler_EmptyLedgerProviderSkipsLedgerChecks(t *testing.T) {
+	var calls atomic.Int32
+	reg := NewRegistry()
+	reg.Register(&Check{Slug: "ledger", Scope: ScopeLedger, Run: func(_ context.Context, _ string) CheckResult {
+		calls.Add(1)
+		return CheckResult{}
+	}})
+	s := NewScheduler(reg, nil, func() []string { return []string{"/work"} }, nil)
+	s.SetLedgerPaths(func() []string { return nil })
+
+	results := s.RunOnce(context.Background())
+
+	assert.Zero(t, calls.Load())
+	assert.Empty(t, results)
 }

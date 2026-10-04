@@ -1466,6 +1466,7 @@ func (d *Daemon) startWorkers() {
 		d.autofixSched = autofix.NewScheduler(autofixReg, d.logger,
 			func() []string { return []string{d.config.ProjectRoot} },
 			d.routeAutofixResult)
+		d.autofixSched.SetLedgerPaths(d.autofixLedgerPaths)
 		d.wg.Add(1)
 		go func() {
 			defer d.wg.Done()

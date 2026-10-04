@@ -28,9 +28,20 @@ type Scheduler struct {
 	interval  time.Duration
 	emit      func(CheckResult) // optional sink (e.g., issue tracker, slog)
 	workspace func() []string   // returns the list of workspace paths to iterate
+	ledger    func() []string   // returns canonical Ledger checkout paths; nil disables Ledger checks
 
 	mu      sync.Mutex
 	running bool
+}
+
+// SetLedgerPaths supplies the canonical Ledger checkouts that Ledger-scoped
+// checks should inspect. The daemon installs an endpoint-wide provider only on
+// the global-sync owner, preventing N daemons from each repairing N Ledgers.
+// A nil provider disables Ledger-scoped checks.
+func (s *Scheduler) SetLedgerPaths(ledger func() []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ledger = ledger
 }
 
 // NewScheduler builds a scheduler. workspace is a callback the
@@ -154,23 +165,19 @@ func (s *Scheduler) tick(ctx context.Context) {
 
 func (s *Scheduler) tickCollect(ctx context.Context, force bool) []CheckResult {
 	checks := s.registry.All()
-	var paths []string
-	if s.workspace != nil {
-		paths = s.workspace()
-	}
-	if len(paths) == 0 {
-		// global checks (no per-workspace iteration) — call once with empty path.
-		paths = []string{""}
-	}
 
 	now := time.Now()
-	results := make([]CheckResult, 0, len(checks)*len(paths))
+	results := make([]CheckResult, 0, len(checks))
 	for _, c := range checks {
 		if !force && !c.shouldRun(now) {
 			continue
 		}
 		if force {
 			c.markRun(now)
+		}
+		paths := s.pathsFor(c.Scope)
+		if len(paths) == 0 {
+			continue
 		}
 		for _, p := range paths {
 			select {
@@ -184,4 +191,27 @@ func (s *Scheduler) tickCollect(ctx context.Context, force bool) []CheckResult {
 		}
 	}
 	return results
+}
+
+func (s *Scheduler) pathsFor(scope Scope) []string {
+	s.mu.Lock()
+	workspace := s.workspace
+	ledger := s.ledger
+	s.mu.Unlock()
+
+	if scope == ScopeLedger {
+		if ledger == nil {
+			return nil
+		}
+		return ledger()
+	}
+	if workspace == nil {
+		// Preserve the original one-shot behavior for rare global checks.
+		return []string{""}
+	}
+	paths := workspace()
+	if len(paths) == 0 {
+		return []string{""}
+	}
+	return paths
 }

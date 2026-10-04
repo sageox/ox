@@ -1041,7 +1041,19 @@ func runDoctorChecksWithState(parent context.Context, opts doctorOptions, state 
 		}
 	}
 
-	// Category 5c: Local State (ephemeral caches)
+	// Category 5c: Ledger Fleet Health. The current project check above is not
+	// enough: canonical Ledgers outlive workspaces and can remain wedged for
+	// months when their source repo is never opened again.
+	progress.show("Ledger Fleet Health")
+	fleetCheck := checkLedgerFleetHealth(opts.shouldFix(CheckSlugLedgerFleetHealth))
+	if !fleetCheck.skipped {
+		categories = append(categories, checkCategory{
+			name:   "Ledger Fleet Health",
+			checks: []checkResult{fleetCheck},
+		})
+	}
+
+	// Category 5d: Local State (ephemeral caches)
 	progress.show("Local State")
 	localStateChecks := []checkResult{
 		checkWhisperDBIntegrity(opts.shouldFix(CheckSlugWhisperDB)),

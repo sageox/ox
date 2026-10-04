@@ -130,8 +130,10 @@ func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
 			// longer than ledgerSyncWedgeAge) — checkAndRunGC's normal
 			// triggers never catch this on their own because a wedge can
 			// persist indefinitely without ever exceeding the GC interval.
-			// Only checked when the other two triggers didn't already fire
-			// and the cooldown has elapsed, since it costs a live fetch.
+			// Checked independently of the other two triggers whenever the
+			// cooldown permits. An overdue interval or full-clone upgrade must
+			// not hide divergence: those ordinary paths skip when the safety
+			// push is rejected, which otherwise leaves the wedge untouched.
 			//
 			// Cooldown is tracked via s.lastWedgeCheck, NOT l.LastGCTime —
 			// LastGCTime is updated by any successful GC regardless of
@@ -145,7 +147,7 @@ func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
 			s.mu.Unlock()
 			wedged := false
 			var wedgeAge time.Duration
-			if !intervalExceeded && !fullClone && wedgeCooldownElapsed {
+			if wedgeCooldownElapsed {
 				var lockBusy bool
 				wedged, wedgeAge, _, lockBusy = s.ledgerSyncWedged(ctx, l.Path)
 				// A lock-busy result means no check actually ran — spending
@@ -161,19 +163,19 @@ func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
 			if intervalExceeded || fullClone || wedged {
 				reason := "interval exceeded"
 				switch {
-				case fullClone:
-					reason = "full clone upgrade"
 				case wedged:
 					reason = "sync wedge detected"
+				case fullClone:
+					reason = "full clone upgrade"
 				}
 				s.logger.Info("gc: ledger due for reclone", "id", l.ID,
 					"reason", reason, "interval_days", intervalDays, "last_gc", l.LastGCTime, "wedge_age", wedgeAge)
 
-				// only the wedge trigger asks the reclone to capture and
+				// A confirmed wedge asks the reclone to capture and
 				// carry forward unpushed commits that a plain push can't
-				// land (diverged from remote) — the interval/full-clone
-				// triggers keep today's conservative gcSkippedDirty
-				// behavior on any local changes that can't be preserved.
+				// land (diverged from remote), even when an interval or
+				// full-clone trigger is due too. Fresh divergence keeps the
+				// conservative gcSkippedDirty behavior.
 				result, recovered := s.runBlueGreenGCOpts(ctx, *l, wedged)
 				if s.issues != nil {
 					switch {
@@ -472,13 +474,26 @@ func (s *SyncScheduler) runTriggerGC(ctx context.Context) *TriggerGCResponse {
 	if l := s.workspaceRegistry.GetLedger(); l != nil && l.Exists && l.CloneURL != "" {
 		if _, loaded := s.cloneInFlight.Load(l.ID); !loaded {
 			s.logger.Info("trigger_gc: forced ledger reclone", "id", l.ID)
-			result := s.runBlueGreenGC(ctx, *l)
+			// A forced repair is an explicit recovery request, so preserve
+			// diverged local commits as working-tree changes rather than
+			// skipping the one broken state the repair is meant to fix.
+			result, recovered := s.runBlueGreenGCOpts(ctx, *l, true)
 			switch result {
 			case gcSuccess:
 				resp.LedgerTriggered = true
 				if s.issues != nil {
 					s.issues.ClearIssue(IssueTypeDirtyWorkspace, "ledger")
 					s.issues.ClearIssue(IssueTypeGCFailed, "ledger")
+					if recovered {
+						s.issues.ClearIssue(IssueTypeSessionConflictWedge, "ledger")
+						s.issues.SetIssue(DaemonIssue{
+							Type:            IssueTypeSessionConflictRecovered,
+							Severity:        SeverityError,
+							Repo:            "ledger",
+							Summary:         "sessions recovered as uncommitted changes after a forced Ledger reclone — review and commit",
+							RequiresConfirm: true,
+						})
+					}
 				}
 				// runBlueGreenGC closes the whisper store before the rename to release
 				// SQLite's mmap; reopen it now so writes don't silently fail until the

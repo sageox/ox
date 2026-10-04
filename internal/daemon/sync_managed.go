@@ -229,12 +229,6 @@ func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPul
 		return ManagedRepoPullResult{CorruptRepo: true}
 	}
 
-	// Rebase-in-progress handling: leave a fresh rebase alone, auto-recover
-	// a stale wedge, or surface an unrecoverable one. See recoverPreexistingRebase.
-	if stop, res := s.recoverPreexistingRebase(ctx, path, repoName, logger); stop {
-		return res
-	}
-
 	// Lock files: auto-remove stale ones, skip and report if still present
 	gitDir := filepath.Join(path, ".git")
 	if locks := gitutil.HasLockFiles(gitDir); len(locks) > 0 {
@@ -284,6 +278,15 @@ func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPul
 	// after a successful pull the pull's own verdict is real and must stand.
 	var pullRan bool
 	lockErr := gitutil.WithRepoLock(ctx, path, func() error {
+		// Re-check and recover stale rebases only after taking the same
+		// cross-process lock used by fetch/pull. Checking age before waiting
+		// could turn a live operation stale, then abort it after the lock was
+		// finally acquired.
+		if stop, recoveryResult := s.recoverPreexistingRebaseLocked(ctx, path, repoName, logger); stop {
+			result = recoveryResult
+			return nil
+		}
+
 		autoPaths := manifest.AutoResolvePaths(opts.ResolveRules)
 		denyPaths := manifest.AutoResolveDenyPaths(opts.ResolveRules)
 		// Check before dedup: a previous successful pull can leave autostash
@@ -1131,6 +1134,23 @@ const staleRebaseThreshold = 5 * time.Minute
 //     with a confirm-required IssueTypeRebaseStuck so doctor / the scheduled
 //     doctor agent task picks it up instead of silently re-looping.
 func (s *SyncScheduler) recoverPreexistingRebase(ctx context.Context, path, repoName string, logger *slog.Logger) (stop bool, result ManagedRepoPullResult) {
+	lockErr := gitutil.WithRepoLock(ctx, path, func() error {
+		stop, result = s.recoverPreexistingRebaseLocked(ctx, path, repoName, logger)
+		return nil
+	})
+	if lockErr == nil {
+		return stop, result
+	}
+	if gitutil.IsRepoLockBusy(lockErr) {
+		return true, ManagedRepoPullResult{Skipped: true, SkipReason: skipReasonRepoLockBusy}
+	}
+	return true, ManagedRepoPullResult{Err: fmt.Errorf("acquire repo lock for %s rebase recovery: %w", repoName, lockErr)}
+}
+
+// recoverPreexistingRebaseLocked performs the age check and any recovery while
+// the caller holds the clone's repo lock. Keeping the check inside the lock is
+// load-bearing: a rebase can cross the stale threshold while a caller waits.
+func (s *SyncScheduler) recoverPreexistingRebaseLocked(ctx context.Context, path, repoName string, logger *slog.Logger) (stop bool, result ManagedRepoPullResult) {
 	age, inProgress := gitutil.RebaseAge(path)
 	if !inProgress {
 		return false, ManagedRepoPullResult{}
@@ -1141,14 +1161,13 @@ func (s *SyncScheduler) recoverPreexistingRebase(ctx context.Context, path, repo
 	}
 	logger.Warn("recovering stale wedged rebase",
 		"op", "stale_rebase_recover", "repo", repoName, "age", age.Round(time.Second))
-	// AbortOrClearRebase first tries the reversible `git rebase --abort`, then
-	// escalates to `git rebase --quit` for a structurally-incomplete "zombie"
-	// state dir (a process killed mid-rebase leaving only an autostash entry, no
-	// head-name/orig-head) that --abort alone cannot clear. See
-	// gitutil.AbortOrClearRebase and bd ox-j3cl.
-	if abortErr := gitutil.AbortOrClearRebase(ctx, path, "stale wedged rebase auto-recovery", logger); abortErr != nil {
+	// Rescue commits reachable only from HEAD before an abort can move it.
+	// Branch-attached rebases have nothing stranded and fall through to the
+	// ordinary abort-or-clear ladder without creating a rescue branch.
+	rescueRef, abortErr := gitutil.RescueIfNeededThenAbort(ctx, path, "stale wedged rebase auto-recovery", logger)
+	if abortErr != nil {
 		logger.Error("stale rebase recovery failed",
-			"op", "stale_rebase_recover_failed", "repo", repoName, "error", abortErr)
+			"op", "stale_rebase_recover_failed", "repo", repoName, "rescue_ref", rescueRef, "error", abortErr)
 		return true, ManagedRepoPullResult{
 			Skipped:    true,
 			SkipReason: "stale rebase recovery failed",
@@ -1161,7 +1180,7 @@ func (s *SyncScheduler) recoverPreexistingRebase(ctx context.Context, path, repo
 			},
 		}
 	}
-	logger.Info("recovered stale wedged rebase", "op", "stale_rebase_recovered", "repo", repoName)
+	logger.Info("recovered stale wedged rebase", "op", "stale_rebase_recovered", "repo", repoName, "rescue_ref", rescueRef)
 	return false, ManagedRepoPullResult{}
 }
 

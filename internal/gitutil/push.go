@@ -329,9 +329,12 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 			// the same clone lock as daemon pulls and doctor repairs.
 			rebaseErr := WithRepoLock(ctx, repoPath, func() error {
 				if IsRebaseInProgress(repoPath) {
-					abortCtx, abortCancel := context.WithTimeout(ctx, opTimeout)
-					_, _ = RunGit(abortCtx, repoPath, "rebase", "--abort")
-					abortCancel()
+					// This rebase appeared after the function's initial safety
+					// check, so this retry did not create it. It may belong to a
+					// concurrent or crashed operation and must be left untouched.
+					// Rebases created by the pull below are still aborted by the
+					// corresponding failure branches that own them.
+					return fmt.Errorf("repo blocked: rebase started after push preflight; leaving it untouched")
 				}
 
 				pullCtx, pullCancel := context.WithTimeout(ctx, opTimeout)

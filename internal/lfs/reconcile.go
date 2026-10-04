@@ -19,23 +19,27 @@ import (
 
 	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/gitutil"
+	"github.com/sageox/ox/internal/sacred"
 	"github.com/sageox/ox/internal/session/pipeline"
+	"github.com/sageox/ox/internal/useragent"
 )
 
 // ReconcileResult describes what ReconcileUnpushedPointers found and fixed.
 type ReconcileResult struct {
-	ScannedPointers int      // distinct pointers examined (push-range scope) or pointer files found (whole-tree scope)
-	MissingOnRemote int      // pointers whose LFS OIDs are not in the remote store
-	HistoryOnly     int      // missing OIDs referenced only by intermediate unpushed commits, not the tip
-	Replaced        int      // unrecoverable pointer artifacts removed
-	Squashed        bool     // whether unpushed history was squashed
-	ReplacedFiles   []string // relative paths of removed pointer artifacts, sorted
+	ScannedPointers  int      // distinct pointers examined (push-range scope) or pointer files found (whole-tree scope)
+	MissingOnRemote  int      // pointers whose LFS OIDs are not in the remote store
+	HistoryOnly      int      // missing OIDs referenced only by intermediate unpushed commits, not the tip
+	RecoveredUploads int      // missing OIDs restored from exact local recovery-cache content
+	Replaced         int      // unrecoverable pointer artifacts removed
+	Squashed         bool     // whether unpushed history was squashed
+	ReplacedFiles    []string // relative paths of removed pointer artifacts, sorted
 }
 
 // Changed reports whether the reconcile rewrote anything a push retry can
-// benefit from: it removed pointer artifacts or rewrote unpushed history.
+// benefit from: it restored a blob, removed pointer artifacts, or rewrote
+// unpushed history.
 func (r *ReconcileResult) Changed() bool {
-	return r != nil && (r.Replaced > 0 || r.Squashed)
+	return r != nil && (r.RecoveredUploads > 0 || r.Replaced > 0 || r.Squashed)
 }
 
 // ReconcileUnpushedPointers repairs a ledger whose push is blocked by
@@ -68,12 +72,10 @@ func (r *ReconcileResult) Changed() bool {
 // heals the ones that predate the fix (their bytes are gone, so removing the
 // broken reference is the only recovery) and backstops any future regression.
 //
-// A recoverable session cache aborts reconciliation before any change so upload
-// can retry without losing content. Safe to call on clean repos: nothing unpushed
-// or all pointers backed returns immediately.
-//
-// With no upstream there is no push range, so the whole working tree is scanned
-// as before.
+// An exact session recovery-cache file is uploaded again without changing its
+// pointer, metadata, or cache. Ambiguous cache content fails closed. A missing
+// upstream or diverged branch also fails closed; callers needing a deliberate
+// whole-tree repair must use ReconcileAllPointers.
 func ReconcileUnpushedPointers(ctx context.Context, ledgerPath, endpointURL string, logger *slog.Logger) (*ReconcileResult, error) {
 	return reconcileLocked(ctx, ledgerPath, endpointURL, logger, reconcileUnpushedPointers)
 }
@@ -127,6 +129,7 @@ type pointerEntry struct {
 // pointerSet is everything a reconcile examines, split by what can be done
 // about it if the blob is missing.
 type pointerSet struct {
+	upstream string
 	// repairable are tip pointers under a tree the repair knows how to clean.
 	repairable []pointerEntry
 	// unrepairable are tip pointers anywhere else. The repair cannot clear their
@@ -150,6 +153,9 @@ func reconcilePointers(ctx context.Context, ledgerPath string, logger *slog.Logg
 
 	var set *pointerSet
 	if pushRangeOnly {
+		if err := ensureReconcileGitSafe(ctx, ledgerPath); err != nil {
+			return result, fmt.Errorf("preflight Ledger for LFS reconcile: %w", err)
+		}
 		var err error
 		set, err = scanPushRange(ctx, ledgerPath, logger)
 		if err != nil {
@@ -157,7 +163,7 @@ func reconcilePointers(ctx context.Context, ledgerPath string, logger *slog.Logg
 		}
 	}
 	if set == nil {
-		// no upstream (or whole-tree mode): every pointer in the working tree
+		// whole-tree mode: every pointer in the working tree
 		pointers, err := walkWorkingTreePointers(ledgerPath)
 		if err != nil {
 			return result, err
@@ -215,29 +221,31 @@ func reconcilePointers(ctx context.Context, ledgerPath string, logger *slog.Logg
 			"which reconcile cannot repair (%d such path(s))", unrepairableMissing[0], len(unrepairableMissing))
 	}
 
-	// A successful push lets session upload prune its source cache. Refuse to
-	// turn recoverable content into empty stubs and report that as publication.
-	// Check every candidate before changing any pointers or git history.
+	// Classify every candidate before the first upload or local mutation. Exact
+	// recovery-cache bytes are safe to re-upload; every ambiguous cache state
+	// fails closed rather than being treated as permission to delete.
+	var recoverable []recoveryUpload
+	var replaceable []pointerEntry
 	for _, p := range missingEntries {
-		if err := checkReplaceable(ledgerPath, p); err != nil {
+		content, err := preflightMissingPointer(ledgerPath, p)
+		if err != nil {
 			return result, err
+		}
+		if content != nil {
+			recoverable = append(recoverable, recoveryUpload{entry: p, content: content})
+		} else {
+			replaceable = append(replaceable, p)
 		}
 	}
 
-	// Reconcile's commit is intentionally unscoped because the later soft-reset
-	// squash republishes every unpushed change. Refuse pre-existing staged
-	// corruption before removing any pointer so a bad session cannot either ride
-	// along in the repair commit or turn a recoverable LFS cleanup destructive.
-	if err := gitutil.ValidateStagedLedgerCommit(ctx, ledgerPath); err != nil {
-		return result, fmt.Errorf("validate Ledger before LFS reconcile: %w", err)
+	if !pushRangeOnly {
+		if err := ensureReconcileGitSafe(ctx, ledgerPath); err != nil {
+			return result, fmt.Errorf("preflight Ledger for LFS reconcile: %w", err)
+		}
 	}
 
-	if len(missingEntries) == 0 {
-		return squashHistoryOnly(ctx, ledgerPath, logger, result)
-	}
-
-	missingRefs := make(map[string]FileRef, len(missingEntries))
-	for _, p := range missingEntries {
+	missingRefs := make(map[string]FileRef, len(replaceable))
+	for _, p := range replaceable {
 		missingRefs[p.relPath] = p.ref
 	}
 	metadata, err := prepareMissingPointerMetadata(ledgerPath, missingRefs)
@@ -245,12 +253,46 @@ func reconcilePointers(ctx context.Context, ledgerPath string, logger *slog.Logg
 		return result, fmt.Errorf("prepare missing artifact metadata: %w", err)
 	}
 
+	// Reconcile's commit is intentionally unscoped because the later soft-reset
+	// squash republishes every unpushed change. Validate both the current index
+	// and the final unpushed tip before uploading or changing local state.
+	if err := gitutil.ValidateStagedLedgerCommit(ctx, ledgerPath); err != nil {
+		return result, fmt.Errorf("validate Ledger before LFS reconcile: %w", err)
+	}
+	if pushRangeOnly {
+		if err := validateUnpushedTip(ctx, ledgerPath, set.upstream); err != nil {
+			return result, fmt.Errorf("validate unpushed Ledger before LFS reconcile: %w", err)
+		}
+		if err := preflightSacredDeletions(ctx, ledgerPath, set.upstream, replaceable); err != nil {
+			return result, err
+		}
+	} else if len(replaceable) > sacred.MassDeleteThreshold {
+		return result, fmt.Errorf("refusing LFS reconcile: would delete %d sacred files, exceeding threshold %d",
+			len(replaceable), sacred.MassDeleteThreshold)
+	}
+
+	for _, upload := range recoverable {
+		if err := uploadRecoveryBlob(ctx, client, upload); err != nil {
+			return result, fmt.Errorf("restore LFS object for %s from recovery cache: %w", upload.entry.relPath, err)
+		}
+	}
+	result.RecoveredUploads = len(recoverable)
+
+	if len(replaceable) == 0 {
+		if result.HistoryOnly == 0 {
+			logger.Info("lfs reconcile complete", "recovered_uploads", result.RecoveredUploads)
+			return result, nil
+		}
+		return squashHistoryOnly(ctx, ledgerPath, logger, result)
+	}
+
 	logger.Info("lfs reconcile: removing unrecoverable pointer artifacts",
-		"missing", len(missingEntries), "history_only", result.HistoryOnly, "total_pointers", result.ScannedPointers)
+		"missing", len(replaceable), "recovered_uploads", result.RecoveredUploads,
+		"history_only", result.HistoryOnly, "total_pointers", result.ScannedPointers)
 
 	// Remove missing artifacts instead of committing non-pointer bytes under
 	// LFS-listed filenames. Metadata was validated before changing any file.
-	for _, p := range missingEntries {
+	for _, p := range replaceable {
 		absPath := filepath.Join(ledgerPath, p.relPath)
 		// absent is fine: a path outside the sparse cone has nothing on disk,
 		// and the staged removal below is what matters
@@ -304,7 +346,7 @@ func reconcilePointers(ctx context.Context, ledgerPath string, logger *slog.Logg
 	}
 	result.Squashed = true
 
-	logger.Info("lfs reconcile complete", "replaced", result.Replaced)
+	logger.Info("lfs reconcile complete", "replaced", result.Replaced, "recovered_uploads", result.RecoveredUploads)
 	return result, nil
 }
 
@@ -341,32 +383,143 @@ func headCommit(ctx context.Context, ledgerPath string) (string, error) {
 	return strings.TrimSpace(out), nil
 }
 
-// checkReplaceable refuses the replacement when it would destroy local content:
-// a session whose recovery cache still holds real bytes (upload can retry), or a
-// working copy that no longer matches the committed pointer.
-func checkReplaceable(ledgerPath string, p pointerEntry) error {
-	if working, err := os.ReadFile(filepath.Join(ledgerPath, p.relPath)); err == nil {
-		oid, _, parseErr := ParsePointer(string(working))
-		if len(working) > maxPointerSize || parseErr != nil || (FileRef{OID: oid}).BareOID() != p.ref.BareOID() {
-			return fmt.Errorf("refusing to replace %s: working copy differs from the committed pointer", p.relPath)
+type recoveryUpload struct {
+	entry   pointerEntry
+	content []byte
+}
+
+// preflightMissingPointer verifies the working pointer and classifies its
+// recovery cache without changing either. A nil content result means no cache
+// exists and the pointer is eligible for deliberate removal. Any cache that is
+// not provably the exact pointed-to object fails closed.
+func preflightMissingPointer(ledgerPath string, p pointerEntry) ([]byte, error) {
+	workingPath := filepath.Join(ledgerPath, p.relPath)
+	if info, err := os.Lstat(workingPath); err == nil {
+		if !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("refusing to replace %s: working copy is not a regular file", p.relPath)
+		}
+		working, readErr := os.ReadFile(workingPath)
+		if readErr != nil {
+			return nil, fmt.Errorf("inspect working copy of %s: %w", p.relPath, readErr)
+		}
+		oid, size, parseErr := ParsePointer(string(working))
+		if len(working) > maxPointerSize || parseErr != nil || (FileRef{OID: oid}).BareOID() != p.ref.BareOID() || size != p.ref.Size {
+			return nil, fmt.Errorf("refusing to replace %s: working copy differs from the committed pointer", p.relPath)
 		}
 	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("inspect working copy of %s: %w", p.relPath, err)
+		return nil, fmt.Errorf("inspect working copy of %s: %w", p.relPath, err)
 	}
 
 	if !strings.HasPrefix(p.relPath, "sessions"+string(filepath.Separator)) {
-		return nil
+		return nil, nil
 	}
 	cachePath := filepath.Join(ledgerPath, ".sageox", "cache", p.relPath)
-	info, err := os.Stat(cachePath)
+	info, err := os.Lstat(cachePath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil
+			return nil, nil
 		}
-		return fmt.Errorf("inspect session recovery cache for %s: %w", p.relPath, err)
+		return nil, fmt.Errorf("inspect session recovery cache for %s: %w", p.relPath, err)
 	}
-	if info.Mode().IsRegular() && info.Size() > 0 && !IsPointerFile(cachePath) {
-		return fmt.Errorf("refusing to replace %s: local session content is available; retry session upload", p.relPath)
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("refusing to replace %s: session recovery cache is not a regular non-symlink file", p.relPath)
+	}
+	content, err := os.ReadFile(cachePath)
+	if err != nil {
+		return nil, fmt.Errorf("read session recovery cache for %s: %w", p.relPath, err)
+	}
+	if pointerShaped(content) {
+		return nil, fmt.Errorf("refusing to replace %s: session recovery cache contains an LFS pointer", p.relPath)
+	}
+	actual := NewFileRef(content)
+	if actual.Size != p.ref.Size || actual.BareOID() != p.ref.BareOID() {
+		return nil, fmt.Errorf("refusing to replace %s: session recovery cache does not match pointer OID and size", p.relPath)
+	}
+	return content, nil
+}
+
+// uploadRecoveryBlob restores one exact cache object through context-bound
+// batch, upload, and verify requests. A nil error is proof the object is
+// present; the pointer, metadata, and cache remain untouched.
+func uploadRecoveryBlob(ctx context.Context, client *Client, upload recoveryUpload) error {
+	ref := upload.entry.ref
+	resp, err := client.BatchUploadContext(ctx, []BatchObject{{OID: ref.BareOID(), Size: ref.Size}})
+	if err != nil {
+		return fmt.Errorf("LFS batch upload: %w", err)
+	}
+	for _, obj := range resp.Objects {
+		if obj.OID != ref.BareOID() {
+			continue
+		}
+		if obj.Size != 0 && obj.Size != ref.Size {
+			return fmt.Errorf("batch response size %d does not match expected %d", obj.Size, ref.Size)
+		}
+		if obj.Error != nil {
+			return fmt.Errorf("server error %d: %s", obj.Error.Code, obj.Error.Message)
+		}
+		if obj.Actions == nil || obj.Actions.Upload == nil {
+			return nil // object became present between the download and upload batches
+		}
+		if err := putRecoveryObject(ctx, obj.Actions.Upload, upload.content); err != nil {
+			return err
+		}
+		if obj.Actions.Verify != nil {
+			if err := verifyRecoveryObject(ctx, obj.Actions.Verify, ref); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return fmt.Errorf("batch response omitted OID %s", ref.BareOID())
+}
+
+func putRecoveryObject(ctx context.Context, action *Action, content []byte) error {
+	if err := validateActionHref(action); err != nil {
+		return fmt.Errorf("upload: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, action.Href, bytes.NewReader(content))
+	if err != nil {
+		return fmt.Errorf("create upload request: %w", err)
+	}
+	req.Header.Set("User-Agent", useragent.String())
+	if err := action.setRequestHeaders(req); err != nil {
+		return err
+	}
+	req.ContentLength = int64(len(content))
+	resp, err := lfsHTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("upload failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		return fmt.Errorf("upload returned HTTP %d: %s", resp.StatusCode, string(body))
+	}
+	return nil
+}
+
+func verifyRecoveryObject(ctx context.Context, action *Action, ref FileRef) error {
+	if err := validateActionHref(action); err != nil {
+		return fmt.Errorf("verify: %w", err)
+	}
+	body := fmt.Sprintf(`{"oid":%q,"size":%d}`, ref.BareOID(), ref.Size)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, action.Href, strings.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("create verify request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/vnd.git-lfs+json")
+	req.Header.Set("User-Agent", useragent.String())
+	if err := action.setRequestHeaders(req); err != nil {
+		return err
+	}
+	resp, err := lfsHTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("verify request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		return fmt.Errorf("verify returned HTTP %d: %s", resp.StatusCode, string(body))
 	}
 	return nil
 }
@@ -463,19 +616,45 @@ func walkWorkingTreePointers(ledgerPath string) ([]pointerEntry, error) {
 	return pointers, nil
 }
 
+func ensureReconcileGitSafe(ctx context.Context, ledgerPath string) error {
+	if err := gitutil.IsSafeForGitOps(ledgerPath); err != nil {
+		return err
+	}
+	for _, marker := range []string{"MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD"} {
+		pathOut, err := gitPlumbing(ctx, ledgerPath, nil, "rev-parse", "--git-path", marker)
+		if err != nil {
+			return fmt.Errorf("resolve git operation marker %s: %w", marker, err)
+		}
+		markerPath := strings.TrimSpace(string(pathOut))
+		if !filepath.IsAbs(markerPath) {
+			markerPath = filepath.Join(ledgerPath, markerPath)
+		}
+		if _, err := os.Lstat(markerPath); err == nil {
+			return fmt.Errorf("git operation in progress (%s exists)", marker)
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("inspect git operation marker %s: %w", marker, err)
+		}
+	}
+	return nil
+}
+
 // scanPushRange collects the pointers GitLab's pre-receive hook would check for
 // a push of HEAD: the pointer-sized blobs introduced by the commits in
-// @{upstream}..HEAD, whatever path or commit holds them. Returns nil when the
-// branch has no upstream, which means there is no push range to scope to.
+// @{upstream}..HEAD, whatever path or commit holds them. Missing or divergent
+// upstream state is an error: push-triggered repair must never fall back to a
+// whole-tree deletion pass.
 func scanPushRange(ctx context.Context, ledgerPath string, logger *slog.Logger) (*pointerSet, error) {
 	upstreamOut, err := gitPlumbing(ctx, ledgerPath, nil, "rev-parse", "--verify", "--quiet", "@{upstream}")
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, ctxErr
 		}
-		return nil, nil
+		return nil, fmt.Errorf("no upstream tracking ref: %w", err)
 	}
 	upstream := strings.TrimSpace(string(upstreamOut))
+	if _, err := gitPlumbing(ctx, ledgerPath, nil, "merge-base", "--is-ancestor", upstream, "HEAD"); err != nil {
+		return nil, fmt.Errorf("upstream is not an ancestor of HEAD (branch diverged; pull first): %w", err)
+	}
 
 	// the same object walk pack-objects does for the push, so the candidate set
 	// is exactly what the server receives (and checks)
@@ -492,7 +671,7 @@ func scanPushRange(ctx context.Context, ledgerPath string, logger *slog.Logger) 
 			oids = append(oids, oid)
 		}
 	}
-	set := &pointerSet{historyOnly: make(map[string]FileRef)}
+	set := &pointerSet{upstream: upstream, historyOnly: make(map[string]FileRef)}
 	if len(oids) == 0 {
 		return set, nil
 	}
@@ -545,6 +724,91 @@ func scanPushRange(ctx context.Context, ledgerPath string, logger *slog.Logger) 
 		"objects", len(oids), "pointer_blobs", len(refsByGitOID),
 		"at_tip", len(set.repairable)+len(set.unrepairable), "history_only", len(set.historyOnly))
 	return set, nil
+}
+
+// validateUnpushedTip performs the immutable-tree validation that the later
+// squash commit would perform, but against HEAD before any upload, removal, or
+// reset. This closes the old failure mode where a corrupt unpushed blob was
+// discovered only after pointer replacement had already changed local state.
+func validateUnpushedTip(ctx context.Context, ledgerPath, upstream string) error {
+	raw, err := gitPlumbing(ctx, ledgerPath, nil, "diff-tree", "-r", "-z", "--no-renames", "--raw", upstream, "HEAD")
+	if err != nil {
+		return fmt.Errorf("diff unpushed tree: %w", err)
+	}
+	tokens := strings.Split(string(raw), "\x00")
+	for i := 0; i+1 < len(tokens); i += 2 {
+		fields := strings.Fields(strings.TrimPrefix(tokens[i], ":"))
+		if len(fields) < 5 || strings.HasPrefix(fields[4], "D") {
+			continue
+		}
+		path := tokens[i+1]
+		if err := gitutil.ValidateLedgerEntryMode(path, fields[1]); err != nil {
+			return err
+		}
+		blob, err := gitPlumbing(ctx, ledgerPath, nil, "cat-file", "blob", fields[3])
+		if err != nil {
+			return fmt.Errorf("inspect unpushed Ledger blob %s: %w", path, err)
+		}
+		if sessionContentStorageGit(ctx, ledgerPath, path) {
+			if gitutil.HasConflictMarkersBytes(blob) {
+				return fmt.Errorf("%s contains an unresolved conflict", path)
+			}
+			continue
+		}
+		if err := gitutil.ValidateLedgerBlob(path, blob); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func sessionContentStorageGit(ctx context.Context, ledgerPath, path string) bool {
+	parts := strings.Split(filepath.ToSlash(filepath.Clean(path)), "/")
+	if len(parts) < 3 || parts[0] != "sessions" || !isLedgerContentFile(filepath.Base(path)) {
+		return false
+	}
+	metaPath := strings.Join(parts[:2], "/") + "/meta.json"
+	data, err := gitPlumbing(ctx, ledgerPath, nil, "show", "HEAD:"+metaPath)
+	if err != nil {
+		return false
+	}
+	var meta struct {
+		Files map[string]FileRef `json:"files"`
+	}
+	if json.Unmarshal(data, &meta) != nil {
+		return false
+	}
+	return meta.Files[strings.Join(parts[2:], "/")].Storage == "git"
+}
+
+func isLedgerContentFile(name string) bool {
+	for _, candidate := range pipeline.LedgerContentFiles {
+		if name == candidate {
+			return true
+		}
+	}
+	return false
+}
+
+func preflightSacredDeletions(ctx context.Context, ledgerPath, upstream string, replaceable []pointerEntry) error {
+	deletedOut, err := gitPlumbing(ctx, ledgerPath, nil, "diff-tree", "-r", "--name-only", "--diff-filter=D", upstream, "HEAD")
+	if err != nil {
+		return fmt.Errorf("preflight sacred deletions: %w", err)
+	}
+	paths := strings.Fields(string(deletedOut))
+	for _, entry := range replaceable {
+		paths = append(paths, filepath.ToSlash(entry.relPath))
+	}
+	deleted := sacred.Filter(paths)
+	seen := make(map[string]bool, len(deleted))
+	for _, path := range deleted {
+		seen[path] = true
+	}
+	if len(seen) <= sacred.MassDeleteThreshold {
+		return nil
+	}
+	return fmt.Errorf("refusing LFS reconcile: would delete %d files under sacred paths, exceeding threshold %d",
+		len(seen), sacred.MassDeleteThreshold)
 }
 
 // pointerSizedBlobs filters oids to blobs small enough to be an LFS pointer, so
