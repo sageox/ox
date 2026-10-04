@@ -86,6 +86,12 @@ type Config struct {
 	// Zero disables automatic ledger index checks.
 	LedgerCheckInterval time.Duration
 
+	// LedgerIndexMinInterval is the minimum idle gap between the end of one full
+	// ledger index rebuild and the start of the next. The ledger HEAD moves every
+	// few minutes (session drafts, PR syncs) and a rebuild walks every commit, so
+	// without a floor the daemon rebuilds back to back. Zero disables the floor.
+	LedgerIndexMinInterval time.Duration
+
 	// GitHubSyncInterval is how often to sync PRs/issues from GitHub.
 	// Zero disables automatic GitHub sync.
 	GitHubSyncInterval time.Duration
@@ -137,6 +143,7 @@ func DefaultConfig() *Config {
 		VersionCheckInterval:      30 * time.Minute, // ETag conditional requests make this cheap
 		GCCheckInterval:           1 * time.Hour,    // check hourly, actual GC cadence is per-workspace
 		LedgerCheckInterval:       15 * time.Minute, // check if ledger index needs rebuild every 15 minutes
+		LedgerIndexMinInterval:    30 * time.Minute, // never rebuild more often than this after the previous build ends
 		GitHubSyncInterval:        15 * time.Minute, // sync PRs/issues every 15 minutes
 		MurmurNudgeInterval:       15 * time.Minute, // nudge agents to self-report every 15 minutes
 		RecordingReminderInterval: 1 * time.Hour,    // remind agents recording is active
