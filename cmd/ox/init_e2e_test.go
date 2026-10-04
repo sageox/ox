@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sageox/ox/internal/api"
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/internal/skillmanager"
 	"github.com/stretchr/testify/assert"
@@ -245,4 +247,147 @@ func TestRunInit_UnwritableScopedIgnoreWarnsAndStillCompletes(t *testing.T) {
 	info, err := os.Stat(blocker)
 	require.NoError(t, err)
 	assert.True(t, info.IsDir(), "ox must not replace a path it failed to write")
+}
+
+// TestRunInit_TeamFlag_ResolvesToTheTeamIDTheServerIsAsked drives `ox init --team`
+// with each vocabulary a coworker might type and asserts on the team ID that
+// actually reached POST /api/v1/repo/init.
+//
+// Failure prevented: `ox init --team platform` (the slug `ox team list` prints)
+// reaching the server as the string "platform" and bouncing as HTTP 400 after init
+// had already written files. The harness reports TWO teams, so a pass-through
+// that sends the typed value, or a resolver that returns the wrong team, both fail
+// here; the unit tests over resolveTeamFlag cannot see either.
+func TestRunInit_TeamFlag_ResolvesToTheTeamIDTheServerIsAsked(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		flag     string
+		wantID   string
+		wantName string
+	}{
+		{name: "slug", flag: "other-team", wantID: "team-e2e-other", wantName: "Other Team"},
+		{name: "name in any case", flag: "OTHER team", wantID: "team-e2e-other", wantName: "Other Team"},
+		{name: "ID", flag: "team-e2e-other", wantID: "team-e2e-other", wantName: "Other Team"},
+		{name: "slug with surrounding whitespace", flag: "  e2e-team  ", wantID: "team-e2e", wantName: "E2E Team"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newOxE2E(t)
+			withInitFlags(t, tc.flag)
+
+			require.NoError(t, runInit())
+
+			assert.Contains(t, env.Requested(), "/api/v1/cli/repos",
+				"init must have fetched the team list to resolve --team")
+			reqs := env.InitRequests()
+			require.Len(t, reqs, 1, "init must register exactly once")
+			assert.Equal(t, []string{tc.wantID}, reqs[0].Teams,
+				"the server must be asked to register against the RESOLVED team ID, not the typed value")
+
+			cfg, err := config.LoadProjectConfig(env.Root)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantID, cfg.TeamID)
+			assert.Equal(t, tc.wantName, cfg.TeamName,
+				"the resolved team's display name must reach config.json, or every label falls back to the raw ID")
+		})
+	}
+}
+
+// TestRunInit_TeamFlag_UnmatchedValueWarnsAndTheServerDecides pins the failure
+// policy for a --team the user's team list does not contain: warn, send it to the
+// server as typed, and let the server's answer stand. It matches `ox invite --team`.
+//
+// Failure prevented: a client-side list blocking a registration the server would
+// accept. A token can be authorized to register into a team that /api/v1/cli/repos
+// does not report (a team still provisioning, a wider token scope); rejecting
+// locally would make that team unreachable from `ox init --team` with no way round.
+// The warning is the other half: without it a typo would go to the server silently.
+func TestRunInit_TeamFlag_UnmatchedValueWarnsAndTheServerDecides(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		serverStatus int
+		wantErr      string
+	}{
+		{name: "server accepts a team missing from the list", serverStatus: 200},
+		{name: "server rejects a typo", serverStatus: 400, wantErr: "failed to register with SageOx API"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newOxE2E(t)
+			withInitFlags(t, "  team-unlisted ")
+			env.OnRegister(func(req api.RepoInitRequest) (int, any) {
+				if tc.serverStatus != 200 {
+					return tc.serverStatus, map[string]any{"success": false, "error": "team name not found"}
+				}
+				return 200, api.RepoInitResponse{RepoID: env.RepoID, TeamID: "team-unlisted"}
+			})
+
+			var err error
+			warned := captureStderr(t, func() { err = runInit() })
+
+			// the typo is never silent, and the message is a heads-up, not a refusal
+			assert.Contains(t, warned, `--team "team-unlisted"`)
+			assert.Contains(t, warned, "the server will decide")
+			assert.Contains(t, warned, "Other Team (other-team, team-e2e-other)",
+				"the warning must show what would have matched")
+
+			// the server — not the local list — was asked, with the value as typed
+			reqs := env.InitRequests()
+			require.Len(t, reqs, 1, "an unmatched --team must still reach the server")
+			assert.Equal(t, []string{"team-unlisted"}, reqs[0].Teams)
+
+			if tc.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantErr, "the server's rejection must stand")
+				return
+			}
+			require.NoError(t, err, "a team the server accepts must not be blocked by the local list")
+			cfg, cfgErr := config.LoadProjectConfig(env.Root)
+			require.NoError(t, cfgErr)
+			assert.Equal(t, "team-unlisted", cfg.TeamID, "config follows the server's reply")
+			assert.Empty(t, cfg.TeamName, "init must not write a team name it never resolved")
+		})
+	}
+}
+
+// TestRunInit_TeamFlag_AmbiguousValueFailsBeforeAnythingIsWritten covers the one
+// outcome that fails locally.
+//
+// Failure prevented: a consultant in two orgs that each named a team "Platform"
+// having `--team platform` bind the repo to whichever came first — which, before the
+// derived list was sorted, differed from run to run. Choosing a tenant is not a
+// decision ox may make silently, so it stops, names both candidates, and has not
+// contacted the server or created .sageox/. The team ID is the way out.
+func TestRunInit_TeamFlag_AmbiguousValueFailsBeforeAnythingIsWritten(t *testing.T) {
+	setup := func(t *testing.T, flag string) *oxE2E {
+		env := newOxE2E(t)
+		withInitFlags(t, flag)
+		env.SetTeams(
+			api.TeamMembership{ID: "team-orga", Name: "Platform", Slug: "platform-a"},
+			api.TeamMembership{ID: "team-orgb", Name: "Platform", Slug: "platform-b"},
+		)
+		return env
+	}
+
+	t.Run("a shared name is refused and lists both candidates", func(t *testing.T) {
+		env := setup(t, "platform")
+
+		err := runInit()
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `ambiguous team "platform"`)
+		assert.Contains(t, err.Error(), "Platform (platform-a, team-orga)")
+		assert.Contains(t, err.Error(), "Platform (platform-b, team-orgb)")
+		assert.Empty(t, env.InitRequests(), "an ambiguous --team must never reach registration")
+		assert.NoDirExists(t, filepath.Join(env.Root, ".sageox"),
+			"an ambiguous --team must fail before init writes anything")
+	})
+
+	t.Run("the team ID is the unambiguous way out", func(t *testing.T) {
+		env := setup(t, "team-orgb")
+
+		require.NoError(t, runInit())
+
+		reqs := env.InitRequests()
+		require.Len(t, reqs, 1)
+		assert.Equal(t, []string{"team-orgb"}, reqs[0].Teams)
+	})
 }
