@@ -49,8 +49,8 @@ func OpenSQLOnly(root string) (*DB, error) {
 	return &DB{store: s}, nil
 }
 
-// OpenSQLReadOnly opens a CodeDB's SQL half for queries only, skipping the
-// O(size) integrity check a writable open runs. Same bleve restrictions as
+// OpenSQLReadOnly opens a CodeDB's SQL half for queries only: it never migrates
+// and never deletes, which a writable open may. Same bleve restrictions as
 // OpenSQLOnly. See store.OpenSQLReadOnly for the tradeoff; callers must be
 // fail-open.
 func OpenSQLReadOnly(root string) (*DB, error) {

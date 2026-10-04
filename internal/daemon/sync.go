@@ -213,6 +213,11 @@ type SyncScheduler struct {
 	// shared mutex for all ledger git operations (pull, push, etc.)
 	ledgerMu sync.Mutex
 
+	// backoffWarned remembers, per workspace id, the failure count the "sync in
+	// backoff" warning last announced, so a workspace that stays in backoff warns
+	// when it enters it (or fails again) rather than on every tick.
+	backoffWarned sync.Map
+
 	// agent work signal channel — notified after successful ledger pull
 	agentWorkSignal chan<- struct{}
 
@@ -1163,10 +1168,13 @@ func isNewerSemver(a, b string) bool {
 // If forceSync is false (background ticker) and backoff is active, logs and returns false.
 func (s *SyncScheduler) shouldSyncOrBypass(id string, forceSync bool) bool {
 	if s.workspaceRegistry.ShouldSync(id) {
+		// the backoff (if any) is over; the next one announces itself again
+		s.backoffWarned.Delete(id)
 		return true
 	}
 	if forceSync {
 		s.workspaceRegistry.ClearSyncFailures(id)
+		s.backoffWarned.Delete(id)
 		return true
 	}
 	if s.workspaceRegistry.IsSyncSuspended(id) {
@@ -1186,7 +1194,14 @@ func (s *SyncScheduler) shouldSyncOrBypass(id string, forceSync bool) bool {
 		return false
 	}
 	failures, nextRetry := s.workspaceRegistry.GetSyncRetryInfo(id)
-	s.logger.Warn("sync in backoff, skipping", "id", id, "failures", failures, "next_retry", nextRetry)
+	// Warn on entering backoff and whenever another failure extends it; the
+	// ticks in between skip silently. This line was ~800 per day per workspace.
+	if prev, announced := s.backoffWarned.Load(id); !announced || prev != failures {
+		s.backoffWarned.Store(id, failures)
+		s.logger.Warn("sync in backoff, skipping", "id", id, "failures", failures, "next_retry", nextRetry)
+	} else {
+		s.logger.Debug("sync in backoff, skipping", "id", id, "failures", failures, "next_retry", nextRetry)
+	}
 	if s.issues != nil {
 		s.issues.SetIssue(DaemonIssue{
 			Type:     IssueTypeSyncBackoff,
@@ -1275,6 +1290,7 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 	if s.config.LedgerPath == "" {
 		return nil
 	}
+	s.reportLedgerPushWedge(s.config.LedgerPath)
 
 	// check if ledger is a valid git repo - if not, try to auto-clone
 	// handles both missing directories and directories left behind by failed clones
@@ -1643,9 +1659,37 @@ func shouldPushMurmurs(logOutput string) (blockingSubject string, ok bool) {
 	return "", sawMurmur
 }
 
+// reportLedgerPushWedge mirrors the push circuit breaker into the issue
+// tracker, so a ledger whose pushes are suspended shows up in `ox status` and
+// the prime warning instead of only in the daemon log. While wedged, every
+// commit stays local: the coworker's sessions are not reaching the team.
+func (s *SyncScheduler) reportLedgerPushWedge(ledgerPath string) {
+	if s.issues == nil {
+		return
+	}
+	until, wedged := gitutil.PushWedgedUntil(ledgerPath)
+	if !wedged {
+		s.issues.ClearIssue(IssueTypeLedgerPushWedged, "ledger")
+		return
+	}
+	s.issues.SetIssue(DaemonIssue{
+		Type:     IssueTypeLedgerPushWedged,
+		Severity: SeverityWarning,
+		Repo:     "ledger",
+		Summary:  fmt.Sprintf("Ledger push blocked: the server is missing LFS objects the automatic repair could not restore; work is saved locally, retrying at %s", until.Format(time.Kitchen)),
+	})
+}
+
 func (s *SyncScheduler) pushMurmurCommits(ctx context.Context, ledgerPath string) {
 	ctx, span := perf.Start(ctx, "daemon:push_murmurs")
 	defer span.End()
+
+	// the murmur commits are already local; a wedged ledger only means they ride
+	// out with the next push that gets through
+	if until, wedged := gitutil.PushWedgedUntil(ledgerPath); wedged {
+		s.logger.Debug("skipping murmur push: ledger push wedged", "path", ledgerPath, "until", until)
+		return
+	}
 
 	// Subjects of every unpushed commit, one per line. Detection is by subject,
 	// NOT a data/murmurs/ pathspec: a pathspec finds murmur commits but is blind
@@ -1674,6 +1718,7 @@ func (s *SyncScheduler) pushMurmurCommits(ctx context.Context, ledgerPath string
 	if err := gitutil.PushWithRetry(ctx, ledgerPath, gitutil.PushOpts{
 		AutoResolvePrefixes: ledger.AutoResolvePrefixes,
 		Logger:              s.logger,
+		SuspendWhenWedged:   true,
 		PrePush: func(repoPath string) error {
 			if ep != "" {
 				return gitserver.RefreshRemoteCredentials(repoPath, ep)
@@ -1681,6 +1726,10 @@ func (s *SyncScheduler) pushMurmurCommits(ctx context.Context, ledgerPath string
 			return nil
 		},
 	}); err != nil {
+		if errors.Is(err, gitutil.ErrPushWedged) {
+			s.logger.Debug("murmur push skipped: ledger push wedged", "error", err)
+			return
+		}
 		s.logger.Warn("murmur push failed (non-fatal)", "error", err)
 	}
 }
@@ -1930,6 +1979,12 @@ func (s *SyncScheduler) pushSessionDraftCommits(ctx context.Context, ledgerPath 
 	ctx, span := perf.Start(ctx, "daemon:push_session_drafts")
 	defer span.End()
 
+	// the draft commits are already local; see pushMurmurCommits
+	if until, wedged := gitutil.PushWedgedUntil(ledgerPath); wedged {
+		s.logger.Debug("skipping session-draft push: ledger push wedged", "path", ledgerPath, "until", until)
+		return
+	}
+
 	// Subjects of every unpushed commit, one per line.
 	out, err := s.git.RunGit(ctx, ledgerPath, "log", "--format=%s", "@{upstream}..HEAD")
 	if err != nil || strings.TrimSpace(out) == "" {
@@ -1953,6 +2008,7 @@ func (s *SyncScheduler) pushSessionDraftCommits(ctx context.Context, ledgerPath 
 	if err := gitutil.PushWithRetry(ctx, ledgerPath, gitutil.PushOpts{
 		AutoResolvePrefixes: ledger.AutoResolvePrefixes,
 		Logger:              s.logger,
+		SuspendWhenWedged:   true,
 		PrePush: func(repoPath string) error {
 			if ep != "" {
 				return gitserver.RefreshRemoteCredentials(repoPath, ep)
@@ -1960,6 +2016,10 @@ func (s *SyncScheduler) pushSessionDraftCommits(ctx context.Context, ledgerPath 
 			return nil
 		},
 	}); err != nil {
+		if errors.Is(err, gitutil.ErrPushWedged) {
+			s.logger.Debug("session-draft push skipped: ledger push wedged", "error", err)
+			return
+		}
 		s.logger.Warn("session-draft push failed (non-fatal)", "error", err)
 	}
 }

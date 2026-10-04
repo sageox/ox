@@ -62,6 +62,20 @@ const (
 	restartHistoryFile  = "daemon-restarts.json"
 )
 
+// Shutdown budgets. shutdown() waits for the CodeDB indexer, then for the
+// daemon's own goroutines; these bound each wait.
+const (
+	shutdownCodeDBDrainTimeout   = 30 * time.Second
+	shutdownGoroutineWaitTimeout = 5 * time.Second
+
+	// MaxGracefulShutdown is the longest a healthy daemon takes to exit after a
+	// stop request: the two waits above, back to back. Callers that wait for the
+	// daemon to exit (`ox daemon stop`/`restart`) derive their patience from
+	// this so the two can never drift apart — a CLI that gives up after 2s
+	// reports "did not stop" for a daemon that is correctly draining.
+	MaxGracefulShutdown = shutdownCodeDBDrainTimeout + shutdownGoroutineWaitTimeout
+)
+
 // ErrNotRunning indicates the daemon is not running.
 var ErrNotRunning = errors.New("daemon not running")
 
@@ -366,6 +380,13 @@ func (d *Daemon) Start() error {
 	if os.Getenv("GOGC") == "" {
 		debug.SetGCPercent(daemonGCPercent)
 		d.logger.Debug("set GC target", "gogc", daemonGCPercent)
+	}
+
+	// Background work must never compete with the coworker's foreground work.
+	// Do this before any worker starts so the threads and git children they
+	// spawn inherit the lower priority.
+	if err := lowerDaemonPriority(); err != nil {
+		d.logger.Debug("could not lower daemon priority", "error", err)
 	}
 
 	// write PID file (informational only)
@@ -762,7 +783,7 @@ func (d *Daemon) shutdown() error {
 	// flush in well under that. We do this BEFORE wg.Wait so the wg timeout
 	// only governs the daemon's own goroutines.
 	if d.codedb != nil {
-		drainCtx, drainCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		drainCtx, drainCancel := context.WithTimeout(context.Background(), shutdownCodeDBDrainTimeout)
 		drainStart := time.Now()
 		if err := d.codedb.WaitIdle(drainCtx); err != nil {
 			d.logger.Warn("codedb did not drain before shutdown timeout; in-flight bleve batch may be killed",
@@ -774,21 +795,36 @@ func (d *Daemon) shutdown() error {
 		drainCancel()
 	}
 
-	// Wait for goroutines with a fixed 5s timeout — codedb drain handled
-	// above out-of-band.
+	// Wait for goroutines — codedb drain handled above out-of-band.
 	done := make(chan struct{})
 	go func() {
 		d.wg.Wait()
 		close(done)
 	}()
 
+	return d.awaitGoroutines(done, shutdownGoroutineWaitTimeout)
+}
+
+// awaitGoroutines finishes shutdown once the daemon's goroutines have exited
+// (done is closed) or timeout elapses, whichever comes first. Either way the
+// socket, PID file and registry entry are cleaned up; on timeout it returns
+// ErrShutdownTimeout.
+func (d *Daemon) awaitGoroutines(done <-chan struct{}, timeout time.Duration) error {
 	select {
 	case <-done:
 		d.logger.Info("graceful shutdown complete")
-		d.cleanup() // only cleanup after successful wait
-	case <-time.After(5 * time.Second):
+		d.cleanup()
+	case <-time.After(timeout):
 		d.logger.Warn("shutdown timeout, forcing exit")
-		// don't cleanup - let OS clean up to avoid corrupting running goroutines
+		// The process exits right after this returns, so straggler goroutines
+		// die with it. What must NOT outlive it is the socket file, PID file
+		// and registry entry: left behind they make the daemon look alive
+		// (GetState trusts a socket file plus a registry PID) and leave the
+		// next `ox daemon stop` dialing a socket with no listener. cleanup()
+		// touches only those files and the already-released lease, never state
+		// the stragglers use, and refuses to remove files a replacement daemon
+		// now owns.
+		d.cleanup()
 		d.mu.Lock()
 		d.running = false
 		d.mu.Unlock()
@@ -874,6 +910,12 @@ func (d *Daemon) releaseGlobalSyncLease() {
 // cleanup removes PID and socket files.
 // When the daemon was superseded by a new instance, skip removing the socket
 // and registry entry — those now belong to the replacement daemon.
+//
+// Supersession is checked twice: d.wasSuperseded covers a takeover noticed by
+// the socket self-check, and superseded() re-reads the registry now because
+// shutdown can take up to MaxGracefulShutdown, long enough for `ox daemon
+// restart` to start a replacement that registers under this same workspace ID
+// and binds this same socket path after the self-check loop has already exited.
 func (d *Daemon) cleanup() {
 	// Release the global-sync lease regardless of supersession. flock is
 	// auto-released on process exit, but Release() also unblocks the
@@ -882,7 +924,7 @@ func (d *Daemon) cleanup() {
 	if d.scheduler != nil {
 		d.scheduler.ReleaseGlobalSyncLease()
 	}
-	if !d.wasSuperseded {
+	if !d.wasSuperseded && !superseded() {
 		if err := UnregisterDaemon(); err != nil {
 			d.logger.Warn("failed to unregister daemon", "error", err)
 		}

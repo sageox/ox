@@ -32,9 +32,12 @@ func TestTracePointerWriteFailureStillPublishesOrdinarySession(t *testing.T) {
 	require.NoError(t, os.MkdirAll(blocked, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(blocked, "keep"), []byte("local recovery"), 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, pipeline.LedgerFileTraceSpans), []byte(lfs.FormatPointer(refs[pipeline.LedgerFileTraceSpans].OID, refs[pipeline.LedgerFileTraceSpans].Size)), 0o644))
-	runGitCmd(t, ledger, "add", "--sparse", filepath.Join("sessions", "trace-write-failure", pipeline.LedgerFileTraceSpans))
+	// -f: a coworker's global gitignore (e.g. "*.gz") must not decide what this fixture stages
+	runGitCmd(t, ledger, "add", "--sparse", "-f", filepath.Join("sessions", "trace-write-failure", pipeline.LedgerFileTraceSpans))
 	handler := newGitBackedHandler()
-	require.True(t, handler.gitCommitAndPush(&SessionFinalizePayload{SessionDir: dir, RawPath: filepath.Join(dir, "raw.jsonl"), LedgerPath: ledger}, refs))
+	pushed, pushErr := handler.gitCommitAndPush(&SessionFinalizePayload{SessionDir: dir, RawPath: filepath.Join(dir, "raw.jsonl"), LedgerPath: ledger}, refs)
+	require.NoError(t, pushErr)
+	require.True(t, pushed)
 	committed := gitOutput(t, ledger, "show", "HEAD:sessions/trace-write-failure/raw.jsonl")
 	_, _, err = lfs.ParsePointer(committed)
 	require.NoError(t, err)
@@ -81,12 +84,16 @@ func TestTraceMissingBlobDoesNotBlockOrdinaryUpload(t *testing.T) {
 			enableLocalFinalizeLFS(t, handler, ledger, traceOID, rawOID)
 			before := gitOutput(t, ledger, "rev-parse", "HEAD")
 			item := &WorkItem{Payload: &SessionFinalizePayload{SessionDir: dir, RawPath: filepath.Join(dir, "raw.jsonl"), LedgerPath: ledger, UploadOnly: true}}
-			require.NoError(t, handler.ProcessResult(item, &RunResult{}))
+			err := handler.ProcessResult(item, &RunResult{})
 			after := gitOutput(t, ledger, "rev-parse", "HEAD")
 			if ordinaryMissing {
+				// a failure, not success: nil would reset the manager's failure
+				// count and keep this session out of the retry cap forever
+				require.ErrorContains(t, err, "missing from the remote")
 				require.Equal(t, before, after)
 				return
 			}
+			require.NoError(t, err)
 			require.NotEqual(t, before, after)
 			paths := gitOutput(t, ledger, "ls-tree", "-r", "--name-only", "HEAD")
 			require.Contains(t, paths, "sessions/missing-trace/raw.jsonl")
@@ -119,9 +126,36 @@ func TestTraceOmissionPreservesUnmergedIndex(t *testing.T) {
 	require.NoError(t, err, string(output))
 	before := gitOutput(t, ledger, "ls-files", "--stage")
 	payload := &SessionFinalizePayload{SessionDir: dir, RawPath: rawPath, LedgerPath: ledger, omitTraces: true}
-	require.False(t, newGitBackedHandler().gitCommitAndPush(payload, map[string]lfs.FileRef{"raw.jsonl": lfs.NewFileRef([]byte(testRawContent))}))
+	pushed, _ := newGitBackedHandler().gitCommitAndPush(payload, map[string]lfs.FileRef{"raw.jsonl": lfs.NewFileRef([]byte(testRawContent))})
+	require.False(t, pushed)
 	require.Equal(t, before, gitOutput(t, ledger, "ls-files", "--stage"))
 	content, err := os.ReadFile(rawPath)
 	require.NoError(t, err)
 	require.Equal(t, testRawContent, string(content))
+}
+
+// A coworker's personal gitignore must not decide what reaches the Ledger.
+// git reads $XDG_CONFIG_HOME/git/ignore even with no global config file, and a
+// "*.gz" there made the trace-omitting `git add` refuse the session, so every
+// finalize on that machine failed.
+func TestFinalizeIgnoresCoworkerGlobalGitignore(t *testing.T) {
+	xdg := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(xdg, "git"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(xdg, "git", "ignore"), []byte("*.gz\n"), 0o644))
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+
+	_, ledger := setupBareAndCloneLedger(t)
+	dir := filepath.Join(ledger, "sessions", "global-ignore")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	traceOID := strings.Repeat("c", 64)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "raw.jsonl"), []byte(testRawContent), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, pipeline.LedgerFileTraceSpans), []byte(lfs.FormatPointer("sha256:"+traceOID, 100)), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "meta.json"), []byte(`{"title":"Global ignore","files":{"trace-spans.jsonl.gz":{"oid":"sha256:`+traceOID+`","size":100}},"trace":{}}`), 0o644))
+	handler := newGitBackedHandler()
+	enableLocalFinalizeLFS(t, handler, ledger, traceOID)
+
+	item := &WorkItem{Payload: &SessionFinalizePayload{SessionDir: dir, RawPath: filepath.Join(dir, "raw.jsonl"), LedgerPath: ledger, UploadOnly: true}}
+	require.NoError(t, handler.ProcessResult(item, &RunResult{}))
+	paths := gitOutput(t, ledger, "ls-tree", "-r", "--name-only", "HEAD")
+	require.Contains(t, paths, "sessions/global-ignore/raw.jsonl")
 }

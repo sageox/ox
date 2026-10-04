@@ -3,7 +3,9 @@ package ledger
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"time"
@@ -333,10 +335,26 @@ func BackfillPRCommits(ctx context.Context, fetcher GitHubFetcher, ledgerPath, o
 	}
 	bestByNumber := make(map[int]prPathInfo)
 
+	// Files that vanish between the directory walk and the read (outside the
+	// ledger's sparse checkout, or removed by a concurrent checkout) are
+	// expected, not failures. They are counted and summarized once per pass
+	// instead of logged per file: a single pass hit 925 of them in 3 minutes.
+	var skippedMissing int
+	defer func() {
+		if skippedMissing > 0 {
+			logger.Debug("PR backfill skipped files that are not on disk", "skipped", skippedMissing)
+		}
+	}()
+
 	for _, path := range prFiles {
 		data, err := os.ReadFile(path)
 		if err != nil {
-			logger.Warn("read PR file for backfill failed", "path", path, "error", err)
+			if errors.Is(err, fs.ErrNotExist) {
+				skippedMissing++
+				logger.Debug("PR file for backfill not on disk", "path", path)
+			} else {
+				logger.Warn("read PR file for backfill failed", "path", path, "error", err)
+			}
 			continue
 		}
 
@@ -363,7 +381,12 @@ func BackfillPRCommits(ctx context.Context, fetcher GitHubFetcher, ledgerPath, o
 
 		data, err := os.ReadFile(info.path)
 		if err != nil {
-			logger.Warn("read PR file for backfill failed", "path", info.path, "error", err)
+			if errors.Is(err, fs.ErrNotExist) {
+				skippedMissing++
+				logger.Debug("PR file for backfill not on disk", "path", info.path)
+			} else {
+				logger.Warn("read PR file for backfill failed", "path", info.path, "error", err)
+			}
 			continue
 		}
 

@@ -645,7 +645,9 @@ func TestReconcile_MissingTraceClearsAttachmentMetadata(t *testing.T) {
 			require.NoError(t, err)
 			require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "meta.json"), data, 0o644))
 			require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "summary.json"), []byte(`{}`), 0o644))
-			git(t, ledger, "add", "sessions/")
+			// -f: the artifacts are *.jsonl.gz, which a contributor's global
+			// gitignore (compressed-file rules are common) would otherwise skip
+			git(t, ledger, "add", "-f", "sessions/")
 			git(t, ledger, "commit", "-m", "missing trace artifact", "--no-verify")
 
 			client := fakeLFSDownloadServer(t, map[string]int{oid: http.StatusNotFound})

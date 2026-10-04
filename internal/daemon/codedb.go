@@ -299,6 +299,18 @@ func (m *CodeDBManager) BuildLedgerIndex(ctx context.Context, ledgerPath string)
 	}
 	defer db.Close()
 
+	// Open no longer scans the database, so damage is first met as SQLITE_CORRUPT
+	// from whichever stage reads the bad page. Without this the ledger index would
+	// fail the same way on every build instead of being rebuilt.
+	discardIfCorrupt := func(err error) bool {
+		if !index.IsCorruptionError(err) {
+			return false
+		}
+		_ = db.Close()
+		m.discardCorruptIndex(ledgerDir, err)
+		return true
+	}
+
 	opts := index.IndexOptions{}
 
 	if err := db.IndexLocalRepo(indexCtx, ledgerPath, opts); err != nil {
@@ -307,22 +319,32 @@ func (m *CodeDBManager) BuildLedgerIndex(ctx context.Context, ledgerPath string)
 			return
 		}
 		m.logger.Warn("codedb ledger: index failed", "error", err)
+		discardIfCorrupt(err)
 		return
 	}
 
 	if _, err := db.ParseSymbols(indexCtx, nil); err != nil {
 		m.logger.Warn("codedb ledger: parse symbols failed", "error", err)
 		// non-fatal: committed content is already indexed
+		if discardIfCorrupt(err) {
+			return
+		}
 	}
 
 	if _, err := db.ParseComments(indexCtx, nil); err != nil {
 		m.logger.Warn("codedb ledger: parse comments failed", "error", err)
 		// non-fatal
+		if discardIfCorrupt(err) {
+			return
+		}
 	}
 
 	// ADR-019 edge backfill for ledger codedb (non-fatal, idempotent).
 	if _, err := db.BackfillSymbolEdges(indexCtx, nil); err != nil {
 		m.logger.Warn("codedb ledger: edge backfill failed", "error", err)
+		if discardIfCorrupt(err) {
+			return
+		}
 	}
 
 	cached := queryStatsFromDB(db, ledgerDir)
@@ -535,6 +557,7 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 	})
 	if err != nil {
 		m.setError(err)
+		m.discardIfCorrupt(db, dataDir, err)
 		return nil, fmt.Errorf("parse symbols: %w", err)
 	}
 	symbolDuration := time.Since(symbolStart)
@@ -552,6 +575,7 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 	})
 	if err != nil {
 		m.setError(err)
+		m.discardIfCorrupt(db, dataDir, err)
 		return nil, fmt.Errorf("parse comments: %w", err)
 	}
 	commentDuration := time.Since(commentStart)
@@ -915,6 +939,73 @@ func (m *CodeDBManager) CheckFreshness(ctx context.Context) {
 		// Run after indexing so the new overlay (if any) is in place before we inspect.
 		m.gcDirtyIndexes(dataDir)
 	}()
+}
+
+// discardIfCorrupt discards the cache at dir when err proves the database
+// damaged, closing db first. OpenIndexWithHeal covers the git-index stage; this
+// covers the stages after it, which the open-time scan used to cover too: they
+// would otherwise hit the same damaged page on every pass and never recover.
+func (m *CodeDBManager) discardIfCorrupt(db *codedb.DB, dir string, err error) {
+	if !index.IsCorruptionError(err) {
+		return
+	}
+	_ = db.Close() // safe to repeat: the caller's deferred Close becomes a no-op
+	m.discardCorruptIndex(dir, err)
+}
+
+// discardCorruptIndex removes a codedb cache that a real statement or a
+// maintenance scan proved damaged, and forgets the freshness fingerprint so the
+// next CheckFreshness rebuilds instead of trusting the HEAD it last indexed.
+// Callers must not hold the database open: the files are about to disappear.
+//
+// The ledger index lives inside the shared index's directory
+// (<shared>/ledger), and has a health of its own: a damaged shared index must
+// not cost a 5 GB ledger rebuild, so that subdirectory is left alone.
+func (m *CodeDBManager) discardCorruptIndex(dir string, cause error) {
+	m.logger.Warn("codedb index is damaged; discarding it for a clean rebuild", "data_dir", dir, "error", cause)
+	ledger := m.resolveLedgerDataDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		m.logger.Warn("codedb discard of damaged index failed", "data_dir", dir, "error", err)
+		return
+	}
+	for _, entry := range entries {
+		path := filepath.Join(dir, entry.Name())
+		if path == ledger {
+			continue
+		}
+		if err := os.RemoveAll(path); err != nil {
+			m.logger.Warn("codedb discard of damaged index failed", "data_dir", dir, "path", path, "error", err)
+			return
+		}
+	}
+	if dir == m.resolveSharedDataDir() {
+		m.mu.Lock()
+		m.lastIndexedHead = ""
+		m.mu.Unlock()
+	}
+}
+
+// buildActiveFor reports whether an index build or overlay refresh is writing
+// the codedb at dir right now. Maintenance defers to it: a VACUUM or a prune
+// would take write locks the build is holding for minutes.
+func (m *CodeDBManager) buildActiveFor(dir string) bool {
+	shared := m.resolveSharedDataDir()
+	ledger := m.resolveLedgerDataDir()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return (dir == shared && (m.indexing || m.dirtyRefreshing)) || (dir == ledger && m.ledgerIndexing)
+}
+
+// maintenanceDirs lists the codedb directories maintenance covers: the shared
+// index and the ledger index. The ledger index is reached through the same
+// resolver BuildLedgerIndex uses, so the two never disagree about its location.
+func (m *CodeDBManager) maintenanceDirs() []string {
+	dirs := []string{m.resolveSharedDataDir()}
+	if ledger := m.resolveLedgerDataDir(); ledger != "" && ledger != dirs[0] {
+		dirs = append(dirs, ledger)
+	}
+	return dirs
 }
 
 // gcDirtyIndexes removes stale dirty overlay directories and logs the result.
