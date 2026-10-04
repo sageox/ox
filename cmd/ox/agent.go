@@ -166,6 +166,13 @@ func init() {
 		"skip confirmation for destructive operations")
 	_ = agentCmd.PersistentFlags().MarkHidden("force")
 
+	// release-quarantine flag - lets `session recover` re-check a recording whose
+	// native source was quarantined (non-destructive; a still-foreign source is
+	// quarantined again).
+	agentCmd.PersistentFlags().Bool("release-quarantine", false,
+		"re-check a quarantined recording's native source during session recover")
+	_ = agentCmd.PersistentFlags().MarkHidden("release-quarantine")
+
 	// Flags consumed by agent session subcommands via manual arg parsing
 	// (parseTitle, parseCapturePriorFile, parseSessionID, parseAdapter).
 	// They are registered here so cobra doesn't reject them as unknown
@@ -607,6 +614,11 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 		case "subagent-list":
 			return runAgentSessionSubagentList(inst)
 		case "recover":
+			if release, _ := cmd.Flags().GetBool("release-quarantine"); release {
+				if err := releaseSourceQuarantine(inst); err != nil {
+					return err
+				}
+			}
 			return runAgentSessionRecover(inst)
 		case "abort":
 			return runAgentSessionAbort(inst, cmd, sessionArgs)

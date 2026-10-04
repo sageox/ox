@@ -138,6 +138,29 @@ func TestCheckHealth_StopIncomplete(t *testing.T) {
 	assert.True(t, status.StopIncompleteAge > 0)
 }
 
+func TestCheckHealth_ReportsQuarantinedRecordings(t *testing.T) {
+	cacheDir := t.TempDir()
+	projectRoot, sessionsBase := setupRecordingTestWithSessionsBase(t, cacheDir)
+	for _, tt := range []struct {
+		agentID        string
+		sourceRejected bool
+	}{{"OxQuarantined", true}, {"OxHealthy", false}} {
+		state := &RecordingState{
+			AgentID:        tt.agentID,
+			StartedAt:      time.Now().Add(-5 * time.Minute),
+			AdapterName:    "claude-code",
+			SessionPath:    filepath.Join(sessionsBase, "2026-01-06T14-30-user-"+tt.agentID),
+			SourceRejected: tt.sourceRejected,
+		}
+		require.NoError(t, SaveRecordingState(projectRoot, state))
+	}
+
+	status := CheckHealth(projectRoot)
+
+	require.Len(t, status.QuarantinedRecordings, 1)
+	assert.Equal(t, "OxQuarantined", status.QuarantinedRecordings[0].AgentID)
+}
+
 func TestCheckHealth_RecordingNotActive(t *testing.T) {
 	tempHome := t.TempDir()
 	t.Setenv("HOME", tempHome)

@@ -739,6 +739,59 @@ func (c *SessionStopIncompleteCheck) Run(_ context.Context, _ bool) CheckResult 
 	}
 }
 
+// SessionQuarantineCheck reports recordings held back because their native
+// source crossed repositories. They are never uploaded or cleaned up
+// automatically, so without this line nothing would say why a session is
+// missing from the Ledger.
+type SessionQuarantineCheck struct {
+	gitRoot      string
+	cachedStatus *session.HealthStatus
+}
+
+func (c *SessionQuarantineCheck) SetHealthStatus(status *session.HealthStatus) {
+	c.cachedStatus = status
+}
+
+// NewSessionQuarantineCheck creates a quarantined-recording check.
+func NewSessionQuarantineCheck(gitRoot string) *SessionQuarantineCheck {
+	return &SessionQuarantineCheck{gitRoot: gitRoot}
+}
+
+// Name returns the check name.
+func (c *SessionQuarantineCheck) Name() string {
+	return "quarantined recording"
+}
+
+// Category returns the check category.
+func (c *SessionQuarantineCheck) Category() string {
+	return "Sessions"
+}
+
+// Run lists recordings with a quarantined native source.
+func (c *SessionQuarantineCheck) Run(_ context.Context, _ bool) CheckResult {
+	status := getOrComputeHealth(c.cachedStatus, c.gitRoot)
+
+	if len(status.QuarantinedRecordings) == 0 {
+		return CheckResult{
+			Name:   c.Name(),
+			Status: StatusSkip,
+		}
+	}
+
+	agentIDs := make([]string, 0, len(status.QuarantinedRecordings))
+	for _, state := range status.QuarantinedRecordings {
+		agentIDs = append(agentIDs, state.AgentID)
+	}
+	first := agentIDs[0]
+
+	return CheckResult{
+		Name:    c.Name(),
+		Status:  StatusWarn,
+		Message: fmt.Sprintf("%d recording(s) kept local, not uploaded: the AI coworker's session file could not be shown to belong only to this repository (%s)", len(agentIDs), strings.Join(agentIDs, ", ")),
+		Fix:     fmt.Sprintf("Nothing is lost. Run 'ox agent %s session recover --release-quarantine' to re-check ownership and upload if it now passes, or 'ox agent %s session abort' to discard the captured data", first, first),
+	}
+}
+
 // ValidSessionRecordingModesString returns comma-separated list of valid modes.
 func ValidSessionRecordingModesString() string {
 	return strings.Join(config.ValidSessionRecordingModes, ", ")

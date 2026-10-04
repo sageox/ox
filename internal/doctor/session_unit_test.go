@@ -493,6 +493,34 @@ func TestSessionStopIncompleteCheck_NilRecording(t *testing.T) {
 	assert.Contains(t, result.Message, "unknown")
 }
 
+// --- SessionQuarantineCheck ---
+
+func TestSessionQuarantineCheck_NothingQuarantinedIsSilent(t *testing.T) {
+	check := NewSessionQuarantineCheck("/tmp/fake")
+	check.SetHealthStatus(&session.HealthStatus{})
+
+	assert.Equal(t, StatusSkip, check.Run(context.Background(), false).Status)
+}
+
+// A quarantined recording is never uploaded or cleaned up, so doctor is the only
+// place that can say why the session is missing and how to get it back.
+func TestSessionQuarantineCheck_NamesRecordingsAndANonDestructiveWayOut(t *testing.T) {
+	check := NewSessionQuarantineCheck("/tmp/fake")
+	check.SetHealthStatus(&session.HealthStatus{
+		QuarantinedRecordings: []*session.RecordingState{
+			{AgentID: "OxFirst", SourceRejected: true},
+			{AgentID: "OxSecond", SourceRejected: true},
+		},
+	})
+
+	result := check.Run(context.Background(), false)
+	assert.Equal(t, StatusWarn, result.Status)
+	assert.Contains(t, result.Message, "OxFirst")
+	assert.Contains(t, result.Message, "OxSecond")
+	assert.Contains(t, result.Fix, "ox agent OxFirst session recover --release-quarantine")
+	assert.Contains(t, result.Fix, "Nothing is lost")
+}
+
 // --- SessionOrphanedCheck with cached HealthStatus ---
 
 func TestSessionOrphanedCheck_Name(t *testing.T) {

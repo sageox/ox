@@ -153,3 +153,38 @@ func TestPhaseEnd_HasActiveBehavior(t *testing.T) {
 	assert.True(t, activePhaseBehavior[phaseEnd],
 		"phaseEnd must be marked active so dispatchPhase routes it to handleEnd")
 }
+
+// A quarantined recording holds a captured prefix of a session known to span
+// repositories. The agent exiting (SessionEnd) or the context being wiped
+// (/clear) is the normal end of every session, so it must not finalize the
+// prefix or remove the marker that carries the quarantine.
+func TestQuarantinedRecordingSurvivesSessionEndAndClear(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		end  func(t *testing.T, projectRoot, agentID string)
+	}{
+		{"session end", func(t *testing.T, projectRoot, agentID string) {
+			ctx := &HookContext{Phase: phaseEnd, AgentType: "claude-code", ProjectRoot: projectRoot, Marker: &SessionMarker{AgentID: agentID}}
+			require.NoError(t, handleEnd(ctx))
+		}},
+		{"clear", func(t *testing.T, projectRoot, agentID string) {
+			ctx := &HookContext{Phase: phaseStart, AgentType: "claude-code", ProjectRoot: projectRoot, Marker: &SessionMarker{AgentID: agentID}}
+			stopSessionForClear(ctx, agentID)
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			projectRoot, repoID := setupTestProject(t)
+			agentID := "OxQuarantineEnd"
+			createActiveRecording(t, projectRoot, repoID, agentID)
+			require.NoError(t, session.MarkSourceRejected(projectRoot, agentID))
+
+			tt.end(t, projectRoot, agentID)
+
+			kept, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+			require.NoError(t, err)
+			require.NotNil(t, kept, "the quarantine marker must not be cleared")
+			assert.True(t, kept.SourceRejected)
+			assert.Nil(t, kept.StoppedAt, "a quarantined recording must not be marked stopped, which hands it to finalization")
+		})
+	}
+}

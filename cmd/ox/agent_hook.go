@@ -335,6 +335,13 @@ func stopSessionForClear(ctx *HookContext, agentID string) {
 	if err != nil || state == nil {
 		return // not recording, nothing to stop
 	}
+	if state.SourceRejected {
+		// Stopping would finalize the captured prefix and clear the marker that
+		// holds the quarantine, publishing a session already known to span
+		// repositories. Leave it for a coworker to review.
+		slog.Info("hook: clear left quarantined recording in place", "agent_id", agentID)
+		return
+	}
 
 	// capture finalized-session info for the post-clear notice (ADR-019).
 	// done before we mutate state so SessionPath is still accurate.
@@ -412,6 +419,12 @@ func handleEnd(ctx *HookContext) error {
 	state, err := session.LoadRecordingStateForAgent(ctx.ProjectRoot, agentID)
 	if err != nil || state == nil {
 		slog.Debug("hook: end no recording state", "agent_id", agentID)
+		return nil
+	}
+	if state.SourceRejected {
+		// Same boundary as stopSessionForClear: the agent exiting must not
+		// finalize and upload a quarantined recording.
+		slog.Info("hook: end left quarantined recording in place", "agent_id", agentID)
 		return nil
 	}
 

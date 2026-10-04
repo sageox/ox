@@ -64,6 +64,10 @@ type HealthStatus struct {
 	// StopIncompleteAge is how long since the incomplete stop occurred
 	StopIncompleteAge time.Duration
 
+	// QuarantinedRecordings are recordings held back because their native
+	// source was proven to cross repositories. Nothing publishes them.
+	QuarantinedRecordings []*RecordingState
+
 	// PendingCount is the number of sessions pending commit
 	PendingCount int
 
@@ -236,6 +240,10 @@ func checkRecordingState(status *HealthStatus, projectRoot string) {
 		if state.StopIncomplete && !status.IsStopIncomplete {
 			status.IsStopIncomplete = true
 			status.StopIncompleteAge = time.Since(state.StartedAt)
+		}
+
+		if state.SourceRejected {
+			status.QuarantinedRecordings = append(status.QuarantinedRecordings, state)
 		}
 
 		// classify stale recordings

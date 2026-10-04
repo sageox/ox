@@ -37,6 +37,31 @@ type sessionRecoverOutput struct {
 	LedgerSessionDir string `json:"ledger_session_dir,omitempty"`
 }
 
+// releaseSourceQuarantine clears the quarantine flag so recovery re-runs the
+// ownership check from the recording's start. Nothing is deleted or uploaded
+// here: a native source that still crosses repositories is quarantined again by
+// the check recovery runs next, so releasing cannot publish a foreign session.
+func releaseSourceQuarantine(inst *agentinstance.Instance) error {
+	projectRoot, err := findProjectRoot()
+	if err != nil {
+		return fmt.Errorf("could not find project root: %w", err)
+	}
+	state, err := session.LoadRecordingStateForAgent(projectRoot, inst.AgentID)
+	if err != nil {
+		return fmt.Errorf("no recording state found: %w", err)
+	}
+	if state == nil || !state.SourceRejected {
+		return nil
+	}
+	if err := session.UpdateRecordingStateForAgent(projectRoot, inst.AgentID, func(s *session.RecordingState) {
+		s.SourceRejected = false
+	}); err != nil {
+		return fmt.Errorf("release source quarantine: %w", err)
+	}
+	slog.Info("released source quarantine for ownership re-check", "agent_id", inst.AgentID)
+	return nil
+}
+
 // runAgentSessionRecover recovers a stale/crashed session.
 //
 // When an AI coworker crashes or loses context, it may leave behind a stale
@@ -63,9 +88,14 @@ func runAgentSessionRecover(inst *agentinstance.Instance) error {
 		return fmt.Errorf("no stale recording to recover\nRun 'ox agent %s session start' to begin a new recording", inst.AgentID)
 	}
 	if state.SourceRejected {
-		return fmt.Errorf("claude source has untrusted repository ownership; recording and cache preserved for manual review")
+		return fmt.Errorf("claude source has untrusted repository ownership; recording and cache preserved for manual review\nto re-check ownership, run 'ox agent %s session recover --release-quarantine'", inst.AgentID)
 	}
-	if state.AdapterName == "claude-code" && state.SessionFile == "" && state.WatchMode != "tail" {
+	// An undiscovered source does not prove a header-only recording empty, so it
+	// waits for retry. A cache that already holds captured turns is another
+	// matter: each batch was ownership-checked as it was appended, so it
+	// recovers from the cache like any other recording.
+	if state.AdapterName == "claude-code" && state.SessionFile == "" && state.WatchMode != "tail" &&
+		(state.SessionPath == "" || !session.HasSubstantiveEntries(filepath.Join(state.SessionPath, ledgerFileRaw))) {
 		return fmt.Errorf("claude hook source not yet verified; recording and cache preserved for retry")
 	}
 

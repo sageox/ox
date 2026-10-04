@@ -6,10 +6,13 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type appendDuringReadClaudeAdapter struct {
@@ -45,6 +48,47 @@ func TestRecoverViaNormalStopQuarantinesNewForeignTurn(t *testing.T) {
 	persisted, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
 	if err != nil || persisted == nil || !persisted.SourceRejected {
 		t.Fatalf("normal recovery must preserve quarantine, state=%v error=%v", persisted, err)
+	}
+}
+
+// Quarantine must have a way out that deletes nothing. Releasing re-runs the
+// ownership check; it cannot publish a source that still crosses repositories.
+func TestReleaseSourceQuarantine_RechecksOwnershipBeforeAnythingPublishes(t *testing.T) {
+	for _, foreign := range []bool{false, true} {
+		name := "source that now passes"
+		if foreign {
+			name = "source that still crosses repositories"
+		}
+		t.Run(name, func(t *testing.T) {
+			projectRoot, agentID, sourceFile := setupHandleAfterToolTest(t)
+			t.Chdir(projectRoot)
+			inst := &agentinstance.Instance{AgentID: agentID}
+			if foreign {
+				f, err := os.OpenFile(sourceFile, os.O_APPEND|os.O_WRONLY, 0)
+				require.NoError(t, err)
+				_, err = fmt.Fprintf(f, "{\"type\":\"assistant\",\"sessionId\":\"session\",\"cwd\":%q}\n", filepath.Dir(projectRoot))
+				require.NoError(t, err)
+				require.NoError(t, f.Close())
+			}
+			require.NoError(t, session.MarkSourceRejected(projectRoot, agentID))
+
+			err := runAgentSessionRecover(inst)
+			require.Error(t, err, "a quarantined recording must not recover without an explicit release")
+			assert.Contains(t, err.Error(), "--release-quarantine", "the refusal must say how to get out")
+
+			require.NoError(t, releaseSourceQuarantine(inst))
+			err = runAgentSessionRecover(inst)
+			current, loadErr := session.LoadRecordingStateForAgent(projectRoot, agentID)
+			require.NoError(t, loadErr)
+			if foreign {
+				require.Error(t, err, "release must not publish a source that still crosses repositories")
+				require.NotNil(t, current, "the recording must survive")
+				assert.True(t, current.SourceRejected, "a still-foreign source is quarantined again")
+				return
+			}
+			require.NoError(t, err)
+			assert.Nil(t, current, "a source that passes the recheck recovers normally")
+		})
 	}
 }
 
@@ -185,21 +229,66 @@ func TestHandleAfterTool_MissingClaudeSourceKeepsRecordingRetryable(t *testing.T
 	}
 }
 
-func TestFinalizeIncrementalSession_MissingClaudeSourcePreservesRaw(t *testing.T) {
-	repo := t.TempDir()
-	raw := filepath.Join(t.TempDir(), "raw.jsonl")
-	original := []byte("preserved raw capture")
-	if err := os.WriteFile(raw, original, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	state := &session.RecordingState{AdapterName: "claude-code", SessionFile: filepath.Join(t.TempDir(), "missing.jsonl")}
-	if _, err := finalizeIncrementalSession(repo, state, raw, &testClaudeCodeAdapter{}, &agentSessionResult{}); err == nil || !strings.Contains(err.Error(), "stat native session before final drain") {
-		t.Fatalf("missing native source must block final import before reading raw capture: %v", err)
-	}
+// raw.jsonl was ownership-checked batch by batch as the hooks appended to it, so
+// a stop or recover that finds the native transcript gone (pruned by Claude,
+// workspace archived) must finalize that capture instead of failing forever.
+func TestFinalizeIncrementalSession_FinalizesCaptureWhenNativeSourceIsGone(t *testing.T) {
+	repo, agentID, source := setupHandleAfterToolTest(t)
+	state, err := session.LoadRecordingStateForAgent(repo, agentID)
+	require.NoError(t, err)
+	first := state.StartedAt.Add(time.Second)
+	appendClaudeEntries(t, source, first,
+		`{"type":"user","timestamp":"`+first.Format(time.RFC3339Nano)+`","message":{"role":"user","content":"captured before the transcript vanished"}}`,
+	)
+	require.NoError(t, handleAfterTool(&HookContext{Phase: phaseAfterTool, AgentType: "claude-code", ProjectRoot: repo, Marker: &SessionMarker{AgentID: agentID}}))
+	require.NoError(t, os.Remove(source))
+
+	state, err = session.LoadRecordingStateForAgent(repo, agentID)
+	require.NoError(t, err)
+	raw := filepath.Join(state.SessionPath, "raw.jsonl")
+	adapter, err := adapters.GetAdapter(state.AdapterName)
+	require.NoError(t, err)
+	result, err := finalizeIncrementalSession(repo, state, raw, adapter, &agentSessionResult{})
+	require.NoError(t, err, "a missing native source must not strand a validated capture")
+	assert.Equal(t, 1, result.EntryCount)
 	contents, err := os.ReadFile(raw)
-	if err != nil || string(contents) != string(original) {
-		t.Fatalf("failed final drain must preserve raw capture: %v", err)
-	}
+	require.NoError(t, err)
+	assert.Contains(t, string(contents), "captured before the transcript vanished")
+}
+
+// The recover prompt can sit for minutes with the capture lock released. A
+// watcher or hook that quarantines the source in that window must still stop
+// the publish, which reads the recording again under the lock.
+func TestRecoverFromCache_HonorsQuarantineSetAfterTheInitialCheck(t *testing.T) {
+	repo, agentID, source := setupHandleAfterToolTest(t)
+	loaded, err := session.LoadRecordingStateForAgent(repo, agentID)
+	require.NoError(t, err)
+	first := loaded.StartedAt.Add(time.Second)
+	appendClaudeEntries(t, source, first,
+		`{"type":"user","timestamp":"`+first.Format(time.RFC3339Nano)+`","message":{"role":"user","content":"captured prefix"}}`,
+	)
+	require.NoError(t, handleAfterTool(&HookContext{Phase: phaseAfterTool, AgentType: "claude-code", ProjectRoot: repo, Marker: &SessionMarker{AgentID: agentID}}))
+
+	stale, err := session.LoadRecordingStateForAgent(repo, agentID)
+	require.NoError(t, err)
+	require.False(t, stale.SourceRejected)
+	raw := filepath.Join(stale.SessionPath, "raw.jsonl")
+	before, err := os.ReadFile(raw)
+	require.NoError(t, err)
+
+	require.NoError(t, session.MarkSourceRejected(repo, agentID))
+
+	err = recoverFromCache(&agentinstance.Instance{AgentID: agentID}, repo, stale, raw)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "untrusted repository ownership")
+
+	after, err := os.ReadFile(raw)
+	require.NoError(t, err)
+	assert.Equal(t, string(before), string(after), "a quarantined cache must be left exactly as it was")
+	current, err := session.LoadRecordingStateForAgent(repo, agentID)
+	require.NoError(t, err)
+	require.NotNil(t, current, "the quarantined recording marker must survive")
+	assert.True(t, current.SourceRejected)
 }
 
 func TestRecoverFromCache_RefusesQuarantinedSource(t *testing.T) {
