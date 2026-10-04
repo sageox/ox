@@ -369,7 +369,9 @@ func GetSageOxStyle() ansi.StyleConfig {
 // else gets the dark default, which is what HasDarkBackground already returns
 // when its query fails.
 func terminalHasDarkBackground(in, out *os.File) bool {
-	_ = term.IsTerminal
+	if !term.IsTerminal(in.Fd()) {
+		return true
+	}
 	return lipgloss.HasDarkBackground(in, out)
 }
 
