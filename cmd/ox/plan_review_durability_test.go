@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/fsnotify/fsnotify"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,6 +15,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/fsnotify/fsnotify"
 
 	"github.com/sageox/ox/internal/plan"
 )

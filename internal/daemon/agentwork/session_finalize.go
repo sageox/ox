@@ -185,6 +185,10 @@ type SessionFinalizeHandler struct {
 	// second test's flush handshake outlives the budget, recovery defers, and
 	// the test fails on a timing accident rather than a real regression.
 	captureLockWait time.Duration
+	// staleRecoveryWarned remembers sessions whose "stale recording recovery
+	// deferred" warning was already logged, so a permanently corrupt recording
+	// state warns once per daemon lifetime instead of once per scan.
+	staleRecoveryWarned sync.Map
 	// afterStageTestHook is called right after `git add` stages the session
 	// path, before the commit. Nil in production; tests use it to perturb the
 	// worktree between staging and commit and confirm the commit still
@@ -581,7 +585,7 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 					return os.Remove(recPath)
 				})
 				if recoverErr != nil {
-					h.logger.Warn("stale recording recovery deferred", "session", name, "err", recoverErr)
+					h.logStaleRecoveryDeferred(name, recoverErr)
 					continue // preserve raw and the cursor so a later pass can retry
 				}
 			} else if err := os.Remove(recPath); err != nil {
@@ -1163,6 +1167,13 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 	}
 
 	payload.omitTraces = false
+
+	// Nothing below can reach git while the ledger index holds unmerged entries,
+	// but LFS upload comes first. Refuse before it: a wedged ledger once caused
+	// ~1,000 pointless LFS re-uploads of the same session blobs in 29 hours.
+	if err := h.checkLedgerResolved(payload.LedgerPath); err != nil {
+		return err
+	}
 
 	if payload.UploadOnly {
 		return h.processUploadOnly(payload)
@@ -2009,6 +2020,34 @@ func (h *SessionFinalizeHandler) stageSessionInLedger(payload *SessionFinalizePa
 	// update payload to point at the staged location
 	payload.SessionDir = destDir
 	return cacheDir, nil
+}
+
+// logStaleRecoveryDeferred warns the first time a session's stale-recording
+// recovery is deferred and logs repeats at debug.
+func (h *SessionFinalizeHandler) logStaleRecoveryDeferred(name string, err error) {
+	if _, seen := h.staleRecoveryWarned.LoadOrStore(name, struct{}{}); seen {
+		h.logger.Debug("stale recording recovery deferred", "session", name, "err", err)
+		return
+	}
+	h.logger.Warn("stale recording recovery deferred", "session", name, "err", err)
+}
+
+// checkLedgerResolved returns ErrLedgerUnresolved when the ledger index holds
+// unmerged entries. A probe failure is not treated as a wedge (fail open): the
+// commit transaction re-checks and is the authority.
+func (h *SessionFinalizeHandler) checkLedgerResolved(ledgerPath string) error {
+	if h.skipGit || ledgerPath == "" {
+		return nil
+	}
+	unmerged, err := gitutil.HasUnmergedEntries(context.Background(), ledgerPath)
+	if err != nil {
+		h.logger.Debug("ledger conflict probe failed, continuing", "ledger", ledgerPath, "err", err)
+		return nil
+	}
+	if unmerged {
+		return fmt.Errorf("finalize blocked: %w", ErrLedgerUnresolved)
+	}
+	return nil
 }
 
 // processUploadOnly handles sessions that are fully finalized in the cache

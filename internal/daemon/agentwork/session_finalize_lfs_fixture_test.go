@@ -20,6 +20,7 @@ import (
 type localFinalizeLFS struct {
 	batchUnavailable atomic.Bool
 	blobUnavailable  atomic.Bool
+	batchCalls       atomic.Int32
 }
 
 // enableLocalFinalizeLFS keeps git-behavior fixtures on the real publication
@@ -36,6 +37,7 @@ func enableLocalFinalizeLFS(t *testing.T, handler *SessionFinalizeHandler, ledge
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/objects/batch"):
+			service.batchCalls.Add(1)
 			if service.batchUnavailable.Load() {
 				http.Error(w, "LFS batch unavailable", http.StatusServiceUnavailable)
 				return
