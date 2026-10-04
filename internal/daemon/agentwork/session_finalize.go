@@ -2893,26 +2893,36 @@ func recoverRawFromSessionFile(logger *slog.Logger, recPath, sessionDir, rawPath
 			}
 		}
 		if repoRoot == "" {
+			if hasRaw && state.WatchMode != "tail" {
+				// nothing proves this capture foreign, and it cannot be
+				// rechecked: finalize what the hooks wrote, as before
+				logger.Warn("legacy Claude hook capture has no repository to recheck; finalizing it", "session_dir", sessionDir)
+				stampCarrierBeforeReclaim(logger, sessionDir, rawPath, &state)
+				return hasRaw, nil
+			}
 			return false, fmt.Errorf("cannot establish repository for legacy Claude recording")
 		}
+	}
+	if state.AdapterName == "claude-code" && hasRaw && state.WatchMode != "tail" {
+		// A dead hook-mode recording. Every batch in raw.jsonl was ownership-
+		// checked as a hook appended it, so the captured file is finalized
+		// unless the native source PROVES the session crossed repositories.
+		// A source that cannot be rechecked (transcript pruned, worktree
+		// archived, a visited directory deleted) is not proof: refusing to
+		// finalize on that would strand validated data behind a retry loop
+		// that can never succeed.
+		if err := recheckClaudeHookSource(&state, repoRoot, sessionDir); errors.Is(err, claudesource.ErrUntrustedSource) {
+			return false, fmt.Errorf("validate Claude hook source before finalization: %w", err)
+		} else if err != nil {
+			logger.Warn("native Claude source not rechecked; finalizing the validated capture", "session_dir", sessionDir, "err", err)
+		}
+		stampCarrierBeforeReclaim(logger, sessionDir, rawPath, &state)
+		return hasRaw, nil
 	}
 	if state.AdapterName == "claude-code" && state.SessionFile == "" && state.WatchMode != "tail" {
 		// No discovered source does not prove the session was empty. Keep the
 		// marker so later recovery can retry without losing the native identity.
 		return false, fmt.Errorf("cannot verify undiscovered Claude hook source before finalization")
-	}
-	if state.AdapterName == "claude-code" && hasRaw && state.WatchMode != "tail" {
-		// A dead hook-mode session can have a safe captured prefix plus later
-		// foreign turns its hooks never saw. Validate before releasing its marker.
-		snapshot, snapshotErr := claudesource.Snapshot(state.SessionFile)
-		if snapshotErr != nil {
-			return false, fmt.Errorf("stat Claude hook source before finalization: %w", snapshotErr)
-		}
-		if err := validateClaudeRecoverySource(&state, repoRoot, sessionDir, snapshot); err != nil {
-			return false, fmt.Errorf("validate Claude hook source before finalization: %w", err)
-		}
-		stampCarrierBeforeReclaim(logger, sessionDir, rawPath, &state)
-		return hasRaw, nil
 	}
 	adapter, err := adapters.GetAdapter(state.AdapterName)
 	if err != nil {
@@ -3096,8 +3106,22 @@ func recoverRawFromSessionFile(logger *slog.Logger, recPath, sessionDir, rawPath
 	return written > 0, nil
 }
 
+// recheckClaudeHookSource re-verifies a dead hook-mode recording's native
+// source. Only an error wrapping claudesource.ErrUntrustedSource is proof of a
+// foreign turn; every other error means the source could not be checked.
+func recheckClaudeHookSource(state *session.RecordingState, repoRoot, sessionDir string) error {
+	if state.SessionFile == "" {
+		return errors.New("recording does not name a native source")
+	}
+	snapshot, err := claudesource.Snapshot(state.SessionFile)
+	if err != nil {
+		return fmt.Errorf("stat Claude hook source: %w", err)
+	}
+	return validateClaudeRecoverySource(state, repoRoot, sessionDir, snapshot)
+}
+
 func validateClaudeRecoverySource(state *session.RecordingState, repoRoot, sessionDir string, snapshot os.FileInfo) error {
-	err := claudesource.ValidateRead(state.SessionFile, repoRoot, state.AgentSessionID, 0, true, snapshot)
+	err := claudesource.ValidateRecorded(state.SessionFile, repoRoot, state.AgentSessionID, state.StartOffset, snapshot)
 	if errors.Is(err, claudesource.ErrUntrustedSource) {
 		state.SourceRejected = true
 		state.SessionPath = sessionDir

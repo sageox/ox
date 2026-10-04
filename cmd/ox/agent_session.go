@@ -550,7 +550,7 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 	// Do not silently upload the captured prefix of a session already known
 	// to span repositories. Keep both caches for a deliberate recovery choice.
 	if state.SourceRejected {
-		return fmt.Errorf("claude source has untrusted repository ownership; recording preserved for manual review")
+		return fmt.Errorf("claude source has untrusted repository ownership; recording preserved for manual review\nrun 'ox doctor' to see how to release or discard it")
 	}
 
 	// process session: read, redact secrets, extract events, save
@@ -1029,9 +1029,11 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 		if repoRoot == "" {
 			repoRoot = projectRoot
 		}
-		// A native turn can be appended while Read runs. Check the whole
-		// source before using any returned entries, even when it read none.
-		if err := claudesource.ValidateRead(state.SessionFile, repoRoot, state.AgentSessionID, 0, true, sourceSnapshot); err != nil {
+		// A native turn can be appended while Read runs. Check everything this
+		// recording could import before using any returned entries, even when
+		// it read none. Turns from before the recording began are filtered out
+		// below and never published, so they do not decide ownership.
+		if err := claudesource.ValidateRecorded(state.SessionFile, repoRoot, state.AgentSessionID, state.StartOffset, sourceSnapshot); err != nil {
 			return nil, fmt.Errorf("claude source no longer belongs to repository: %w", err)
 		}
 	}

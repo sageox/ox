@@ -28,14 +28,14 @@ func TestValidateWatcherSource_RejectsAppendedForeignTurn(t *testing.T) {
 		t.Fatal(err)
 	}
 	aw := &activeWatcher{adapterName: "claude-code", projectRoot: repo, sessionFile: path}
-	if err := validateWatcherSource(aw); err != nil {
+	if err := validateWatcherSource(aw, 0); err != nil {
 		t.Fatalf("initial source: %v", err)
 	}
 	foreign := fmt.Sprintf("{\"type\":\"assistant\",\"sessionId\":%q,\"cwd\":%q}\n", id, filepath.Dir(repo))
 	if err := os.WriteFile(path, []byte(first+foreign), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := validateWatcherSource(aw); err == nil {
+	if err := validateWatcherSource(aw, 0); err == nil {
 		t.Fatal("watcher accepted source after foreign turn")
 	}
 }
@@ -144,4 +144,71 @@ func TestClaudeWatcherPreservesCursorAcrossOwnershipChanges(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A source that cannot be checked yet is not a source that crossed repositories.
+// The watcher must keep its cursor and look again, not end capture until the
+// daemon's slow restart pass.
+func TestClaudeWatcherKeepsPollingAfterRetryableValidationError(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: live capture checks ownership on a polling interval")
+	}
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("OX_XDG_DISABLE", "")
+	repo, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	const repoID = "repo_watcher_retry"
+	const endpoint = "https://test.sageox.ai"
+	require.NoError(t, config.SaveProjectConfig(repo, &config.ProjectConfig{RepoID: repoID, Endpoint: endpoint}))
+	cache := filepath.Join(paths.LedgerSessionCacheBase(repoID, endpoint), "sessions", "retryable")
+	require.NoError(t, os.MkdirAll(cache, 0o700))
+
+	const nativeID = "77b16b24-5b7d-4598-aacf-4c9afeb4b5ca"
+	first := fmt.Sprintf("{\"type\":\"user\",\"sessionId\":%q,\"cwd\":%q}\n", nativeID, repo)
+	// a path component that is a regular file cannot be resolved, which is
+	// neither inside nor outside the repo: the turn is uncheckable for now
+	blocker := filepath.Join(repo, "node")
+	require.NoError(t, os.WriteFile(blocker, []byte("not a directory yet"), 0o600))
+	second := fmt.Sprintf("{\"type\":\"assistant\",\"sessionId\":%q,\"cwd\":%q}\n", nativeID, filepath.Join(blocker, "pkg"))
+	mgr := newTestWatcherManager(t)
+	source := filepath.Join(mgr.homeDir(), ".claude", "projects", "owned", nativeID+".jsonl")
+	require.NoError(t, os.MkdirAll(filepath.Dir(source), 0o755))
+	require.NoError(t, os.WriteFile(source, []byte(first), 0o600))
+	state := session.RecordingState{
+		AgentID: "OxWatcherRetry", WorkspacePath: repo, SessionPath: cache,
+		AdapterName: "claude-code", SessionFile: source, WatchMode: "tail",
+		SourceOffset: int64(len(first)), ParentPID: os.Getpid(),
+	}
+	writeRecordingState(t, filepath.Join(cache, recordingMarker), state)
+	adapters.Register(&testAdapter{name: "claude-code"})
+	t.Cleanup(func() {
+		mgr.StopAll()
+		adapters.Unregister("claude-code")
+	})
+	raw := filepath.Join(cache, "raw.jsonl")
+	require.NoError(t, mgr.StartWatch("retryable", source, "claude-code", filepath.Dir(cache), cache))
+	require.Eventually(t, func() bool { _, err := os.Stat(raw); return err == nil }, time.Second, 10*time.Millisecond)
+
+	f, err := os.OpenFile(source, os.O_APPEND|os.O_WRONLY, 0)
+	require.NoError(t, err)
+	_, err = f.WriteString(second)
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+	time.Sleep(pollInterval + 500*time.Millisecond) // at least one poll sees the uncheckable turn
+	deferred, err := session.LoadRecordingStateForAgent(repo, state.AgentID)
+	require.NoError(t, err)
+	require.NotNil(t, deferred)
+	assert.False(t, deferred.SourceRejected, "an uncheckable turn is not proof of a foreign one")
+	assert.Equal(t, int64(len(first)), deferred.SourceOffset, "the cursor must wait at the uncheckable turn")
+
+	// the directory becomes checkable; the same watcher must pick the turn up
+	require.NoError(t, os.Remove(blocker))
+	require.NoError(t, os.MkdirAll(blocker, 0o755))
+	require.Eventually(t, func() bool {
+		updated, err := session.LoadRecordingStateForAgent(repo, state.AgentID)
+		return err == nil && updated != nil && updated.SourceOffset == int64(len(first)+len(second))
+	}, 3*pollInterval, 50*time.Millisecond, "capture must resume once the turn can be checked")
+	mgr.StopAll()
+	assert.Equal(t, 1, countRawJSONLEntries(t, raw))
 }

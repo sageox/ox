@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -39,35 +38,79 @@ func TestRecoverUndiscoveredClaudeHookSourcePreservesMarker(t *testing.T) {
 	}
 }
 
-func TestRecoverClaudeHookMissingNativeFileKeepsMarker(t *testing.T) {
-	project := t.TempDir()
-	sessionDir := t.TempDir()
-	recPath := filepath.Join(sessionDir, recordingMarker)
-	rawPath := filepath.Join(sessionDir, artifactRaw)
-	// A header alone is not a captured prefix; only substantive turns exercise
-	// the hook-mode final validation before marker cleanup.
-	header := []byte(`{"type":"header","metadata":{}}` + "\n" + `{"type":"user","content":"captured prefix"}` + "\n")
-	if err := os.WriteFile(rawPath, header, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	writeRecordingState(t, recPath, session.RecordingState{
-		AgentID: "OxMissingNative", AdapterName: "claude-code", WatchMode: "hook",
-		WorkspacePath: project, SessionFile: filepath.Join(t.TempDir(), "missing.jsonl"),
-	})
-	before, err := os.ReadFile(recPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if recovered, err := recoverRawFromSessionFile(slog.Default(), recPath, sessionDir, rawPath); recovered || err == nil || !strings.Contains(err.Error(), "stat Claude hook source before finalization") {
-		t.Fatalf("missing hook source must defer after inspecting captured prefix, recovered=%v err=%v", recovered, err)
-	}
-	marker, err := os.ReadFile(recPath)
-	if err != nil || !bytes.Equal(marker, before) {
-		t.Fatalf("native source loss must not clear the recovery marker: %v", err)
-	}
-	got, err := os.ReadFile(rawPath)
-	if err != nil || !bytes.Equal(got, header) {
-		t.Fatalf("native source loss must preserve captured prefix: %v", err)
+// A hook capture was ownership-checked batch by batch as it was appended, so a
+// dead recording whose native source can no longer be rechecked must still
+// finalize: the check can never succeed again, and deferring it forever strands
+// a validated transcript behind a retry loop.
+func TestRecoverClaudeHookUncheckableNativeSourceFinalizesValidatedCapture(t *testing.T) {
+	const nativeID = "77b16b24-5b7d-4598-aacf-4c9afeb4b5ca"
+	for _, tt := range []struct {
+		name  string
+		setup func(t *testing.T, project string) string // returns the native source path recorded in the marker
+	}{
+		{"transcript pruned", func(t *testing.T, project string) string {
+			return filepath.Join(t.TempDir(), "missing.jsonl")
+		}},
+		{"visited directory deleted", func(t *testing.T, project string) string {
+			gone := filepath.Join(project, "build")
+			if err := os.MkdirAll(gone, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			source := filepath.Join(t.TempDir(), nativeID+".jsonl")
+			turn := fmt.Sprintf("{\"type\":\"user\",\"sessionId\":%q,\"cwd\":%q}\n", nativeID, gone)
+			if err := os.WriteFile(source, []byte(turn), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.RemoveAll(gone); err != nil {
+				t.Fatal(err)
+			}
+			return source
+		}},
+		{"workspace archived", func(t *testing.T, project string) string {
+			source := filepath.Join(t.TempDir(), nativeID+".jsonl")
+			turn := fmt.Sprintf("{\"type\":\"user\",\"sessionId\":%q,\"cwd\":%q}\n", nativeID, project)
+			if err := os.WriteFile(source, []byte(turn), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return source
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			project, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			source := tt.setup(t, project)
+			if tt.name == "workspace archived" {
+				// the workspace directory is gone by the time the daemon looks
+				if err := os.RemoveAll(project); err != nil {
+					t.Fatal(err)
+				}
+			}
+			sessionDir := t.TempDir()
+			recPath := filepath.Join(sessionDir, recordingMarker)
+			rawPath := filepath.Join(sessionDir, artifactRaw)
+			captured := []byte(`{"type":"header","metadata":{}}` + "\n" + `{"type":"user","content":"captured prefix"}` + "\n")
+			if err := os.WriteFile(rawPath, captured, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			writeRecordingState(t, recPath, session.RecordingState{
+				AgentID: "OxUncheckable", AgentSessionID: nativeID, AdapterName: "claude-code", WatchMode: "hook",
+				WorkspacePath: project, SessionFile: source,
+			})
+			recovered, err := recoverRawFromSessionFile(slog.Default(), recPath, sessionDir, rawPath)
+			if err != nil || !recovered {
+				t.Fatalf("a validated capture must finalize when its native source cannot be rechecked, recovered=%v err=%v", recovered, err)
+			}
+			got, err := os.ReadFile(rawPath)
+			if err != nil || !bytes.HasPrefix(got, captured) {
+				t.Fatalf("finalizing must keep the captured prefix intact: %v", err)
+			}
+			marker, err := os.ReadFile(recPath)
+			if err != nil || bytes.Contains(marker, []byte("source_rejected")) {
+				t.Fatalf("an uncheckable source is not proof of a foreign turn and must not quarantine: %v", err)
+			}
+		})
 	}
 }
 

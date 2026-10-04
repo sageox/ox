@@ -385,7 +385,7 @@ func (m *SessionWatcherManager) runWatcher(
 		}
 		// A restarted watcher may inherit an unverified cached path/offset. Check
 		// its entire source once before trusting only appended ranges in this run.
-		if err := validateWatcherSource(aw); err != nil {
+		if err := validateWatcherSource(aw, state.StartOffset); err != nil {
 			m.rejectWatcherSource(aw, err)
 			return nil
 		}
@@ -522,9 +522,14 @@ func (m *SessionWatcherManager) rejectWatcherSource(aw *activeWatcher, err error
 	}
 }
 
-func validateWatcherSource(aw *activeWatcher) error {
+// validateWatcherSource checks what the recording can have captured. Turns
+// before startOffset predate the recording and are never imported.
+func validateWatcherSource(aw *activeWatcher, startOffset int64) error {
 	if aw.adapterName != "claude-code" {
 		return nil
+	}
+	if startOffset > 0 {
+		return claudesource.ValidateFrom(aw.sessionFile, aw.projectRoot, "", startOffset)
 	}
 	return claudesource.Validate(aw.sessionFile, aw.projectRoot, "")
 }
@@ -553,6 +558,7 @@ func (m *SessionWatcherManager) pollSession(
 	offset := startCursor
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
+	var lastDeferred string // dedupes the log of a source that stays uncheckable
 
 	for {
 		select {
@@ -585,9 +591,21 @@ func (m *SessionWatcherManager) pollSession(
 			continue
 		}
 		if err := validateWatcherSourceFrom(aw, offset, sourceSnapshot); err != nil {
-			m.rejectWatcherSource(aw, err)
-			return
+			if errors.Is(err, claudesource.ErrUntrustedSource) {
+				m.rejectWatcherSource(aw, err)
+				return
+			}
+			// Anything else (the source was swapped mid-read, a directory
+			// cannot be checked yet) is retryable: keep the cursor where it is
+			// and look again next tick instead of ending capture until the
+			// daemon's slow restart pass.
+			if msg := err.Error(); msg != lastDeferred {
+				lastDeferred = msg
+				m.rejectWatcherSource(aw, err)
+			}
+			continue
 		}
+		lastDeferred = ""
 
 		// Check the cursor BEFORE writing. An adapter that returns rows without
 		// advancing would otherwise have those rows appended to raw.jsonl on

@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -110,23 +111,40 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 		}
 
 		var sourceSnapshot os.FileInfo
+		// A native transcript or workspace that no longer exists cannot be
+		// drained or rechecked, but raw.jsonl was ownership-checked batch by
+		// batch as it was written. Finalize that capture rather than fail
+		// every stop and recover on a source that will never come back.
+		skipDrain := false
 		if state.AdapterName == "claude-code" {
 			var snapshotErr error
 			sourceSnapshot, snapshotErr = claudesource.Snapshot(state.SessionFile)
-			if snapshotErr != nil {
+			if errors.Is(snapshotErr, fs.ErrNotExist) {
+				slog.Warn("finalize: native session is gone; finalizing the captured recording", "source", state.SessionFile)
+				skipDrain = true
+			} else if snapshotErr != nil {
 				return nil, fmt.Errorf("stat native session before final drain: %w", snapshotErr)
 			}
 		}
-		entries, newOffset, readErr := reader.ReadFromOffset(state.SessionFile, readOffset)
-		if readErr != nil {
-			return nil, fmt.Errorf("read final session entries: %w", readErr)
+		var entries []adapters.RawEntry
+		var newOffset int64
+		if !skipDrain {
+			var readErr error
+			entries, newOffset, readErr = reader.ReadFromOffset(state.SessionFile, readOffset)
+			if readErr != nil {
+				return nil, fmt.Errorf("read final session entries: %w", readErr)
+			}
 		}
-		if state.AdapterName == "claude-code" {
+		if state.AdapterName == "claude-code" && !skipDrain {
 			repoRoot := state.WorkspacePath
 			if repoRoot == "" {
 				repoRoot = projectRoot
 			}
-			if err := claudesource.ValidateRead(state.SessionFile, repoRoot, state.AgentSessionID, 0, true, sourceSnapshot); err != nil {
+			if err := claudesource.ValidateRecorded(state.SessionFile, repoRoot, state.AgentSessionID, state.StartOffset, sourceSnapshot); errors.Is(err, fs.ErrNotExist) {
+				// the workspace itself vanished mid-check: nothing read can be vouched for
+				slog.Warn("finalize: native session cannot be rechecked; finalizing the captured recording", "source", state.SessionFile, "error", err)
+				entries = nil
+			} else if err != nil {
 				return nil, fmt.Errorf("claude source changed repository during final drain: %w", err)
 			}
 		}

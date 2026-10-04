@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -50,6 +51,15 @@ func ValidateRead(path, repoRoot, sessionID string, offset int64, full bool, bef
 		return fmt.Errorf("claude source changed while reading; retry without advancing cursor")
 	}
 	return nil
+}
+
+// ValidateRecorded checks the part of a native file a recording can have
+// captured: everything from the offset where the recording began. Turns before
+// it were never imported, so a directory visited then says nothing about this
+// recording. A recording that began at the top of the file also requires the
+// file to carry repository metadata at all.
+func ValidateRecorded(path, repoRoot, sessionID string, startOffset int64, before os.FileInfo) error {
+	return ValidateRead(path, repoRoot, sessionID, startOffset, startOffset <= 0, before)
 }
 
 // ValidateFrom checks only records read since offset before they are written to
@@ -114,14 +124,17 @@ func validate(path, repoRoot, sessionID string, offset int64, requireInitialIden
 		if cwd != "" {
 			valid, checked := checkedCwd[cwd]
 			if !checked {
-				// A deleted cwd may have been an ordinary subdirectory or a
-				// separate worktree. Its absence proves neither: defer rather
-				// than permanently quarantine an uncheckable filesystem state.
-				if _, err := filepath.EvalSymlinks(cwd); err != nil {
+				// A directory the session visited may be gone by now (a build
+				// directory, an archived workspace). Where it stood is still
+				// decidable, so it is judged by its resolved location; only a
+				// path that cannot be resolved at all defers, rather than
+				// permanently quarantining an uncheckable filesystem state.
+				resolved, err := resolveVanished(cwd)
+				if err != nil {
 					ownershipErr = fmt.Errorf("cannot verify Claude source cwd: %w", err)
 					return nil, nil
 				}
-				valid = withinRepo(repoRoot, cwd)
+				valid = withinRepo(repoRoot, resolved)
 				checkedCwd[cwd] = valid
 			}
 			if !valid {
@@ -147,15 +160,42 @@ func validate(path, repoRoot, sessionID string, offset int64, requireInitialIden
 	return nil
 }
 
+// resolveVanished resolves symlinks in the longest prefix of path that still
+// exists and re-attaches the part that does not, so a deleted directory is
+// placed where it stood rather than left unknown.
+func resolveVanished(path string) (string, error) {
+	if !filepath.IsAbs(path) {
+		return path, nil // withinRepo refuses relative paths
+	}
+	var vanished []string
+	for dir := filepath.Clean(path); ; {
+		resolved, err := filepath.EvalSymlinks(dir)
+		if err == nil {
+			for i := len(vanished) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, vanished[i])
+			}
+			return resolved, nil
+		}
+		parent := filepath.Dir(dir)
+		if !errors.Is(err, fs.ErrNotExist) || parent == dir {
+			return "", err
+		}
+		if _, statErr := os.Lstat(dir); statErr == nil {
+			// the entry exists but leads nowhere: a symlink whose target is gone
+			// says nothing about where the session actually stood
+			return "", err
+		}
+		vanished = append(vanished, filepath.Base(dir))
+		dir = parent
+	}
+}
+
+// withinRepo reports whether cwd, already symlink-resolved, lies inside
+// repoRoot and outside any nested repository.
 func withinRepo(repoRoot, cwd string) bool {
 	if !filepath.IsAbs(cwd) {
 		return false
 	}
-	resolved, err := filepath.EvalSymlinks(cwd)
-	if err != nil {
-		return false // a deleted directory or symlink cannot prove its former ownership
-	}
-	cwd = resolved
 	rel, err := filepath.Rel(repoRoot, cwd)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
 		return false
@@ -164,9 +204,16 @@ func withinRepo(repoRoot, cwd string) bool {
 	// containment in the parent's filesystem tree does not imply ownership.
 	for dir := cwd; dir != repoRoot; {
 		for _, marker := range []string{".git", filepath.Join(".sageox", "config.json"), filepath.Join(".sageox", "config.yaml")} {
-			if _, err := os.Lstat(filepath.Join(dir, marker)); err == nil || !os.IsNotExist(err) {
-				return false
+			info, err := os.Lstat(filepath.Join(dir, marker))
+			if err != nil && os.IsNotExist(err) {
+				continue
 			}
+			// a submodule is checked out inside this repo and recorded in its
+			// history; its .git file points back into this repo's own git dir
+			if err == nil && marker == ".git" && info.Mode().IsRegular() && isOwnSubmodule(repoRoot, dir) {
+				continue
+			}
+			return false
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
@@ -175,4 +222,49 @@ func withinRepo(repoRoot, cwd string) bool {
 		dir = parent
 	}
 	return true
+}
+
+// isOwnSubmodule reports whether dir's .git file is a gitlink into repoRoot's
+// own modules directory. A linked worktree or a separate clone also has a .git
+// file, but its git dir lives elsewhere, so it stays foreign.
+func isOwnSubmodule(repoRoot, dir string) bool {
+	gitdir, ok := readGitlink(filepath.Join(dir, ".git"))
+	if !ok {
+		return false
+	}
+	gitdir, err := filepath.EvalSymlinks(gitdir)
+	if err != nil {
+		return false
+	}
+	repoGitDir := filepath.Join(repoRoot, ".git")
+	if info, err := os.Lstat(repoGitDir); err == nil && info.Mode().IsRegular() {
+		// repoRoot is itself a linked worktree: its submodules live under
+		// the git dir its own .git file names
+		if repoGitDir, ok = readGitlink(repoGitDir); !ok {
+			return false
+		}
+	}
+	repoGitDir, err = filepath.EvalSymlinks(repoGitDir)
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(filepath.Join(repoGitDir, "modules"), gitdir)
+	return err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
+}
+
+// readGitlink returns the absolute git dir a ".git" file points at.
+func readGitlink(path string) (string, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil || len(data) > 4096 {
+		return "", false
+	}
+	target, ok := strings.CutPrefix(strings.TrimSpace(string(data)), "gitdir:")
+	if !ok {
+		return "", false
+	}
+	target = strings.TrimSpace(target)
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(filepath.Dir(path), target)
+	}
+	return target, true
 }
