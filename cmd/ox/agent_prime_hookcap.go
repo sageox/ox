@@ -54,6 +54,7 @@ var hookCapSectionPriority = []string{
 	// team skill that was published and never arrived. It is emitted only when
 	// something is held, so ranking it high costs a healthy session nothing.
 	"team-knowledge/team-skills-held",
+	"team-skills-held", // the same report, top-level on a compact re-prime
 	"team-knowledge/memory",
 	"team-knowledge/team-instructions",
 	"team-knowledge/docs",
@@ -101,6 +102,7 @@ var hookCapDeferredHints = map[string]string{
 	"team-knowledge/memory":            "team memory (MEMORY.md)",
 	"team-knowledge/team-rules":        "always-visible team rules",
 	"team-knowledge/team-skills-held":  "team skills published but held back — read before assuming a team skill is available",
+	"team-skills-held":                 "team skills published but held back — read before assuming a team skill is available",
 }
 
 // hookCapSplitParents are wrappers whose children are trimmed individually.

@@ -324,3 +324,26 @@ func assertCompactRePrime(t *testing.T, xml, fullXML string) {
 			len(xml), len(fullXML), minReductionFactor)
 	}
 }
+
+// TestCompactReprime_RendersNewlyWithheldTeamSkills: a team publishes a skill after
+// the coworker's first prime and a routine re-prime reconciles it. The reconcile
+// records the revision, so this is the only prime that will ever report it.
+// Without it, the compact path drops the report and the coworker never learns the
+// skill was held back.
+func TestCompactReprime_RendersNewlyWithheldTeamSkills(t *testing.T) {
+	out := fullyLoadedPrimeFixture()
+	out.PrimeCallCount = 2
+	out.CompactReprime = true
+	out.WithheldTeamSkills = []prime.WithheldSkill{{Name: "deploy-helper", Reason: "bundled script awaits approval"}}
+
+	xml := renderXML(t, out)
+
+	if got := strings.Count(xml, "<team-skills-held"); got != 1 || !strings.Contains(xml, "deploy-helper") {
+		t.Errorf("compact re-prime must report the held skill exactly once; found %d report(s)", got)
+	}
+
+	out.CompactReprime = false
+	if got := strings.Count(renderXML(t, out), "<team-skills-held"); got != 1 {
+		t.Errorf("a full prime must report the held skill exactly once; found %d", got)
+	}
+}

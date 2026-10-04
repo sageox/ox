@@ -543,6 +543,13 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 
 	} // !compact — end of the static + slow-changing tier (see top of function)
 
+	// A held-back skill is reported once: the reconcile that found it recorded its
+	// revision, so no later prime will see it again. A compact re-prime skips team
+	// knowledge, so it must carry the report here or the coworker never learns of it.
+	if compact {
+		emitWithheldTeamSkills(&sb, bk, output.WithheldTeamSkills)
+	}
+
 	// ════════════════════════════════════════════════════════════
 	// CACHE BOUNDARY — everything below here is unique per session.
 	// Adding content above this line? It MUST be identical across
