@@ -897,7 +897,12 @@ func (m *Manager) clearFailures(item *WorkItem) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.retries, item.DedupKey)
-	delete(m.pausedTypes, item.Type)
+	// a success from an item already in flight when the type was paused proves
+	// nothing about the ledger (several ProcessResult paths return nil before
+	// touching git), so an unexpired pause stays; ForceDetect lifts it explicitly
+	if p := m.pausedTypes[item.Type]; p != nil && !m.now().Before(p.until) {
+		delete(m.pausedTypes, item.Type)
+	}
 }
 
 // clearSuppression lifts every park and pause. Failure counts stay, so an item

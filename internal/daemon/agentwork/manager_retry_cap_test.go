@@ -160,3 +160,29 @@ func TestManager_LedgerUnresolvedPausesTypeWithoutRunningHandler(t *testing.T) {
 	runDetectCycle(t, m)
 	assert.Equal(t, 3, int(h.processCalls.Load()), "both sessions resume")
 }
+
+// A success from an item that was already running when its work type got
+// paused must not lift the pause early. Failure prevented: one in-flight
+// success reopens the ledger-wedge LFS re-upload loop for every session.
+func TestManager_InFlightSuccessDoesNotClearActivePause(t *testing.T) {
+	m, _ := newTestManager(NewMockRunner(true), nil)
+	now := time.Now()
+	m.now = func() time.Time { return now }
+
+	item := &WorkItem{Type: "session-finalize", DedupKey: "session-finalize:a"}
+	m.pauseType(item, now)
+	if !m.isTypePaused(item.Type, now) {
+		t.Fatal("precondition: type should be paused")
+	}
+
+	m.clearFailures(&WorkItem{Type: "session-finalize", DedupKey: "session-finalize:b"})
+	if !m.isTypePaused(item.Type, now) {
+		t.Fatal("in-flight success cleared an unexpired pause")
+	}
+
+	now = now.Add(2 * time.Hour)
+	m.clearFailures(&WorkItem{Type: "session-finalize", DedupKey: "session-finalize:c"})
+	if m.isTypePaused(item.Type, now) {
+		t.Fatal("expired pause should be cleared on success")
+	}
+}
