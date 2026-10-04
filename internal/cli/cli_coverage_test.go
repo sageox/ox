@@ -248,6 +248,40 @@ func TestTrackCommandCompletion_NestedCommand(t *testing.T) {
 	assert.NotPanics(t, func() { ctx.TrackCommandCompletion(primeCmd) })
 }
 
+// Failure prevented: `ox plan viz lint` and `ox viz lint` are recorded as the
+// same command, and every `ox agent ...` verb as just "agent".
+func TestTrackCommandCompletion_RecordsTheFullCommandPath(t *testing.T) {
+	root := &cobra.Command{Use: "ox"}
+	plan := &cobra.Command{Use: "plan"}
+	planViz := &cobra.Command{Use: "viz"}
+	planVizLint := &cobra.Command{Use: "lint"}
+	viz := &cobra.Command{Use: "viz"}
+	vizLint := &cobra.Command{Use: "lint"}
+	agent := &cobra.Command{Use: "agent"}
+	root.AddCommand(plan, viz, agent)
+	plan.AddCommand(planViz)
+	planViz.AddCommand(planVizLint)
+	viz.AddCommand(vizLint)
+
+	client := telemetry.NewClient("test-session", telemetry.WithEnabled(true))
+	track := func(cmd *cobra.Command, dispatchedPath string) {
+		ctx := &Context{Config: &config.Config{}, TelemetryClient: client, CommandStartTime: time.Now()}
+		if dispatchedPath != "" {
+			ctx.SetCommandPath(dispatchedPath)
+		}
+		ctx.TrackCommandCompletion(cmd)
+	}
+	track(planVizLint, "")
+	track(vizLint, "")
+	track(agent, "agent session stop")
+
+	assert.Equal(t, map[string]int{
+		"plan viz lint":      1,
+		"viz lint":           1,
+		"agent session stop": 1,
+	}, client.GetStats().CommandCounts)
+}
+
 func TestTrackCommandError_WithTelemetry(t *testing.T) {
 	client := telemetry.NewClient("test-session", telemetry.WithEnabled(true))
 

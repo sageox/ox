@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sageox/ox/internal/gitutil"
 )
 
 // initTestRepo creates a fresh git repo in dir and returns its path.
@@ -148,7 +150,7 @@ func TestResolve_AcceptTheirsTier(t *testing.T) {
 	// commit being replayed) is feature's content. ResolveRebaseAcceptTheirs
 	// picks that side. We just verify the file is no longer in conflict.
 	got := readFile(t, repo, "data/feed.json")
-	if hasConflictMarkers([]byte(got)) {
+	if gitutil.HasConflictMarkersBytes([]byte(got)) {
 		t.Errorf("expected resolved content, got conflict markers: %s", got)
 	}
 }
@@ -235,25 +237,29 @@ func TestTryUnionTier_LeavesMarkedFiles(t *testing.T) {
 	}
 }
 
-func TestHasConflictMarkers(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name string
-		in   string
-		want bool
-	}{
-		{"empty", "", false},
-		{"plain", "hello\n", false},
-		{"marker at start of line", "a\n<<<<<<< HEAD\nb\n", true},
-		{"marker mid-line is not a marker", "echo \"<<<<<<< embedded\"\n", false},
-		{"only at line start", "<<<<<<< X\n", true},
+// TestResolve_OrphanedMarkerTailIsNotStagedAsResolved checks that a file which
+// lost its opening marker but kept the "=======" and ">>>>>>>" tail stays unmerged.
+// Failure prevented: the union tier stages the tail and the rebase commits it.
+func TestResolve_OrphanedMarkerTailIsNotStagedAsResolved(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: builds a real halted rebase")
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := hasConflictMarkers([]byte(tc.in)); got != tc.want {
-				t.Errorf("hasConflictMarkers(%q) = %v, want %v", tc.in, got, tc.want)
-			}
-		})
+	t.Parallel()
+	const path = "sessions/example/meta.json"
+	repo := makeRebaseConflict(t, path, `{"summary_attempts": 2}`+"\n", `{"summary_attempts": 3}`+"\n")
+	writeFile(t, repo, path, "{\n  \"stopped_at\": \"2026-09-22T16:59:31.860617Z\",\n=======\n  \"summary_attempts\": 3,\n>>>>>>> Stashed changes\n}\n")
+
+	// no safe prefixes and no LLM binary, so only the union tier can stage it
+	ok, err := New(Options{}).Resolve(context.Background(), repo)
+	if ok || !errors.Is(err, ErrLLMUnavailable) {
+		t.Fatalf("Resolve = (%v, %v), want the tail left unresolved", ok, err)
+	}
+	conflicts, err := listConflictedPaths(context.Background(), repo)
+	if err != nil {
+		t.Fatalf("list conflicts: %v", err)
+	}
+	if len(conflicts) != 1 || conflicts[0] != path {
+		t.Errorf("expected %s still unmerged, got %v", path, conflicts)
 	}
 }
 

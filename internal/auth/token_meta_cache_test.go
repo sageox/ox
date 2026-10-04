@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,6 +15,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sageox/ox/internal/endpoint"
 )
 
 // withTempCacheDir redirects paths.CacheDir() to a t.TempDir by setting
@@ -242,4 +245,83 @@ func TestTokenMetaCacheKey_DistinctByEndpoint(t *testing.T) {
 	x := tokenMetaCacheKey("ab", "")
 	y := tokenMetaCacheKey("a", "b")
 	assert.NotEqual(t, x, y, "separator must prevent prefix-collision")
+}
+
+// serveIntrospectBody answers every request with body and returns the URL.
+func serveIntrospectBody(t *testing.T, body string) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, body)
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+// teamAnswer is an introspection answer for a team token whose coworker field
+// is coworker verbatim; "" leaves the field out, as a server older than it does.
+func teamAnswer(coworker string) string {
+	body := `{"active":true,"principal_kind":"team-service","expires_at":"2030-01-02T03:04:05Z","team":{"team_id":"team_1"}`
+	if coworker != "" {
+		body += `,"coworker":` + coworker
+	}
+	return body + "}"
+}
+
+// Failure prevented: an older server's missing coworker field is read as "none
+// attached" (refusing all team-token work), or a null one as "not reported".
+func TestFetchTokenMetaFromServer_Coworker(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		coworker       string
+		wantCoworker   *Coworker
+		wantNoCoworker bool
+	}{
+		{"named", `{"id":"agt_rip","display_name":" Rip "}`, &Coworker{ID: "agt_rip", DisplayName: "Rip"}, false},
+		{"none attached", `null`, nil, true},
+		{"server predates the field", "", nil, false},
+		{"id unsafe in a session name", `{"id":"agt_a b","display_name":"Rip"}`, nil, false},
+		{"unnamed", `{"id":"agt_rip","display_name":""}`, &Coworker{ID: "agt_rip"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			meta, err := fetchTokenMetaFromServer(context.Background(), serveIntrospectBody(t, teamAnswer(tc.coworker)), "oxt_test_1ljPfr")
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantCoworker, meta.Coworker)
+			assert.Equal(t, tc.wantNoCoworker, meta.NoCoworker)
+			require.NotNil(t, meta.ExpiresAt, "a team token's expiry still drives the expiry warning")
+			assert.Equal(t, time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC), meta.ExpiresAt.UTC())
+		})
+	}
+}
+
+// Failure prevented: ox keeps refusing for an hour after an AI coworker is attached.
+func TestFetchTokenMetaCached_NoCoworkerAnswerExpiresInAMinute(t *testing.T) {
+	withTempCacheDir(t)
+	ep := serveIntrospectBody(t, teamAnswer(`{"id":"agt_rip","display_name":"Rip"}`))
+	require.NoError(t, saveTokenMetaCache(&tokenMetaCacheFileFormat{Entries: map[string]TokenMeta{
+		tokenMetaCacheKey(endpoint.NormalizeEndpoint(ep), "oxt_test_1ljPfr"): {NoCoworker: true, FetchedAt: time.Now().Add(-2 * noCoworkerTTL)},
+	}}))
+
+	meta, err := FetchTokenMetaCached(context.Background(), ep, "oxt_test_1ljPfr")
+	require.NoError(t, err)
+	assert.Equal(t, &Coworker{ID: "agt_rip", DisplayName: "Rip"}, meta.Coworker)
+}
+
+// Failure prevented: with the server unreachable, every lookup one command
+// makes waits out the request timeout again.
+func TestFetchTokenMetaCached_DoesNotRetryAFailedFetchAtOnce(t *testing.T) {
+	withTempCacheDir(t)
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(srv.Close)
+
+	for range 3 {
+		meta, err := FetchTokenMetaCached(context.Background(), srv.URL, "oxt_test_1ljPfr")
+		require.NoError(t, err)
+		assert.Nil(t, meta)
+	}
+	assert.Equal(t, int32(1), calls.Load())
 }

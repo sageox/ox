@@ -29,6 +29,8 @@ import (
 //	  - Any UI or metadata that could be shared beyond the user
 //
 // Fallback chain (best → worst):
+//  0. The AI coworker a team token acts as (auth.TeamCoworker) — when named,
+//     it is the whole attribution; nothing below is consulted
 //  1. SageOx OAuth (ox login) — verified identity
 //  2. Config display_name (ox config) — DisplayName only
 //  3. Git identity (git config user.name / user.email)
@@ -68,6 +70,11 @@ type Attribution struct {
 	// Use for: session meta.json, murmur files, session list/view,
 	// any output that could be seen by teammates.
 	DisplayName string
+
+	// AI is true when the work belongs to the AI coworker a team token acts
+	// as. Username is then the coworker's slug (or agt_ id), Name and
+	// DisplayName its name as set in SageOx, unabbreviated, and Email is "".
+	AI bool
 }
 
 // IsAnonymous reports whether attribution fell all the way through to step 5,
@@ -95,6 +102,12 @@ func (a Attribution) IsAnonymous() bool {
 // configDisplayName is the user's configured display_name from ox config.
 // Pass "" for either if unavailable.
 func ResolveAttribution(ep, configDisplayName string) Attribution {
+	// The git identity, $USER and display_name config on the machine running
+	// a team token describe that machine, not the coworker doing the work.
+	if c, _ := auth.TeamCoworker(ep); c != nil {
+		return Attribution{Username: c.Username(), Name: c.Name(), DisplayName: c.Name(), AI: true}
+	}
+
 	var email, name, username string
 
 	// 1. Try SageOx OAuth (verified identity)

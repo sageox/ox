@@ -55,7 +55,11 @@ func runConversationTopic(cmd *cobra.Command, args []string) error {
 	if openErr != nil {
 		return finishConversationEnvelope(cmd.OutOrStdout(), format, read.ErrorEnvelope(openErr), nil)
 	}
-	env := reader.Topic(args[0], args[1], flags.IncludeSuperseded)
+	idArg, shareErr := resolveConversationIDArg(conversationContext(cmd), args[0])
+	if shareErr != nil {
+		return finishConversationEnvelope(cmd.OutOrStdout(), format, read.ErrorEnvelope(shareErr), nil)
+	}
+	env := reader.Topic(idArg, args[1], flags.IncludeSuperseded)
 	return finishConversationEnvelope(cmd.OutOrStdout(), format, env, renderConversationTopicText)
 }
 

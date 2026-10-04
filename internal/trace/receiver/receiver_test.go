@@ -238,7 +238,16 @@ func TestServeIdleAndCancellation(t *testing.T) {
 			defer cancel()
 			done := make(chan error, 1)
 			go func() { done <- r.Serve(ctx, listener) }()
-			<-pruned
+			// Bounded, like every other wait in this test. An unbounded receive
+			// here is a 15-minute package timeout rather than a failure: when the
+			// startup scan was skipped, this blocked until the whole
+			// internal/trace/receiver binary was killed, and the panic named a
+			// channel rather than the contract that broke.
+			select {
+			case <-pruned:
+			case <-time.After(5 * time.Second):
+				t.Fatal("receiver never ran the startup retention scan")
+			}
 			if cancelEarly {
 				cancel()
 			}

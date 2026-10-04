@@ -23,6 +23,7 @@ import (
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/doctor"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/lfs"
@@ -97,7 +98,7 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 
 	// verify SageOx is initialized in this project
 	if !config.IsInitialized(projectRoot) {
-		return fmt.Errorf("SageOx not initialized in this project\nRun 'ox init' first to set up session recording")
+		return errkind.Errorf(errkind.NotInitialized, "SageOx not initialized in this project\nRun 'ox init' first to set up session recording")
 	}
 
 	// NOTE: No OAuth gate here. Session recording only needs a Git PAT for upload
@@ -556,34 +557,37 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 	var processResult *agentSessionResult
 	if state.SessionFile != "" {
 		processStart := time.Now()
-		if state.WatchMode == "tail" {
-			// IPC stop is advisory. Wait for the writer's file lock and reload
-			// its final cursor before draining, so an in-flight batch is not
-			// captured twice. A lock failure preserves the recording for retry.
-			err = fileutil.WithFileLock(context.Background(), filepath.Join(state.SessionPath, "raw.jsonl"), func() error {
-				latest, loadErr := session.LoadRecordingStateForAgent(projectRoot, inst.AgentID)
-				if loadErr != nil {
-					return loadErr
-				}
-				if latest == nil {
-					return session.ErrNotRecording
-				}
-				latest.SessionFile = state.SessionFile
-				state = latest
-				state.Trace = traceAtStop
-				// in-memory only: the stop was requested at stopStart, and every
-				// meta.json/header writer below reads state.StoppedAt through
-				// session.ResolveStoppedAt. Never persisted — a saved StoppedAt
-				// is the daemon's "owner gone, reclaim me" signal.
-				state.StoppedAt = &stopRequestedAt
-				var processErr error
-				processResult, processErr = processAgentSession(projectRoot, state)
-				return processErr
-			})
-		} else {
+		// Serialize with the raw.jsonl writer's file lock so processAgentSession
+		// (RecoverRawAppend + drain) never runs concurrently with a hook or
+		// watcher still appending a batch under the same lock — stop is
+		// advisory and a capture can be in flight when it fires. Every capture
+		// mode appends under this lock, so every mode waits for it here. A lock
+		// failure preserves the recording for retry.
+		err = fileutil.WithFileLock(context.Background(), filepath.Join(state.SessionPath, "raw.jsonl"), func() error {
+			latest, loadErr := reloadRecordingForFinalDrain(projectRoot, state)
+			if loadErr != nil {
+				return loadErr
+			}
+			state = latest
+			state.Trace = traceAtStop
+			// in-memory only: the stop was requested at stopStart, and every
+			// meta.json/header writer below reads state.StoppedAt through
+			// session.ResolveStoppedAt. Never persisted — a saved StoppedAt
+			// is the daemon's "owner gone, reclaim me" signal.
 			state.StoppedAt = &stopRequestedAt
-			processResult, err = processAgentSession(projectRoot, state)
-		}
+			var processErr error
+			if processResult, processErr = processAgentSession(projectRoot, state); processErr != nil {
+				return processErr
+			}
+			// Clear before releasing the lock, and clear THIS recording: a hook
+			// queued on the lock re-reads the state once it gets in. Left in
+			// place, it would append a batch after the final drain that nothing
+			// will ever upload. See ClearRecordingStateAt.
+			if clearErr := session.ClearRecordingStateAt(state.SessionPath, state.SessionID); clearErr != nil {
+				return fmt.Errorf("finalize recording stop: %w", clearErr)
+			}
+			return nil
+		})
 		timing["process_ms"] = time.Since(processStart).Milliseconds()
 		if err != nil {
 			if errors.Is(err, claudesource.ErrUntrustedSource) {
@@ -618,9 +622,13 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 	// with no data. Preserve state when session file discovery failed — it contains
 	// breadcrumbs (WorkspacePath, AdapterName, StartedAt) needed for recovery.
 	if processResult != nil || state.SessionFile == "" && state.AdapterName == "" {
-		if err := session.ClearRecordingStateForAgent(projectRoot, inst.AgentID); err != nil {
-			_ = doctor.SetNeedsDoctorAgent(projectRoot)
-			return fmt.Errorf("failed to finalize recording stop: %w", err)
+		// A processed recording was already cleared under the capture lock
+		// above; only the explicit no-data stop still has state to clear here.
+		if processResult == nil {
+			if err := session.ClearRecordingStateAt(state.SessionPath, state.SessionID); err != nil {
+				_ = doctor.SetNeedsDoctorAgent(projectRoot)
+				return fmt.Errorf("failed to finalize recording stop: %w", err)
+			}
 		}
 		convergeAfterSessionBoundary(projectRoot)
 	} else if state.SessionFile == "" {
@@ -992,7 +1000,10 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	// resulting commit will break LFS linkage and the daemon's anti-entropy
 	// will start clobbering. See the 2026-04-25 post-mortem (bd ox-4ncz).
 	rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
-	hasIncrementalEntries := rawJSONLHasEntries(rawPath)
+	if err := session.RecoverRawAppend(rawPath, state.SourceOffset); err != nil {
+		return nil, err
+	}
+	hasIncrementalEntries := session.HasSubstantiveEntries(rawPath)
 
 	if hasIncrementalEntries {
 		// incremental hooks already wrote entries -- do final drain, write footer, and generate artifacts
@@ -1307,7 +1318,8 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 		// async mode: copy files to ledger dir locally, signal daemon to upload+finalize
 		if result.EntryCount == 0 {
 			// nothing to upload — skip copy and daemon signal entirely.
-			// the 1-line header-only raw.jsonl written at session start is not worth committing.
+			// the header-only raw.jsonl written at session start (plus any footer a
+			// finalize door stamped) is not worth committing.
 			slog.Info("async upload skipped: session has no entries", "session", sessionName)
 		} else if copyErr := copySessionCacheToLedger(result, ledgerPath, sessionName); copyErr != nil {
 			slog.Warn("async copy to ledger failed", "error", copyErr)
@@ -2408,26 +2420,6 @@ func getSessionTermsNotice() string {
 	return sessionTermsNotice
 }
 
-// rawJSONLHasEntries returns true if raw.jsonl exists and contains more than
-// just a header line, indicating incremental hooks have appended entries.
-func rawJSONLHasEntries(rawPath string) bool {
-	f, err := os.Open(rawPath)
-	if err != nil {
-		return false
-	}
-	defer f.Close()
-
-	scanner := bufio.NewScanner(f)
-	lineCount := 0
-	for scanner.Scan() {
-		lineCount++
-		if lineCount > 1 {
-			return true // more than just the header
-		}
-	}
-	return false
-}
-
 // needsGenericDropFile returns true when a generic adapter session needs a drop
 // file created (no session file provided and adapter is generic).
 func needsGenericDropFile(sessionFile, adapterName string) bool {
@@ -2464,4 +2456,29 @@ func isGenericDropFileEmpty(state *session.RecordingState) bool {
 		return errors.Is(err, os.ErrNotExist)
 	}
 	return info.Size() == 0
+}
+
+// reloadRecordingForFinalDrain must run under the expected session's raw lock.
+// Hooks, like watchers, may commit a batch while stop waits for that lock.
+func reloadRecordingForFinalDrain(projectRoot string, expected *session.RecordingState) (*session.RecordingState, error) {
+	latest, err := session.LoadRecordingStateForAgent(projectRoot, expected.AgentID)
+	if err != nil {
+		return nil, err
+	}
+	if latest == nil {
+		return nil, session.ErrNotRecording
+	}
+	if latest.SessionPath != expected.SessionPath || latest.SessionID != expected.SessionID {
+		return nil, fmt.Errorf("recording changed while waiting to finalize")
+	}
+	// Stop may just have discovered a file that did not exist at recording
+	// start; nothing is persisted for it yet, so carry it over. A PERSISTED file
+	// is different: SourceOffset is a byte cursor into it, and a hook that
+	// rediscovered the source while we waited committed the two together.
+	// Overwriting only the file would aim that cursor at the wrong transcript
+	// and the drain would skip or tear entries -- the persisted pair wins.
+	if latest.SessionFile == "" {
+		latest.SessionFile = expected.SessionFile
+	}
+	return latest, nil
 }

@@ -16,6 +16,7 @@ import (
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/manifest"
@@ -727,7 +728,7 @@ func fetchLedgerURLWithError(currentEndpoint string) (string, error) {
 		return "", fmt.Errorf("get auth token for %s: %w", projectEndpoint, err)
 	}
 	if token == nil || token.AccessToken == "" {
-		return "", fmt.Errorf("not authenticated to %s - run 'ox login' first", projectEndpoint)
+		return "", errkind.Errorf(errkind.NotLoggedIn, "not authenticated to %s - run 'ox login' first", projectEndpoint)
 	}
 
 	// use ledger-status API (project-scoped) to get ledger URL
@@ -760,7 +761,7 @@ func fetchTeamContextURLWithError(teamID string, currentEndpoint string) (string
 		return "", fmt.Errorf("get auth token for %s: %w", currentEndpoint, err)
 	}
 	if token == nil || token.AccessToken == "" {
-		return "", fmt.Errorf("not authenticated to %s - run 'ox login' first", currentEndpoint)
+		return "", errkind.Errorf(errkind.NotLoggedIn, "not authenticated to %s - run 'ox login' first", currentEndpoint)
 	}
 
 	client := api.NewRepoClientWithEndpoint(currentEndpoint).WithAuthToken(token.AccessToken)

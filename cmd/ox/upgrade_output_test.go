@@ -315,6 +315,23 @@ func TestUpgradeVersionCheckOutcome(t *testing.T) {
 	}
 }
 
+// inHomebrewKeg places oxBin at a Homebrew keg path, which is how a release
+// build detects a Homebrew install. It hard-links rather than symlinks because
+// detection resolves symlinks back to the original path, and copies when the
+// link would cross filesystems.
+func inHomebrewKeg(t *testing.T, oxBin string) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "Cellar", "ox", "0.0.0", "bin")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	path := filepath.Join(dir, "ox")
+	if err := os.Link(oxBin, path); err != nil {
+		data, err := os.ReadFile(oxBin)
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(path, data, 0o755))
+	}
+	return path
+}
+
 // Offline checks and unsupported targets must fail once in both output modes;
 // target validation must not depend on a successful release lookup.
 func TestUpgradeCLI(t *testing.T) {
@@ -328,31 +345,42 @@ func TestUpgradeCLI(t *testing.T) {
 		{"offline lookup", "", "check for updates"},
 		{"unsupported target", "v99.0.0", "--target is supported only"},
 	} {
-		for _, jsonOutput := range []bool{false, true} {
-			name := "text"
-			if jsonOutput {
-				name = "json"
-			}
-			t.Run(tt.name+"/"+name, func(t *testing.T) {
+		for _, mode := range []struct {
+			name string
+			env  string
+			flag string
+			json bool
+		}{
+			{"text", "", "", false},
+			{"json flag", "0", "--json", true},
+			{"json environment", "1", "", true},
+			{"json disabled", "1", "--json=false", false},
+		} {
+			t.Run(tt.name+"/"+mode.name, func(t *testing.T) {
 				env := noInputCLIEnv(t) // empty cache and an unreachable proxy, never a real install
+				env = append(env, "OX_JSON="+mode.env)
 				args := []string{"upgrade"}
+				bin := oxBin
 				if tt.target != "" {
 					if runtime.GOOS == "windows" {
 						t.Skip("fake Homebrew detection uses a POSIX shell script")
 					}
 					binDir := t.TempDir()
-					// Release builds detect Homebrew; development builds detect source.
-					// Both must reject the target without running an installer.
-					require.NoError(t, os.WriteFile(filepath.Join(binDir, "brew"), []byte("#!/bin/sh\nif [ \"$1\" = list ]; then exit 0; fi\nexit 91\n"), 0o700))
+					// Release builds (CI's OX_TEST_OX_BINARY) detect Homebrew from
+					// this Cellar path; development builds detect source. Both must
+					// reject the target without running an installer, and this
+					// brew fails if one runs.
+					require.NoError(t, os.WriteFile(filepath.Join(binDir, "brew"), []byte("#!/bin/sh\nexit 91\n"), 0o700))
 					env = append(env, "PATH="+binDir)
 					args = append(args, "--target="+tt.target)
+					bin = inHomebrewKeg(t, oxBin)
 				}
-				if jsonOutput {
-					args = append(args, "--json")
+				if mode.flag != "" {
+					args = append(args, mode.flag)
 				}
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()
-				cmd := testguard.OxCmdContext(t, ctx, oxBin, t.TempDir(), env, args...)
+				cmd := testguard.OxCmdContext(t, ctx, bin, t.TempDir(), env, args...)
 				var stdout, stderr bytes.Buffer
 				cmd.Stdout = &stdout
 				cmd.Stderr = &stderr
@@ -361,7 +389,7 @@ func TestUpgradeCLI(t *testing.T) {
 				var exit *exec.ExitError
 				require.ErrorAs(t, err, &exit, "stdout=%s stderr=%s", stdout.String(), stderr.String())
 				assert.Equal(t, 1, exit.ExitCode())
-				if jsonOutput {
+				if mode.json {
 					var got upgradeResult
 					require.NoError(t, json.Unmarshal(stdout.Bytes(), &got))
 					assert.Equal(t, "failed", got.Status)

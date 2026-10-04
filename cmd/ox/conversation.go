@@ -25,15 +25,27 @@ var conversationCmd = &cobra.Command{
 	Short:   "Read recorded team conversations from the local Team Context",
 	Long: `Read-only commands for browsing recorded team conversations locally:
 summaries, transcript slices, and distillation topics, served from the
-team-context checkout the daemon keeps synced. Works fully logged out.
+team-context checkout the daemon keeps synced. Requires ` + "`ox login`" + `: ox
+confirms you are signed in and a member of the repo's team (checked with
+SageOx at most once an hour; offline, a confirmation from the last hour
+still counts) before it reads anything.
 
 Commands disclose progressively: list -> show -> topics -> topic -> transcript.
+A screen walkthrough adds one more: walkthrough, what was on screen, clicked,
+and pointed at, with the keyframe images.
 Each JSON envelope's guidance field names the next step, and token_estimate
 reports what reading the payload costs. With no subcommand, behaves like
 ` + "`ox conversation list`" + `.
 
-Accepted ids: cnv_<uuidv7>, rec_<uuidv7>, or a full sageox:// citation URI
-copied from a distillation atom.`,
+Accepted ids: cnv_<uuidv7>, rec_<uuidv7>, a full sageox:// citation URI
+copied from a distillation atom, or a pasted sageox.ai recording link:
+  https://sageox.ai/c/rec_…
+  https://sageox.ai/team/<team>/media/recordings/rec_…[/transcript]
+  https://sageox.ai/kb/<kb>/recordings/rec_…
+Share links (https://sageox.ai/s/…) resolve online when you are logged in
+to the link's environment (one lookup; the discussion itself is still read
+locally). A link or id never grants access on its own: signed out, or
+outside the team, every form is refused the same way.`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	Args:          cobra.NoArgs,
@@ -51,6 +63,7 @@ func init() {
 	conversationCmd.AddCommand(conversationTranscriptCmd)
 	conversationCmd.AddCommand(conversationTopicsCmd)
 	conversationCmd.AddCommand(conversationTopicCmd)
+	conversationCmd.AddCommand(conversationWalkthroughCmd)
 	rootCmd.AddCommand(conversationCmd)
 }
 
@@ -84,9 +97,12 @@ func resolveConversationFormat(f conversationFormatFlags) (string, error) {
 }
 
 // openConversationReader resolves the repo's active team context into a
-// Reader. A package-level variable so command-level tests can point it at a
-// staged discussions root; the default goes through the canonical helpers
-// (findProjectRoot -> config.FindRepoTeamContext inside read.Open).
+// Reader, after the access gate: signed in, and a member of the repo's team
+// per the server (confirmed within the last hour). A refusal returns before
+// any team file is opened, so list, ids, pasted links, and share links are
+// all covered by this one call. A package-level variable so command-level
+// tests can point it at a staged discussions root; the default goes through
+// the canonical helpers (findProjectRoot -> config.FindRepoTeamContext).
 var openConversationReader = func() (*read.Reader, *read.Error) {
 	projectRoot, err := findProjectRoot()
 	if err != nil {
@@ -95,8 +111,16 @@ var openConversationReader = func() (*read.Reader, *read.Error) {
 			Message: fmt.Sprintf("not inside an ox project: %v", err),
 		}
 	}
-	return read.Open(projectRoot)
+	if accessErr := conversationAccessGate(projectRoot); accessErr != nil {
+		return nil, accessErr
+	}
+	return openConversationReaderAt(projectRoot)
 }
+
+// openConversationReaderAt is the default reader's open step, after the
+// gate. Gate tests replace it with a stub that fails the test if a refused
+// caller ever reaches it.
+var openConversationReaderAt = read.Open
 
 // conversationTextRenderer renders one command's success payload for humans.
 // The shared writer handles the error, warning, and guidance framing.
@@ -138,14 +162,18 @@ func writeConversationEnvelope(w io.Writer, format string, env *read.Envelope, r
 
 // conversationExitCode maps a typed read error to a process exit code:
 // usage-shaped codes (a bad id or a structurally invalid selector — the
-// caller got the invocation wrong) exit 2, everything else is runtime (1).
+// caller got the invocation wrong) exit 2, everything else — access
+// refusals included — is runtime (1).
 func conversationExitCode(e *read.Error) int {
 	if e == nil {
 		return 0
 	}
 	switch e.Code {
-	case read.ErrCodeInvalidID, read.ErrCodeInvalidSelector:
+	case read.ErrCodeInvalidID, read.ErrCodeInvalidSelector, read.ErrCodeShareLinkUnresolvable, read.ErrCodeShareLinkNotDiscussion:
 		return 2
+	case read.ErrCodeNotAuthenticated, read.ErrCodeNoTeamAccess, read.ErrCodeAccessUnverified:
+		// Runtime refusals, not usage errors: the invocation was fine.
+		return 1
 	default:
 		return 1
 	}

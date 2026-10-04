@@ -24,13 +24,16 @@ type MurmurFile struct {
 	AgentID       string            `json:"agent_id,omitempty"`       // which agent instance
 	AgentType     string            `json:"agent_type,omitempty"`     // "claude-code", etc.
 	PrincipalID   string            `json:"principal_id,omitempty"`   // who the agent works for
-	PrincipalType string            `json:"principal_type,omitempty"` // "human" for now
+	PrincipalType string            `json:"principal_type,omitempty"` // "human", or "ai" for the AI coworker a team token acts as
 	Topic         string            `json:"topic"`                    // freeform slug
 	Importance    string            `json:"importance"`               // "critical", "normal", "ambient"
 	Content       string            `json:"content"`                  // the spoken message
 	Metadata      map[string]string `json:"metadata,omitempty"`       // optional structured context
 	Tags          []string          `json:"tags,omitempty"`
 	Scope         string            `json:"scope,omitempty"` // "ledger" or "team" (informational)
+
+	// PrincipalDisplay is the AI coworker's name, set only when PrincipalType is "ai".
+	PrincipalDisplay string `json:"principal_display,omitempty"`
 }
 
 // MurmurDateHourDir returns the relative directory path for murmurs at a given time.

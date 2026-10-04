@@ -258,6 +258,10 @@ jobs:
         env:
           SAGEOX_CLI_PUBLIC_KEY: ${{ steps.sign.outputs.SAGEOX_CLI_PUBLIC_KEY }}
           SAGEOX_CLI_SIGNATURES: ${{ steps.sign.outputs.SAGEOX_CLI_SIGNATURES }}
+          # PostHog project for CLI usage events (internal/telemetry/posthog.go).
+          # A release built while these repository variables are unset sends nothing to PostHog.
+          POSTHOG_PROJECT_KEY: ${{ vars.POSTHOG_PROJECT_KEY }}
+          POSTHOG_HOST: ${{ vars.POSTHOG_HOST }}
 
       # Keep formula publication independently retryable after the release is
       # immutable. This artifact is private to the workflow run.

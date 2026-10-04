@@ -14,7 +14,9 @@
 //
 // Each tier is conservative: a tier that can't safely resolve every
 // remaining conflicted path returns control to the next tier. The Resolver
-// only calls `git rebase --continue` once all conflicts have been staged.
+// only calls `git rebase --continue` once all conflicts of the current step
+// have been staged, and repeats the whole cycle until the rebase is over — a
+// replay range can hold many sequentially conflicting commits.
 package automerge
 
 import (
@@ -30,11 +32,6 @@ import (
 
 	"github.com/sageox/ox/internal/gitutil"
 )
-
-// conflictMarkerStart is git's textual conflict marker. We look for it as
-// a line prefix to determine whether union (or any other in-place driver)
-// has fully resolved the working-tree content.
-const conflictMarkerStart = "<<<<<<<"
 
 // ErrLLMUnavailable is returned by tier helpers when no LLM binary is
 // configured or discoverable on PATH. It is a sentinel: callers can decide
@@ -89,6 +86,13 @@ const (
 	defaultMaxLLMFileBytes = 50 * 1024
 )
 
+// maxResolvePasses bounds the resolve loop. A rebase halts once per
+// conflicting commit, so a ledger that has been wedged for weeks can carry
+// hundreds of them — the production incident behind ResolveRebaseAcceptTheirs
+// replayed 344 commits and hit 281 conflicts. Generous, but finite: a pass
+// that resolves nothing would otherwise spin forever.
+const maxResolvePasses = 5000
+
 // New constructs a Resolver from Options.
 func New(opts Options) *Resolver {
 	if opts.LLMTimeout <= 0 {
@@ -108,20 +112,51 @@ func New(opts Options) *Resolver {
 	}
 }
 
-// Resolve attempts to resolve conflicts in a repo that's mid-rebase.
+// Resolve carries a repo that is mid-rebase all the way through its replay
+// range, resolving each conflicting step in turn.
 //
-// Returns (true, nil) if all conflicts were resolved AND `git rebase
-// --continue` succeeded.
-// Returns (false, ErrNoConflicts) if there's nothing to do.
-// Returns (false, err) if any tier failed and the caller should abort the
+// A rebase halts once per conflicting commit, so resolving only the first one
+// leaves the rebase in progress. Callers treat that as a wedge, so Resolve
+// loops until the rebase is actually over.
+//
+// Returns (true, nil) only when the rebase has FINISHED — no rebase state
+// remains on disk.
+// Returns (false, ErrNoConflicts) if there was nothing to do.
+// Returns (false, err) if a tier failed and the caller should abort the
 // rebase. The rebase is NOT aborted by this function.
 func (r *Resolver) Resolve(ctx context.Context, repoPath string) (bool, error) {
+	for pass := 0; ; pass++ {
+		if pass >= maxResolvePasses {
+			return false, fmt.Errorf("rebase did not converge after %d resolve passes", maxResolvePasses)
+		}
+		done, err := r.resolveOneStep(ctx, repoPath, pass == 0)
+		if err != nil {
+			return false, err
+		}
+		if done {
+			return true, nil
+		}
+	}
+}
+
+// resolveOneStep resolves the conflicts of the CURRENT rebase step and
+// advances past it. done reports whether the WHOLE rebase finished.
+//
+// first separates the initial call, where an empty index means the caller had
+// nothing to resolve (ErrNoConflicts), from a later pass, where it means the
+// rebase halted for a reason no tier can act on.
+func (r *Resolver) resolveOneStep(ctx context.Context, repoPath string, first bool) (bool, error) {
 	conflicts, err := listConflictedPaths(ctx, repoPath)
 	if err != nil {
 		return false, fmt.Errorf("list conflicts: %w", err)
 	}
 	if len(conflicts) == 0 {
-		return false, ErrNoConflicts
+		if first {
+			return false, ErrNoConflicts
+		}
+		// Halted with a clean index — no tier has anything to stage, so let
+		// continueRebase either finish the rebase or fail honestly.
+		return r.continueRebase(ctx, repoPath)
 	}
 
 	r.logger.Info("automerge.start", "repo", repoPath, "conflicts", len(conflicts))
@@ -146,7 +181,12 @@ func (r *Resolver) Resolve(ctx context.Context, repoPath string) (bool, error) {
 		if err := gitutil.ResolveRebaseAcceptTheirs(ctx, repoPath, r.opts.SafePrefixes, r.opts.SafeDenyPrefixes); err != nil {
 			return false, fmt.Errorf("accept-theirs: %w", err)
 		}
-		// ResolveRebaseAcceptTheirs already runs `git rebase --continue`.
+		// ResolveRebaseAcceptTheirs runs `git rebase --continue` itself, in a
+		// loop over the whole replay range. Trust repo state over that
+		// assumption anyway: if anything remains, the outer loop picks it up.
+		if gitutil.IsRebaseInProgress(repoPath) {
+			return false, nil
+		}
 		return true, nil
 	}
 
@@ -161,18 +201,67 @@ func (r *Resolver) Resolve(ctx context.Context, repoPath string) (bool, error) {
 	return r.continueRebase(ctx, repoPath)
 }
 
-// continueRebase runs `git rebase --continue` with GIT_EDITOR=true so git
-// doesn't try to open an editor for the commit message.
+// continueRebase advances the rebase past the current step and reports whether
+// the WHOLE rebase finished.
+//
+// The verdict comes from repo state, never from the exit code. `git rebase
+// --continue` exits NON-ZERO when it commits the current step and then halts on
+// the next conflicting commit — that is progress, not failure. Reading it as
+// failure made the caller abort the rebase, restoring the pre-rebase state and
+// re-wedging the ledger on every attempt. ResolveRebaseAcceptTheirs already
+// carries that fix for the accept-theirs tier; the union and LLM tiers reach
+// this function instead, and never got it.
+//
+// GIT_EDITOR=true keeps git from opening an editor for the commit message.
+// LC_ALL/LANG pin git's output language, and gpgsign is disabled so a signing
+// prompt cannot block a loop that may run hundreds of times.
 func (r *Resolver) continueRebase(ctx context.Context, repoPath string) (bool, error) {
-	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "rebase", "--continue")
+	before := rebaseStepID(repoPath)
+	cmd := exec.CommandContext(ctx, "git", "-C", repoPath,
+		"-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", "rebase", "--continue")
 	cmd.Dir = repoPath
-	cmd.Env = append(cmd.Environ(), "GIT_EDITOR=true")
+	cmd.Env = append(cmd.Environ(), "GIT_EDITOR=true", "LC_ALL=C", "LANG=C")
 	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return false, fmt.Errorf("rebase --continue: %s: %w", strings.TrimSpace(string(out)), err)
+
+	if !gitutil.IsRebaseInProgress(repoPath) {
+		r.logger.Info("automerge.done", "repo", repoPath)
+		return true, nil
 	}
-	r.logger.Info("automerge.done", "repo", repoPath)
-	return true, nil
+	// Progress is "the rebase moved to a different step", nothing else.
+	//
+	// Unmerged entries are NOT a progress signal. listConflictedPaths reads the
+	// working tree (`git diff --diff-filter=U`) while an unmerged-index probe
+	// reads the index (`git ls-files --unmerged`), and the two disagree on
+	// rename and delete conflicts. When they disagree, this function sees an
+	// unmerged index, calls it progress, and hands back a step no tier staged —
+	// so the caller re-enters, git refuses the same step again, and the loop
+	// spins to maxResolvePasses burning a git subprocess per pass.
+	after := rebaseStepID(repoPath)
+	if before != "" && after != "" && after != before {
+		return false, nil // the rebase genuinely advanced
+	}
+	if err == nil {
+		return false, nil // git reported success; let the next pass re-probe
+	}
+	// Same step AND git errored: this step cannot advance. Say so, so the
+	// caller aborts and restores a clean state instead of spinning.
+	return false, fmt.Errorf("rebase --continue made no progress at step %q: %s: %w",
+		after, strings.TrimSpace(string(out)), err)
+}
+
+// rebaseStepID identifies the rebase's current step. Empty when it cannot be
+// read, which callers must treat as "unknown", never as "unchanged".
+//
+// HEAD is deliberately not used: an empty or skipped commit advances the rebase
+// without moving HEAD, so HEAD would report a stall that isn't one.
+func rebaseStepID(repoPath string) string {
+	for _, rel := range []string{"rebase-merge/msgnum", "rebase-apply/next"} {
+		data, err := os.ReadFile(filepath.Join(repoPath, ".git", filepath.FromSlash(rel)))
+		if err == nil {
+			return rel + ":" + strings.TrimSpace(string(data))
+		}
+	}
+	return ""
 }
 
 func (r *Resolver) allUnderSafePrefixes(paths []string) bool {
@@ -228,7 +317,7 @@ func (r *Resolver) tryUnionTier(ctx context.Context, repoPath string, paths []st
 			remaining = append(remaining, p)
 			continue
 		}
-		if hasConflictMarkers(data) {
+		if gitutil.HasConflictMarkersBytes(data) {
 			remaining = append(remaining, p)
 			continue
 		}
@@ -244,20 +333,6 @@ func (r *Resolver) tryUnionTier(ctx context.Context, repoPath string, paths []st
 	}
 
 	return remaining, nil
-}
-
-// hasConflictMarkers returns true if the file content has a git conflict
-// marker at the start of any line.
-func hasConflictMarkers(data []byte) bool {
-	if !strings.Contains(string(data), conflictMarkerStart) {
-		return false
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		if strings.HasPrefix(line, conflictMarkerStart) {
-			return true
-		}
-	}
-	return false
 }
 
 // time used in Options.LLMTimeout default — keeps import live.

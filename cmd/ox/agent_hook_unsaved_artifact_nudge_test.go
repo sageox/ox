@@ -31,7 +31,7 @@ func TestFindUnsavedArtifacts_FindsAuthoredPage(t *testing.T) {
 	page := filepath.Join(root, ".context", "arc-lab", "device-review.html")
 	authoredPage(t, page)
 
-	got := findUnsavedArtifacts(root, time.Now())
+	got := findUnsavedArtifacts(root, time.Now(), time.Time{})
 	if len(got) != 1 || filepath.Base(got[0]) != "device-review.html" {
 		t.Fatalf("authored page not found: %v", got)
 	}
@@ -59,7 +59,7 @@ func TestFindUnsavedArtifacts_Ignores(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got := findUnsavedArtifacts(root, time.Now()); len(got) != 0 {
+	if got := findUnsavedArtifacts(root, time.Now(), time.Time{}); len(got) != 0 {
 		t.Fatalf("nudged on something it should ignore: %v", got)
 	}
 }
@@ -94,10 +94,10 @@ func TestEmitUnsavedArtifactNudge_OncePerArtifact(t *testing.T) {
 	authoredPage(t, filepath.Join(root, "review.html"))
 
 	var first, second bytes.Buffer
-	emitUnsavedArtifactNudge(&first, root, "TestAgent")
-	emitUnsavedArtifactNudge(&second, root, "TestAgent")
+	emitUnsavedArtifactNudge(&first, root, "TestAgent", time.Time{})
+	emitUnsavedArtifactNudge(&second, root, "TestAgent", time.Time{})
 
-	if !strings.Contains(first.String(), "not in the ledger") {
+	if !strings.Contains(first.String(), "Saved nothing yet") {
 		t.Fatalf("first prompt said nothing: %q", first.String())
 	}
 	if !strings.Contains(first.String(), "--kind") {
@@ -125,7 +125,7 @@ func TestFindUnsavedArtifacts_SameBasenameElsewhereStillNudges(t *testing.T) {
 		t.Fatalf("seed saved plan: %v", err)
 	}
 
-	got := findUnsavedArtifacts(root, time.Now())
+	got := findUnsavedArtifacts(root, time.Now(), time.Time{})
 	if !slices.Contains(got, unsaved) {
 		t.Fatalf("a distinct artifact sharing a basename with a saved plan was silenced: got %v, want %s", got, unsaved)
 	}
@@ -153,7 +153,7 @@ func TestFindUnsavedArtifacts_RelativeSavedSourceIsUnprovable(t *testing.T) {
 		t.Fatalf("seed saved plan: %v", err)
 	}
 
-	if got := findUnsavedArtifacts(root, time.Now()); !slices.Contains(got, page) {
+	if got := findUnsavedArtifacts(root, time.Now(), time.Time{}); !slices.Contains(got, page) {
 		t.Fatalf("a relative stored path was treated as proof the artifact is saved: got %v, want %s", got, page)
 	}
 }

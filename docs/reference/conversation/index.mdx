@@ -12,15 +12,27 @@ Read recorded team conversations from the local Team Context
 
 Read-only commands for browsing recorded team conversations locally:
 summaries, transcript slices, and distillation topics, served from the
-team-context checkout the daemon keeps synced. Works fully logged out.
+team-context checkout the daemon keeps synced. Requires `ox login`: ox
+confirms you are signed in and a member of the repo's team (checked with
+SageOx at most once an hour; offline, a confirmation from the last hour
+still counts) before it reads anything.
 
 Commands disclose progressively: list -> show -> topics -> topic -> transcript.
+A screen walkthrough adds one more: walkthrough, what was on screen, clicked,
+and pointed at, with the keyframe images.
 Each JSON envelope's guidance field names the next step, and token_estimate
 reports what reading the payload costs. With no subcommand, behaves like
 `ox conversation list`.
 
-Accepted ids: cnv_<uuidv7>, rec_<uuidv7>, or a full sageox:// citation URI
-copied from a distillation atom.
+Accepted ids: cnv_<uuidv7>, rec_<uuidv7>, a full sageox:// citation URI
+copied from a distillation atom, or a pasted sageox.ai recording link:
+  https://sageox.ai/c/rec_…
+  https://sageox.ai/team/<team>/media/recordings/rec_…[/transcript]
+  https://sageox.ai/kb/<kb>/recordings/rec_…
+Share links (https://sageox.ai/s/…) resolve online when you are logged in
+to the link's environment (one lookup; the discussion itself is still read
+locally). A link or id never grants access on its own: signed out, or
+outside the team, every form is refused the same way.
 
 ```
 ox conversation [flags]
@@ -39,7 +51,7 @@ ox conversation [flags]
 ### Options inherited from parent commands
 
 ```
-  -c, --config string    config file path (default: .sageox/config.yaml)
+  -c, --config string    user config file (overrides OX_USER_CONFIG)
       --json             output in JSON format (default: false)
       --no-input         disable prompts and terminal UI; provide required input with arguments or flags
       --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
@@ -53,7 +65,9 @@ ox conversation [flags]
 
 * [ox](/)	 - Shared team context that makes agentic engineering multiplayer
 * [ox conversation list](/conversation/list)	 - List the active team's recorded conversations
+* [ox conversation search](/conversation/search)	 - Find recorded conversations by keyword, person, and date
 * [ox conversation show](/conversation/show)	 - Show one conversation's metadata and human summary
 * [ox conversation topic](/conversation/topic)	 - Show one distillation topic's atoms
 * [ox conversation topics](/conversation/topics)	 - List a conversation's distillation topics
 * [ox conversation transcript](/conversation/transcript)	 - Read a transcript slice by cue range or time window
+* [ox conversation walkthrough](/conversation/walkthrough)	 - Show what was on screen, clicked, and pointed at in a walkthrough

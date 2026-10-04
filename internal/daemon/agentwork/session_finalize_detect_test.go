@@ -669,8 +669,9 @@ func TestDetect_SkipsHeaderOnlySessions(t *testing.T) {
 	}
 
 	// raw.jsonl with ONLY the metadata header — no real session content
+	rawPath := filepath.Join(sessionDir, "raw.jsonl")
 	headerOnly := `{"metadata":{"agent_id":"OxHDR0","agent_type":"claude","version":"1.0"},"type":"header"}` + "\n"
-	if err := os.WriteFile(filepath.Join(sessionDir, "raw.jsonl"), []byte(headerOnly), 0644); err != nil {
+	if err := os.WriteFile(rawPath, []byte(headerOnly), 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -682,6 +683,24 @@ func TestDetect_SkipsHeaderOnlySessions(t *testing.T) {
 	if len(items) != 0 {
 		t.Errorf("expected 0 items for header-only session, got %d — "+
 			"header-only sessions should be skipped to prevent ghost stubs in the ledger", len(items))
+	}
+
+	// The SessionEnd door stamps a carrier footer (#1025) before the daemon
+	// looks at the file; header + footer must be skipped the same way.
+	now := time.Now().UTC()
+	if err := session.StampRawCarrier(rawPath, session.CarrierStamp{
+		StoppedAt:      now,
+		NativeSessions: []lfs.NativeSession{{ID: "cc-1", Source: "startup", FirstSeen: now, LastSeen: now}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	items, err = handler.Detect(ledgerPath)
+	if err != nil {
+		t.Fatalf("Detect after footer failed: %v", err)
+	}
+	if len(items) != 0 {
+		t.Errorf("expected 0 items after the carrier footer, got %d — a recording that never "+
+			"captured a turn must not be finalized because a finalize door stamped it", len(items))
 	}
 }
 

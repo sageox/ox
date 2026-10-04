@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -86,13 +85,15 @@ func NewTelemetryCollector(logger *slog.Logger) *TelemetryCollector {
 	// rather than POSTing into a 404.
 	endpoint := os.Getenv("SAGEOX_TELEMETRY_ENDPOINT")
 	enabled := isTelemetryEnabled()
+	// An unsaved ID still labels this daemon's traces for its lifetime.
+	clientID, _ := config.InstallID()
 
 	return &TelemetryCollector{
 		buffer:       make([]TelemetryEvent, telemetryBufferSize),
 		bufferSize:   telemetryBufferSize,
 		throttle:     NewFlushThrottle(telemetryFlushCooldown),
 		sendInterval: telemetryDefaultInterval,
-		clientID:     getOrCreateClientID(),
+		clientID:     clientID,
 		appType:      "ox-daemon",
 		appVersion:   version.Version,
 		httpClient: &http.Client{
@@ -120,36 +121,6 @@ func isTelemetryEnabled() bool {
 		return cfg.IsTelemetryEnabled()
 	}
 	return true
-}
-
-// getOrCreateClientID returns a persistent client ID.
-// Checks SAGEOX_CLIENT_ID env, then ~/.sageox/config/client_id file.
-func getOrCreateClientID() string {
-	// check env first
-	if id := os.Getenv("SAGEOX_CLIENT_ID"); id != "" {
-		return id
-	}
-
-	// check file
-	configDir := config.GetUserConfigDir()
-	path := filepath.Join(configDir, "client_id")
-
-	if data, err := os.ReadFile(path); err == nil {
-		id := strings.TrimSpace(string(data))
-		if id != "" {
-			return id
-		}
-	}
-
-	// generate new UUIDv4
-	id := uuid.NewString()
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		slog.Debug("failed to create config directory for telemetry client ID", "error", err)
-	} else if err := os.WriteFile(path, []byte(id+"\n"), 0600); err != nil {
-		slog.Debug("failed to persist telemetry client ID", "error", err)
-	}
-
-	return id
 }
 
 // Start begins background processing of telemetry events.

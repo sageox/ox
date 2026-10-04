@@ -24,6 +24,13 @@ import (
 // transcript, for instance — doesn't false-positive.
 const ConflictMarkerStart = "<<<<<<<"
 
+// conflictMarkerSeparator and conflictMarkerEnd finish a conflict hunk. Either
+// line can appear alone in real content, so the scan only trusts them in order.
+const (
+	conflictMarkerSeparator = "======="
+	conflictMarkerEnd       = ">>>>>>>"
+)
+
 // ErrConflictProbeFailed marks an error as "we could not determine whether the
 // index holds conflicts", which is a different fact from "the index holds
 // conflicts". The distinction is load-bearing: a context deadline or a canceled
@@ -62,9 +69,18 @@ func HasConflictMarkers(path string) (bool, error) {
 // content directly. Use this when the content under inspection isn't (or
 // might not be) the working-tree file — e.g. a staged git blob read via
 // `git show :<path>`, which can differ from what's currently on disk.
+//
+// It also catches an orphaned tail whose opening marker is gone: a ">>>>>>>"
+// line anywhere below a line that is exactly "=======".
 func HasConflictMarkersBytes(data []byte) bool {
+	sawSeparator := false
 	for _, line := range strings.Split(string(data), "\n") {
-		if strings.HasPrefix(line, ConflictMarkerStart) {
+		switch {
+		case strings.HasPrefix(line, ConflictMarkerStart):
+			return true
+		case strings.TrimSuffix(line, "\r") == conflictMarkerSeparator:
+			sawSeparator = true
+		case sawSeparator && strings.HasPrefix(line, conflictMarkerEnd):
 			return true
 		}
 	}
@@ -573,10 +589,11 @@ var sessionMetaBookkeepingMerges = map[string]func(ours, theirs any) (any, bool)
 	// "deleted counter refuses before any merge rule applies" and "a counter
 	// RESET paired with its status write still refuses" pin one guard each.
 	//
-	// Writers that BUMP the counter alone already exist — RecoverEmptyTitleMeta
-	// below the cap, and `ox session repair-meta-summary` on a session already
-	// marked failed_validation — which is precisely why this merge is reachable
-	// at all. A writer that RESETS it alone would invalidate the analysis
+	// Writers that BUMP the counter alone existed before GH #1107 —
+	// RecoverEmptyTitleMeta below the cap, and `ox session repair-meta-summary`
+	// on a session already marked failed_validation. Teammates on those ox
+	// versions keep producing such edits until they upgrade, which is precisely
+	// why this merge is still reachable. A writer that RESETS it alone would invalidate the analysis
 	// above; give the counter a reset-aware merge (or an episode id) first.
 	"summary_attempts": mergeMonotonicCounter,
 }

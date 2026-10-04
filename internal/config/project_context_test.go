@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -597,12 +598,36 @@ func TestProjectContext_LocalhostEndpoint(t *testing.T) {
 	ctx, err := LoadProjectContext(projectDir)
 	require.NoError(t, err)
 
-	// localhost endpoint paths should use "localhost" slug (port stripped)
-	teamsDir := ctx.TeamsDataDir()
+	// localhost endpoint paths should use "localhost" slug (port stripped).
+	//
+	// Asserted against the path RELATIVE to tempHome, never the absolute path.
+	// t.TempDir() names its directory after the test plus a random number, and
+	// this test's own name is long enough that the random suffix is the only thing
+	// varying — so a substring check over the absolute path is really a check that
+	// four particular digits never appear in a random number. It failed in CI on
+	// `…LocalhostEndpoint880806410/…`, where "88080" contains "8080": a real red
+	// build, on a machine that had done nothing wrong, for a port that was
+	// correctly stripped.
+	// Containment is asserted explicitly, not inferred from the absence of an
+	// error. filepath.Rel succeeds for a target OUTSIDE its base and returns a
+	// path starting with "..", so require.NoError alone would let a path that
+	// escaped tempHome through — and such a path could still contain "localhost"
+	// and omit "8080", passing both assertions below for entirely the wrong
+	// reason. That is the same defect this helper was written to remove.
+	relative := func(path string) string {
+		t.Helper()
+		rel, relErr := filepath.Rel(tempHome, path)
+		require.NoError(t, relErr, "path %q is expected to live under the test HOME", path)
+		require.False(t, rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)),
+			"path %q escaped the test HOME %q (relative: %q)", path, tempHome, rel)
+		return rel
+	}
+
+	teamsDir := relative(ctx.TeamsDataDir())
 	assert.Contains(t, teamsDir, "localhost")
 	assert.NotContains(t, teamsDir, "8080") // port should be stripped
 
-	ledgerPath := ctx.DefaultLedgerPath()
+	ledgerPath := relative(ctx.DefaultLedgerPath())
 	assert.Contains(t, ledgerPath, "localhost")
 	assert.NotContains(t, ledgerPath, "8080")
 	assert.Contains(t, ledgerPath, "repo_localhost_test")

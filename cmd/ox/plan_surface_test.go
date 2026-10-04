@@ -20,12 +20,14 @@ func TestPlanCommandSurface_AudienceTiers(t *testing.T) {
 			visible[c.Name()] = true
 		}
 	}
-	for _, n := range []string{"enrich", "render", "review", "list", "view"} {
+	// save is visible: AGENTS.md and prime tell every coworker to run it, and
+	// its share link / NOT SHARED verdict are for the human to see.
+	for _, n := range []string{"enrich", "render", "review", "save", "list", "view"} {
 		if !visible[n] {
 			t.Errorf("%q must be human-visible in `ox plan --help`", n)
 		}
 	}
-	for _, n := range []string{"save", "lint", "viz", "feedback"} {
+	for _, n := range []string{"lint", "viz", "feedback"} {
 		if !hidden[n] {
 			t.Errorf("%q must be Hidden (agent/CI tier, taught via prime)", n)
 		}

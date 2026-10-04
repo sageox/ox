@@ -1,0 +1,25 @@
+{"t_utc":"2026-09-30T10:00:01.000Z","t_ms":500,"snapshot":"axs_1","reason":"interval","hit":"axn_root","node_count":3,"walk_ms":1}
+{"t_utc":"2026-09-30T10:00:01.000Z","snapshot":"axs_1","ax_ref":"axn_win","parent":null,"depth":0,"role":"AXWindow","title":"Team - Browser - Tobias","desc":null,"value":null,"dom_id":null,"url":null}
+{"t_utc":"2026-09-30T10:00:01.000Z","snapshot":"axs_1","ax_ref":"axn_root","parent":"axn_win","depth":1,"role":"AXGroup","title":"Team - Browser - Tobias","desc":null,"value":null,"dom_id":null,"url":null}
+{"t_utc":"2026-09-30T10:00:01.000Z","snapshot":"axs_1","ax_ref":"axn_web","parent":"axn_root","depth":2,"role":"AXWebArea","title":"Team home","desc":null,"value":null,"dom_id":null,"url":"https://user:pw@sageox.test/team/t1?token=SECRET-QUERY#frag"}
+{"t_utc":"2026-09-30T10:00:06.500Z","t_ms":6000,"snapshot":"axs_2","reason":"click","hit":"axn_saved","node_count":2,"walk_ms":1}
+{"t_utc":"2026-09-30T10:00:06.500Z","snapshot":"axs_2","ax_ref":"axn_win","parent":null,"depth":0,"role":"AXWindow","title":"Team - Browser - Tobias","desc":null,"value":null,"dom_id":null,"url":null}
+{"t_utc":"2026-09-30T10:00:06.500Z","snapshot":"axs_2","ax_ref":"axn_saved","parent":"axn_win","depth":3,"role":"AXLink","title":"Saved","desc":null,"value":"SECRET-TYPED-TEXT","dom_id":"nav-saved","url":"https://sageox.test/team/t1/saved?secret=SECRET-LINK"}
+{"t_utc":"2026-09-30T10:00:07.500Z","t_ms":7000,"snapshot":"axs_3","reason":"interval","hit":"axn_web","node_count":1,"walk_ms":1}
+{"t_utc":"2026-09-30T10:00:07.500Z","snapshot":"axs_3","ax_ref":"axn_web","parent":"axn_root","depth":2,"role":"AXWebArea","title":"Saved","desc":null,"value":null,"dom_id":null,"url":"https://sageox.test/team/t1/saved"}
+{"t_utc":"2026-09-30T10:00:11.500Z","t_ms":11000,"snapshot":"axs_4","reason":"hover","hit":"axn_img","node_count":2,"walk_ms":0}
+{"t_utc":"2026-09-30T10:00:11.500Z","snapshot":"axs_4","ax_ref":"axn_img","parent":"axn_web","depth":4,"role":"AXImage","title":"Team mural for 2026-09-30","desc":null,"value":null,"dom_id":null,"url":null}
+{"t_utc":"2026-09-30T10:00:11.500Z","snapshot":"axs_4","ax_ref":"axn_ad","parent":"axn_web","depth":5,"role":"AXWebArea","title":"Ad frame","desc":null,"value":null,"dom_id":null,"url":"https://ads.test/frame"}
+{"t_utc":"2026-09-30T10:00:14.500Z","t_ms":14000,"snapshot":"axs_5","reason":"hover","hit":"axn_card","node_count":1,"walk_ms":0}
+{"t_utc":"2026-09-30T10:00:14.500Z","snapshot":"axs_5","ax_ref":"axn_card","parent":"axn_root","depth":3,"role":"AXGroup","title":"Pinned items","desc":null,"value":null,"dom_id":null,"url":null}
+{"t_utc":"2026-09-30T10:00:17.500Z","t_ms":17000,"snapshot":"axs_6","reason":"click","hit":"axn_group","node_count":4,"walk_ms":1}
+{"t_utc":"2026-09-30T10:00:17.500Z","snapshot":"axs_6","ax_ref":"axn_win","parent":null,"depth":0,"role":"AXWindow","title":"Team - Browser - Tobias","desc":null,"value":null,"dom_id":null,"url":null}
+{"t_utc":"2026-09-30T10:00:17.500Z","snapshot":"axs_6","ax_ref":"axn_web","parent":"axn_root","depth":2,"role":"AXWebArea","title":"Saved","desc":null,"value":null,"dom_id":null,"url":"https://sageox.test/team/t1/saved"}
+{"t_utc":"2026-09-30T10:00:17.500Z","snapshot":"axs_6","ax_ref":"axn_group","parent":"axn_inner","depth":5,"role":"AXGroup","title":null,"desc":null,"value":"SECRET-TYPED-TEXT","dom_id":null,"url":null}
+{"t_utc":"2026-09-30T10:00:17.500Z","snapshot":"axs_6","ax_ref":"axn_inner","parent":"axn_card","depth":4,"role":"AXGroup","title":"","desc":"","value":null,"dom_id":"","url":null}
+{"t_utc":"2026-09-30T10:00:18.500Z","t_ms":18000,"snapshot":"axs_7","reason":"click","hit":"axn_group2","node_count":1,"walk_ms":0}
+{"t_utc":"2026-09-30T10:00:18.500Z","snapshot":"axs_7","ax_ref":"axn_group2","parent":"axn_root","depth":2,"role":"AXGroup","title":null,"desc":null,"value":null,"dom_id":null,"url":null}
+{"t_utc":"2026-09-30T10:00:21.500Z","t_ms":21000,"snapshot":"axs_8","reason":"interval","hit":"axn_web","node_count":1,"walk_ms":0}
+{"t_utc":"2026-09-30T10:00:21.500Z","snapshot":"axs_8","ax_ref":"axn_web","parent":"axn_root","depth":2,"role":"AXWebArea","title":"","desc":null,"value":null,"dom_id":null,"url":"https://sageox.test/team/t1"}
+{"t_utc":"2026-09-30T10:00:22.000Z","t_ms":21500,"snapshot":"axs_9","reason":"focus-change","hit":"axn_web","node_count":1,"walk_ms":0}
+{"t_utc":"2026-09-30T10:00:22.000Z","snapshot":"axs_9","ax_ref":"axn_web","parent":"axn_root","depth":2,"role":"AXWebArea","title":"Team home","desc":null,"value":null,"dom_id":null,"url":"https://sageox.test/team/t1"}

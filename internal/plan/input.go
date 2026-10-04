@@ -192,11 +192,19 @@ const PrimaryHTML = "html"
 // LooksLikeHTML reports whether a resolved plan source is an authored HTML
 // document rather than markdown — the switch that routes --file plan.html into
 // the HTML-primary pipeline (extract → enrich → inject) instead of the
-// markdown template. Sniffs the document head only: a markdown plan that
-// merely EMBEDS html (an ```html-interactive fence, an inline <div>) never
-// STARTS with a doctype/<html> tag, so it is not misrouted.
-func LooksLikeHTML(raw string) bool {
+// markdown template. A path ending in .html or .htm is a page by the author's
+// own naming, so a page without a doctype still counts. Otherwise it sniffs the
+// document head only: a markdown plan that merely EMBEDS html (an
+// ```html-interactive fence, an inline <div>) never STARTS with a
+// doctype/<html> tag, so it is not misrouted. Empty input is never a page.
+func LooksLikeHTML(path, raw string) bool {
 	head := strings.ToLower(strings.TrimSpace(raw))
+	if head == "" {
+		return false
+	}
+	if ext := strings.ToLower(filepath.Ext(path)); ext == ".html" || ext == ".htm" {
+		return true
+	}
 	if len(head) > 256 {
 		head = head[:256]
 	}

@@ -284,6 +284,10 @@ func TestSessionEndAndClear_HandCarrierToDaemonFinalize(t *testing.T) {
 			require.NotNil(t, stored.Meta.StoppedAt, "the carrier must hold the stop time")
 			assert.True(t, stored.Meta.StoppedAt.After(before))
 			assert.True(t, stored.Meta.StoppedAt.After(stored.Meta.CreatedAt))
+			// the daemon classifies this file next; a recording that never
+			// captured a turn must still read as header-only after the stamp,
+			// or it is summarized, uploaded and committed as an empty session
+			assert.Equal(t, session.RawHeaderOnly, session.ClassifyRawFile(rawPath))
 		})
 	}
 }

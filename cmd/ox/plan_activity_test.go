@@ -200,6 +200,7 @@ func TestPostPlanActivityBestEffort_ConfiguredProjectNotifies(t *testing.T) {
 // says "created".
 func TestSavePlanArtifacts_NotifiesCreatedThenRevised(t *testing.T) {
 	root, kinds := newPlanActivityEventRepo(t, "team_abc")
+	initPlanTestLedger(t, root)
 	t.Setenv("SAGEOX_AGENT_ID", "")
 
 	in := plan.Input{Raw: "# Notify Kind Wiring\n"}

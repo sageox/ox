@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
@@ -19,6 +21,7 @@ import (
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/lfs"
@@ -135,6 +138,7 @@ type importResult struct {
 	RecordingID string `json:"recording_id,omitempty"`
 }
 
+// runImport uploads a document to the team context's LFS store and commits its pointer files.
 func runImport(cmd *cobra.Command, args []string) error {
 	jsonOutput, _ := cmd.Flags().GetBool("json")
 
@@ -239,9 +243,6 @@ func runImport(cmd *cobra.Command, args []string) error {
 	if _, statErr := os.Stat(docDir); statErr == nil && !importFlags.force {
 		return fmt.Errorf("document directory already exists for this date — use --force to reimport: %s", docDir)
 	}
-	if err := os.MkdirAll(docDir, 0o755); err != nil {
-		return fmt.Errorf("create doc directory: %w", err)
-	}
 
 	// prepare LFS batch objects
 	batchObjects := []lfs.BatchObject{
@@ -290,6 +291,22 @@ func runImport(cmd *cobra.Command, args []string) error {
 	}
 	if len(uploadErrors) > 0 {
 		return fmt.Errorf("LFS upload failed:\n  %s", strings.Join(uploadErrors, "\n  "))
+	}
+
+	// created only after the upload succeeds, so a failed upload leaves nothing that blocks a retry;
+	// Mkdir, not MkdirAll, so an import that created docDir during our upload is not overwritten without --force
+	err = os.MkdirAll(filepath.Dir(docDir), 0o755)
+	if err == nil {
+		err = os.Mkdir(docDir, 0o755)
+	}
+	if errors.Is(err, fs.ErrExist) && importFlags.force {
+		err = nil
+	}
+	if errors.Is(err, fs.ErrExist) {
+		return fmt.Errorf("document directory was created by another import while this one was uploading, use --force to reimport: %s", docDir)
+	}
+	if err != nil {
+		return fmt.Errorf("create doc directory: %w", err)
 	}
 
 	// write LFS pointer files (~200 bytes each, referencing content on LFS server).
@@ -752,7 +769,7 @@ func resolveImportContext(ctx context.Context) (contextType, contextID string, c
 		return "", "", nil, "", fmt.Errorf("failed to read auth store: %w", err)
 	}
 	if storedToken == nil || storedToken.AccessToken == "" {
-		return "", "", nil, "", fmt.Errorf("not authenticated — run 'ox login' first")
+		return "", "", nil, "", errkind.Errorf(errkind.NotLoggedIn, "not authenticated — run 'ox login' first")
 	}
 
 	client = api.NewRepoClientWithEndpoint(ep).WithAuthToken(storedToken.AccessToken)

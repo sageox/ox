@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/sageox/ox/internal/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -186,53 +185,6 @@ func TestBatchDeleteSessionsFromLedger_UsesCanonicalPushLedger(t *testing.T) {
 	for _, name := range []string{"OxCp1", "OxCp2"} {
 		matches, _ := filepath.Glob(filepath.Join(verifyClone, "sessions", "*"+name))
 		assert.Empty(t, matches, "%s should be gone from remote", name)
-	}
-}
-
-func TestCountSubstantiveEntries(t *testing.T) {
-	tests := []struct {
-		name     string
-		content  string
-		expected int
-	}{
-		{
-			name:     "empty file",
-			content:  "",
-			expected: 0,
-		},
-		{
-			name:     "header only",
-			content:  `{"metadata":{"agent_id":"Ox1"}}` + "\n",
-			expected: 0,
-		},
-		{
-			name:     "header plus one entry",
-			content:  `{"metadata":{"agent_id":"Ox1"}}` + "\n" + `{"type":"assistant","content":"hello"}` + "\n",
-			expected: 1,
-		},
-		{
-			name:     "header plus entries and footer",
-			content:  `{"metadata":{}}` + "\n" + `{"type":"user"}` + "\n" + `{"type":"assistant"}` + "\n" + `{"entry_count":2}` + "\n",
-			expected: 3, // counts footer as a line too — that's fine, >0 is what matters
-		},
-		{
-			name:     "nonexistent file",
-			content:  "", // won't be written
-			expected: 0,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if tt.name == "nonexistent file" {
-				assert.Equal(t, 0, session.CountSubstantiveEntries("/nonexistent/raw.jsonl"))
-				return
-			}
-			tmpDir := t.TempDir()
-			path := filepath.Join(tmpDir, "raw.jsonl")
-			require.NoError(t, os.WriteFile(path, []byte(tt.content), 0644))
-			assert.Equal(t, tt.expected, session.CountSubstantiveEntries(path))
-		})
 	}
 }
 

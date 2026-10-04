@@ -33,6 +33,9 @@ type ConversationRow struct {
 	ActionItemCount int      `json:"action_item_count"`
 	Topics          []string `json:"topics,omitempty"`
 	HasDistillation bool     `json:"has_distillation"`
+	// HasKeyframes marks a screen recording (INDEX.json's has_keyframes):
+	// its transcript can carry frames and pointing with --frames.
+	HasKeyframes bool `json:"has_keyframes,omitempty"`
 }
 
 // ListData is the list envelope payload.
@@ -119,6 +122,7 @@ func (r *Reader) listRow(root *os.Root, rw row) ConversationRow {
 		ActionItemCount: rw.entry.ActionItemCount,
 		Topics:          rw.entry.Topics,
 		HasDistillation: rw.hasDistillation,
+		HasKeyframes:    rw.entry.HasKeyframes,
 	}
 	if id, err := ParseID(rw.entry.RecordingID); err == nil {
 		cr.ConversationID = id.ConversationID
@@ -129,7 +133,18 @@ func (r *Reader) listRow(root *os.Root, rw row) ConversationRow {
 	return cr
 }
 
-// guidanceShow names the L1 rung for a specific conversation.
-func guidanceShow(conversationID string) string {
-	return fmt.Sprintf("Topics: ox conversation topics %s. Transcript: ox conversation transcript %s --cues N-M.", conversationID, conversationID)
+// screenHint points a screen recording at its screen data: the walkthrough
+// view first (moments as first-class data), the per-cue interleave second.
+func screenHint(conversationID string) string {
+	return fmt.Sprintf("Screen walkthrough: ox conversation walkthrough %s lists what was on screen, clicked, and pointed at, plus the keyframes; transcript --frames shows the same per cue.", conversationID)
+}
+
+// guidanceShow names the L1 rung for a specific conversation; a screen
+// recording also gets the walkthrough hint.
+func guidanceShow(conversationID string, screen bool) string {
+	g := fmt.Sprintf("Topics: ox conversation topics %s. Transcript: ox conversation transcript %s --cues N-M.", conversationID, conversationID)
+	if screen {
+		g += " " + screenHint(conversationID)
+	}
+	return g
 }

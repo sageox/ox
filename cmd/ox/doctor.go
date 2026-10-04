@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"github.com/sageox/ox/internal/doctor"
 	"github.com/sageox/ox/internal/doctor/checks"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/perf"
 	"github.com/sageox/ox/internal/tips"
@@ -150,7 +152,11 @@ var doctorCmd = &cobra.Command{
 	Short: "Run diagnostics on ox installation and configuration",
 	Long: `Run comprehensive diagnostics on your ox installation, project configuration,
 git health, agent environment, and connected services. Use --fix to auto-repair
-common issues, or --fix-slug to target specific checks.`,
+common issues, or --fix-slug to target specific checks.
+
+Exits 1 if any check fails or required setup is missing, including with --json.
+Warnings and skipped checks alone exit 0. JSON output remains a single report;
+read summary.has_failed for the result and the process exit code for scripting.`,
 	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		// --force-session-uploads: force detection and upload of incomplete sessions
@@ -225,7 +231,7 @@ common issues, or --fix-slug to target specific checks.`,
 		// short-circuit: not in a git repo
 		if gitRoot == "" {
 			if cfg != nil && cfg.JSON {
-				return cli.PrintJSONTo(cmd.OutOrStdout(), JSONDoctorOutput{
+				if err := cli.PrintJSONTo(cmd.OutOrStdout(), JSONDoctorOutput{
 					Summary: JSONSummary{Failed: 1, HasFailed: true},
 					Categories: []JSONCategory{{
 						Name: "Setup",
@@ -234,7 +240,10 @@ common issues, or --fix-slug to target specific checks.`,
 							Message: "not inside a git repository",
 						}},
 					}},
-				})
+				}); err != nil {
+					return err
+				}
+				return doctorExitError(true, "Setup")
 			}
 			w := cmd.OutOrStdout()
 			renderDoctorHeader(w, false)
@@ -250,7 +259,7 @@ common issues, or --fix-slug to target specific checks.`,
 			content := strings.Join(steps, "\n")
 			fmt.Fprintln(w, ui.RenderBox("No Git Repository", content, ui.BoxWarning))
 			fmt.Fprintln(w)
-			return nil
+			return doctorExitError(true, "Setup")
 		}
 
 		// short-circuit with setup guidance if not ready
@@ -269,10 +278,13 @@ common issues, or --fix-slug to target specific checks.`,
 						Message: "not initialized — run 'ox init' to set up this project",
 					})
 				}
-				return cli.PrintJSONTo(cmd.OutOrStdout(), JSONDoctorOutput{
+				if err := cli.PrintJSONTo(cmd.OutOrStdout(), JSONDoctorOutput{
 					Summary:    JSONSummary{Failed: len(checks), HasFailed: true},
 					Categories: []JSONCategory{{Name: "Setup", Checks: checks}},
-				})
+				}); err != nil {
+					return err
+				}
+				return doctorExitError(true, "Setup")
 			}
 			w := cmd.OutOrStdout()
 			renderDoctorHeader(w, false)
@@ -307,7 +319,7 @@ common issues, or --fix-slug to target specific checks.`,
 			content := strings.Join(steps, "\n")
 			fmt.Fprintln(w, ui.RenderBox("Setup Required", content, ui.BoxWarning))
 			fmt.Fprintln(w)
-			return nil
+			return doctorExitError(true, "Setup")
 		}
 
 		fix, _ := cmd.Flags().GetBool("fix")
@@ -380,11 +392,40 @@ common issues, or --fix-slug to target specific checks.`,
 		// PAT is exactly the class of thing they'd want surfaced.
 		_ = auth.CheckAndWarnExpiry(cmd.Context(), projectEndpoint, os.Stderr)
 
-		if hasFailed && (cfg == nil || !cfg.JSON) {
-			return fmt.Errorf("some checks failed")
-		}
-		return nil
+		return doctorExitError(hasFailed, strings.Join(failedCheckCategories(categories), ","))
 	},
+}
+
+// The report decides success in every output mode. JSON already contains the
+// failure details, so return its exit code without a second error message.
+func doctorExitError(hasFailed bool, detail string) error {
+	if !hasFailed {
+		return nil
+	}
+	err := errors.New("some checks failed")
+	if cfg != nil && cfg.JSON {
+		err = &commandExitError{ExitCode: 1, Message: err.Error()}
+	}
+	return errkind.WithDetail(errkind.ChecksFailed, detail, err)
+}
+
+// failedCheckCategories names the categories holding a failed check, in
+// report order. Usage telemetry sends them, and they are fixed names; a
+// check's own name can carry a repository name or a path.
+func failedCheckCategories(categories []checkCategory) []string {
+	var names []string
+	for _, cat := range categories {
+		if slices.ContainsFunc(cat.checks, checkFailed) && !slices.Contains(names, cat.name) {
+			names = append(names, cat.name)
+		}
+	}
+	return names
+}
+
+// checkFailed is the failure the report counts: a check or a child check
+// that neither passed nor was skipped.
+func checkFailed(c checkResult) bool {
+	return (!c.passed && !c.skipped) || slices.ContainsFunc(c.children, checkFailed)
 }
 
 var gcCmd = &cobra.Command{
@@ -912,6 +953,7 @@ func runDoctorChecksWithState(parent context.Context, opts doctorOptions, state 
 		checkGitRepoState(),
 		checkMergeConflicts(),
 		checkGitLockFiles(), // check for stale lock files
+		checkLedgerGitLockFiles(),
 	}
 	// slow checks only run with --fix
 	if opts.fix {

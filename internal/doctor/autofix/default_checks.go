@@ -42,9 +42,9 @@ func Default() *Registry {
 	})
 	r.Register(&Check{
 		Slug:        "session-meta-titles",
-		Description: "Recover empty meta.title from summary.json on finalized sessions; cap retries at MaxSummaryAttempts",
+		Description: "Recover empty meta.title from summary.json after summarization; skip draft and pending sessions; never counts summary attempts",
 		MinInterval: 30 * time.Minute,
-		BlastRadius: "single ledger; per-session meta.json rewrite, bounded by MaxSummaryAttempts",
+		BlastRadius: "single ledger; per-session meta.json rewrite only when summary.json holds a title or summary holds leaked error prose",
 		Run:         checkSessionMetaTitles,
 	})
 	r.Register(&Check{
@@ -305,9 +305,10 @@ func checkSessionInlineSummaryRetry(_ context.Context, repoPath string) CheckRes
 // checkSessionMetaTitles is the daemon-side empty-title repair. It
 // resolves the ledger for repoPath, walks sessions/, and runs
 // lfs.RecoverEmptyTitleMeta on each session whose meta.title is
-// empty. Recovers from summary.json when possible; otherwise
-// increments the bounded attempt counter and at lfs.MaxSummaryAttempts
-// flips status to "unrecoverable" so the next pass short-circuits.
+// empty. Draft and pending sessions are left to their recording and
+// summarization paths. For other sessions, it recovers from summary.json
+// when possible and otherwise leaves the session alone: only the finalize
+// worker counts summary attempts (GH #1107).
 //
 // Why per-ledger and not per-session: the autofix scheduler iterates
 // repoPaths (workspaces). The session repair lives on the LEDGER
@@ -315,8 +316,9 @@ func checkSessionInlineSummaryRetry(_ context.Context, repoPath string) CheckRes
 // once and walk it. Skipping a workspace whose ledger isn't on disk
 // yet is normal during clone.
 //
-// Blast radius: per-session meta.json rewrites, bounded by the cap.
-// No git operations, no LFS calls, no network. Worst-case if the
+// Blast radius: per-session meta.json rewrites, only where there is a title
+// to recover or leaked error prose to move. No git operations, no LFS calls,
+// no network. Worst-case if the
 // recovery is wrong: the affected session row title shows the wrong
 // string, fixable by a future regenerate.
 func checkSessionMetaTitles(_ context.Context, repoPath string) CheckResult {
@@ -353,7 +355,7 @@ func repairLedgerSessionTitles(sessionsDir, repoPath string) CheckResult {
 		}
 	}
 
-	var recovered, bumped, flipped, errored int
+	var recovered, movedDiagnostic, errored int
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
@@ -364,32 +366,20 @@ func repairLedgerSessionTitles(sessionsDir, repoPath string) CheckResult {
 			errored++
 		case out.RecoveredFromJSON:
 			recovered++
-		case out.FlippedTerminal:
-			flipped++
-		case out.BumpedAttempts:
-			bumped++
+		case out.MovedDiagnostic:
+			movedDiagnostic++
 		}
 	}
-	if recovered == 0 && bumped == 0 && flipped == 0 && errored == 0 {
+	if recovered == 0 && movedDiagnostic == 0 && errored == 0 {
 		return CheckResult{Status: StatusClean, Repo: repoPath}
 	}
-	if recovered > 0 || flipped > 0 {
-		status := StatusFixed
-		if errored > 0 {
-			status = StatusFound // partial progress must not clear unresolved errors
-		}
-		return CheckResult{
-			Status:  status,
-			Repo:    repoPath,
-			Summary: fmt.Sprintf("session meta titles: recovered=%d flipped_terminal=%d bumped=%d errored=%d", recovered, flipped, bumped, errored),
-		}
+	status := StatusFixed
+	if errored > 0 {
+		status = StatusFound // partial progress must not clear unresolved errors
 	}
-	// only bumps and/or errors — surface as Found so it's visible in
-	// the issue tracker but doesn't claim we actively fixed anything
-	// (we just made progress toward the terminal cap).
 	return CheckResult{
-		Status:  StatusFound,
+		Status:  status,
 		Repo:    repoPath,
-		Summary: fmt.Sprintf("session meta titles: bumped=%d errored=%d (no recoveries this pass)", bumped, errored),
+		Summary: fmt.Sprintf("session meta titles: recovered=%d moved_diagnostic=%d errored=%d", recovered, movedDiagnostic, errored),
 	}
 }

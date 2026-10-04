@@ -1,6 +1,9 @@
 package identity
 
 import (
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -115,4 +118,25 @@ func TestResolveAttribution_BogusEndpoint(t *testing.T) {
 	attr := ResolveAttribution("https://this-does-not-exist.example.com:99999", "")
 	assert.NotEmpty(t, attr.Username, "should fall back gracefully with bogus endpoint")
 	assert.NotEmpty(t, attr.DisplayName)
+}
+
+// --- F. AI coworker of a team token ---
+
+// Failure prevented: a coworker's work is attributed to its machine's git
+// identity, or its name is abbreviated like a person's.
+func TestResolveAttribution_TeamCoworker(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"active":true,"principal_kind":"team-service","coworker":{"id":"agt_rip","display_name":"Rip Van Winkle"}}`)
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("SAGEOX_ENDPOINT", srv.URL)
+	t.Setenv("SAGEOX_TOKEN", "oxt_test_1ljPfr")
+
+	assert.Equal(t, Attribution{
+		Username:    "rip-van-winkle",
+		Name:        "Rip Van Winkle",
+		DisplayName: "Rip Van Winkle",
+		AI:          true,
+	}, ResolveAttribution(srv.URL, "port8080"))
 }

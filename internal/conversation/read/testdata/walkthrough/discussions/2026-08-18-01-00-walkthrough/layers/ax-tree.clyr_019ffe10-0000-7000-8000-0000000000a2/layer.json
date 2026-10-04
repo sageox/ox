@@ -1,0 +1,15 @@
+{
+  "$schema_version": 1,
+  "layer_id": "clyr_019ffe10-0000-7000-8000-0000000000a2",
+  "conversation_id": "cnv_019ffe10-0000-7000-8000-000000000011",
+  "kind": "ax-tree",
+  "modality": "data",
+  "mime": "application/x-ndjson",
+  "label": "Accessibility tree",
+  "origin": "client",
+  "spec": "sageox://layer-spec/ax-tree/1",
+  "revision": 1,
+  "status": "active",
+  "supersedes": null,
+  "clock": {"t0": "2026-08-18T01:00:00Z"}
+}

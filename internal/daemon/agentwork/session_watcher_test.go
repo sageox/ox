@@ -1449,3 +1449,30 @@ func TestSessionWatcherManager_PersistOffset_CorruptRecordingJSON(t *testing.T) 
 
 	mgr.StopAll()
 }
+
+type nonAdvancingAdapter struct{ testAdapter }
+
+func (a *nonAdvancingAdapter) ReadFromOffset(_ string, offset int64) ([]adapters.RawEntry, int64, error) {
+	return []adapters.RawEntry{{Role: "assistant", Content: "must not append"}}, offset, nil
+}
+
+func TestWatcherRejectsNonAdvancingCatchUpCursor(t *testing.T) {
+	mgr := newTestWatcherManager(t)
+	dir := t.TempDir()
+	raw := filepath.Join(dir, "raw.jsonl")
+	writeRecordingState(t, filepath.Join(dir, recordingMarker), session.RecordingState{SessionPath: dir, SourceOffset: 10})
+	aw := &activeWatcher{done: make(chan struct{}), sessionName: "bad-cursor", cachePath: dir, startOffset: 10}
+	mgr.wg.Add(1)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	mgr.runWatcher(ctx, aw, &nonAdvancingAdapter{}, raw)
+	data, err := os.ReadFile(raw)
+	require.NoError(t, err)
+	require.NotContains(t, string(data), "must not append")
+	stateData, err := os.ReadFile(filepath.Join(dir, recordingMarker))
+	require.NoError(t, err)
+	var state session.RecordingState
+	require.NoError(t, json.Unmarshal(stateData, &state))
+	require.Equal(t, int64(10), state.SourceOffset)
+	require.Zero(t, state.EntryCount)
+}

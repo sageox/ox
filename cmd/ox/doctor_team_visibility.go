@@ -10,6 +10,7 @@ import (
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/teamaccess"
 )
 
 // CheckSlugTeamVisibility is the slug for the team-visibility check.
@@ -90,10 +91,7 @@ func teamVisibilityVerdict(cfg *config.ProjectConfig, teams []api.TeamMembership
 			"server did not report team memberships", "")
 	}
 
-	for _, t := range teams {
-		if t.ID != cfg.TeamID {
-			continue
-		}
+	if t, ok := teamaccess.FindMembership(teams, cfg.TeamID); ok {
 		name := t.Name
 		if name == "" {
 			name = cfg.TeamID

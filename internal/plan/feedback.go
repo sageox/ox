@@ -3,6 +3,7 @@ package plan
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -46,7 +48,37 @@ func randSuffix() string {
 
 // feedbackSubdir is the per-plan folder holding review rounds + resolutions.
 const feedbackSubdir = "feedback"
+
+// resolutionsFile is the LEGACY single-array resolution log. It is still read
+// (plans committed before the per-entry layout carry their history there) but
+// never rewritten: two machines appending to one shared file both lose an
+// entry when the ledger rebase auto-resolves the data/ conflict to one side.
 const resolutionsFile = "resolutions.json"
+
+// resolutionsSubdir holds one file per resolution (see AppendResolution). It
+// sits under feedback/ rather than beside it so every piece of review state
+// stays in one subtree — and so a blocked feedback/ path still fails a
+// resolution write loudly instead of silently landing elsewhere.
+const resolutionsSubdir = "resolutions"
+
+// roundPrefix marks a review-round file. Only round-*.json is a round: the
+// feedback dir also holds remaps.json and resolutions.json, which must never
+// be decoded (or reported corrupt) as rounds.
+const roundPrefix = "round-"
+
+// roundTimeLayout is fixed-width, so the round ID can be sliced out of the
+// filename unambiguously even though IDs may themselves contain '-'.
+const roundTimeLayout = "20060102-150405.000000000"
+
+// roundIDPattern bounds a client-supplied round ID to filename-safe characters.
+// The ID is embedded in a path, so this is a traversal guard as much as a
+// format check; 8 chars minimum keeps accidental collisions implausible.
+var roundIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{8,64}$`)
+
+// ErrDuplicateRound is returned by SaveFeedback when a round with the same ID
+// is already on disk — a double Submit or a re-applied export. The caller
+// treats it as success-already-done, not as a failure.
+var ErrDuplicateRound = errors.New("feedback round already saved")
 
 // FeedbackStatus is the reviewer's verdict on one anchored element.
 type FeedbackStatus string
@@ -83,22 +115,30 @@ func validResolutionState(s ResolutionState) bool {
 	return false
 }
 
-// FeedbackItem is one anchored review mark. Anchor is a CONTENT hash of the
-// element (section heading + element text), computed page-side, so it survives a
+// FeedbackItem is one anchored review mark. Anchor is a CONTENT hash computed
+// page-side — of (section heading + element text) for a mark on a whole
+// element, of (section heading + Quote) for a highlight — so it survives a
 // re-render and only disappears when the agent rewrites that text — which is
 // itself the signal the item was addressed. Anchor doubles as the item id used
 // by `ox plan feedback resolve`.
 type FeedbackItem struct {
-	Anchor   string         `json:"anchor"`             // stable content-hash id, e.g. "h3f9a1c2"
+	Anchor   string         `json:"anchor"`             // stable content-hash id: "h…" for an element, "q…" for a highlight
 	Section  string         `json:"section,omitempty"`  // section heading the element sits under
-	Label    string         `json:"label"`              // short text of the element
+	Label    string         `json:"label"`              // short text of the element, or the start of Quote
+	Quote    string         `json:"quote,omitempty"`    // the exact words a highlight covers; empty for a whole-element mark
 	Status   FeedbackStatus `json:"status"`             // approve | request-change | flag | comment
 	Note     string         `json:"note,omitempty"`     // the reviewer's comment
 	Reviewer string         `json:"reviewer,omitempty"` // who left this mark (multi-user); stamped from the round on save
 }
 
 // FeedbackSet is one review round (one submit from the page).
+//
+// ID is the round's idempotency key: when set, SaveFeedback writes at most one
+// round per ID per plan, so a retried submit or a re-applied export cannot
+// duplicate the reviewer's marks. Empty keeps the pre-ID behavior (every save
+// is a new round).
 type FeedbackSet struct {
+	ID        string         `json:"id,omitempty"`
 	Slug      string         `json:"slug"`
 	Reviewer  string         `json:"reviewer,omitempty"`
 	CreatedAt time.Time      `json:"created_at"`
@@ -156,6 +196,9 @@ func ParseFeedback(raw []byte) (FeedbackSet, error) {
 			return FeedbackSet{}, err
 		}
 	}
+	if err := validateRoundID(set.ID); err != nil {
+		return FeedbackSet{}, err
+	}
 	if len(set.Items) == 0 {
 		return FeedbackSet{}, fmt.Errorf("feedback has no items")
 	}
@@ -171,9 +214,74 @@ func ParseFeedback(raw []byte) (FeedbackSet, error) {
 	return set, nil
 }
 
+// validateRoundID accepts an empty ID (no idempotency requested) or one that
+// matches roundIDPattern.
+func validateRoundID(id string) error {
+	if id == "" || roundIDPattern.MatchString(id) {
+		return nil
+	}
+	return fmt.Errorf("invalid round id %q: want 8-64 chars of [A-Za-z0-9_-]", id)
+}
+
+// ContentRoundID derives a deterministic round ID from what the reviewer said
+// (reviewer + items), for inputs that carry no ID of their own — e.g. an
+// exported JSON applied by hand. Applying the same export twice then yields
+// the same ID, which SaveFeedback dedups. Slug and timestamps are excluded on
+// purpose: they vary between exports of identical marks.
+func ContentRoundID(set FeedbackSet) (string, error) {
+	canon, err := json.Marshal(struct {
+		Reviewer string         `json:"reviewer"`
+		Items    []FeedbackItem `json:"items"`
+	}{set.Reviewer, set.Items})
+	if err != nil {
+		return "", fmt.Errorf("encode feedback for round id: %w", err)
+	}
+	sum := sha256.Sum256(canon)
+	// 32 hex chars (128 bits) is collision-proof for per-plan dedup and keeps
+	// filenames readable; the "c" prefix marks the ID as content-derived.
+	return "c" + hex.EncodeToString(sum[:16]), nil
+}
+
+// roundIDFromName extracts the ID (or legacy random suffix) from a round
+// filename, or "" if the name is not a well-formed round file.
+func roundIDFromName(name string) string {
+	if !strings.HasPrefix(name, roundPrefix) || !strings.HasSuffix(name, ".json") {
+		return ""
+	}
+	rest := strings.TrimSuffix(strings.TrimPrefix(name, roundPrefix), ".json")
+	if len(rest) <= len(roundTimeLayout)+1 || rest[len(roundTimeLayout)] != '-' {
+		return ""
+	}
+	return rest[len(roundTimeLayout)+1:]
+}
+
+// findRoundByID returns the path of the round in dir whose filename carries id.
+func findRoundByID(dir, id string) (string, bool, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", false, fmt.Errorf("read feedback dir: %w", err)
+	}
+	for _, e := range entries {
+		if !e.IsDir() && roundIDFromName(e.Name()) == id {
+			return filepath.Join(dir, e.Name()), true, nil
+		}
+	}
+	return "", false, nil
+}
+
 // SaveFeedback writes a review round under <planDir>/feedback/. now controls the
 // timestamp (tests stay deterministic). Returns the written path.
+//
+// When set.ID is non-empty and a round with that ID already exists, nothing is
+// written and (existingPath, ErrDuplicateRound) is returned. The exists-check
+// and the write share one advisory lock, so concurrent same-ID submits (the
+// review server and an `apply` in another process) produce exactly one round.
+// The write is atomic (temp+fsync+rename): a crash leaves either the whole
+// round or none of it, never a torn file that would later read as corrupt.
 func SaveFeedback(planDir string, set FeedbackSet, now time.Time) (string, error) {
+	if err := validateRoundID(set.ID); err != nil {
+		return "", err
+	}
 	if set.CreatedAt.IsZero() {
 		set.CreatedAt = now.UTC()
 	}
@@ -188,26 +296,54 @@ func SaveFeedback(planDir string, set FeedbackSet, now time.Time) (string, error
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("create feedback dir: %w", err)
 	}
-	// timestamp prefix keeps rounds chronologically sortable by filename; a random
-	// suffix makes concurrent multi-user submits collision-proof (two reviewers can
-	// submit in the same nanosecond).
-	name := "round-" + now.UTC().Format("20060102-150405.000000000") + "-" + randSuffix() + ".json"
-	path := filepath.Join(dir, name)
 	b, err := json.MarshalIndent(set, "", "  ")
 	if err != nil {
 		return "", fmt.Errorf("encode feedback: %w", err)
 	}
-	if err := os.WriteFile(path, b, 0o644); err != nil {
-		return "", fmt.Errorf("write feedback: %w", err)
+	// timestamp prefix keeps rounds chronologically sortable by filename; the
+	// suffix is the round ID when given (so a duplicate is findable by name
+	// without decoding every round) or a random tag that makes concurrent
+	// multi-user submits collision-proof (two reviewers in the same nanosecond).
+	suffix := set.ID
+	if suffix == "" {
+		suffix = randSuffix()
+	}
+	path := filepath.Join(dir, roundPrefix+now.UTC().Format(roundTimeLayout)+"-"+suffix+".json")
+	if set.ID == "" {
+		if err := fileutil.AtomicWriteBytes(path, b, 0o644); err != nil {
+			return "", fmt.Errorf("write feedback: %w", err)
+		}
+		return path, nil
+	}
+	// The lock target is a name, not a file we create: WithFileLock keys a
+	// sidecar lock off it, serializing every ID'd save for this plan.
+	var existing string
+	err = fileutil.WithFileLock(context.Background(), filepath.Join(dir, ".rounds"), func() error {
+		found, ok, ferr := findRoundByID(dir, set.ID)
+		if ferr != nil {
+			return ferr
+		}
+		if ok {
+			existing = found
+			return ErrDuplicateRound
+		}
+		if werr := fileutil.AtomicWriteBytes(path, b, 0o644); werr != nil {
+			return fmt.Errorf("write feedback: %w", werr)
+		}
+		return nil
+	})
+	if errors.Is(err, ErrDuplicateRound) {
+		return existing, ErrDuplicateRound
+	}
+	if err != nil {
+		return "", fmt.Errorf("save feedback round %s: %w", set.ID, err)
 	}
 	return path, nil
 }
 
-// LoadAllFeedback reads every review round under a plan dir, oldest first. A
-// missing feedback/ dir is not an error. resolutions.json is skipped (it is not
-// a round).
-func LoadAllFeedback(planDir string) ([]FeedbackSet, error) {
-	dir := filepath.Join(planDir, feedbackSubdir)
+// roundFileNames lists the round files under dir, oldest first. A missing dir
+// is an empty list.
+func roundFileNames(dir string) ([]string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -217,32 +353,90 @@ func LoadAllFeedback(planDir string) ([]FeedbackSet, error) {
 	}
 	var names []string
 	for _, e := range entries {
-		if e.IsDir() || e.Name() == resolutionsFile || !strings.HasSuffix(e.Name(), ".json") {
+		if e.IsDir() || !strings.HasPrefix(e.Name(), roundPrefix) || !strings.HasSuffix(e.Name(), ".json") {
 			continue
 		}
 		names = append(names, e.Name())
 	}
 	sort.Strings(names) // timestamped names sort chronologically
+	return names, nil
+}
+
+// readRound decodes one round file.
+func readRound(path string) (FeedbackSet, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return FeedbackSet{}, fmt.Errorf("read round: %w", err)
+	}
+	var set FeedbackSet
+	if err := json.Unmarshal(b, &set); err != nil {
+		return FeedbackSet{}, fmt.Errorf("parse round: %w", err)
+	}
+	return set, nil
+}
+
+// LoadAllFeedback reads every review round under a plan dir, oldest first. A
+// missing feedback/ dir is not an error.
+//
+// An unreadable round does not fail the load — one torn file must not blank
+// the whole review — but it is logged, and CorruptFeedbackRounds surfaces it
+// to the human, because a skipped round is a reviewer's words going missing.
+// Two rounds sharing an ID (only possible when two machines saved the same
+// round before the ledger synced) collapse to the earliest.
+func LoadAllFeedback(planDir string) ([]FeedbackSet, error) {
+	dir := filepath.Join(planDir, feedbackSubdir)
+	names, err := roundFileNames(dir)
+	if err != nil {
+		return nil, err
+	}
 	var sets []FeedbackSet
+	seenID := map[string]bool{}
 	for _, n := range names {
-		b, err := os.ReadFile(filepath.Join(dir, n))
+		set, err := readRound(filepath.Join(dir, n))
 		if err != nil {
+			slog.Warn("plan feedback: skipping unreadable review round", "error", err, "round", n, "dir", planDir)
 			continue
 		}
-		var set FeedbackSet
-		if err := json.Unmarshal(b, &set); err != nil {
-			continue
+		if set.ID != "" {
+			if seenID[set.ID] {
+				slog.Info("plan feedback: skipping duplicate review round", "round_id", set.ID, "round", n, "dir", planDir)
+				continue
+			}
+			seenID[set.ID] = true
 		}
 		sets = append(sets, set)
 	}
 	return sets, nil
 }
 
-// AppendResolution adds one agent disposition to the append log. The whole
-// read-modify-write runs under an advisory flock: the reviewer's Accept (via
-// the review server) and the agent's `ox plan feedback resolve` are separate
-// processes writing the same file, and an unlocked RMW loses whichever
-// resolution lands first — a sacred-data loss, not a cosmetic race.
+// CorruptFeedbackRounds returns the paths of round files under planDir that
+// cannot be read or decoded — the rounds LoadAllFeedback skips. Empty when
+// every round is intact or there is no feedback.
+func CorruptFeedbackRounds(planDir string) ([]string, error) {
+	dir := filepath.Join(planDir, feedbackSubdir)
+	names, err := roundFileNames(dir)
+	if err != nil {
+		return nil, err
+	}
+	var corrupt []string
+	for _, n := range names {
+		p := filepath.Join(dir, n)
+		if _, err := readRound(p); err != nil {
+			corrupt = append(corrupt, p)
+		}
+	}
+	return corrupt, nil
+}
+
+// AppendResolution records one agent disposition as its own file under
+// <planDir>/feedback/resolutions/<utc ns>-<rand>.json.
+//
+// One file per entry, never a shared file rewritten in place: the reviewer's
+// Accept (review server) and the agent's `ox plan feedback resolve` run in
+// different processes and, across machines, different clones. A shared array
+// survives the in-process race with a lock but not the cross-machine one — the
+// ledger rebase auto-resolves a data/ conflict to one side, silently dropping
+// the other machine's entry. Distinct filenames never conflict.
 func AppendResolution(planDir string, r Resolution, now time.Time) error {
 	if err := validateAnchor(r.Anchor); err != nil {
 		return err
@@ -253,23 +447,19 @@ func AppendResolution(planDir string, r Resolution, now time.Time) error {
 	if r.At.IsZero() {
 		r.At = now.UTC()
 	}
-	dir := filepath.Join(planDir, feedbackSubdir)
+	dir := filepath.Join(planDir, feedbackSubdir, resolutionsSubdir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("create feedback dir: %w", err)
+		return fmt.Errorf("create resolutions dir: %w", err)
 	}
-	path := filepath.Join(dir, resolutionsFile)
-	return fileutil.WithFileLock(context.Background(), path, func() error {
-		existing, err := LoadResolutions(planDir)
-		if err != nil {
-			return err
-		}
-		existing = append(existing, r)
-		b, err := json.MarshalIndent(existing, "", "  ")
-		if err != nil {
-			return fmt.Errorf("encode resolutions: %w", err)
-		}
-		return fileutil.AtomicWriteBytes(path, b, 0o644)
-	})
+	b, err := json.MarshalIndent(r, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode resolution: %w", err)
+	}
+	name := r.At.UTC().Format(roundTimeLayout) + "-" + randSuffix() + ".json"
+	if err := fileutil.AtomicWriteBytes(filepath.Join(dir, name), b, 0o644); err != nil {
+		return fmt.Errorf("write resolution: %w", err)
+	}
+	return nil
 }
 
 // validateAnchor keeps anchors to the page-emitted shape (no separators) so a
@@ -285,20 +475,68 @@ func validateAnchor(a string) error {
 	return nil
 }
 
-// LoadResolutions reads the append log (latest entries last). Missing is empty.
+// LoadResolutions returns every resolution, oldest first: the legacy
+// resolutions.json array merged with the per-entry files. Missing is empty.
+//
+// An entry present in both (a clone that carried a legacy entry forward) is
+// kept once. A corrupt legacy file is an error, as before; a single corrupt
+// per-entry file is skipped with a warning so one torn write cannot hide
+// every other disposition.
 func LoadResolutions(planDir string) ([]Resolution, error) {
-	b, err := os.ReadFile(filepath.Join(planDir, feedbackSubdir, resolutionsFile))
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("read resolutions: %w", err)
-	}
 	var rs []Resolution
-	if err := json.Unmarshal(b, &rs); err != nil {
-		return nil, fmt.Errorf("parse resolutions: %w", err)
+	b, err := os.ReadFile(filepath.Join(planDir, feedbackSubdir, resolutionsFile))
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+	case err != nil:
+		return nil, fmt.Errorf("read resolutions: %w", err)
+	default:
+		if err := json.Unmarshal(b, &rs); err != nil {
+			return nil, fmt.Errorf("parse resolutions: %w", err)
+		}
 	}
+
+	dir := filepath.Join(planDir, feedbackSubdir, resolutionsSubdir)
+	entries, err := os.ReadDir(dir)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("read resolutions dir: %w", err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".json") {
+			names = append(names, e.Name())
+		}
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		eb, err := os.ReadFile(filepath.Join(dir, n))
+		if err != nil {
+			slog.Warn("plan feedback: skipping unreadable resolution", "error", err, "file", n, "dir", planDir)
+			continue
+		}
+		var r Resolution
+		if err := json.Unmarshal(eb, &r); err != nil {
+			slog.Warn("plan feedback: skipping corrupt resolution", "error", err, "file", n, "dir", planDir)
+			continue
+		}
+		if containsResolution(rs, r) {
+			continue
+		}
+		rs = append(rs, r)
+	}
+	// Stable: equal timestamps keep legacy-before-dir, then filename order.
+	sort.SliceStable(rs, func(i, j int) bool { return rs[i].At.Before(rs[j].At) })
 	return rs, nil
+}
+
+// containsResolution reports whether rs already holds an entry identical to r.
+// Time is compared with Equal: a JSON round-trip drops the monotonic reading.
+func containsResolution(rs []Resolution, r Resolution) bool {
+	for _, x := range rs {
+		if x.Anchor == r.Anchor && x.State == r.State && x.Commit == r.Commit && x.Note == r.Note && x.At.Equal(r.At) {
+			return true
+		}
+	}
+	return false
 }
 
 // AssembleReview joins every review item (latest mark per anchor across rounds)
@@ -450,7 +688,12 @@ func FeedbackDigest(items []MergedItem) string {
 	}
 	for _, it := range openItems {
 		label := it.Label
-		if label == "" {
+		if it.Quote != "" {
+			// the words the agent searches the plan for: more than the 70-char
+			// label, but on one line and capped, so a highlighted paragraph
+			// can't flood every digest or forge a line of its own
+			label = "“" + clipQuote(it.Quote) + "”"
+		} else if label == "" {
 			label = it.Anchor
 		}
 		fmt.Fprintf(&b, "  [%s] (%s) %s", it.Status, it.Anchor, label)
@@ -477,6 +720,19 @@ func FeedbackDigest(items []MergedItem) string {
 		b.WriteString("\nResolve each: ox plan feedback resolve <slug> <anchor> --state addressed --commit <sha> --note \"…\"\n")
 	}
 	return b.String()
+}
+
+// digestQuoteMax caps a highlight's words in the digest, in runes.
+const digestQuoteMax = 200
+
+// clipQuote collapses a quote's whitespace to single spaces and cuts it to
+// digestQuoteMax runes.
+func clipQuote(q string) string {
+	r := []rune(strings.Join(strings.Fields(q), " "))
+	if len(r) <= digestQuoteMax {
+		return string(r)
+	}
+	return string(r[:digestQuoteMax-1]) + "…"
 }
 
 // CountOpenFeedback returns the number of OPEN, actionable review items for a

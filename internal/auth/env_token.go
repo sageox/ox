@@ -1,16 +1,20 @@
 package auth
 
 import (
+	"context"
 	"encoding/binary"
 	"hash/crc32"
 	"log/slog"
 	"math/big"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/gitserver"
+	"github.com/sageox/ox/internal/repotools"
 )
 
 // EnvVarToken is the environment variable for supplying a SageOx access token
@@ -205,6 +209,70 @@ func EnvTokenFor(ep string) (*StoredToken, EnvTokenState) {
 // requiring a parsed StoredToken (a malformed token never produces one).
 func EnvTokenIsTeamFamily(ep string) bool {
 	return strings.HasPrefix(envTokenBoundValue(ep), TeamTokenPrefix)
+}
+
+// Coworker is the AI coworker a team token acts as, as introspection names it.
+type Coworker struct {
+	ID          string `json:"id"`           // agt_…
+	DisplayName string `json:"display_name"` // the coworker's name in SageOx; may be empty
+}
+
+// Name is the coworker's display name, or its agt_ id when it has none.
+func (c *Coworker) Name() string {
+	if c.DisplayName != "" {
+		return c.DisplayName
+	}
+	return c.ID
+}
+
+// Username is the coworker's slug. Slugify keeps only ASCII letters and
+// digits, so an empty name, or one with neither, falls back to the agt_ id.
+func (c *Coworker) Username() string {
+	if slug := repotools.Slugify(c.DisplayName); slug != "" {
+		return slug
+	}
+	return strings.ToLower(c.ID)
+}
+
+// coworkerIDPattern admits only characters a session name may hold, because
+// Username falls back to the id and session names embed Username.
+var coworkerIDPattern = regexp.MustCompile(`^agt_[A-Za-z0-9_-]+$`)
+
+func isCoworkerID(id string) bool {
+	return coworkerIDPattern.MatchString(id)
+}
+
+// ErrNoCoworker reports that the server says the team token in SAGEOX_TOKEN has
+// no AI coworker attached. Recording and murmurs refuse it rather than file
+// the work under the git identity of whatever machine runs ox.
+var ErrNoCoworker = errkind.Errorf(errkind.Auth, "SAGEOX_TOKEN is a team token with no AI coworker attached: attach an AI coworker to the token in SageOx, or unset SAGEOX_TOKEN to use your own login")
+
+// TeamCoworker returns the AI coworker that the team token in SAGEOX_TOKEN acts
+// as for ep. identity.ResolveAttribution, GetUserID and GetUsername attribute
+// work to it.
+//
+// It returns nil, nil when ep's credential is not a team token, or when the
+// server has not named a coworker: it predates the field, or it was not
+// reachable and nothing is cached. Callers then attribute work as before. It
+// returns ErrNoCoworker when the server answers that none is attached.
+func TeamCoworker(ep string) (*Coworker, error) {
+	// Checked before EnvTokenFor so a person's command never pays for the
+	// checksum check or repeats its warning about a mistyped SAGEOX_TOKEN.
+	if !EnvTokenIsTeamFamily(ep) {
+		return nil, nil
+	}
+	tok, state := EnvTokenFor(ep)
+	if state != EnvTokenValid {
+		return nil, nil
+	}
+	meta, _ := FetchTokenMetaCached(context.Background(), ep, tok.AccessToken)
+	if meta == nil {
+		return nil, nil
+	}
+	if meta.NoCoworker {
+		return nil, ErrNoCoworker
+	}
+	return meta.Coworker, nil
 }
 
 // tokenFromEnv returns a StoredToken populated from SAGEOX_TOKEN when the

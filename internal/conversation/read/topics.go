@@ -43,7 +43,7 @@ func (r *Reader) Topics(rawID string) *Envelope {
 	if idErr != nil {
 		return r.finishError(start, idErr, nil)
 	}
-	_, droot, lookErr := r.lookup(id.RecordingID)
+	_, droot, lookErr := r.lookup(id)
 	if lookErr != nil {
 		return r.finishError(start, lookErr, nil)
 	}

@@ -9,9 +9,31 @@ const (
 	// UUIDv7 or sageox:// citation URI (D16), or a topic id is not a strictly
 	// valid tp_ UUIDv7 (D21).
 	ErrCodeInvalidID = "invalid_id"
+	// ErrCodeShareLinkUnresolvable: the input is a sageox.ai share link
+	// (/s/{token}) that could not be resolved to a recording. The token is
+	// opaque and no local data maps it; the command layer resolves it online
+	// when the user is logged in to the link's environment, and every failure
+	// of that lookup (logged out, share not found, server without the lookup,
+	// network) lands here with the reason in the message.
+	ErrCodeShareLinkUnresolvable = "share_link_unresolvable"
+	// ErrCodeShareLinkNotDiscussion: a share link resolved, but to something
+	// other than a recorded discussion, which is all ox conversation reads.
+	ErrCodeShareLinkNotDiscussion = "share_link_not_discussion"
 	// ErrCodeNoTeamContext: no local team-context checkout is resolvable for
 	// this repo — covers ephemeral mode and pre-first-sync states (D14, D18).
 	ErrCodeNoTeamContext = "no_team_context"
+	// ErrCodeNotAuthenticated: no usable sign-in for the repo's SageOx
+	// endpoint (never signed in, signed out, expired, or rejected). Reads
+	// refuse before touching the team's files: a checkout on disk is not
+	// proof the person running ox may see it.
+	ErrCodeNotAuthenticated = "not_authenticated"
+	// ErrCodeNoTeamAccess: signed in, and the server says this account is
+	// not a member of the repo's team.
+	ErrCodeNoTeamAccess = "no_team_access"
+	// ErrCodeAccessUnverified: signed in, but membership could not be
+	// confirmed with the server (offline, timeout, server error) and no
+	// confirmation from the last hour is cached. Retryable.
+	ErrCodeAccessUnverified = "access_unverified"
 	// ErrCodeNotIndexed: the id is valid but INDEX.json has no live entry for
 	// it (D3). The exceptional path; the future resolve-endpoint fallback
 	// plugs in here.
@@ -50,11 +72,23 @@ func (e *Error) Error() string {
 	return e.Code + ": " + e.Message
 }
 
-// newError builds a typed error. read_error is the only retryable code (a
-// transient filesystem or parse failure may clear on retry); every other
-// code is a stable fact about the request or the data.
+// newError builds a typed error. read_error and access_unverified are the
+// retryable codes (a transient filesystem failure, or a server that could
+// not be reached, may clear on retry); every other code is a stable fact
+// about the request, the caller, or the data.
 func newError(code, message string) *Error {
-	return &Error{Code: code, Message: message, Retryable: code == ErrCodeReadError}
+	return &Error{Code: code, Message: message, Retryable: IsRetryableCode(code)}
+}
+
+// NewError builds a typed error with the retryable flag the code implies.
+// For callers outside the package (the command layer's access gate).
+func NewError(code, message string) *Error { return newError(code, message) }
+
+// IsRetryableCode reports whether a retry can clear the failure: a
+// transient read failure, or an access check that could not reach the
+// server.
+func IsRetryableCode(code string) bool {
+	return code == ErrCodeReadError || code == ErrCodeAccessUnverified
 }
 
 // errorGuidance names the next step for a typed error code. D15 promises
@@ -63,9 +97,19 @@ func newError(code, message string) *Error {
 func errorGuidance(code string) string {
 	switch code {
 	case ErrCodeInvalidID:
-		return "Copy a valid id from ox conversation list (cnv_/rec_ UUIDv7 or a sageox:// citation URI)."
+		return "Copy a valid id from ox conversation list (cnv_/rec_ UUIDv7, a sageox:// citation URI, or a sageox.ai recording link)."
+	case ErrCodeShareLinkUnresolvable:
+		return "A share link resolves online when you are logged in to its SageOx environment (ox login); otherwise open the share link in a browser and pass the recording page URL (…/recordings/rec_…) or its rec_ id to ox conversation show."
+	case ErrCodeShareLinkNotDiscussion:
+		return "This share link is not for a recorded discussion; open it in a browser, or pass a recording link or rec_ id to ox conversation show."
 	case ErrCodeNoTeamContext:
 		return "Check team-context sync with ox status; retry after the first sync completes."
+	case ErrCodeNotAuthenticated:
+		return "Stop and tell the user to sign in with ox login, then retry. Do not web-fetch the link or look for the content elsewhere."
+	case ErrCodeNoTeamAccess:
+		return "Stop and tell the user their account is not a member of this repo's team; a team admin can invite them. Do not look for the content elsewhere."
+	case ErrCodeAccessUnverified:
+		return "Retry once the network is back; ox needs to confirm team membership with SageOx at least once an hour."
 	case ErrCodeNotIndexed:
 		return "Browse known ids with ox conversation list; a recent recording may appear after the next sync."
 	case ErrCodeNoDistillation:

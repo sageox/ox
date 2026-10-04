@@ -16,6 +16,22 @@ printer; see `.claude/rules/json-output.md`. Writer-aware helpers such as
 `PrintWarningTo` honor their supplied writer. Command-specific JSON response
 envelopes remain part of the command's stdout contract.
 
+The common CLI pre-run resolves `OX_JSON=1` as the JSON default; explicit
+`--json` or `--json=false` takes precedence. It applies that result to both the
+configuration and command flags so handlers agree regardless of which they read.
+An environment default must not mark the flag as explicitly supplied: commands
+that choose JSON automatically for AI coworkers still need to distinguish an
+omitted flag from `--json=false`.
+
+The stdout color-stripping proxy must finish flushing before the command reports
+success. If copying returns a write error, report it on stderr and change an
+otherwise successful exit to 1. Preserve an existing nonzero command exit code.
+A failed destination must also unblock commands writing more output than the
+color-stripping pipe can buffer. Keep Go's default Unix `SIGPIPE` termination
+when a downstream reader closes stdout (for example,
+`ox release-notes --raw | head`); that case already exits nonzero without a
+diagnostic.
+
 ## Spinner Cancellation
 
 `cli.WithSpinner` returns `tea.ErrInterrupted` when dismissed before the operation
@@ -58,6 +74,13 @@ Flag-only commands that change state (`init`, `login`, `logout`, `uninstall`,
 arguments before their handlers run. A stray path must not silently select the
 current repository, and `--force false` must not proceed with force enabled.
 Use `--force=false` to explicitly disable a boolean flag.
+
+Unknown subcommands exit 1 with an error and a short `--help` hint on stderr.
+Command groups must validate arguments even when they have no runnable handler;
+otherwise Cobra prints help and reports success. Bare groups and explicit help
+requests continue to show help on stdout and exit 0. Nested typo suggestions
+come from that group's available subcommands; the curated correction catalog
+retains its existing behavior.
 
 ## Color Palette
 

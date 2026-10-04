@@ -2,7 +2,7 @@ package version
 
 // Version information set via ldflags during build
 var (
-	Version   = "0.17.1"
+	Version   = "0.20.0"
 	BuildDate = "unknown"
 	GitCommit = "unknown"
 )

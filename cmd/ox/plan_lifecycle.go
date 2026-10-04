@@ -126,7 +126,7 @@ superseded), one line per event. Pure reader — never writes.`,
 		if err != nil {
 			return fmt.Errorf("load plan %q: %w", args[0], err)
 		}
-		return runPlanStatusOnDir(cmd, info.Dir, info.Topic, info.Slug, jsonOut)
+		return runPlanStatusOnDir(cmd, info.Dir, info.Topic, info.Slug, planShareURL(gitRoot, planIDForDir(info.Dir)), jsonOut)
 	},
 }
 
@@ -170,7 +170,19 @@ func runPlanLifecycleVerbOnDir(cmd *cobra.Command, gitRoot, planDir, slug string
 	if err != nil {
 		return fmt.Errorf("record %s event for plan %q: %w", kind, slug, err)
 	}
+	var share *planShareStatus
 	if changed {
+		// Commit + push the event exactly like the browser /approve path
+		// (commitPlanBestEffort) does. Without this, `ox plan approve` wrote
+		// events.jsonl into the working tree and nothing else: the approval
+		// existed on one laptop until some unrelated later commit swept it up.
+		// Observed rather than best-effort-logged so the verb can say when the
+		// approval did not reach teammates.
+		st := sharePlanDir(gitRoot, planDir)
+		share = &st
+		if !st.Shared {
+			cli.PrintWarningTo(cmd.ErrOrStderr(), fmt.Sprintf("NOT SHARED — %s recorded locally only: %s. Fix: `%s`", kind, st.Reason, st.Fix))
+		}
 		// best-effort, off-by-default caller-driven index report — see
 		// plan_activity.go. Only on an actual change, matching the no-op
 		// re-run contract the rest of this function already honors.
@@ -179,7 +191,7 @@ func runPlanLifecycleVerbOnDir(cmd *cobra.Command, gitRoot, planDir, slug string
 
 	status := currentPlanStatus(planDir)
 	if jsonOut {
-		return cli.PrintJSONTo(cmd.OutOrStdout(), planLifecycleResult{Changed: changed, Status: status})
+		return cli.PrintJSONTo(cmd.OutOrStdout(), planLifecycleResult{Changed: changed, Status: status, Share: share})
 	}
 	return writePlanLifecycleHuman(cmd, slug, changed, status)
 }
@@ -223,6 +235,9 @@ func currentPlanStatus(planDir string) plan.PlanStatus {
 type planLifecycleResult struct {
 	Changed bool            `json:"changed"`
 	Status  plan.PlanStatus `json:"status,omitempty"`
+	// Share is set only when the verb changed something and so had to be
+	// committed: whether the new status reached teammates.
+	Share *planShareStatus `json:"share,omitempty"`
 }
 
 func writePlanLifecycleHuman(cmd *cobra.Command, slug string, changed bool, status plan.PlanStatus) error {
@@ -238,7 +253,7 @@ func writePlanLifecycleHuman(cmd *cobra.Command, slug string, changed bool, stat
 // runPlanStatusOnDir is the testable core of `ox plan status`: LoadEvents →
 // Fold → print, split from planStatusCmd's RunE so it doesn't need a real
 // ledger to test.
-func runPlanStatusOnDir(cmd *cobra.Command, planDir, topic, slug string, jsonOut bool) error {
+func runPlanStatusOnDir(cmd *cobra.Command, planDir, topic, slug, shareURL string, jsonOut bool) error {
 	events, err := plan.LoadEvents(planDir)
 	if err != nil {
 		return fmt.Errorf("load plan events %q: %w", slug, err)
@@ -255,12 +270,16 @@ func runPlanStatusOnDir(cmd *cobra.Command, planDir, topic, slug string, jsonOut
 			UpdatedAt:  folded.UpdatedAt,
 			Visibility: folded.Visibility,
 			Sessions:   toSessionsJSON(folded.Sessions),
+			URL:        shareURL,
 		})
 	}
 
 	out := cmd.OutOrStdout()
 	fmt.Fprintln(out, cli.StyleBrand.Render(topic))
 	fmt.Fprintf(out, "slug: %s   status: %s\n", slug, folded.Status)
+	if shareURL != "" {
+		fmt.Fprintf(out, "link: %s\n", shareURL)
+	}
 	if len(folded.Authors) > 0 {
 		fmt.Fprintf(out, "authors: %s\n", strings.Join(folded.Authors, ", "))
 	}
@@ -326,6 +345,8 @@ type planStatusJSON struct {
 	UpdatedAt  time.Time         `json:"updated_at"`
 	Visibility string            `json:"visibility"`
 	Sessions   []planSessionJSON `json:"sessions"`
+	// URL is the plan's share link; omitted when the endpoint or id is unknown.
+	URL string `json:"url,omitempty"`
 }
 
 type planSessionJSON struct {

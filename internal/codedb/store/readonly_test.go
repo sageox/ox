@@ -503,3 +503,71 @@ func TestRecoverBleveOpen(t *testing.T) {
 		}
 	})
 }
+
+// TestOpenSQLReadOnly_AdvisoryReader verifies the integrity-check-free reader
+// used by `ox plan enrich`: it serves reads from a writable store (with the
+// daemon's writer connection still open) and never creates or deletes a
+// database that is not there.
+// Failure prevented: the plan detectors paying PRAGMA integrity_check (~22s per
+// open on a large index) on every `ox plan save`, or an advisory read path
+// minting an empty index where none was built.
+func TestOpenSQLReadOnly_AdvisoryReader(t *testing.T) {
+	tests := []struct {
+		name     string
+		seed     bool
+		holdOpen bool // a writer connection stays open (the daemon case: WAL present)
+		wantErr  bool
+	}{
+		{name: "checkpointed store", seed: true},
+		{name: "store with a live writer", seed: true, holdOpen: true},
+		{name: "no store built", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			if tt.seed {
+				seedStore(t, root)
+			}
+			if tt.holdOpen {
+				w, err := OpenSQLOnly(root)
+				if err != nil {
+					t.Fatalf("writer open: %v", err)
+				}
+				if _, err := w.Exec(`INSERT INTO repos (name, path) VALUES ('live', '/tmp/live')`); err != nil {
+					t.Fatalf("writer insert: %v", err)
+				}
+				t.Cleanup(func() { _ = w.Close() })
+			}
+
+			s, err := OpenSQLReadOnly(root)
+			if tt.wantErr {
+				if err == nil {
+					_ = s.Close()
+					t.Fatal("want error for a missing store")
+				}
+				if _, statErr := os.Stat(filepath.Join(root, MetadataDBFile)); !os.IsNotExist(statErr) {
+					t.Error("advisory reader must not create metadata.db")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("OpenSQLReadOnly: %v", err)
+			}
+			defer func() { _ = s.Close() }()
+			if !s.ReadOnly {
+				t.Error("store must report ReadOnly")
+			}
+			var n int
+			if err := s.QueryRow(`SELECT COUNT(*) FROM repos`).Scan(&n); err != nil {
+				t.Fatalf("query: %v", err)
+			}
+			want := 1
+			if tt.holdOpen {
+				want = 2 // the uncheckpointed WAL row must be visible
+			}
+			if n != want {
+				t.Errorf("repos = %d, want %d", n, want)
+			}
+		})
+	}
+}

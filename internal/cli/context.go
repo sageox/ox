@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/sageox/ox/internal/auth"
@@ -48,6 +49,27 @@ type Context struct {
 	// OTel root span — is suppressed for these, because it would report the
 	// service lifetime as command latency. See IsLongRunning.
 	LongRunning bool
+
+	// Cmd is the command cobra resolved for this invocation.
+	Cmd *cobra.Command
+
+	// ProjectRoot is what config.FindProjectRoot returned when the command
+	// started: the working directory or its nearest parent holding .sageox/,
+	// or "". A .sageox/ directory alone does not make a project initialized;
+	// see config.IsInitialized.
+	ProjectRoot string
+
+	// Err is what the command returned, set by cmd/ox's
+	// executeWithFrictionRecovery after Execute so usage telemetry can report
+	// how it failed.
+	Err error
+
+	// commandPath overrides the path derived from the command; see
+	// SetCommandPath.
+	commandPath string
+
+	// outcome is how the command ended, for usage telemetry; see SetOutcome.
+	outcome map[string]any
 }
 
 // NewContext creates a new CLI context from a Cobra command.
@@ -58,6 +80,7 @@ func NewContext(cmd *cobra.Command, args []string) (*Context, error) {
 		CommandStartTime: time.Now(),
 		Ctx:              cmd.Context(),
 		LongRunning:      IsLongRunning(cmd),
+		Cmd:              cmd,
 	}
 
 	// if no context set, use background
@@ -105,6 +128,7 @@ func NewContext(cmd *cobra.Command, args []string) (*Context, error) {
 	// uses auth.NewServerSessionID() for a per-invocation session ID
 	// if in a project context, uses disk-based queue for persistence
 	projectRoot := config.FindProjectRoot()
+	cliCtx.ProjectRoot = projectRoot
 	if projectRoot != "" {
 		cliCtx.TelemetryClient = telemetry.NewClient(auth.NewServerSessionID(), telemetry.WithProjectRoot(projectRoot))
 	} else {
@@ -202,11 +226,7 @@ func NewContext(cmd *cobra.Command, args []string) (*Context, error) {
 	}
 
 	// create root span for this command
-	cmdPath := cmd.Name()
-	if cmd.Parent() != nil && cmd.Parent().Name() != "ox" {
-		cmdPath = cmd.Parent().Name() + " " + cmdPath
-	}
-	cliCtx.Ctx, _ = observability.StartCommand(cliCtx.Ctx, observability.CommandName(cmdPath))
+	cliCtx.Ctx, _ = observability.StartCommand(cliCtx.Ctx, observability.CommandName(cliCtx.CommandPath(cmd)))
 	// Propagate the traced context onto the cobra command so
 	// downstream cmd.Context() callers inherit the OTel root span.
 	// Without this, perf.Start(cmd.Context(), ...) creates a NEW
@@ -303,14 +323,47 @@ func (c *Context) TrackCommandCompletion(cmd *cobra.Command) {
 	}
 
 	duration := time.Since(c.CommandStartTime)
+	c.TelemetryClient.TrackCommand(c.CommandPath(cmd), duration, true, "")
+}
 
-	// build full command path (e.g., "agent prime" not just "prime")
-	cmdPath := cmd.Name()
-	if cmd.Parent() != nil && cmd.Parent().Name() != "ox" {
-		cmdPath = cmd.Parent().Name() + " " + cmdPath
+// CommandPath names the invoked command for telemetry: the full path below
+// the root ("plan viz lint", not "viz lint", which is also a top-level
+// command), or the path set by SetCommandPath.
+func (c *Context) CommandPath(cmd *cobra.Command) string {
+	if c.commandPath != "" {
+		return c.commandPath
 	}
+	return strings.TrimPrefix(cmd.CommandPath(), cmd.Root().Name()+" ")
+}
 
-	c.TelemetryClient.TrackCommand(cmdPath, duration, true, "")
+// SetCommandPath records the path for a command that dispatches its own
+// subcommands, which cobra sees only as the dispatcher: `ox agent <id>
+// session stop` is "agent session stop", not "agent".
+func (c *Context) SetCommandPath(path string) {
+	c.commandPath = path
+}
+
+// SetOutcome records how a command ended, for its usage event, when the exit
+// code cannot say (a review session exits 0 whether it was approved or
+// abandoned). Counts and fixed words only: ADR-008's PostHog addendum lists
+// each key, and no value may carry anything a person wrote. A nil Context
+// records nothing.
+func (c *Context) SetOutcome(key string, value any) {
+	if c == nil {
+		return
+	}
+	if c.outcome == nil {
+		c.outcome = map[string]any{}
+	}
+	c.outcome[key] = value
+}
+
+// Outcome returns what SetOutcome recorded; nil for a nil Context.
+func (c *Context) Outcome() map[string]any {
+	if c == nil {
+		return nil
+	}
+	return c.outcome
 }
 
 // TrackCommandError tracks a command error via telemetry
@@ -327,12 +380,6 @@ func (c *Context) TrackCommandError(cmd *cobra.Command, err error) {
 
 	duration := time.Since(c.CommandStartTime)
 
-	// build full command path
-	cmdPath := cmd.Name()
-	if cmd.Parent() != nil && cmd.Parent().Name() != "ox" {
-		cmdPath = cmd.Parent().Name() + " " + cmdPath
-	}
-
 	// extract error code if available
 	errorCode := "ERR_UNKNOWN"
 	if err != nil {
@@ -344,7 +391,7 @@ func (c *Context) TrackCommandError(cmd *cobra.Command, err error) {
 		errorCode = errStr
 	}
 
-	c.TelemetryClient.TrackCommand(cmdPath, duration, false, errorCode)
+	c.TelemetryClient.TrackCommand(c.CommandPath(cmd), duration, false, errorCode)
 }
 
 // Shutdown performs cleanup operations.
