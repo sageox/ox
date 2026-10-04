@@ -1,3 +1,7 @@
+//go:build !windows
+
+// Dials the IPC server over a Unix socket; Windows serves IPC on a named pipe.
+
 package daemon
 
 import (

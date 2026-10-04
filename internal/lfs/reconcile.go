@@ -759,8 +759,12 @@ func squashUnpushed(ctx context.Context, repoPath, commitMsg string) error {
 	countCtx, countCancel := context.WithTimeout(ctx, 5*time.Second)
 	countOut, err := gitutil.RunGit(countCtx, repoPath, "rev-list", "--count", upstream+"..HEAD")
 	countCancel()
-	count := strings.TrimSpace(countOut)
-	if err != nil || count == "0" || count == "1" {
+	if err != nil {
+		// not "nothing to squash": a caller that asked for a squash must learn
+		// it did not happen, or the push stays wedged with no error
+		return fmt.Errorf("count unpushed commits: %w", err)
+	}
+	if count := strings.TrimSpace(countOut); count == "0" || count == "1" {
 		return nil
 	}
 

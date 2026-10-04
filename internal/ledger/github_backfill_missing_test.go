@@ -27,6 +27,29 @@ func (h *backfillLogRecorder) Handle(_ context.Context, r slog.Record) error {
 func (h *backfillLogRecorder) WithAttrs([]slog.Attr) slog.Handler { return h }
 func (h *backfillLogRecorder) WithGroup(string) slog.Handler      { return h }
 
+// attrInt returns the int attribute key of the first record matching level and
+// message, and whether such a record exists.
+func (h *backfillLogRecorder) attrInt(level slog.Level, msg, key string) (int64, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, r := range h.records {
+		if r.Level != level || r.Message != msg {
+			continue
+		}
+		var val int64
+		found := false
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == key {
+				val, found = a.Value.Int64(), true
+				return false
+			}
+			return true
+		})
+		return val, found
+	}
+	return 0, false
+}
+
 // count returns how many records match the level and message.
 func (h *backfillLogRecorder) count(level slog.Level, msg string) int {
 	h.mu.Lock()
@@ -137,6 +160,10 @@ func TestBackfillPRCommits_MissingFilesDoNotWarn(t *testing.T) {
 			if tt.wantDebug > 0 {
 				if got := recorder.count(slog.LevelDebug, "PR backfill skipped files that are not on disk"); got != 1 {
 					t.Errorf("per-pass summary count = %d, want exactly 1", got)
+				}
+				const summaryMsg = "PR backfill skipped files that are not on disk"
+				if skipped, ok := recorder.attrInt(slog.LevelDebug, summaryMsg, "skipped"); !ok || skipped != int64(tt.wantDebug) {
+					t.Errorf("per-pass summary skipped = %d (present=%v), want %d", skipped, ok, tt.wantDebug)
 				}
 			}
 		})

@@ -215,7 +215,9 @@ func TestFaultDaemon_Slow_SlowResponse_UnderTimeout(t *testing.T) {
 	}
 	setupFaultTest(t)
 
-	d := NewSlowDaemon(t, 50*time.Millisecond)
+	// well under IsHealthy's 100ms budget: a 50ms delay left too little
+	// headroom on a loaded CI runner and failed with an i/o timeout
+	d := NewSlowDaemon(t, 10*time.Millisecond)
 	d.Start()
 	defer d.Stop()
 
