@@ -489,3 +489,9 @@ jobs:
 
       - name: Skill inventory tests
         run: go test ./internal/skillmanager/... ./internal/sageoxignore/... ./extensions/skills/... -count=1
+
+      # Markdown theming queried the console on a redirected stdin and hung forever on
+      # Windows (#1110). macOS and Linux cannot reproduce it, so only this runner can
+      # catch a regression; the timeout turns a hang into a fast, named failure.
+      - name: Terminal UI tests
+        run: go test ./internal/ui/... -count=1 -timeout 5m
