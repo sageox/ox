@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/sageox/ox/internal/skillmanager"
+	"github.com/sageox/ox/internal/teamskills"
 	"github.com/sageox/ox/internal/version"
 	"github.com/sageox/ox/pkg/adapterprotocol"
 )
@@ -75,6 +76,13 @@ func managedExists(t *testing.T, path string) bool {
 // edited the committed file would silently stop simulating anything.
 func setLockRevision(t *testing.T, repoRoot, revision string) {
 	t.Helper()
+	setStateSource(t, repoRoot, "revision", revision)
+}
+
+// setStateSource rewrites one field of the recorded source in the machine-local
+// state, leaving every other recorded byte alone.
+func setStateSource(t *testing.T, repoRoot, field, value string) {
+	t.Helper()
 	path := skillmanager.StatePath(repoRoot)
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -88,7 +96,7 @@ func setLockRevision(t *testing.T, repoRoot, revision string) {
 	if !ok {
 		t.Fatalf("skills state has no source object: %s", data)
 	}
-	source["revision"] = revision
+	source[field] = value
 	out, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		t.Fatalf("marshal skills state: %v", err)
@@ -131,7 +139,7 @@ func TestReconcileSkillInventoryIfStale_LeavesGitStatusClean(t *testing.T) {
 		t.Fatalf("fixture is dirty before prime: %q", status)
 	}
 
-	if changed := reconcileSkillInventoryIfStale(repoRoot); changed == 0 {
+	if changed, _ := reconcileSkillInventoryIfStale(repoRoot); changed == 0 {
 		t.Fatal("fixture did not exercise automatic projection repair")
 	}
 	if status := gitOutput(t, repoRoot, "status", "--porcelain"); status != "" {
@@ -174,7 +182,7 @@ func TestReconcileSkillInventoryIfStale_TwoUnchangedPrimesBuildOnePlan(t *testin
 	removeManaged(t, managedFile)
 	setLockRevision(t, repoRoot, "revision-from-an-older-release")
 
-	if changed := reconcileSkillInventoryIfStale(repoRoot); changed == 0 {
+	if changed, _ := reconcileSkillInventoryIfStale(repoRoot); changed == 0 {
 		t.Fatal("first prime did not plan the stale inventory")
 	}
 	if !managedExists(t, managedFile) {
@@ -182,7 +190,7 @@ func TestReconcileSkillInventoryIfStale_TwoUnchangedPrimesBuildOnePlan(t *testin
 	}
 
 	removeManaged(t, managedFile)
-	if changed := reconcileSkillInventoryIfStale(repoRoot); changed != 0 {
+	if changed, _ := reconcileSkillInventoryIfStale(repoRoot); changed != 0 {
 		t.Fatalf("second unchanged prime planned work: changed=%d", changed)
 	}
 	if managedExists(t, managedFile) {
@@ -245,5 +253,153 @@ func TestReconcileSkillInventoryIfStale_DoesNotRepairTrackedIgnoreAtSessionStart
 		if _, err := os.Stat(filepath.Join(repoRoot, dir, ".gitignore")); !os.IsNotExist(err) {
 			t.Errorf("prime recreated tracked %s/.gitignore: %v", dir, err)
 		}
+	}
+}
+
+// commitTeamCheckout commits everything in the team checkout so its HEAD moves.
+// The planner keys the recorded catalog revision on that HEAD, so a team revision
+// that is not a real commit is not a revision change at all.
+func commitTeamCheckout(t *testing.T, team, message string) {
+	t.Helper()
+	gitOutput(t, team, "add", "-A")
+	gitOutput(t, team, "commit", "-q", "-m", message)
+}
+
+// stageWithheldOnlyRevision builds a repository whose team's NEXT revision adds
+// ONLY a skill whose manifest grants tools. ox withholds that skill outright, so
+// the resulting plan has no file to create, update, or remove — the shape that
+// exposes whether a revision ox evaluated but wrote nothing for is remembered.
+//
+// It returns with the baseline settled and the new revision published but not yet
+// primed, so each caller decides what the next session start looks like.
+func stageWithheldOnlyRevision(t *testing.T) (repo, installedNotes string) {
+	t.Helper()
+	repo, team := stageApprovalRepo(t, "notes", nil)
+	gitInitRepo(t, team)
+	commitTeamCheckout(t, team, "publish notes")
+
+	// settle the baseline: the first real team commit is itself a revision change.
+	if _, withheld := reconcileSkillInventoryIfStale(repo); len(withheld) != 0 {
+		t.Fatalf("the prose-only baseline reported something withheld: %+v", withheld)
+	}
+	installedNotes = filepath.Join(installedSkillDir(repo, "notes"), "SKILL.md")
+	if _, err := os.Stat(installedNotes); err != nil {
+		t.Fatalf("baseline team skill did not reach disk: %v", err)
+	}
+
+	grants := filepath.Join(team, "agents", "skills", "grants")
+	if err := os.MkdirAll(grants, 0o755); err != nil {
+		t.Fatalf("stage withheld skill: %v", err)
+	}
+	manifest := "---\nname: grants\ndescription: Needs a tool grant.\nallowed-tools: Bash\n---\n\nbody\n"
+	if err := os.WriteFile(filepath.Join(grants, "SKILL.md"), []byte(manifest), 0o644); err != nil {
+		t.Fatalf("stage withheld skill: %v", err)
+	}
+	commitTeamCheckout(t, team, "publish a skill that grants tools")
+	return repo, installedNotes
+}
+
+// TestReconcileSkillInventoryIfStale_WithheldOnlyRevisionIsReportedOnce is the
+// customer promise behind "tell the coworker when part of a team skill was held
+// back": the coworker is told ONCE, when the team publishes the skill — not in
+// every session start afterward.
+//
+// Nothing is written to disk for a withheld-only revision, but the revision was
+// still successfully evaluated. If it is not recorded, the next session start
+// sees the same stale revision, rebuilds the whole plan, and repeats the same
+// warning forever.
+func TestReconcileSkillInventoryIfStale_WithheldOnlyRevisionIsReportedOnce(t *testing.T) {
+	repo, installedNotes := stageWithheldOnlyRevision(t)
+
+	wantRevision, err := skillmanager.ExpectedRevision(repo)
+	if err != nil {
+		t.Fatalf("expected revision: %v", err)
+	}
+	if recorded, _, _ := skillmanager.InstalledSource(repo); recorded == wantRevision {
+		t.Fatalf("fixture did not move the team revision: %q", recorded)
+	}
+
+	changed, withheld := reconcileSkillInventoryIfStale(repo)
+	if changed != 0 {
+		t.Fatalf("fixture is no longer withheld-only; the plan mutated %d files", changed)
+	}
+	if len(withheld) != 1 || withheld[0].Name != "grants" {
+		t.Fatalf("first prime after the publish did not report the withheld skill: %+v", withheld)
+	}
+	if recorded, _, _ := skillmanager.InstalledSource(repo); recorded != wantRevision {
+		t.Errorf("a successfully evaluated revision was not recorded:\n got  %q\n want %q", recorded, wantRevision)
+	}
+
+	// delete a managed file so a second plan, if built, is observable: it would
+	// restore it, while the recorded-revision fast path leaves it alone.
+	removeManaged(t, installedNotes)
+	changed, withheld = reconcileSkillInventoryIfStale(repo)
+	if changed != 0 || len(withheld) != 0 {
+		t.Errorf("second prime on the same revision repeated itself: changed=%d withheld=%+v", changed, withheld)
+	}
+	if managedExists(t, installedNotes) {
+		t.Errorf("second prime rebuilt the plan instead of taking the revision fast path")
+	}
+}
+
+// TestReconcileSkillInventoryIfStale_RefusedPlanReportsNothing guards the other
+// half of "reported on change": a reconcile that was REFUSED decided nothing.
+//
+// When a newer ox installed these skills, Apply refuses to downgrade them and
+// writes nothing, so no revision is ever recorded and every session start
+// re-plans. The planner still carries the team decisions on that refused plan,
+// so without this guard the coworker is told the same skill is held back at the
+// start of every session — while the real fact is that this binary is too old to
+// act on the repository at all.
+func TestReconcileSkillInventoryIfStale_RefusedPlanReportsNothing(t *testing.T) {
+	repo, _ := stageWithheldOnlyRevision(t)
+	setStateSource(t, repo, "version", "999.0.0")
+
+	for prime := 1; prime <= 2; prime++ {
+		changed, withheld := reconcileSkillInventoryIfStale(repo)
+		if changed != 0 || len(withheld) != 0 {
+			t.Errorf("prime %d reported a decision from a refused reconcile: changed=%d withheld=%+v", prime, changed, withheld)
+		}
+	}
+}
+
+// TestReconcileSkillInventoryIfStale_FailedReconcileReportsNothingAndRecoversLater
+// pins the invariant that makes recording an evaluated revision safe: a plan ox
+// could not build must not reach the session as a decision, and must not
+// advance the recorded revision — otherwise the failure would be remembered as
+// success and the team's skill would never be reported once the cause is fixed.
+//
+// An unreadable approvals store is the cause used here because ox treats it as
+// "I cannot tell", never as "nothing is approved": materializing an executable
+// skill off a store it could not parse is the fail-open shape to avoid.
+func TestReconcileSkillInventoryIfStale_FailedReconcileReportsNothingAndRecoversLater(t *testing.T) {
+	repo, installedNotes := stageWithheldOnlyRevision(t)
+	staleRevision, _, _ := skillmanager.InstalledSource(repo)
+
+	approvals := teamskills.ApprovalPath(repo)
+	if err := os.MkdirAll(filepath.Dir(approvals), 0o755); err != nil {
+		t.Fatalf("stage approvals dir: %v", err)
+	}
+	if err := os.WriteFile(approvals, []byte("{not json"), 0o644); err != nil {
+		t.Fatalf("corrupt approvals store: %v", err)
+	}
+
+	changed, withheld := reconcileSkillInventoryIfStale(repo)
+	if changed != 0 || len(withheld) != 0 {
+		t.Errorf("a reconcile that failed still reported a decision: changed=%d withheld=%+v", changed, withheld)
+	}
+	if recorded, _, _ := skillmanager.InstalledSource(repo); recorded != staleRevision {
+		t.Errorf("a failed reconcile advanced the recorded revision:\n got  %q\n want %q", recorded, staleRevision)
+	}
+	if !managedExists(t, installedNotes) {
+		t.Errorf("a failed reconcile disturbed an already-installed team skill")
+	}
+
+	// the cause is fixed; the very next session start must tell the coworker.
+	if err := os.Remove(approvals); err != nil {
+		t.Fatalf("repair approvals store: %v", err)
+	}
+	if _, withheld := reconcileSkillInventoryIfStale(repo); len(withheld) != 1 || withheld[0].Name != "grants" {
+		t.Errorf("after the store was repaired the held-back skill was not reported: %+v", withheld)
 	}
 }

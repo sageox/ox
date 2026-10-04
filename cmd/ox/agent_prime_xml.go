@@ -865,12 +865,6 @@ func writeDecisionRecordGuidance(sb *strings.Builder) {
 	sb.WriteString("</decision-record-guidance>\n")
 }
 
-// emitTeamRules writes <team-rules> and <team-rules-budget> blocks for the
-// discovered, filtered set of team rules. Charges its bookkeeper as it goes:
-// framing (tags, table headers, attribute names) is sageox-overhead; the
-// rule names, descriptions, paths, and bodies are team-content (the team
-// authored them). This keeps the rolled-up <context-budget> accurate even
-// when teams accumulate large always-tier rule libraries.
 // emitWithheldTeamSkills names the team skills ox declined to install.
 //
 // Emitted ONLY when something is held, so a healthy repository — the common case
@@ -904,6 +898,12 @@ func emitWithheldTeamSkills(sb *strings.Builder, bk *bookkeeper, withheld []prim
 	bk.charge(prime.BudgetSourceSageox)
 }
 
+// emitTeamRules writes <team-rules> and <team-rules-budget> blocks for the
+// discovered, filtered set of team rules. Charges its bookkeeper as it goes:
+// framing (tags, table headers, attribute names) is sageox-overhead; the
+// rule names, descriptions, paths, and bodies are team-content (the team
+// authored them). This keeps the rolled-up <context-budget> accurate even
+// when teams accumulate large always-tier rule libraries.
 func emitTeamRules(sb *strings.Builder, bk *bookkeeper, rules []teamdocs.TeamRule) {
 	var alwaysRules []teamdocs.TeamRule
 	var indexedRules []teamdocs.TeamRule

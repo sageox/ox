@@ -81,6 +81,16 @@ func reconcileSkillInventoryIfStale(projectRoot string) (changed int, withheld [
 	if plan == nil {
 		return 0, nil
 	}
+	if len(plan.Warnings) > 0 {
+		// Apply refuses a plan with warnings (a newer ox owns this install, or the
+		// lockfile schema is newer) and writes nothing, so no revision is recorded
+		// and this path runs again next session. The planner still carries the team
+		// decisions on that plan, but none of them was acted on: reporting them
+		// would repeat the same line at every session start, and would blame a
+		// held-back skill for what is really a binary too old to touch the repo.
+		slog.Debug("skills: prime reconcile refused", "warnings", plan.Warnings)
+		return 0, nil
+	}
 	changed = len(plan.Creates) + len(plan.Updates) + len(plan.Removes)
 	withheld = plan.WithheldTeamSkills()
 	if changed > 0 || len(withheld) > 0 {

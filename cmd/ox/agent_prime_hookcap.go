@@ -100,6 +100,7 @@ var hookCapDeferredHints = map[string]string{
 	"team-knowledge/team-instructions": "team CLAUDE.md/AGENTS.md pointers",
 	"team-knowledge/memory":            "team memory (MEMORY.md)",
 	"team-knowledge/team-rules":        "always-visible team rules",
+	"team-knowledge/team-skills-held":  "team skills published but held back — read before assuming a team skill is available",
 }
 
 // hookCapSplitParents are wrappers whose children are trimmed individually.

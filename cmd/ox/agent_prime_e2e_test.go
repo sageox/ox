@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -290,4 +291,122 @@ func TestPrimeCodexRecording_ReprimeDiscoversDelayedSource(t *testing.T) {
 			assert.Equal(t, rawBefore, rawAfter, "discovery must not replace the recording's captured data")
 		})
 	}
+}
+
+// primeForWithheldSkill stages a project whose team publishes a skill that grants
+// tools, then returns a function that runs one real session-start prime and
+// returns what the coworker would read.
+//
+// format selects the output shape. hookSource, when set, delivers a SessionStart
+// hook payload on stdin the way Claude Code does; "clear" matters because it is
+// the one source that forces a FULL prime on a repeat call. A bare second prime
+// in the same process is a compact re-prime that omits team knowledge entirely,
+// so "the held-back section is absent" would hold even if nothing were
+// remembered.
+//
+// The team checkout is a real git repository because the recorded catalog
+// revision is keyed on its HEAD: without a commit there is no revision to move,
+// so there is nothing for prime to evaluate and nothing to report.
+func primeForWithheldSkill(t *testing.T) func(format, hookSource string) string {
+	t.Helper()
+	env := initializedE2E(t)
+
+	// Select a skills target, as the sibling reconcile test does: prime refuses
+	// to install into a repo that never selected one, and adapter binaries are
+	// not on PATH in a test.
+	_, err := reconcileSelectedSkills(env.Root, []adapterprotocol.SkillTarget{{
+		Key: "claude-project", Root: ".claude/skills",
+		Format: adapterprotocol.SkillFormatAgentSkillsV1,
+		Scope:  adapterprotocol.SkillScopeProject,
+	}})
+	require.NoError(t, err, "harness setup: selecting a skills target must succeed")
+
+	teamDir := t.TempDir()
+	gitInitRepo(t, teamDir)
+	skillDir := filepath.Join(teamDir, "agents", "skills", "deploy-prod")
+	require.NoError(t, os.MkdirAll(skillDir, 0o755))
+	manifest := "---\nname: deploy-prod\ndescription: Ship to production.\nallowed-tools: Bash\n---\n\nRun the deploy.\n"
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(manifest), 0o644))
+	commitTeamCheckout(t, teamDir, "publish deploy-prod")
+
+	localCfg := fmt.Sprintf("\n[[team_contexts]]\nteam_id = %q\nteam_name = %q\nslug = %q\npath = %q\nlast_sync = 0001-01-01T00:00:00Z\n",
+		env.TeamID, "E2E Team", "e2e-team", teamDir)
+	require.NoError(t, os.WriteFile(filepath.Join(env.Root, ".sageox", "config.local.toml"), []byte(localCfg), 0o600))
+
+	return func(format, hookSource string) string {
+		t.Helper()
+		if hookSource != "" {
+			origStdin := os.Stdin
+			r, w, pipeErr := os.Pipe()
+			require.NoError(t, pipeErr)
+			_, pipeErr = io.WriteString(w, `{"session_id":"held-skill-e2e","hook_event_name":"SessionStart","source":"`+hookSource+`"}`)
+			require.NoError(t, pipeErr)
+			_ = w.Close()
+			os.Stdin = r
+			t.Cleanup(func() { os.Stdin = origStdin; _ = r.Close() })
+		}
+		var buf bytes.Buffer
+		cmd := agentPrimeCmd
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		require.NoError(t, cmd.Flags().Set("agent", "claude-code"))
+		require.NoError(t, cmd.Flags().Set("format", format))
+		t.Cleanup(func() {
+			_ = cmd.Flags().Set("agent", "")
+			_ = cmd.Flags().Set("format", "")
+			cmd.SetOut(nil)
+			cmd.SetErr(nil)
+		})
+		require.NoError(t, runAgentPrime(cmd, nil))
+		return buf.String()
+	}
+}
+
+// TestRunAgentPrime_TellsTheCoworkerAboutAHeldBackTeamSkillOnce is the customer
+// journey for "tell the coworker when part of a team skill was held back".
+//
+// A teammate publishes a skill whose manifest grants tools, so ox withholds it
+// outright. From the repository that is indistinguishable from a skill nobody
+// wrote, so the first session start after the publish must name it and say what
+// to run; every session start after that must stay silent, because the fact has
+// not changed and prime spends the coworker's context budget.
+//
+// The second prime is a /clear, which forces a full prime, so the silence is
+// proven against a prime that WOULD have carried the section — not against a
+// compact re-prime that omits team knowledge whatever happened.
+//
+// Failure prevented: a skill its author believes they shipped never arriving,
+// with nothing anywhere saying so — or, the over-correction, the same warning
+// at the top of every session forever.
+func TestRunAgentPrime_TellsTheCoworkerAboutAHeldBackTeamSkillOnce(t *testing.T) {
+	runPrime := primeForWithheldSkill(t)
+
+	first := runPrime("", "")
+	require.Contains(t, first, "<team-skills-held", "the first prime after the publish did not report the held-back skill")
+	assert.Contains(t, first, "deploy-prod", "the report does not name the skill the teammate published")
+	assert.Contains(t, first, "ox skills status", "the report gives the coworker no next action")
+
+	second := runPrime("", "clear")
+	require.Contains(t, second, "<team-knowledge",
+		"the second prime was not a full prime, so its silence proves nothing")
+	assert.NotContains(t, second, "<team-skills-held",
+		"an unchanged team revision was reported again at the next session start")
+}
+
+// TestRunAgentPrime_JSONCarriesTheHeldBackTeamSkill pins the structured form of
+// the same report, which is what a consumer parsing `--format json` reads
+// instead of the XML section.
+func TestRunAgentPrime_JSONCarriesTheHeldBackTeamSkill(t *testing.T) {
+	runPrime := primeForWithheldSkill(t)
+
+	var parsed struct {
+		Withheld []struct {
+			Name   string `json:"name"`
+			Reason string `json:"reason"`
+		} `json:"withheld_team_skills"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(runPrime("json", "")), &parsed))
+	require.Len(t, parsed.Withheld, 1, "the held-back skill is missing from the JSON prime")
+	assert.Equal(t, "deploy-prod", parsed.Withheld[0].Name)
+	assert.NotEmpty(t, parsed.Withheld[0].Reason, "the reader cannot tell why it was held back")
 }
