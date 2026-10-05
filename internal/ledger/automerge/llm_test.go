@@ -201,39 +201,95 @@ func TestMergeOneWithLLM_ContentPreservation(t *testing.T) {
 	const conflicted = "# Memory\n<<<<<<< HEAD\n- Devon chose Postgres\n=======\n- Avery chose SQLite\n>>>>>>> br\ntail\n"
 	cases := []struct {
 		name    string
+		path    string // defaults to MEMORY.md
 		in      string
 		out     string
-		wantErr bool
+		wantErr string // substring of the expected error; empty means success
 	}{
-		{"union keeps both", conflicted, "# Memory\n- Devon chose Postgres\n- Avery chose SQLite\ntail\n", false},
-		{"reorder keeps both", conflicted, "# Memory\n- Avery chose SQLite\n- Devon chose Postgres\ntail\n", false},
-		{"drops theirs", conflicted, "# Memory\n- Devon chose Postgres\ntail\n", true},
-		{"drops ours", conflicted, "# Memory\n- Avery chose SQLite\ntail\n", true},
-		{"paraphrases both", conflicted, "# Memory\n- Team weighed Postgres vs SQLite\ntail\n", true},
+		{"union keeps both", "", conflicted, "# Memory\n- Devon chose Postgres\n- Avery chose SQLite\ntail\n", ""},
+		{"reorder keeps both", "", conflicted, "# Memory\n- Avery chose SQLite\n- Devon chose Postgres\ntail\n", ""},
+		{"drops theirs", "", conflicted, "# Memory\n- Devon chose Postgres\ntail\n", "dropped"},
+		{"drops ours", "", conflicted, "# Memory\n- Avery chose SQLite\ntail\n", "dropped"},
+		{"paraphrases both", "", conflicted, "# Memory\n- Team weighed Postgres vs SQLite\ntail\n", "dropped"},
 		{
 			"json union may add a comma and reindent",
+			"state.json",
 			"{\n<<<<<<< HEAD\n  \"a\": 1\n=======\n  \"b\": 2\n>>>>>>> br\n}\n",
 			"{\n    \"a\": 1,\n    \"b\": 2\n}\n",
-			false,
+			"",
 		},
 		{
 			"diff3 base may be discarded",
+			"",
 			"<<<<<<< HEAD\nours\n||||||| base\nancestor\n=======\ntheirs\n>>>>>>> br\n",
 			"ours\ntheirs\n",
-			false,
+			"",
 		},
 		{
 			"same line rewritten on both sides is refused",
+			"",
 			"<<<<<<< HEAD\nversion: 2\n=======\nversion: 3\n>>>>>>> br\n",
 			"version: 3\n",
-			true,
+			"dropped",
+		},
+		{
+			"a line one side repeats keeps every copy",
+			"",
+			"<<<<<<< HEAD\n- task\n- task\n=======\n- other\n>>>>>>> br\n",
+			"- task\n- other\n",
+			"dropped",
+		},
+		{
+			"a line both sides added may appear once",
+			"",
+			"<<<<<<< HEAD\n- same\n- a\n=======\n- same\n- b\n>>>>>>> br\n",
+			"- same\n- a\n- b\n",
+			"",
+		},
+		{
+			"dropping context outside the hunk is refused",
+			"",
+			conflicted,
+			"- Devon chose Postgres\n- Avery chose SQLite\n",
+			"dropped",
+		},
+		{
+			"toml union keeping both values of one key is refused",
+			"config.toml",
+			"<<<<<<< HEAD\nversion = 2\n=======\nversion = 3\n>>>>>>> br\n",
+			"version = 2\nversion = 3\n",
+			"not valid",
+		},
+		{
+			"yaml union keeping both values of one key is refused",
+			"config.yaml",
+			"<<<<<<< HEAD\nversion: 2\n=======\nversion: 3\n>>>>>>> br\n",
+			"version: 2\nversion: 3\n",
+			"not valid",
+		},
+		{
+			"json union missing its comma is refused",
+			"state.json",
+			"{\n<<<<<<< HEAD\n  \"a\": 1\n=======\n  \"b\": 2\n>>>>>>> br\n}\n",
+			"{\n  \"a\": 1\n  \"b\": 2\n}\n",
+			"not valid",
+		},
+		{
+			"valid toml union passes",
+			"config.toml",
+			"<<<<<<< HEAD\nours = 1\n=======\ntheirs = 2\n>>>>>>> br\n",
+			"ours = 1\ntheirs = 2\n",
+			"",
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			repo := initTestRepo(t, t.TempDir())
-			path := "MEMORY.md"
+			path := tc.path
+			if path == "" {
+				path = "MEMORY.md"
+			}
 			writeFile(t, repo, path, tc.in)
 
 			r := New(Options{LLMBinary: "fake"})
@@ -241,9 +297,9 @@ func TestMergeOneWithLLM_ContentPreservation(t *testing.T) {
 				return tc.out, nil
 			}
 			err := r.mergeOneWithLLM(context.Background(), repo, path)
-			if tc.wantErr {
-				if err == nil || !strings.Contains(err.Error(), "dropped") {
-					t.Fatalf("expected dropped-content rejection, got: %v", err)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("expected error containing %q, got: %v", tc.wantErr, err)
 				}
 				if got := readFile(t, repo, path); got != tc.in {
 					t.Errorf("rejected merge must leave the file untouched, got %q", got)

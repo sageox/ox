@@ -12,6 +12,9 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/pelletier/go-toml/v2"
+	"gopkg.in/yaml.v3"
+
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/llmprompt"
 )
@@ -120,9 +123,13 @@ func (r *Resolver) mergeOneWithLLM(ctx context.Context, repoPath, path string) e
 	// Marker-free output is only syntactically clean. The prompt asks the
 	// model to keep both sides; this enforces it, so a merge that silently
 	// drops or paraphrases one side's lines is refused instead of committed.
-	if dropped := droppedSideLines(conflictSideLines(data), merged); len(dropped) > 0 {
-		r.logger.Warn("automerge.llm.dropped_content", "path", path, "lines_dropped", len(dropped))
-		return fmt.Errorf("llm output dropped %d line(s) from a conflict side", len(dropped))
+	if dropped := droppedLines(requiredLines(data), merged); dropped > 0 {
+		r.logger.Warn("automerge.llm.dropped_content", "path", path, "lines_dropped", dropped)
+		return fmt.Errorf("llm output dropped %d line(s) from the conflicted file", dropped)
+	}
+	if err := validateStructured(path, merged); err != nil {
+		r.logger.Warn("automerge.llm.invalid_structure", "path", path, "error", err)
+		return fmt.Errorf("llm output is not valid %s: %w", filepath.Ext(path), err)
 	}
 
 	// preserve original file mode (info from the Lstat above; we already
@@ -138,58 +145,99 @@ func (r *Resolver) mergeOneWithLLM(ctx context.Context, repoPath, path string) e
 	return nil
 }
 
-// conflictSideLines returns the non-blank lines inside every conflict hunk,
-// from both the "ours" and "theirs" sections. A diff3 base section
+// requiredLines counts, per normalized non-blank line, how many times a
+// lossless merge must contain it: once per occurrence outside the conflict
+// hunks, plus, for each hunk, the larger of its "ours" and "theirs" counts.
+// Taking the larger count lets a line both sides added appear once, while a
+// line one side repeats must keep every copy. A diff3 base section
 // ("|||||||" up to "=======") is skipped: it is the common ancestor, which a
 // correct merge may legitimately discard.
-func conflictSideLines(data []byte) []string {
+func requiredLines(data []byte) map[string]int {
 	const (
 		outside = iota
-		side
+		ours
 		base
+		theirs
 	)
+	required := make(map[string]int)
+	var oursCount, theirsCount map[string]int
 	state := outside
-	var lines []string
 	for _, line := range strings.Split(string(data), "\n") {
 		bare := strings.TrimSuffix(line, "\r")
 		switch {
 		case strings.HasPrefix(bare, gitutil.ConflictMarkerStart):
-			state = side
+			state = ours
+			oursCount, theirsCount = make(map[string]int), make(map[string]int)
 		case state != outside && strings.HasPrefix(bare, "|||||||"):
 			state = base
 		case state != outside && bare == "=======":
-			state = side
+			state = theirs
 		case state != outside && strings.HasPrefix(bare, ">>>>>>>"):
+			for l, n := range oursCount {
+				required[l] += max(n, theirsCount[l])
+			}
+			for l, n := range theirsCount {
+				if _, seen := oursCount[l]; !seen {
+					required[l] += n
+				}
+			}
 			state = outside
-		case state == side:
-			if n := normalizeMergeLine(bare); n != "" {
-				lines = append(lines, n)
+		default:
+			n := normalizeMergeLine(bare)
+			if n == "" {
+				continue
+			}
+			switch state {
+			case outside:
+				required[n]++
+			case ours:
+				oursCount[n]++
+			case theirs:
+				theirsCount[n]++
 			}
 		}
 	}
-	return lines
+	return required
 }
 
-// droppedSideLines returns the conflict-side lines that do not appear in
-// merged. Lines are compared after normalizeMergeLine, so re-indenting or
-// adding the comma a union of two list entries needs is not a drop.
+// droppedLines returns how many required occurrences merged is missing.
+// Lines are compared after normalizeMergeLine, so re-indenting or adding the
+// comma a union of two list entries needs is not a drop.
 //
 // A conflict where both sides rewrote the same line cannot pass: keeping
 // both is the only merge this accepts. That is deliberate — the tier then
 // fails exactly as it does with no LLM configured, and the conflict is left
 // for a person rather than resolved by discarding someone's record.
-func droppedSideLines(sides []string, merged string) []string {
-	present := make(map[string]bool)
+func droppedLines(required map[string]int, merged string) int {
+	have := make(map[string]int)
 	for _, line := range strings.Split(merged, "\n") {
-		present[normalizeMergeLine(line)] = true
+		have[normalizeMergeLine(line)]++
 	}
-	var dropped []string
-	for _, line := range sides {
-		if !present[line] {
-			dropped = append(dropped, line)
+	dropped := 0
+	for line, want := range required {
+		if have[line] < want {
+			dropped += want - have[line]
 		}
 	}
 	return dropped
+}
+
+// validateStructured parses merged as the format its extension names, so a
+// union that keeps both sides of the same key is refused rather than staged.
+// go-toml and yaml.v3 both reject duplicate keys. Other extensions pass.
+func validateStructured(path, merged string) error {
+	var v any
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".json":
+		if !json.Valid([]byte(merged)) {
+			return errors.New("invalid JSON")
+		}
+	case ".toml":
+		return toml.Unmarshal([]byte(merged), &v)
+	case ".yaml", ".yml":
+		return yaml.Unmarshal([]byte(merged), &v)
+	}
+	return nil
 }
 
 // normalizeMergeLine strips whitespace and one trailing comma.

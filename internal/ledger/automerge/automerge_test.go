@@ -157,7 +157,7 @@ func TestResolve_AcceptTheirsTier(t *testing.T) {
 
 func TestResolve_LLMTier(t *testing.T) {
 	t.Parallel()
-	repo := makeRebaseConflict(t, "config.toml", "version = \"ours\"\n", "version = \"theirs\"\n")
+	repo := makeRebaseConflict(t, "config.toml", "ours = 1\n", "theirs = 2\n")
 
 	r := New(Options{LLMBinary: "fake-llm"})
 	// The LookPath gate in tryLLMTier requires the binary to resolve from
@@ -170,7 +170,7 @@ func TestResolve_LLMTier(t *testing.T) {
 	}
 	r.opts.LLMBinary = gitBin
 	r.runLLM = func(ctx context.Context, binary, prompt string) (string, error) {
-		return "version = \"ours\"\nversion = \"theirs\"\n", nil
+		return "ours = 1\ntheirs = 2\n", nil
 	}
 
 	ok, err := r.Resolve(context.Background(), repo)
@@ -181,7 +181,7 @@ func TestResolve_LLMTier(t *testing.T) {
 		t.Fatal("expected ok=true")
 	}
 	got := readFile(t, repo, "config.toml")
-	if !strings.Contains(got, "\"ours\"") || !strings.Contains(got, "\"theirs\"") {
+	if !strings.Contains(got, "ours = 1") || !strings.Contains(got, "theirs = 2") {
 		t.Errorf("expected merged content, got: %s", got)
 	}
 }
