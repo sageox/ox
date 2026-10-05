@@ -668,7 +668,11 @@ func (c *SessionOrphanedCheck) Run(_ context.Context, _ bool) CheckResult {
 			cleanedEmpty++
 		} else {
 			// has content: clear .recording.json so it stops showing as "recording"
-			// data preserved for 'ox session recover'
+			// data preserved for 'ox session recover'. A manual-mode recording is
+			// held first, or the daemon publishes it once the marker is gone.
+			if err := session.HoldRecordedManual(state, "doctor"); err != nil {
+				continue
+			}
 			recPath := filepath.Join(state.SessionPath, ".recording.json")
 			if err := os.Remove(recPath); err != nil && !os.IsNotExist(err) {
 				continue

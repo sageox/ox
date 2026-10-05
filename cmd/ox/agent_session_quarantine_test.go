@@ -641,6 +641,10 @@ func TestUploadSessionLFS_RefusesAQuarantinedSession(t *testing.T) {
 // without publishing anything; the recording must go back to being quarantined,
 // not be left as an ordinary stale recording the next sweep would publish.
 func TestReleaseQuarantine_DecliningThePromptsPutsTheQuarantineBack(t *testing.T) {
+	// The prompts exist only on the publish path; the fixture's manual project
+	// config would hold the session instead (GH #1093). Set before the
+	// recording starts, which records the mode it resolves.
+	t.Setenv("OX_SESSION_PUBLISHING", "auto")
 	projectRoot, agentID, _ := setupHandleAfterToolTest(t)
 	t.Chdir(projectRoot)
 	held, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
@@ -673,4 +677,45 @@ func TestReleaseQuarantine_DecliningThePromptsPutsTheQuarantineBack(t *testing.T
 	active, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
 	require.NoError(t, err)
 	assert.Nil(t, active, "the recording must not be left looking like an ordinary stale one")
+}
+
+// Failure prevented: `ox doctor` (every run) reclaims a crashed manual-mode
+// recording and uploads it; or uploads a session already held (GH #1093).
+func TestFindOrphanedSessions_HoldsManualRecording(t *testing.T) {
+	for _, tt := range []struct {
+		name, recState string
+		alreadyHeld    bool
+		orphan         bool
+	}{
+		{"stale, recorded manual", `{"agent_id":"OxHold","started_at":"2001-02-03T04:05:00Z","publishing_mode":"manual"}`, false, false},
+		{"already held, no marker", "", true, false},
+		{"control: stale, recorded auto", `{"agent_id":"OxHold","started_at":"2001-02-03T04:05:00Z","publishing_mode":"auto"}`, false, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			cacheDir := filepath.Join(tmpDir, "cache", "sessions")
+			ledgerDir := filepath.Join(tmpDir, "ledger")
+			require.NoError(t, os.MkdirAll(filepath.Join(ledgerDir, "sessions"), 0o755))
+			dir := filepath.Join(cacheDir, "2026-01-15T10-30-ryan-OxHold")
+			require.NoError(t, os.MkdirAll(dir, 0o755))
+			writeTestRawJSONL(t, filepath.Join(dir, ledgerFileRaw))
+			if tt.recState != "" {
+				require.NoError(t, os.WriteFile(filepath.Join(dir, ".recording.json"), []byte(tt.recState), 0o644))
+			}
+			if tt.alreadyHeld {
+				require.NoError(t, session.WriteHoldMarker(dir, session.HoldManualPublishing, "test"))
+			}
+
+			orphans := findTestOrphans(t, cacheDir, ledgerDir)
+
+			if tt.orphan {
+				assert.Len(t, orphans, 1)
+				assert.False(t, session.IsHeld(dir))
+				return
+			}
+			assert.Empty(t, orphans, "a held session must never be queued for upload")
+			assert.True(t, session.IsHeld(dir))
+			assert.NoFileExists(t, filepath.Join(dir, ".recording.json"), "the stale marker is still reclaimed")
+		})
+	}
 }
