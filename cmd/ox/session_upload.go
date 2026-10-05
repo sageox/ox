@@ -19,6 +19,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sageox/ox/internal/errkind"
+
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
@@ -157,10 +159,10 @@ func getLFSClient(projectRoot string) (*lfs.Client, error) {
 		return nil, fmt.Errorf("load credentials: %w", err)
 	}
 	if creds == nil {
-		return nil, fmt.Errorf("no git credentials found (run 'ox login' first)")
+		return nil, errkind.Errorf(errkind.NotLoggedIn, "no git credentials found (run 'ox login' first)")
 	}
 	if creds.Token == "" {
-		return nil, fmt.Errorf("git credentials have empty token")
+		return nil, errkind.Errorf(errkind.NotLoggedIn, "git credentials have empty token")
 	}
 
 	// derive LFS repo URL from the ledger's local git remote (no API call needed)
@@ -437,12 +439,12 @@ func backfillGitArtifactInMeta(sessionDir, filename string, size int64) bool {
 func resolveLedgerPath() (string, error) {
 	path := getLedgerPath()
 	if path == "" {
-		return "", fmt.Errorf("no ledger path found (run 'ox doctor --fix' or wait for daemon to clone)")
+		return "", errkind.Errorf(errkind.NotInitialized, "no ledger path found (run 'ox doctor --fix' or wait for daemon to clone)")
 	}
 
 	// verify ledger exists on disk
 	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return "", fmt.Errorf("ledger not found at %s (run 'ox doctor --fix')", path)
+		return "", errkind.Errorf(errkind.NotInitialized, "ledger not found at %s (run 'ox doctor --fix')", path)
 	}
 
 	return path, nil

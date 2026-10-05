@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sageox/ox/internal/errkind"
+
 	tea "charm.land/bubbletea/v2"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
@@ -278,7 +280,7 @@ func ensureDaemonRunning(jsonOutput bool) error {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	return errors.New("daemon did not start in time")
+	return errkind.Errorf(errkind.Daemon, "daemon did not start in time")
 }
 
 // renderExportHuman prints the teaching output: the ownership philosophy, where

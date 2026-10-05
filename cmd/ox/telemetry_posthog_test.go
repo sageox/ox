@@ -21,6 +21,7 @@ import (
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/conversation/read"
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/updatenotice"
@@ -561,4 +562,41 @@ func TestCobraRejection_NamesTheMistakeNotWhatWasTyped(t *testing.T) {
 		postPreRun := tt.want == "required flag missing" || tt.want == "conflicting flags"
 		assert.Equal(t, postPreRun, cobraFlagValidation(errors.New(tt.msg)), tt.msg)
 	}
+}
+
+// TestConversationErrorKind_EveryCodeFiled covers every code the
+// conversation read commands can fail with.
+//
+// Failure prevented: a conversation failure reaching PostHog as
+// error_kind=other with the Go type name as its detail, or a code that exits
+// 2 (the invocation was wrong) counted as an ox failure.
+func TestConversationErrorKind_EveryCodeFiled(t *testing.T) {
+	want := map[string]errkind.Kind{
+		read.ErrCodeInvalidID:              errkind.Usage,
+		read.ErrCodeInvalidSelector:        errkind.Usage,
+		read.ErrCodeShareLinkUnresolvable:  errkind.Usage,
+		read.ErrCodeShareLinkNotDiscussion: errkind.Usage,
+		read.ErrCodeNotAuthenticated:       errkind.NotLoggedIn,
+		read.ErrCodeNoTeamAccess:           errkind.Auth,
+		read.ErrCodeAccessUnverified:       errkind.Network,
+		read.ErrCodeNoTeamContext:          errkind.NotInitialized,
+		read.ErrCodeNotIndexed:             errkind.Other,
+		read.ErrCodeNoDistillation:         errkind.Other,
+		read.ErrCodeTranscriptNotAvailable: errkind.Other,
+		read.ErrCodeTopicNotFound:          errkind.Other,
+		read.ErrCodeReadError:              errkind.Other,
+	}
+	for code, kind := range want {
+		err := conversationExitError(&read.Error{Code: code, Message: "conversation cnv_secret not found"})
+		assert.Equal(t, kind, errkind.Of(err), code)
+		assert.Equal(t, code, errkind.DetailOf(err), "the detail is the code, never the message")
+		var exit *commandExitError
+		require.True(t, errors.As(err, &exit), "main still honors the exit code for %s", code)
+		assert.Equal(t, exit.ExitCode == 2, kind == errkind.Usage, "%s: exit 2 if and only if usage", code)
+	}
+
+	// Flag failures the command layer catches itself go out as usage too.
+	err := conversationUsageExit(io.Discard, "json", conversationUsageErrorCode, "--since: bad value")
+	assert.Equal(t, errkind.Usage, errkind.Of(err))
+	assert.Equal(t, conversationUsageErrorCode, errkind.DetailOf(err))
 }

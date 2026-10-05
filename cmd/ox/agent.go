@@ -294,7 +294,7 @@ func runAgentDispatcher(cmd *cobra.Command, args []string) error {
 		if agentID := resolveImplicitAgentID(); agentID != "" {
 			return runWithAgentID(cmd, agentID, args)
 		}
-		return fmt.Errorf("no agent ID: %q requires an agent ID (run 'ox agent prime' first)", firstArg)
+		return errkind.Errorf(errkind.Other, "no agent ID: %q requires an agent ID (run 'ox agent prime' first)", firstArg)
 	}
 
 	// unknown argument — check for common wrong-format patterns.
@@ -679,7 +679,7 @@ func resolveInstance(agentID string) (*agentinstance.Instance, error) {
 
 	inst, err := store.Get(agentID)
 	if err != nil {
-		return nil, fmt.Errorf("instance not found: %s\nRun 'ox agent prime' to create a new instance", agentID)
+		return nil, errkind.Errorf(errkind.Other, "instance not found: %s\nRun 'ox agent prime' to create a new instance", agentID)
 	}
 
 	return inst, nil

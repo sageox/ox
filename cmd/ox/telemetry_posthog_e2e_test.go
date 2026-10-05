@@ -192,3 +192,47 @@ func TestPostHog_InvocationMistakesAndWhoMadeThem(t *testing.T) {
 		assert.Equal(t, "human", props["actor"], "%v", m.args)
 	}
 }
+
+// TestPostHog_EverydayFailuresSayWhatWentWrong runs a real ox binary into the
+// failures people hit most often before a repository is fully set up, and
+// checks each reaches PostHog with a kind and a fixed detail.
+//
+// Failure prevented: the commonest failures filed as error_kind=other with no
+// error_detail, which made the usage dashboard unable to say why ox failed.
+func TestPostHog_EverydayFailuresSayWhatWentWrong(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: builds and runs a real ox binary")
+	}
+	e := newPostHogE2E(t)
+	repo := filepath.Join(e.workDir, "repo") // a git repository not set up for SageOx
+	require.NoError(t, os.MkdirAll(repo, 0o755))
+	gitInit := exec.Command("git", "init", "-q", repo)
+	require.NoError(t, gitInit.Run())
+	setUp := filepath.Join(e.workDir, "set-up") // set up for SageOx, Ledger not cloned yet
+	require.NoError(t, os.MkdirAll(filepath.Join(setUp, ".sageox"), 0o755))
+	require.NoError(t, exec.Command("git", "init", "-q", setUp).Run())
+
+	failures := []struct {
+		dir     string
+		args    []string
+		command string
+		kind    string
+		detail  string
+	}{
+		{repo, []string{"conversation", "list"}, "conversation list", "not_initialized", "no_team_context"},
+		{repo, []string{"murmur", "hello"}, "murmur", "not_initialized", "no ledger found — run 'ox doctor --fix' or wait for daemon to clone"},
+		{setUp, []string{"session", "download", "abc"}, "session download", "not_initialized", "no ledger path found (run 'ox doctor --fix' or wait for daemon to clone)"},
+		{e.workDir, []string{"session", "upload", "abc"}, "session upload", "not_initialized", "not in a SageOx project (no .sageox directory found)"},
+		{repo, []string{"session", "score", "0.5"}, "session score", "other", "SAGEOX_AGENT_ID not set -- run 'ox agent prime' first"},
+		{repo, []string{"agent", "OxAbcd", "session", "start"}, "agent session start", "other", "instance not found: %s"},
+		{repo, []string{"sync"}, "sync", "daemon", "daemon start disabled: OX_NO_DAEMON=1"},
+	}
+	for _, f := range failures {
+		output, code, _ := testguard.RunOx(t, e.bin, f.dir, e.env, f.args...)
+		require.NotEqual(t, 0, code, output)
+		props := e.props(t)
+		assert.Equal(t, f.command, props["command"], "%v", f.args)
+		assert.Equal(t, f.kind, props["error_kind"], "%v", f.args)
+		assert.Equal(t, f.detail, props["error_detail"], "%v", f.args)
+	}
+}

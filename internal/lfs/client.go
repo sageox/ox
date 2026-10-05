@@ -20,6 +20,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sageox/ox/internal/errkind"
+
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/useragent"
@@ -280,7 +282,8 @@ func (c *Client) doBatch(ctx context.Context, operation string, objects []BatchO
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("LFS batch API returned HTTP %d: %s", resp.StatusCode, string(respBody))
+		return nil, errkind.WithDetail(errkind.HTTPStatus(resp.StatusCode), fmt.Sprintf("LFS batch API HTTP %d", resp.StatusCode),
+			fmt.Errorf("LFS batch API returned HTTP %d: %s", resp.StatusCode, string(respBody)))
 	}
 
 	var batchResp BatchResponse

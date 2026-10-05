@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/auth"
+	"github.com/sageox/ox/internal/errkind"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -635,4 +636,32 @@ func TestReadLFS_StreamingFailureBoundaries(t *testing.T) {
 		require.Error(t, err)
 		require.NotContains(t, err.Error(), action.Href)
 	})
+}
+
+// TestBatch_HTTPFailureKind files a rejected batch request for usage
+// telemetry.
+// Failure prevented: an LFS upload or download refused for its credentials
+// counted as an unexplained failure instead of an auth one.
+func TestBatch_HTTPFailureKind(t *testing.T) {
+	tests := []struct {
+		status int
+		kind   errkind.Kind
+	}{
+		{http.StatusUnauthorized, errkind.Auth},
+		{http.StatusForbidden, errkind.Auth},
+		{http.StatusInternalServerError, errkind.Other},
+	}
+	for _, tt := range tests {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(tt.status)
+			_, _ = w.Write([]byte("refused for user@example.com"))
+		}))
+		c := &Client{batchURL: server.URL, httpClient: server.Client(), authHeader: "Basic dGVzdDp0b2tlbg=="}
+		_, err := c.BatchDownload([]BatchObject{{OID: "abc", Size: 10}})
+		server.Close()
+		require.Error(t, err)
+		assert.Equal(t, tt.kind, errkind.Of(err), "HTTP %d", tt.status)
+		assert.Equal(t, fmt.Sprintf("LFS batch API HTTP %d", tt.status), errkind.DetailOf(err))
+		assert.Contains(t, err.Error(), "refused for user@example.com", "the message a person sees is unchanged")
+	}
 }
