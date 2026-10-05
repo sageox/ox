@@ -516,7 +516,13 @@ func (m *SessionWatcherManager) runWatcher(
 func (m *SessionWatcherManager) rejectWatcherSource(aw *activeWatcher, err error) {
 	m.logger.Warn("session source failed ownership check; leaving cursor unchanged", "session", aw.sessionName, "error", err)
 	if errors.Is(err, claudesource.ErrUntrustedSource) {
-		if markErr := session.MarkSourceRejected(aw.projectRoot, aw.agentID); markErr != nil {
+		// by the watched recording's own folder: once quarantined it leaves the
+		// agent's active slot, and an agent lookup could find a newer recording
+		markErr := session.MutateRecordingStateFile(filepath.Join(aw.cachePath, recordingMarker), func(state *session.RecordingState) error {
+			state.SourceRejected = true
+			return nil
+		})
+		if markErr != nil {
 			m.logger.Warn("failed to quarantine session source", "session", aw.sessionName, "error", markErr)
 		}
 	}

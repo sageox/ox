@@ -71,6 +71,9 @@ func runAgentSessionAbortActive(inst *agentinstance.Instance, cmd *cobra.Command
 		return fmt.Errorf("failed to load recording state: %w", err)
 	}
 	if state == nil {
+		if held, heldErr := session.LoadQuarantinedRecordingsForAgent(projectRoot, inst.AgentID); heldErr == nil && len(held) > 0 {
+			return fmt.Errorf("no active session to abort; a quarantined recording is kept for review\ndiscard it with 'ox agent %s session abort %s'", inst.AgentID, session.GetSessionName(held[0].SessionPath))
+		}
 		return fmt.Errorf("no active session to abort\nRun 'ox agent %s session start' to begin recording", inst.AgentID)
 	}
 
@@ -241,7 +244,9 @@ func buildSessionInfo(sessionName, sessionPath string) session.SessionInfo {
 	if data, err := os.ReadFile(recPath); err == nil {
 		var state session.RecordingState
 		if jsonErr := json.Unmarshal(data, &state); jsonErr == nil {
-			info.Recording = true
+			// a quarantined recording is held for review, not recording: it is
+			// safe to discard and must not read as an active session
+			info.Recording = !state.SourceRejected
 			info.AgentID = state.AgentID
 			info.EntryCount = state.EntryCount
 			info.ParentPID = state.ParentPID

@@ -140,8 +140,8 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 			if repoRoot == "" {
 				repoRoot = projectRoot
 			}
-			if err := claudesource.ValidateRecorded(state.SessionFile, repoRoot, state.AgentSessionID, state.StartOffset, sourceSnapshot); errors.Is(err, fs.ErrNotExist) {
-				// the workspace itself vanished mid-check: nothing read can be vouched for
+			if err := claudesource.ValidateRecorded(state.SessionFile, repoRoot, state.AgentSessionID, state.StartOffset, sourceSnapshot); errors.Is(err, claudesource.ErrSourceGone) {
+				// the transcript itself vanished mid-check: nothing read can be vouched for
 				slog.Warn("finalize: native session cannot be rechecked; finalizing the captured recording", "source", state.SessionFile, "error", err)
 				entries = nil
 			} else if err != nil {

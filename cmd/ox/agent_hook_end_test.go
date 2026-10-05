@@ -180,10 +180,8 @@ func TestQuarantinedRecordingSurvivesSessionEndAndClear(t *testing.T) {
 
 			tt.end(t, projectRoot, agentID)
 
-			kept, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
-			require.NoError(t, err)
-			require.NotNil(t, kept, "the quarantine marker must not be cleared")
-			assert.True(t, kept.SourceRejected)
+			kept := heldRecording(t, projectRoot, agentID)
+			assert.True(t, kept.SourceRejected, "the quarantine marker must not be cleared")
 			assert.Nil(t, kept.StoppedAt, "a quarantined recording must not be marked stopped, which hands it to finalization")
 		})
 	}

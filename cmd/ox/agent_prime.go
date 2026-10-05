@@ -1494,6 +1494,11 @@ func startSessionRecording(projectRoot, agentID, agentType, parentAgentID, conti
 	if resolved.IsAuto() {
 		notificationMsg += " (Tip: Disable auto-start with 'ox config set session_recording manual')"
 	}
+	// say so when an earlier recording from this agent is being held back, so a
+	// missing session does not look like a recording that never happened
+	if held, heldErr := session.LoadQuarantinedRecordingsForAgent(projectRoot, agentID); heldErr == nil && len(held) > 0 {
+		notificationMsg += " An earlier recording from this session is held back because its session file also covers another repository; run 'ox doctor' to review it."
+	}
 
 	return &sessionStatus{
 		Recording:        true,

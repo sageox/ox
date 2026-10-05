@@ -335,13 +335,6 @@ func stopSessionForClear(ctx *HookContext, agentID string) {
 	if err != nil || state == nil {
 		return // not recording, nothing to stop
 	}
-	if state.SourceRejected {
-		// Stopping would finalize the captured prefix and clear the marker that
-		// holds the quarantine, publishing a session already known to span
-		// repositories. Leave it for a coworker to review.
-		slog.Info("hook: clear left quarantined recording in place", "agent_id", agentID)
-		return
-	}
 
 	// capture finalized-session info for the post-clear notice (ADR-019).
 	// done before we mutate state so SessionPath is still accurate.
@@ -419,12 +412,6 @@ func handleEnd(ctx *HookContext) error {
 	state, err := session.LoadRecordingStateForAgent(ctx.ProjectRoot, agentID)
 	if err != nil || state == nil {
 		slog.Debug("hook: end no recording state", "agent_id", agentID)
-		return nil
-	}
-	if state.SourceRejected {
-		// Same boundary as stopSessionForClear: the agent exiting must not
-		// finalize and upload a quarantined recording.
-		slog.Info("hook: end left quarantined recording in place", "agent_id", agentID)
 		return nil
 	}
 
@@ -663,10 +650,6 @@ func handleAfterTool(ctx *HookContext) error {
 		return nil // not recording for this agent, silent noop
 	}
 
-	if state.SourceRejected {
-		return nil // preserved for manual ownership review; do not retry the native source
-	}
-
 	// Serialize the read cursor and append transaction with the watcher and
 	// recovery. Reload after locking so concurrent hooks cannot replay a batch.
 	return fileutil.WithFileLock(context.Background(), filepath.Join(state.SessionPath, "raw.jsonl"), func() error {
@@ -699,9 +682,6 @@ func captureHookEntries(ctx *HookContext, agentID, expectedSessionPath, expected
 	state, err := session.LoadRecordingStateForAgent(ctx.ProjectRoot, agentID)
 	if err != nil || state == nil || state.StoppedAt != nil {
 		return err
-	}
-	if state.SourceRejected {
-		return nil // quarantined while this hook waited for the raw lock
 	}
 	changed := state.SessionPath != expectedSessionPath
 	if expectedSessionID != "" || state.SessionID != "" {
@@ -784,11 +764,16 @@ func captureHookEntries(ctx *HookContext, agentID, expectedSessionPath, expected
 		if findErr == nil && sf != "" && sf != state.SessionFile {
 			slog.Info("hook: rediscovered session file", "old", state.SessionFile, "new", sf)
 			state.SessionFile = sf
+			// both offsets belong to the old file: a StartOffset left behind would
+			// make every read skip the first bytes of the new transcript, and
+			// every ownership check start mid-record
 			_ = session.UpdateRecordingStateForAgent(ctx.ProjectRoot, agentID, func(s *session.RecordingState) {
 				s.SessionFile = sf
 				s.SourceOffset = 0 // reset offset for new file
+				s.StartOffset = 0
 			})
 			state.SourceOffset = 0
+			state.StartOffset = 0
 		}
 	}
 
@@ -826,12 +811,14 @@ func captureHookEntries(ctx *HookContext, agentID, expectedSessionPath, expected
 		// ownership on each captured turn; finalization rechecks the whole file.
 		if err := claudesource.ValidateRead(state.SessionFile, repoRoot, state.AgentSessionID, readOffset, false, sourceSnapshot); err != nil {
 			slog.Info("hook: Claude source crossed repository boundary", "agentID", agentID, "error", err)
+			// record the status first: once quarantined the recording leaves the
+			// agent's active slot, which recordHookStatus looks it up by
+			recordHookStatus("source-repo-mismatch")
 			if errors.Is(err, claudesource.ErrUntrustedSource) {
-				if markErr := session.MarkSourceRejected(ctx.ProjectRoot, agentID); markErr != nil {
+				if markErr := session.SetSourceRejectedAt(state.SessionPath, state.SessionID, true); markErr != nil {
 					slog.Warn("hook: failed to quarantine source", "agentID", agentID, "error", markErr)
 				}
 			}
-			recordHookStatus("source-repo-mismatch")
 			return nil
 		}
 	}

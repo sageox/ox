@@ -614,12 +614,8 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 		case "subagent-list":
 			return runAgentSessionSubagentList(inst)
 		case "recover":
-			if release, _ := cmd.Flags().GetBool("release-quarantine"); release {
-				if err := releaseSourceQuarantine(inst); err != nil {
-					return err
-				}
-			}
-			return runAgentSessionRecover(inst)
+			release, _ := cmd.Flags().GetBool("release-quarantine")
+			return recoverAgentSession(inst, release)
 		case "abort":
 			return runAgentSessionAbort(inst, cmd, sessionArgs)
 		case "pause":

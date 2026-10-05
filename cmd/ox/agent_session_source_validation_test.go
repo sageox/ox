@@ -45,50 +45,9 @@ func TestRecoverViaNormalStopQuarantinesNewForeignTurn(t *testing.T) {
 	if err := recoverViaNormalStop(&agentinstance.Instance{AgentID: agentID}, projectRoot, state); err == nil {
 		t.Fatal("normal recovery must not publish newly foreign turns")
 	}
-	persisted, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
-	if err != nil || persisted == nil || !persisted.SourceRejected {
-		t.Fatalf("normal recovery must preserve quarantine, state=%v error=%v", persisted, err)
-	}
-}
-
-// Quarantine must have a way out that deletes nothing. Releasing re-runs the
-// ownership check; it cannot publish a source that still crosses repositories.
-func TestReleaseSourceQuarantine_RechecksOwnershipBeforeAnythingPublishes(t *testing.T) {
-	for _, foreign := range []bool{false, true} {
-		name := "source that now passes"
-		if foreign {
-			name = "source that still crosses repositories"
-		}
-		t.Run(name, func(t *testing.T) {
-			projectRoot, agentID, sourceFile := setupHandleAfterToolTest(t)
-			t.Chdir(projectRoot)
-			inst := &agentinstance.Instance{AgentID: agentID}
-			if foreign {
-				f, err := os.OpenFile(sourceFile, os.O_APPEND|os.O_WRONLY, 0)
-				require.NoError(t, err)
-				_, err = fmt.Fprintf(f, "{\"type\":\"assistant\",\"sessionId\":\"session\",\"cwd\":%q}\n", filepath.Dir(projectRoot))
-				require.NoError(t, err)
-				require.NoError(t, f.Close())
-			}
-			require.NoError(t, session.MarkSourceRejected(projectRoot, agentID))
-
-			err := runAgentSessionRecover(inst)
-			require.Error(t, err, "a quarantined recording must not recover without an explicit release")
-			assert.Contains(t, err.Error(), "--release-quarantine", "the refusal must say how to get out")
-
-			require.NoError(t, releaseSourceQuarantine(inst))
-			err = runAgentSessionRecover(inst)
-			current, loadErr := session.LoadRecordingStateForAgent(projectRoot, agentID)
-			require.NoError(t, loadErr)
-			if foreign {
-				require.Error(t, err, "release must not publish a source that still crosses repositories")
-				require.NotNil(t, current, "the recording must survive")
-				assert.True(t, current.SourceRejected, "a still-foreign source is quarantined again")
-				return
-			}
-			require.NoError(t, err)
-			assert.Nil(t, current, "a source that passes the recheck recovers normally")
-		})
+	persisted := heldRecording(t, projectRoot, agentID)
+	if !persisted.SourceRejected {
+		t.Fatalf("normal recovery must preserve quarantine, state=%v", persisted)
 	}
 }
 
@@ -133,9 +92,9 @@ func TestRecoverAndProcessPreserveQuarantinedClaudeSession(t *testing.T) {
 	if err := runAgentSessionRecover(&agentinstance.Instance{AgentID: agentID}); err == nil {
 		t.Fatal("recover must not publish cached data after native file disappears")
 	}
-	state, err = session.LoadRecordingStateForAgent(projectRoot, agentID)
-	if err != nil || state == nil || !state.SourceRejected {
-		t.Fatalf("quarantined marker must survive recovery: state=%v error=%v", state, err)
+	state = heldRecording(t, projectRoot, agentID)
+	if !state.SourceRejected {
+		t.Fatalf("quarantined marker must survive recovery: state=%v", state)
 	}
 	if _, err := processAgentSession(projectRoot, state); err == nil {
 		t.Fatal("internal stop must not process quarantined data")
@@ -285,10 +244,8 @@ func TestRecoverFromCache_HonorsQuarantineSetAfterTheInitialCheck(t *testing.T) 
 	after, err := os.ReadFile(raw)
 	require.NoError(t, err)
 	assert.Equal(t, string(before), string(after), "a quarantined cache must be left exactly as it was")
-	current, err := session.LoadRecordingStateForAgent(repo, agentID)
-	require.NoError(t, err)
-	require.NotNil(t, current, "the quarantined recording marker must survive")
-	assert.True(t, current.SourceRejected)
+	current := heldRecording(t, repo, agentID)
+	assert.True(t, current.SourceRejected, "the quarantined recording marker must survive")
 }
 
 func TestRecoverFromCache_RefusesQuarantinedSource(t *testing.T) {

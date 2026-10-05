@@ -2893,9 +2893,12 @@ func recoverRawFromSessionFile(logger *slog.Logger, recPath, sessionDir, rawPath
 			}
 		}
 		if repoRoot == "" {
-			if hasRaw && state.WatchMode != "tail" {
-				// nothing proves this capture foreign, and it cannot be
-				// rechecked: finalize what the hooks wrote, as before
+			headerRepoID, _ := meta["repo_id"].(string)
+			if hasRaw && state.WatchMode != "tail" && headerRepoID == "" {
+				// the header names no repository, so nothing proves this capture
+				// foreign and nothing can recheck it: finalize what the hooks
+				// wrote, as before. A header that names another repository is
+				// the opposite of a missing one and is held for review below.
 				logger.Warn("legacy Claude hook capture has no repository to recheck; finalizing it", "session_dir", sessionDir)
 				stampCarrierBeforeReclaim(logger, sessionDir, rawPath, &state)
 				return hasRaw, nil
@@ -3125,7 +3128,9 @@ func validateClaudeRecoverySource(state *session.RecordingState, repoRoot, sessi
 	if errors.Is(err, claudesource.ErrUntrustedSource) {
 		state.SourceRejected = true
 		state.SessionPath = sessionDir
-		if markErr := session.SaveRecordingState(repoRoot, state); markErr != nil {
+		// under the state lock and keyed to this recording: a whole-file save of
+		// the copy read earlier would revert a cursor a live capture committed
+		if markErr := session.SetSourceRejectedAt(sessionDir, state.SessionID, true); markErr != nil {
 			return fmt.Errorf("quarantine untrusted native source: %w", errors.Join(err, markErr))
 		}
 	}

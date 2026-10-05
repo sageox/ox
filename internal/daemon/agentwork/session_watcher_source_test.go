@@ -40,6 +40,36 @@ func TestValidateWatcherSource_RejectsAppendedForeignTurn(t *testing.T) {
 	}
 }
 
+// Turns before the recording began were never imported, so a directory visited
+// then must not condemn a watcher restarted from its persisted start offset.
+func TestValidateWatcherSource_ChecksOnlyWhatTheRecordingCouldHaveCaptured(t *testing.T) {
+	repo, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const id = "77b16b24-5b7d-4598-aacf-4c9afeb4b5ca"
+	path := filepath.Join(t.TempDir(), id+".jsonl")
+	before := fmt.Sprintf("{\"type\":\"user\",\"sessionId\":%q,\"cwd\":%q}\n", id, filepath.Dir(repo))
+	recorded := fmt.Sprintf("{\"type\":\"user\",\"sessionId\":%q,\"cwd\":%q}\n", id, repo)
+	if err := os.WriteFile(path, []byte(before+recorded), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	aw := &activeWatcher{adapterName: "claude-code", projectRoot: repo, sessionFile: path}
+	if err := validateWatcherSource(aw, 0); err == nil {
+		t.Fatal("a recording that began at the top of the file owns every turn in it")
+	}
+	if err := validateWatcherSource(aw, int64(len(before))); err != nil {
+		t.Fatalf("a directory visited before the recording began must not condemn it: %v", err)
+	}
+	foreign := fmt.Sprintf("{\"type\":\"assistant\",\"sessionId\":%q,\"cwd\":%q}\n", id, filepath.Dir(repo))
+	if err := os.WriteFile(path, []byte(before+recorded+foreign), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateWatcherSource(aw, int64(len(before))); err == nil {
+		t.Fatal("a foreign turn inside the recorded range must still be refused")
+	}
+}
+
 type appendForeignDuringCatchUpAdapter struct {
 	*testAdapter
 	foreignTurn string
@@ -129,13 +159,14 @@ func TestClaudeWatcherPreservesCursorAcrossOwnershipChanges(t *testing.T) {
 				require.NoError(t, f.Close())
 			}
 			require.Eventually(t, func() bool {
-				updated, err := session.LoadRecordingStateForAgent(repo, state.AgentID)
-				return err == nil && updated != nil && updated.SourceRejected
+				held, err := session.LoadQuarantinedRecordingsForAgent(repo, state.AgentID)
+				return err == nil && len(held) == 1
 			}, 5*time.Second, 10*time.Millisecond)
 			mgr.StopAll()
-			updated, err := session.LoadRecordingStateForAgent(repo, state.AgentID)
+			held, err := session.LoadQuarantinedRecordingsForAgent(repo, state.AgentID)
 			require.NoError(t, err)
-			require.NotNil(t, updated)
+			require.Len(t, held, 1)
+			updated := held[0]
 			assert.Equal(t, int64(len(first)), updated.SourceOffset, "foreign turns must not advance the cursor")
 			if contents, err := os.ReadFile(raw); err == nil {
 				assert.Empty(t, contents, "foreign turns must not reach the raw capture")

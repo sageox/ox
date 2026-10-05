@@ -3,15 +3,18 @@ package agentwork
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
+	"github.com/sageox/ox/internal/session/claudesource"
 )
 
 func TestRecoverUndiscoveredClaudeHookSourcePreservesMarker(t *testing.T) {
@@ -114,6 +117,130 @@ func TestRecoverClaudeHookUncheckableNativeSourceFinalizesValidatedCapture(t *te
 	}
 }
 
+// Archiving the workspace (a Conductor worktree, a deleted checkout) must not
+// strand a recording the daemon could finalize before: its turns stood inside
+// the repo, and a turn that stood elsewhere is still foreign.
+func TestRecoverClaudeFromAnArchivedWorkspace(t *testing.T) {
+	adapters.Register(&claudeRecoveryTestAdapter{})
+	t.Cleanup(func() { adapters.Unregister("claude-code") })
+	const nativeID = "77b16b24-5b7d-4598-aacf-4c9afeb4b5ca"
+	for _, tt := range []struct {
+		name, watchMode string
+		foreignTurn     bool
+	}{
+		{name: "hook recording that only holds a header", watchMode: "hook"},
+		{name: "tail recording", watchMode: "tail"},
+		{name: "tail recording with a turn from another repository", watchMode: "tail", foreignTurn: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			outer, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			project := filepath.Join(outer, "archived-workspace")
+			if err := os.MkdirAll(project, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			startedAt := time.Now().Add(-time.Hour)
+			stamp := startedAt.Add(time.Minute).UTC().Format(time.RFC3339)
+			cwd := project
+			if tt.foreignTurn {
+				cwd = outer
+			}
+			source := filepath.Join(home, ".claude", "projects", "bucket", nativeID+".jsonl")
+			if err := os.MkdirAll(filepath.Dir(source), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			turn := fmt.Sprintf("{\"type\":\"user\",\"sessionId\":%q,\"cwd\":%q,\"role\":\"user\",\"content\":\"worked in the archived workspace\",\"timestamp\":%q}\n", nativeID, cwd, stamp)
+			if err := os.WriteFile(source, []byte(turn), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			sessionDir := t.TempDir()
+			recPath := filepath.Join(sessionDir, recordingMarker)
+			rawPath := filepath.Join(sessionDir, artifactRaw)
+			header := `{"type":"header","metadata":{}}` + "\n"
+			if err := os.WriteFile(rawPath, []byte(header), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			writeRecordingState(t, recPath, session.RecordingState{
+				AgentID: "OxArchived", AgentSessionID: nativeID, AdapterName: "claude-code", WatchMode: tt.watchMode,
+				WorkspacePath: project, SessionFile: source, StartedAt: startedAt,
+			})
+			if err := os.RemoveAll(project); err != nil {
+				t.Fatal(err)
+			}
+
+			recovered, err := recoverRawFromSessionFile(slog.Default(), recPath, sessionDir, rawPath)
+			if tt.foreignTurn {
+				if recovered || !errors.Is(err, claudesource.ErrUntrustedSource) {
+					t.Fatalf("a turn from outside the archived workspace must be refused, recovered=%v err=%v", recovered, err)
+				}
+				return
+			}
+			if err != nil || !recovered {
+				t.Fatalf("an archived workspace must not strand its recording, recovered=%v err=%v", recovered, err)
+			}
+			if got := countRawJSONLEntries(t, rawPath); got < 2 {
+				t.Fatalf("the native turn must reach raw.jsonl, entries=%d", got)
+			}
+		})
+	}
+}
+
+// A tail recording whose transcript is gone has nothing to drain. That is not a
+// reason to discard the recording: it stays for a later pass, marker intact.
+func TestRecoverClaudeTailRecordingWithAGoneTranscriptKeepsItsMarker(t *testing.T) {
+	adapters.Register(&claudeRecoveryTestAdapter{})
+	t.Cleanup(func() { adapters.Unregister("claude-code") })
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	project := t.TempDir()
+	source := filepath.Join(home, ".claude", "projects", "bucket", "77b16b24-5b7d-4598-aacf-4c9afeb4b5ca.jsonl")
+	if err := os.MkdirAll(filepath.Dir(source), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sessionDir := t.TempDir()
+	recPath := filepath.Join(sessionDir, recordingMarker)
+	rawPath := filepath.Join(sessionDir, artifactRaw)
+	header := []byte(`{"type":"header","metadata":{}}` + "\n")
+	if err := os.WriteFile(rawPath, header, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeRecordingState(t, recPath, session.RecordingState{
+		AgentID: "OxGone", AdapterName: "claude-code", WatchMode: "tail", WorkspacePath: project,
+		SessionFile: source, StartedAt: time.Now().Add(-time.Hour),
+	})
+	recovered, err := recoverRawFromSessionFile(slog.Default(), recPath, sessionDir, rawPath)
+	if recovered || err == nil || !strings.Contains(err.Error(), "stat native session before recovery") {
+		t.Fatalf("a gone transcript defers the recovery, recovered=%v err=%v", recovered, err)
+	}
+	if _, err := os.Stat(recPath); err != nil {
+		t.Fatalf("the marker must survive: %v", err)
+	}
+}
+
+// A hook recording whose state never named a native source still holds what its
+// hooks validated; with nothing to recheck it finalizes that capture.
+func TestRecoverClaudeHookCaptureWithNoRecordedSourceFinalizes(t *testing.T) {
+	project := t.TempDir()
+	sessionDir := t.TempDir()
+	recPath := filepath.Join(sessionDir, recordingMarker)
+	rawPath := filepath.Join(sessionDir, artifactRaw)
+	captured := []byte(`{"type":"header","metadata":{}}` + "\n" + `{"type":"user","content":"captured prefix"}` + "\n")
+	if err := os.WriteFile(rawPath, captured, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeRecordingState(t, recPath, session.RecordingState{
+		AgentID: "OxNoSource", AdapterName: "claude-code", WatchMode: "hook", WorkspacePath: project,
+	})
+	recovered, err := recoverRawFromSessionFile(slog.Default(), recPath, sessionDir, rawPath)
+	if err != nil || !recovered {
+		t.Fatalf("the validated capture must finalize, recovered=%v err=%v", recovered, err)
+	}
+}
+
 func TestRecoverPiWithoutWorkspacePathPreservesMarker(t *testing.T) {
 	sessionDir := t.TempDir()
 	recPath := filepath.Join(sessionDir, recordingMarker)
@@ -153,6 +280,9 @@ func TestRecoverClaudeWithoutWorkspacePathRequiresMatchingHeaderRepo(t *testing.
 		{name: "hook prefix valid", headerRepo: "repo-allowed", allowed: true, prefix: true},
 		{name: "hook prefix foreign turn", headerRepo: "repo-allowed", foreign: true, prefix: true},
 		{name: "wrong repository", headerRepo: "repo-other"},
+		// a header that names a repository is the opposite of one that names none
+		{name: "hook prefix wrong repository", headerRepo: "repo-other", prefix: true},
+		{name: "hook prefix names no repository", allowed: true, prefix: true},
 		{name: "missing repository"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

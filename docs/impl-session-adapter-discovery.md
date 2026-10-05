@@ -20,8 +20,13 @@ Fix Claude and Pi adapter discovery for sessions stored in a different native pr
 - [x] Guard native reads against source replacement and prevent stop/recover from publishing quarantined caches.
 - [x] Recheck dead hook-mode sources before daemon finalization; quarantine proven foreign turns, but finalize the already-validated capture when the source can no longer be checked (transcript pruned, workspace archived) instead of retrying forever.
 - [x] Validate stop, final drain, daemon recovery and watcher restart from the recording's start offset, so directories visited before it began do not condemn it.
-- [x] Keep quarantined recordings through SessionEnd and `/clear`; recheck the quarantine under the recovery lock before publishing; list them in `ox doctor`; `ox agent <id> session recover --release-quarantine` re-runs the ownership check without deleting anything.
+- [x] A quarantined recording is held for review, not recording: it leaves the agent's active slot, so the agent's next recording (after `/clear`, or the next prime) starts beside it and prime says the earlier one is held. It survives SessionEnd and `/clear`, is listed by `ox doctor`, and a new recording that would land in its folder is refused rather than written over it.
+- [x] `ox agent <id> session recover --release-quarantine` re-checks ownership against the native file and recovers only if that passes; with the file gone or still foreign the recording stays quarantined. Discard it with `ox agent <id> session abort <session-name>`.
+- [x] A workspace that has since been archived is judged like a deleted cwd, so recordings of it finalize instead of retrying forever. A cwd that cannot be placed no longer ends the scan: a later turn that proves a foreign repository still quarantines. A vanished cwd written with `..`, `.` or doubled separators is refused as non-canonical.
+- [x] Stop reads a Claude transcript from the offset it validates from, and a rediscovered transcript resets the start offset with the cursor.
+- [x] A legacy hook capture with no workspace is finalized only when its header names no repository; a header that names another repository is held for review.
 - [ ] Decide whether a foreign turn should quarantine the whole session or be skipped, with the clean part uploaded (author's call).
+- [ ] Known limit: a deleted directory inside the tree that was an independent clone is indistinguishable from a deleted subdirectory, so turns from it are attributed to this repo.
 - [x] Refuse daemon Pi recovery and watcher restart when repository ownership is absent.
 - [x] Preserve undiscovered Claude hook recordings through daemon recovery, explicit recover, and stale/ghost cleanup; test the header-only case.
 - [x] Pass full `make lint` and focused adapter/capture/daemon tests.

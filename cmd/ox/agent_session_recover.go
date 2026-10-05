@@ -37,28 +37,65 @@ type sessionRecoverOutput struct {
 	LedgerSessionDir string `json:"ledger_session_dir,omitempty"`
 }
 
-// releaseSourceQuarantine clears the quarantine flag so recovery re-runs the
-// ownership check from the recording's start. Nothing is deleted or uploaded
-// here: a native source that still crosses repositories is quarantined again by
-// the check recovery runs next, so releasing cannot publish a foreign session.
-func releaseSourceQuarantine(inst *agentinstance.Instance) error {
-	projectRoot, err := findProjectRoot()
-	if err != nil {
-		return fmt.Errorf("could not find project root: %w", err)
+// quarantineHeldMessage tells a coworker why a recording was not recovered and
+// how to get it back.
+func quarantineHeldMessage(agentID string) string {
+	return fmt.Sprintf("claude source has untrusted repository ownership; recording and cache preserved for manual review\nto re-check ownership, run 'ox agent %s session recover --release-quarantine'", agentID)
+}
+
+// recheckQuarantinedSource re-runs the ownership check a quarantine stands on. A
+// release must never go further than this check does: with the native file
+// gone there is nothing left to check, and recovery would fall back to
+// publishing the cache without any check at all.
+func recheckQuarantinedSource(projectRoot string, state *session.RecordingState) error {
+	if state.SessionFile == "" {
+		return fmt.Errorf("cannot re-check: the recording names no native session file; it stays quarantined, discard it with 'ox agent %s session abort %s'", state.AgentID, session.GetSessionName(state.SessionPath))
 	}
-	state, err := session.LoadRecordingStateForAgent(projectRoot, inst.AgentID)
+	snapshot, err := claudesource.Snapshot(state.SessionFile)
+	if err != nil {
+		return fmt.Errorf("cannot re-check: the native session file cannot be read (%w); it stays quarantined, discard it with 'ox agent %s session abort %s'", err, state.AgentID, session.GetSessionName(state.SessionPath))
+	}
+	repoRoot := state.WorkspacePath
+	if repoRoot == "" {
+		repoRoot = projectRoot
+	}
+	err = claudesource.ValidateRecorded(state.SessionFile, repoRoot, state.AgentSessionID, state.StartOffset, snapshot)
+	switch {
+	case errors.Is(err, claudesource.ErrUntrustedSource):
+		return fmt.Errorf("the native session still crosses repositories; it stays quarantined: %w", err)
+	case err != nil:
+		return fmt.Errorf("cannot re-check ownership right now; it stays quarantined: %w", err)
+	}
+	return nil
+}
+
+// releaseAndRecover re-checks a quarantined recording and, only if the check
+// passes, recovers that recording. The quarantine is lifted just for the
+// attempt and put back if the recovery does not finish, so a recording is never
+// left half-released. Nothing is deleted.
+func releaseAndRecover(inst *agentinstance.Instance, projectRoot string) error {
+	held, err := session.LoadQuarantinedRecordingsForAgent(projectRoot, inst.AgentID)
 	if err != nil {
 		return fmt.Errorf("no recording state found: %w", err)
 	}
-	if state == nil || !state.SourceRejected {
-		return nil
+	if len(held) == 0 {
+		return fmt.Errorf("no quarantined recording to release for agent %s", inst.AgentID)
 	}
-	if err := session.UpdateRecordingStateForAgent(projectRoot, inst.AgentID, func(s *session.RecordingState) {
-		s.SourceRejected = false
-	}); err != nil {
+	state := held[0] // newest; 'ox doctor' lists every one
+	if err := recheckQuarantinedSource(projectRoot, state); err != nil {
+		return err
+	}
+	if err := session.SetSourceRejectedAt(state.SessionPath, state.SessionID, false); err != nil {
 		return fmt.Errorf("release source quarantine: %w", err)
 	}
-	slog.Info("released source quarantine for ownership re-check", "agent_id", inst.AgentID)
+	state.SourceRejected = false
+	slog.Info("released source quarantine for recovery", "agent_id", inst.AgentID, "session_path", state.SessionPath)
+	if err := recoverRecording(inst, projectRoot, state); err != nil {
+		if restoreErr := session.SetSourceRejectedAt(state.SessionPath, state.SessionID, true); restoreErr != nil && !errors.Is(restoreErr, os.ErrNotExist) {
+			slog.Warn("could not restore source quarantine after failed recovery", "agent_id", inst.AgentID, "error", restoreErr)
+		}
+		return err
+	}
 	return nil
 }
 
@@ -73,9 +110,18 @@ func releaseSourceQuarantine(inst *agentinstance.Instance) error {
 //  2. If only cache raw.jsonl exists -> upload that directly to ledger
 //  3. If no data exists -> clear stale state and warn
 func runAgentSessionRecover(inst *agentinstance.Instance) error {
+	return recoverAgentSession(inst, false)
+}
+
+// recoverAgentSession is runAgentSessionRecover, optionally releasing a
+// quarantined recording first (see releaseAndRecover).
+func recoverAgentSession(inst *agentinstance.Instance, releaseQuarantine bool) error {
 	projectRoot, err := findProjectRoot()
 	if err != nil {
 		return fmt.Errorf("could not find project root: %w", err)
+	}
+	if releaseQuarantine {
+		return releaseAndRecover(inst, projectRoot)
 	}
 
 	// load stale recording state
@@ -85,11 +131,17 @@ func runAgentSessionRecover(inst *agentinstance.Instance) error {
 	}
 
 	if state == nil {
+		if held, heldErr := session.LoadQuarantinedRecordingsForAgent(projectRoot, inst.AgentID); heldErr == nil && len(held) > 0 {
+			return errors.New(quarantineHeldMessage(inst.AgentID))
+		}
 		return fmt.Errorf("no stale recording to recover\nRun 'ox agent %s session start' to begin a new recording", inst.AgentID)
 	}
-	if state.SourceRejected {
-		return fmt.Errorf("claude source has untrusted repository ownership; recording and cache preserved for manual review\nto re-check ownership, run 'ox agent %s session recover --release-quarantine'", inst.AgentID)
-	}
+	return recoverRecording(inst, projectRoot, state)
+}
+
+// recoverRecording recovers one recording, named by its state rather than
+// looked up by agent.
+func recoverRecording(inst *agentinstance.Instance, projectRoot string, state *session.RecordingState) error {
 	// An undiscovered source does not prove a header-only recording empty, so it
 	// waits for retry. A cache that already holds captured turns is another
 	// matter: each batch was ownership-checked as it was appended, so it
@@ -119,7 +171,7 @@ func runAgentSessionRecover(inst *agentinstance.Instance) error {
 	}
 
 	// strategy 3: no recoverable data -- clear state and warn
-	_ = session.ClearRecordingStateForAgent(projectRoot, state.AgentID)
+	_ = session.ClearRecordingStateAt(state.SessionPath, state.SessionID)
 
 	output := &sessionRecoverOutput{
 		Success: true,
@@ -162,7 +214,7 @@ func recoverViaNormalStop(inst *agentinstance.Instance, projectRoot string, stat
 	})
 	if err != nil {
 		if errors.Is(err, claudesource.ErrUntrustedSource) {
-			if markErr := session.MarkSourceRejected(projectRoot, state.AgentID); markErr != nil {
+			if markErr := session.SetSourceRejectedAt(state.SessionPath, state.SessionID, true); markErr != nil {
 				return fmt.Errorf("quarantine untrusted recovery source: %w", errors.Join(err, markErr))
 			}
 		}

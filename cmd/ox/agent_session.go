@@ -418,8 +418,13 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 		return fmt.Errorf("could not find project root: %w", err)
 	}
 
-	// check if actually recording
+	// check if actually recording. A quarantined recording is held for review,
+	// not recording: stop never finalizes it, since that would publish a session
+	// already known to span repositories.
 	if !session.IsRecordingForAgent(projectRoot, inst.AgentID) {
+		if held, heldErr := session.LoadQuarantinedRecordingsForAgent(projectRoot, inst.AgentID); heldErr == nil && len(held) > 0 {
+			return fmt.Errorf("not currently recording; a recording is held back for ownership review and was not finalized\nrun 'ox doctor' to see how to release or discard it")
+		}
 		return fmt.Errorf("not currently recording\nRun 'ox agent %s session start' to begin recording", inst.AgentID)
 	}
 
@@ -547,12 +552,6 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 		}
 	}
 
-	// Do not silently upload the captured prefix of a session already known
-	// to span repositories. Keep both caches for a deliberate recovery choice.
-	if state.SourceRejected {
-		return fmt.Errorf("claude source has untrusted repository ownership; recording preserved for manual review\nrun 'ox doctor' to see how to release or discard it")
-	}
-
 	// process session: read, redact secrets, extract events, save
 	var processResult *agentSessionResult
 	if state.SessionFile != "" {
@@ -591,7 +590,7 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 		timing["process_ms"] = time.Since(processStart).Milliseconds()
 		if err != nil {
 			if errors.Is(err, claudesource.ErrUntrustedSource) {
-				if markErr := session.MarkSourceRejected(projectRoot, inst.AgentID); markErr != nil {
+				if markErr := session.SetSourceRejectedAt(state.SessionPath, state.SessionID, true); markErr != nil {
 					return fmt.Errorf("quarantine untrusted source: %w", errors.Join(err, markErr))
 				}
 				return fmt.Errorf("claude source has untrusted repository ownership; recording preserved for manual review: %w", err)
@@ -1019,8 +1018,15 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 			return nil, fmt.Errorf("stat native session before read: %w", err)
 		}
 	}
-	// read entries from session file
-	rawEntries, err := adapter.Read(state.SessionFile)
+	// read entries from session file. A Claude source is read from the same
+	// offset it is validated from: entries before it are never imported, so a
+	// foreign turn in that window can neither condemn nor ride along.
+	var rawEntries []adapters.RawEntry
+	if reader, ok := adapter.(adapters.IncrementalReader); ok && state.AdapterName == "claude-code" && state.StartOffset > 0 {
+		rawEntries, _, err = reader.ReadFromOffset(state.SessionFile, state.StartOffset)
+	} else {
+		rawEntries, err = adapter.Read(state.SessionFile)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to read session: %w", err)
 	}
@@ -1034,7 +1040,10 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 		// it read none. Turns from before the recording began are filtered out
 		// below and never published, so they do not decide ownership.
 		if err := claudesource.ValidateRecorded(state.SessionFile, repoRoot, state.AgentSessionID, state.StartOffset, sourceSnapshot); err != nil {
-			return nil, fmt.Errorf("claude source no longer belongs to repository: %w", err)
+			if errors.Is(err, claudesource.ErrUntrustedSource) {
+				return nil, fmt.Errorf("claude source no longer belongs to repository: %w", err)
+			}
+			return nil, fmt.Errorf("cannot verify claude source ownership right now: %w", err)
 		}
 	}
 
@@ -2462,8 +2471,18 @@ func isGenericDropFileEmpty(state *session.RecordingState) bool {
 
 // reloadRecordingForFinalDrain must run under the expected session's raw lock.
 // Hooks, like watchers, may commit a batch while stop waits for that lock.
+//
+// The recording is read from its own folder, not found by agent: an agent can
+// hold a newer active recording beside a quarantined one it is finalizing, and
+// an agent lookup would answer with the wrong one.
 func reloadRecordingForFinalDrain(projectRoot string, expected *session.RecordingState) (*session.RecordingState, error) {
-	latest, err := session.LoadRecordingStateForAgent(projectRoot, expected.AgentID)
+	var latest *session.RecordingState
+	var err error
+	if expected.SessionPath != "" {
+		latest, err = session.ReadRecordingStateFile(expected.SessionPath)
+	} else {
+		latest, err = session.LoadRecordingStateForAgent(projectRoot, expected.AgentID)
+	}
 	if err != nil {
 		return nil, err
 	}
