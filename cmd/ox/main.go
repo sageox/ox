@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -17,6 +18,7 @@ import (
 	"github.com/sageox/agentx"
 	friction "github.com/sageox/frictionax"
 	"github.com/sageox/ox/internal/cli"
+	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/observability"
 	"github.com/sageox/ox/internal/telemetry"
 	"github.com/spf13/cobra"
@@ -198,6 +200,8 @@ func executeWithFrictionRecovery(args []string, attempt int) int {
 		syncFeatureGatedCommands(rootCmd)
 	}
 	rootCmd.SetArgs(args)
+	preRunReached = false
+	start := time.Now()
 
 	// mark retry attempts to avoid telemetry double-counting
 	if attempt > 0 {
@@ -225,6 +229,12 @@ func executeWithFrictionRecovery(args []string, attempt int) int {
 	unknownCommand := err != nil && strings.HasPrefix(err.Error(), `unknown command "`)
 	if unknownCommand {
 		err = fmt.Errorf("%w\n\nRun '%s --help' for usage", err, cmd.CommandPath())
+	}
+	if err != nil && !preRunReached && !headlessLedgerReadRequested(args) {
+		// Cobra rejected the invocation before ox built its context. Give
+		// usage telemetry one, so the mistake is counted like any failure.
+		err = errkind.WithDetail(errkind.Usage, cobraRejection(err), err)
+		cliCtx = &cli.Context{Cmd: cmd, CommandStartTime: start, Ctx: context.Background()}
 	}
 	if cliCtx != nil {
 		cliCtx.Err = err

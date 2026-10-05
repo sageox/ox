@@ -218,3 +218,31 @@ func showTelemetryNoticeOnce(w io.Writer) {
 	}
 	fmt.Fprintln(w, cli.StyleDim.Render(telemetryNotice))
 }
+
+// cobraRejections maps the start of each error cobra and pflag return for an
+// invocation they reject to the error_detail usage telemetry sends. The
+// messages quote what was typed, so only these fixed phrases are sent.
+var cobraRejections = []struct{ prefix, detail string }{
+	{`unknown command "`, "unknown command"},
+	{"unknown flag:", "unknown flag"},
+	{"unknown shorthand flag:", "unknown flag"},
+	{"flag needs an argument:", "flag needs an argument"},
+	{"bad flag syntax:", "unknown flag"},
+	{`invalid argument "`, "invalid argument"},
+	{"required flag(s) ", "required flag missing"},
+	{"accepts ", "wrong number of arguments"},
+	{"requires at least ", "wrong number of arguments"},
+	{"if any flags in the group ", "conflicting flags"},
+	{"at least one of the flags in the group ", "conflicting flags"},
+}
+
+// cobraRejection names which way cobra rejected an invocation.
+func cobraRejection(err error) string {
+	msg := err.Error()
+	for _, r := range cobraRejections {
+		if strings.HasPrefix(msg, r.prefix) {
+			return r.detail
+		}
+	}
+	return "rejected invocation"
+}
