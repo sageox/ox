@@ -35,6 +35,13 @@ const (
 	parkBackoffBase = detectCooldown
 	parkBackoffMax  = time.Hour
 
+	// stopGracePeriod bounds how long Start waits for in-flight work items once
+	// its context is canceled. Items observe that same cancellation (their git
+	// runs with it), so they normally return at once; the bound only matters for
+	// one stuck outside a context-aware call. It stays below the daemon's 5s
+	// goroutine-wait deadline so waiting never turns a clean stop into a forced one.
+	stopGracePeriod = 3 * time.Second
+
 	// status constants for AgentProcess
 	statusRunning   = "running"
 	statusCompleted = "completed"
@@ -47,6 +54,13 @@ const (
 // would fail identically and re-running the expensive part (LFS upload) of each
 // one achieves nothing.
 var ErrLedgerUnresolved = errors.New("ledger has unresolved index conflicts")
+
+// ErrLedgerPushWedged is returned by a handler whose work cannot reach the
+// remote because the ledger's push is wedged: the remote rejects it for LFS
+// objects it does not have and the repair could not fix that. Like
+// ErrLedgerUnresolved it pauses the whole work type — every item's push would be
+// refused the same way — rather than burning a retry per item.
+var ErrLedgerPushWedged = errors.New("ledger push is wedged")
 
 // retryState tracks consecutive ProcessResult failures for one dedup key. It
 // outlives the queue entry: Complete() clears the dedup key, so without this the
@@ -141,6 +155,12 @@ type Manager struct {
 	active map[string]AgentProcess // keyed by WorkItem.ID
 	recent []AgentProcess
 
+	// inFlight tracks work-item goroutines so Start can wait for them on stop.
+	// Only processQueue adds, and only Start's own goroutine calls it and waits,
+	// so Add never races a Wait.
+	inFlight  sync.WaitGroup
+	stopGrace time.Duration // injectable for tests; defaults to stopGracePeriod
+
 	// callbacks
 	onComplete func(result WorkResult)
 
@@ -198,6 +218,7 @@ func NewManager(
 		retries:       make(map[string]*retryState),
 		pausedTypes:   make(map[string]*typePause),
 		now:           time.Now,
+		stopGrace:     stopGracePeriod,
 		active:        make(map[string]AgentProcess),
 		rateLimiter:   NewRateLimiter(maxPerHour, time.Hour),
 		sem:           make(chan struct{}, maxConcurrent),
@@ -253,6 +274,9 @@ func (m *Manager) Start(ctx context.Context) {
 	doctorTicker := time.NewTicker(doctorInterval)
 	defer doctorTicker.Stop()
 	defer m.releaseLedgerAntiEntropy()
+	// Runs before the lease is released (defers are LIFO): an item still
+	// finishing its git work must not have lost the claim on the ledger.
+	defer m.waitForInFlight()
 
 	m.logger.Info("agent work manager started")
 
@@ -287,6 +311,25 @@ func (m *Manager) Start(ctx context.Context) {
 			m.detectAndEnqueue(cfg)
 			m.processQueue(ctx)
 		}
+	}
+}
+
+// waitForInFlight blocks until every started work item has returned, or the
+// stop grace period elapses. Without it the daemon's goroutine wait never saw
+// these items (they were bare goroutines), so a finalize mid-push could outlive
+// shutdown still holding the ledger lock the sync scheduler needs to exit.
+func (m *Manager) waitForInFlight() {
+	done := make(chan struct{})
+	go func() {
+		m.inFlight.Wait()
+		close(done)
+	}()
+	timer := time.NewTimer(m.stopGrace)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+		m.logger.Warn("agent work items still running at shutdown", "waited", m.stopGrace)
 	}
 }
 
@@ -613,7 +656,9 @@ func (m *Manager) processQueue(ctx context.Context) {
 			return
 		}
 
+		m.inFlight.Add(1)
 		go func(item *WorkItem) {
+			defer m.inFlight.Done()
 			defer func() {
 				<-m.sem
 				// signal queue to pick up next item immediately
@@ -793,8 +838,17 @@ func (m *Manager) executeItem(ctx context.Context, item *WorkItem) {
 func (m *Manager) logProcessFailure(item *WorkItem, err error) {
 	now := m.now()
 
-	if errors.Is(err, ErrLedgerUnresolved) {
-		m.pauseType(item, now)
+	if errors.Is(err, ErrLedgerUnresolved) || errors.Is(err, ErrLedgerPushWedged) {
+		if until, started := m.pauseType(item, now); started {
+			msg := "ledger has unresolved index conflicts; session finalize paused until resolved (run `ox doctor`)"
+			if errors.Is(err, ErrLedgerPushWedged) {
+				msg = "ledger push is wedged by LFS objects missing from the remote; session finalize paused until pushes recover"
+			}
+			m.logger.Warn(msg,
+				"type", item.Type,
+				"retry_after", until.Sub(now),
+			)
+		}
 		return
 	}
 
@@ -845,29 +899,24 @@ func (m *Manager) logProcessFailure(item *WorkItem, err error) {
 	}
 }
 
-// pauseType suspends a work type after a ledger-wide blocker. Logs once per
-// pause window; items already queued are dropped as they are dequeued.
-func (m *Manager) pauseType(item *WorkItem, now time.Time) {
+// pauseType suspends a work type after a ledger-wide blocker. Items already
+// queued are dropped as they are dequeued. Reports when the pause ends and
+// whether this call started it (false: one was already active), so the caller
+// logs once per pause window.
+func (m *Manager) pauseType(item *WorkItem, now time.Time) (until time.Time, started bool) {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	p := m.pausedTypes[item.Type]
 	if p == nil {
 		p = &typePause{}
 		m.pausedTypes[item.Type] = p
 	}
-	alreadyPaused := now.Before(p.until)
-	if !alreadyPaused {
-		p.failures++
-		p.until = now.Add(parkBackoff(maxRetries + p.failures - 1))
+	if now.Before(p.until) {
+		return p.until, false
 	}
-	until := p.until
-	m.mu.Unlock()
-
-	if !alreadyPaused {
-		m.logger.Warn("ledger has unresolved index conflicts; session finalize paused until resolved (run `ox doctor`)",
-			"type", item.Type,
-			"retry_after", until.Sub(now),
-		)
-	}
+	p.failures++
+	p.until = now.Add(parkBackoff(maxRetries + p.failures - 1))
+	return p.until, true
 }
 
 // isSuppressed reports whether detection should skip this item: its type is

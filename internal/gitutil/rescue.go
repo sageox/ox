@@ -2,6 +2,7 @@ package gitutil
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os/exec"
@@ -19,6 +20,23 @@ const rescueBranchPrefix = "rescue-wedge-"
 // reachable from a branch or remote — so there is nothing to rescue and the
 // caller should use the ordinary recovery path.
 var ErrNoStrandedCommits = fmt.Errorf("no stranded commits: nothing to rescue")
+
+// RescueIfNeededThenAbort safely clears an in-progress rebase, first anchoring
+// any commits reachable only from HEAD on a verified rescue branch. A normal
+// branch-attached rebase has nothing stranded, so ErrNoStrandedCommits is the
+// signal to use the ordinary abort-or-clear ladder without creating noise.
+//
+// Any other rescue error stays loud. In particular, a detached zombie rebase
+// gets its stranded commits rescued but AbortOrClearRebase still refuses the
+// unsafe --quit escalation; the non-empty rescue ref and error let callers
+// report both facts without weakening detached-HEAD protection.
+func RescueIfNeededThenAbort(ctx context.Context, repoPath, reason string, logger *slog.Logger) (string, error) {
+	rescueRef, err := RescueThenAbort(ctx, repoPath, reason, logger)
+	if !errors.Is(err, ErrNoStrandedCommits) {
+		return rescueRef, err
+	}
+	return "", AbortOrClearRebase(ctx, repoPath, reason, logger)
+}
 
 // RescueThenAbort recovers a ledger whose HEAD carries commits that exist
 // NOWHERE else, by creating a verified rescue branch BEFORE it touches the

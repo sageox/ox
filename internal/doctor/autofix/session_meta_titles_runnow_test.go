@@ -50,6 +50,7 @@ func TestRunNow_LeavesFailedSummaryForSummarizer(t *testing.T) {
 	require.NoError(t, err)
 
 	s := NewScheduler(Default(), nil, func() []string { return []string{root} }, nil)
+	s.SetLedgerPaths(func() []string { return []string{ledgerPath} })
 	for range lfs.MaxSummaryAttempts + 1 {
 		var ran bool
 		for _, r := range s.RunNow(context.Background()) {

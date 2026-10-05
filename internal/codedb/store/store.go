@@ -30,7 +30,8 @@ import (
 // ErrCorrupt indicates the index is corrupted and needs re-indexing.
 var ErrCorrupt = fmt.Errorf("codedb index is corrupt")
 
-// ErrIntegrityUnknown reports that PRAGMA integrity_check could not run.
+// ErrIntegrityUnknown reports that a SQLite health check (the open-time header
+// probe or the PRAGMA quick_check run by maintenance) could not run.
 // SQLite examined nothing, so it has said nothing about the database contents.
 //
 // Kept distinct from ErrCorrupt because the two license opposite actions. A
@@ -183,8 +184,14 @@ type Store struct {
 
 // Open opens (or creates) a Store at the given root directory.
 // It creates the directory structure, initializes SQLite and Bleve indexes.
-// If SQLite corruption is detected, the database is removed and ErrCorrupt is returned
-// so the caller can trigger a full re-index.
+// If opening proves the SQLite file damaged (SQLITE_CORRUPT or SQLITE_NOTADB from
+// the header probe or the schema migration), the database is removed and
+// ErrCorrupt is returned so the caller can trigger a full re-index. Open does
+// not scan the database for damage: PRAGMA integrity_check is O(size), minutes
+// on a multi-GB index, and every pass of the daemon opens the index several
+// times. Damage deeper in the file surfaces as SQLITE_CORRUPT from the first
+// statement that reads it (see IsSQLiteDamage) and from the daily quick_check
+// in Maintain.
 //
 // Bleve self-heal: when a sub-index has a structurally broken `_mapping` doc
 // (kill-9 mid-flush, partial scorch snapshot), Open nukes the sub-index dir,
@@ -247,14 +254,14 @@ func OpenSQLOnly(root string) (*Store, error) {
 
 // OpenSQLReadOnly opens the SQLite half of a Store for queries only, through
 // the same read-only open used for read-only media (openSQLiteReadOnly). It
-// never runs PRAGMA integrity_check, never migrates, and never deletes.
+// never probes the database, never migrates, and never deletes.
 //
 // For advisory read paths that open the index on a latency-sensitive command.
-// integrity_check is O(database size): on a large team index it cost ~22s per
-// open, and `ox plan enrich` opened the index twice (collision + expert
-// detectors), which is most of why `ox plan save` took ~55s. Integrity is
-// still verified by every writable open (the daemon, `ox index`), which is
-// the only path whose remedy — delete and rebuild — is appropriate anyway.
+// A full integrity scan is O(database size): on a large team index it cost ~22s
+// per open, and `ox plan enrich` opened the index twice (collision + expert
+// detectors), which is most of why `ox plan save` took ~55s. Damage is still
+// diagnosed by the writable paths (the daemon, `ox index`), the only ones whose
+// remedy — delete and rebuild — is appropriate anyway.
 //
 // Tradeoff: when no WAL sidecar exists the open is `immutable=1`, so a writer
 // that starts mid-read can make a query fail or read slightly stale rows.
@@ -274,7 +281,7 @@ func OpenSQLReadOnly(root string) (*Store, error) {
 }
 
 // openSQLite handles the SQLite half of store construction. Shared by Open
-// and OpenSQLOnly so the SQLite pragma string and integrity check live in one
+// and OpenSQLOnly so the SQLite pragma string and open-time probe live in one
 // place. The bool reports whether the store had to be opened read-only.
 func openSQLite(root string) (*sql.DB, bool, error) {
 	dbPath := filepath.Join(root, MetadataDBFile)
@@ -282,9 +289,9 @@ func openSQLite(root string) (*sql.DB, bool, error) {
 	// Settle writability before anything diagnoses the store. On read-only
 	// media SQLite fails with SQLITE_READONLY_DIRECTORY — WAL mode has to
 	// create the `-shm` wal-index before it can read anything — and at the
-	// integrity_check call site below that is indistinguishable from
-	// corruption, whose remedy is deleting the database. A store we cannot
-	// write is not a store that is damaged (#871).
+	// probe call site below that is indistinguishable from corruption, whose
+	// remedy is deleting the database. A store we cannot write is not a store
+	// that is damaged (#871).
 	if _, err := os.Stat(dbPath); err == nil && !storeIsWritable(root) {
 		db, roErr := openSQLiteReadOnly(dbPath)
 		return db, true, roErr
@@ -310,24 +317,22 @@ func openSQLite(root string) (*sql.DB, bool, error) {
 		return nil, false, fmt.Errorf("open sqlite: %w", err)
 	}
 
-	if err := checkSQLiteIntegrity(db); err != nil {
+	// The open path used to run PRAGMA integrity_check here. It reads every page
+	// and does an index lookup per row — minutes on a multi-GB index — and the
+	// daemon opens the index several times per pass. A header read answers the
+	// only question open has to settle (is this a database at all, and can it be
+	// reached?) and keeps what the full scan was incidentally providing: the BUSY
+	// retry for the concurrent fresh-open race (#758) and the ran-vs-could-not-run
+	// verdict (#875). Damage deeper in the file is caught where it is read, by
+	// the SQLITE_CORRUPT that statement returns, and by the daily quick_check in
+	// Maintain.
+	//
+	// No caller context exists on this path (Open takes none), and the probe is
+	// bounded: one page read plus a 3-attempt BUSY retry.
+	if err := probeSQLiteHeader(context.Background(), db); err != nil {
 		_ = db.Close()
-		// Re-probe. The check at the top of this function is skipped when no
-		// metadata.db existed yet, and media can turn read-only in between (a
-		// remount, a revoked ACL). Deleting the index over either is
-		// unrecoverable — a cold rebuild costs minutes.
-		if !storeIsWritable(root) {
-			return nil, true, fmt.Errorf("%w: %w", ErrReadOnly, err)
-		}
-		// Only a check that actually inspected the data licenses destroying it.
-		// An inconclusive one names a condition of this process or this moment,
-		// not of the index.
-		if !errors.Is(err, ErrCorrupt) {
-			return nil, false, err
-		}
-		slog.Error("sqlite corruption detected, removing database", "path", dbPath, "err", err)
-		removeSQLiteFiles(dbPath)
-		return nil, false, fmt.Errorf("sqlite integrity check failed: %w", ErrCorrupt)
+		readOnly, failure := resolveOpenFailure(root, dbPath, err)
+		return nil, readOnly, failure
 	}
 
 	if err := CreateSchema(db); err != nil {
@@ -341,9 +346,36 @@ func openSQLite(root string) (*sql.DB, bool, error) {
 		if !fileIsWritable(dbPath) {
 			return nil, true, fmt.Errorf("%w: %s needs a schema migration that cannot be applied: %w", ErrReadOnly, dbPath, err)
 		}
+		// The migration reads the schema pages, so damage there surfaces here
+		// rather than in the header probe. Same evidence, same verdict.
+		if IsSQLiteDamage(err) {
+			readOnly, failure := resolveOpenFailure(root, dbPath, fmt.Errorf("%w: create schema: %w", ErrCorrupt, err))
+			return nil, readOnly, failure
+		}
 		return nil, false, fmt.Errorf("create schema: %w", err)
 	}
 	return db, false, nil
+}
+
+// resolveOpenFailure decides what a failed open-time probe means to the caller
+// and, only when the evidence licenses it, removes the damaged database.
+func resolveOpenFailure(root, dbPath string, err error) (readOnly bool, failure error) {
+	// Re-probe. The check at the top of openSQLite is skipped when no
+	// metadata.db existed yet, and media can turn read-only in between (a
+	// remount, a revoked ACL). Deleting the index over either is
+	// unrecoverable — a cold rebuild costs minutes.
+	if !storeIsWritable(root) {
+		return true, fmt.Errorf("%w: %w", ErrReadOnly, err)
+	}
+	// Only a probe that actually met damage licenses destroying the data. An
+	// inconclusive one names a condition of this process or this moment, not of
+	// the index.
+	if !errors.Is(err, ErrCorrupt) {
+		return false, err
+	}
+	slog.Error("sqlite corruption detected, removing database", "path", dbPath, "err", err)
+	removeSQLiteFiles(dbPath)
+	return false, fmt.Errorf("sqlite corruption detected while opening: %w", ErrCorrupt)
 }
 
 // bleveMappingFor returns the bleve index mapping for a sub-index.
@@ -612,11 +644,24 @@ func (s *Store) rebuildCombinedIndex() {
 // CheckIntegrity validates that the SQLite database and all Bleve indexes
 // are healthy. Returns nil if everything is fine, ErrCorrupt otherwise.
 //
+// The SQLite half is PRAGMA quick_check, which walks every page like
+// integrity_check but skips the per-row index cross-check. It cannot be
+// interrupted: callers that hold a context use CheckIntegrityContext.
+//
 // On a SQL-only store (constructed via OpenSQLOnly), the bleve indexes are
 // nil by design — those checks are skipped, not treated as a failure.
 // Callers that genuinely need bleve integrity must use Open, not OpenSQLOnly.
 func (s *Store) CheckIntegrity() error {
-	if err := checkSQLiteIntegrity(s.db); err != nil {
+	// kept for `ox doctor`, which has no context to thread through
+	return s.CheckIntegrityContext(context.Background())
+}
+
+// CheckIntegrityContext is CheckIntegrity with the SQLite scan bound to ctx, so
+// cancellation (daemon shutdown, a deadline) interrupts it instead of waiting
+// out a multi-minute page walk. A canceled check is ErrIntegrityUnknown, never
+// ErrCorrupt.
+func (s *Store) CheckIntegrityContext(ctx context.Context) error {
+	if err := checkSQLiteIntegrity(ctx, s.db); err != nil {
 		// Pass the verdict through rather than relabelling every failure
 		// ErrCorrupt: `ox doctor --fix` responds to that label by removing the
 		// whole dataDir, so a check that could not run must not wear it.
@@ -723,46 +768,94 @@ const (
 	integrityBusyBackoff  = 20 * time.Millisecond
 )
 
-// checkSQLiteIntegrity runs PRAGMA integrity_check and classifies the outcome.
+// probeSQLiteHeader reads the database header (PRAGMA schema_version) — the
+// cheapest statement that must open the file and read page 1 — and classifies
+// the outcome like checkSQLiteIntegrity. It is the open-time check: constant
+// cost whatever the size of the index.
+func probeSQLiteHeader(ctx context.Context, db *sql.DB) error {
+	return runSQLiteCheck(ctx, db, "PRAGMA schema_version", func(string) bool { return true })
+}
+
+// checkSQLiteIntegrity runs PRAGMA quick_check on db and classifies the outcome.
+// It walks every page, so it belongs in maintenance and `ox doctor`, never on
+// the open path; the context interrupts it mid-scan.
+//
+// See runSQLiteCheck for the classification.
+func checkSQLiteIntegrity(ctx context.Context, db *sql.DB) error {
+	return runSQLiteCheck(ctx, db, "PRAGMA quick_check", func(result string) bool { return result == "ok" })
+}
+
+// runSQLiteCheck runs a one-row pragma and classifies the outcome.
 //
 // It separates two results that a single error return conflated:
 //
-//   - The check RAN and reported something other than "ok" — evidence of
-//     damage, returned as ErrCorrupt, which is the verdict that licenses
-//     callers to delete and rebuild.
+//   - The check RAN and found damage — the statement reported something other
+//     than the accepted result, or failed with SQLITE_CORRUPT / SQLITE_NOTADB
+//     because the file is damaged. Returned as ErrCorrupt, the verdict that
+//     licenses callers to delete and rebuild.
 //   - The check could not run — ErrIntegrityUnknown. SQLite read nothing, so it
-//     has reported nothing about the data; an I/O error, an exhausted fd table
-//     or an out-of-memory is not a statement that the index is broken.
-//     SQLITE_CORRUPT and SQLITE_NOTADB are the exception, since there the check
-//     failed *because* the file is damaged.
+//     has reported nothing about the data; an I/O error, an exhausted fd table,
+//     an out-of-memory or a canceled context is not a statement that the index
+//     is broken.
 //
 // SQLITE_BUSY is retried rather than reported. busy_timeout does not cover the
 // exclusive lock taken while a brand-new database is converted to WAL, so
 // openers racing to create one codedb (the #758 scenario) can get an immediate
 // BUSY — which reached the corruption branch and deleted the zero-byte file the
 // winning opener was still initializing.
-func checkSQLiteIntegrity(db *sql.DB) error {
+func runSQLiteCheck(ctx context.Context, db *sql.DB, pragma string, accept func(result string) bool) error {
 	var lastErr error
 	for attempt := range integrityBusyAttempts {
 		var result string
-		lastErr = db.QueryRow("PRAGMA integrity_check").Scan(&result)
+		lastErr = db.QueryRowContext(ctx, pragma).Scan(&result)
 		if lastErr == nil {
-			if result == "ok" {
+			if accept(result) {
 				return nil
 			}
-			return fmt.Errorf("%w: integrity_check returned: %s", ErrCorrupt, result)
+			return fmt.Errorf("%w: %s returned: %s", ErrCorrupt, pragma, result)
 		}
-		if !isSQLiteCode(lastErr, sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED) {
+		if ctx.Err() != nil || !isSQLiteCode(lastErr, sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED) {
 			break
 		}
 		if attempt < integrityBusyAttempts-1 {
-			time.Sleep(integrityBusyBackoff)
+			if sleepErr := sleepContext(ctx, integrityBusyBackoff); sleepErr != nil {
+				break
+			}
 		}
 	}
-	if isSQLiteCode(lastErr, sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB) {
-		return fmt.Errorf("%w: integrity_check: %w", ErrCorrupt, lastErr)
+	// A canceled check names this process, not the data, even when SQLite
+	// reported the interrupt with a code of its own.
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return fmt.Errorf("%w: %s: %w", ErrIntegrityUnknown, pragma, errors.Join(ctxErr, lastErr))
 	}
-	return fmt.Errorf("%w: %w", ErrIntegrityUnknown, lastErr)
+	if IsSQLiteDamage(lastErr) {
+		return fmt.Errorf("%w: %s: %w", ErrCorrupt, pragma, lastErr)
+	}
+	return fmt.Errorf("%w: %s: %w", ErrIntegrityUnknown, pragma, lastErr)
+}
+
+// sleepContext waits for d or until ctx is done, returning ctx's error in the
+// latter case.
+func sleepContext(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+// IsSQLiteDamage reports whether err carries SQLITE_CORRUPT or SQLITE_NOTADB —
+// the result codes SQLite returns when a statement runs into a damaged database
+// image. It is the evidence that licenses discarding an index: a real statement
+// failing this way is as conclusive as a scan finding the same fault, and a
+// fraction of the cost. Every other failure (I/O, ENFILE, out of memory,
+// BUSY, a canceled context) names a condition of this process or this moment,
+// not of the index, and must never be treated as damage (#875).
+func IsSQLiteDamage(err error) bool {
+	return isSQLiteCode(err, sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB)
 }
 
 // isSQLiteCode reports whether err is a SQLite error whose primary result code
@@ -777,9 +870,10 @@ func isSQLiteCode(err error, want ...int) bool {
 	return slices.Contains(want, sqErr.Code()&0xff)
 }
 
-// removeSQLiteFiles removes the database file and its WAL/SHM sidecars.
+// removeSQLiteFiles removes the database file, its WAL/SHM sidecars, and the
+// maintenance sidecar: a rebuilt database has not been verified or vacuumed yet.
 func removeSQLiteFiles(dbPath string) {
-	for _, suffix := range []string{"", "-wal", "-shm"} {
+	for _, suffix := range []string{"", "-wal", "-shm", maintStateSuffix} {
 		p := dbPath + suffix
 		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
 			slog.Warn("failed to remove sqlite file", "path", p, "err", err)

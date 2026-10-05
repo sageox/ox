@@ -45,7 +45,7 @@ func TestGetSageOxStyle_ConsoleWithRedirectedStdinDoesNotHang(t *testing.T) {
 	}
 
 	cmd := exec.Command(os.Args[0], "-test.run=^TestGetSageOxStyle_ConsoleWithRedirectedStdinDoesNotHang$", "-test.count=1")
-	cmd.Env = append(os.Environ(), allocConsoleEnv+"=1")
+	cmd.Env = append(os.Environ(), allocConsoleEnv+"=1") // safe: isolated child test process needs the parent test environment
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}

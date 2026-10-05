@@ -570,6 +570,6 @@ func makeLFSReconciler(ep string) func(string) (bool, error) {
 		if err != nil {
 			return false, err
 		}
-		return result.Replaced > 0, nil
+		return result.Changed(), nil
 	}
 }

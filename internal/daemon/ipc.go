@@ -1073,6 +1073,11 @@ type Server struct {
 	lastCallerVersionAt   time.Time
 	skewWarnLoggedVersion string // de-dup warn log per skewing version
 
+	// workspaceMismatchWarned records caller IDs already warned about for a
+	// workspace-ID mismatch, so each caller warns once per daemon lifetime.
+	// Bounded by the number of clones/worktrees that talk to this daemon.
+	workspaceMismatchWarned sync.Map // caller ID -> struct{}
+
 	// peerCredDisabled, when true, skips the SO_PEERCRED / LOCAL_PEERCRED
 	// check in handleConnection. Test-only — exercised by in-process IPC
 	// tests where peer credentials are technically the same UID but the
@@ -1116,6 +1121,32 @@ func (s *Server) recordCallerVersion(v string) {
 	s.logger.Warn("CLI version skew detected — please upgrade `ox`",
 		"caller_version", v,
 		"daemon_version", Version())
+}
+
+// recordWorkspaceMismatch logs a request whose workspace ID differs from the
+// daemon's. The first mismatch from each caller is a warning; every later one
+// from the same caller drops to debug.
+//
+// A mismatch is routine, not a fault: the CLI stamps the ID derived from its
+// cwd, which for a subdirectory differs from the repo-root ID the daemon runs
+// under, and resolveSocketPath still routes the request to the right daemon.
+// Warning on every request turned that into ~39k log lines a day. One warning
+// per caller keeps the signal (a caller is configured oddly) without the flood.
+func (s *Server) recordWorkspaceMismatch(msg Message) {
+	// older clients send no caller ID; their workspace ID is the next best key
+	key := msg.CallerID
+	if key == "" {
+		key = msg.WorkspaceID
+	}
+	level := slog.LevelDebug
+	if _, seen := s.workspaceMismatchWarned.LoadOrStore(key, struct{}{}); !seen {
+		level = slog.LevelWarn
+	}
+	s.logger.Log(context.Background(), level, "workspace mismatch",
+		"msg_type", msg.Type,
+		"expected", CurrentWorkspaceID(),
+		"got", msg.WorkspaceID,
+		"caller_id", msg.CallerID)
 }
 
 // LastCallerVersion returns the most recent CLI version observed via
@@ -1613,9 +1644,9 @@ func (s *Server) handleConnection(_ context.Context, conn net.Conn) {
 
 	s.logger.Debug("received message", "type", msg.Type, "workspace_id", msg.WorkspaceID, "caller_id", msg.CallerID)
 
-	// validate workspace ID if provided (warn on mismatch, still process for backward compatibility)
+	// validate workspace ID if provided (warn once per caller on mismatch, still process for backward compatibility)
 	if msg.WorkspaceID != "" && msg.WorkspaceID != CurrentWorkspaceID() {
-		s.logger.Warn("workspace mismatch", "expected", CurrentWorkspaceID(), "got", msg.WorkspaceID, "caller_id", msg.CallerID)
+		s.recordWorkspaceMismatch(msg)
 	}
 
 	// record CLI version skew (ox-mt3k) — track the most recent caller

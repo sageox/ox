@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"errors"
@@ -15,7 +16,7 @@ import (
 )
 
 // holdExclusiveLock parks an EXCLUSIVE transaction on root's database so a
-// second connection's PRAGMA integrity_check comes back SQLITE_BUSY. The store
+// second connection's PRAGMA quick_check comes back SQLITE_BUSY. The store
 // is switched off WAL first: in WAL mode readers never block on a writer, which
 // is exactly why this failure is rare and why it went unnoticed.
 func holdExclusiveLock(t *testing.T, root string) {
@@ -61,13 +62,13 @@ func TestCheckSQLiteIntegrity_BusyIsNotCorruption(t *testing.T) {
 	// skip itself the moment a regression swallowed the underlying code — the
 	// exact regression it exists to catch.
 	var probe string
-	rawErr := db.QueryRow("PRAGMA integrity_check").Scan(&probe)
+	rawErr := db.QueryRow("PRAGMA quick_check").Scan(&probe)
 	var sqErr *sqlite.Error
 	if !errors.As(rawErr, &sqErr) || sqErr.Code()&0xff != sqlite3.SQLITE_BUSY {
 		t.Fatalf("setup did not produce SQLITE_BUSY, got: %v", rawErr)
 	}
 
-	err = checkSQLiteIntegrity(db)
+	err = checkSQLiteIntegrity(context.Background(), db)
 	if err == nil {
 		t.Fatal("expected the locked check to fail")
 	}
@@ -149,7 +150,7 @@ func TestCheckSQLiteIntegrity_DamageIsStillCorruption(t *testing.T) {
 				t.Fatalf("open: %v", err)
 			}
 			defer db.Close()
-			err = checkSQLiteIntegrity(db)
+			err = checkSQLiteIntegrity(context.Background(), db)
 			if !errors.Is(err, ErrCorrupt) {
 				t.Errorf("error = %v, want ErrCorrupt", err)
 			}

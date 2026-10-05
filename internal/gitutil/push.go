@@ -2,9 +2,12 @@ package gitutil
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -56,6 +59,20 @@ type PushOpts struct {
 
 	// Logger for push diagnostics (defaults to slog.Default).
 	Logger *slog.Logger
+
+	// SuspendWhenWedged turns on the push circuit breaker for this call: a push
+	// rejected for missing LFS objects that ReconcileLFS cannot repair suspends
+	// further pushes to the repo (ErrPushWedged), and those pushes are skipped
+	// until the backoff elapses. For long-lived callers — the daemon, whose many
+	// pushers would otherwise repeat the same rejection and repair every tick.
+	// User-initiated callers leave it false: a retry after the user fixed
+	// something is a new situation and must always reach the remote.
+	SuspendWhenWedged bool
+
+	// breaker overrides the process-wide push circuit breaker (and implies
+	// SuspendWhenWedged). Tests inject one with a fake clock; production leaves
+	// it nil.
+	breaker *pushBreaker
 }
 
 func (o *PushOpts) maxRetries() int {
@@ -77,6 +94,117 @@ func (o *PushOpts) logger() *slog.Logger {
 		return o.Logger
 	}
 	return slog.Default()
+}
+
+// pushBreaker returns the breaker this push consults, or nil when the caller
+// did not opt in. A nil breaker is inert: every method below is a no-op on it.
+func (o *PushOpts) pushBreaker() *pushBreaker {
+	switch {
+	case o.breaker != nil:
+		return o.breaker
+	case o.SuspendWhenWedged:
+		return defaultPushBreaker
+	default:
+		return nil
+	}
+}
+
+// ErrPushWedged is returned (wrapped) by PushWithRetry when a repo's push is
+// known to be blocked by LFS objects the remote does not have and the LFS repair
+// could not unblock it. While the breaker is open PushWithRetry returns this
+// without running git, so every pusher stops re-running the same expensive
+// rejected push and repair. Match it with errors.Is.
+var ErrPushWedged = errors.New("ledger push wedged")
+
+const (
+	// pushWedgeBackoffBase is how long the breaker stays open after it first
+	// trips. Each further trip without an intervening successful push doubles it.
+	pushWedgeBackoffBase = 5 * time.Minute
+	// pushWedgeBackoffMax caps the doubling so a wedge a human fixes resumes
+	// within an hour.
+	pushWedgeBackoffMax = time.Hour
+)
+
+// pushBreaker is a per-repo circuit breaker for pushes rejected as "LFS objects
+// are missing" that the reconcile callback could not repair. State is in memory
+// only: a daemon restart is a fresh attempt, which is the right default.
+type pushBreaker struct {
+	now func() time.Time
+
+	mu    sync.Mutex
+	state map[string]pushWedgeState // keyed by cleaned absolute repo path
+}
+
+type pushWedgeState struct {
+	trips int
+	until time.Time
+}
+
+func newPushBreaker(now func() time.Time) *pushBreaker {
+	return &pushBreaker{now: now, state: make(map[string]pushWedgeState)}
+}
+
+// defaultPushBreaker is shared by every pusher in the process, because the
+// wedge belongs to the repo, not to whichever caller happened to hit it first.
+var defaultPushBreaker = newPushBreaker(time.Now)
+
+// PushWedgedUntil reports whether pushes to repoPath are currently suspended and
+// until when. Read-only, for status surfaces and callers that want to skip work
+// that only matters when a push can follow.
+func PushWedgedUntil(repoPath string) (time.Time, bool) {
+	return defaultPushBreaker.blockedUntil(repoPath)
+}
+
+func pushBreakerKey(repoPath string) string {
+	if abs, err := filepath.Abs(repoPath); err == nil {
+		repoPath = abs
+	}
+	return filepath.Clean(repoPath)
+}
+
+// blockedUntil returns the end of the open window, or false once it has elapsed.
+// An elapsed window leaves the trip count in place: the next push is a probe,
+// and failing it doubles the backoff instead of restarting at the base.
+func (b *pushBreaker) blockedUntil(repoPath string) (time.Time, bool) {
+	if b == nil {
+		return time.Time{}, false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	st, ok := b.state[pushBreakerKey(repoPath)]
+	if !ok || !b.now().Before(st.until) {
+		return time.Time{}, false
+	}
+	return st.until, true
+}
+
+// trip opens the breaker and returns when it will next allow a probe push.
+func (b *pushBreaker) trip(repoPath string) time.Time {
+	if b == nil {
+		return time.Time{}
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	key := pushBreakerKey(repoPath)
+	st := b.state[key]
+	st.trips++
+	backoff := pushWedgeBackoffMax
+	if shift := st.trips - 1; shift < 10 {
+		backoff = min(pushWedgeBackoffBase<<shift, pushWedgeBackoffMax)
+	}
+	st.until = b.now().Add(backoff)
+	b.state[key] = st
+	return st.until
+}
+
+// clear forgets the wedge: a push got through, so whatever blocked it is gone.
+func (b *pushBreaker) clear(repoPath string) {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	delete(b.state, pushBreakerKey(repoPath))
 }
 
 // permanentPatterns are error strings that indicate retrying won't help.
@@ -110,6 +238,14 @@ const lfsObjectsMissing = "LFS objects are missing"
 // acquire that same non-reentrant lock around this call or inside the hook.
 func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 	log := opts.logger()
+	breaker := opts.pushBreaker()
+
+	// Before anything that costs: a wedged repo rejects this push for the same
+	// reason it rejected the last one, and the repair that follows takes minutes.
+	if until, wedged := breaker.blockedUntil(repoPath); wedged {
+		log.Debug("push skipped: ledger push wedged", "repo", repoPath, "until", until.Format(time.RFC3339))
+		return fmt.Errorf("%w: skipping push until %s", ErrPushWedged, until.Format(time.RFC3339))
+	}
 
 	// pre-flight: check for lock files and broken rebase state
 	if err := IsSafeForGitOps(repoPath); err != nil {
@@ -128,34 +264,45 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 
 	maxRetries := opts.maxRetries()
 	opTimeout := opts.opTimeout()
+	var lastOut string
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		attemptCtx, cancel := context.WithTimeout(ctx, opTimeout)
 		outStr, err := RunGit(attemptCtx, repoPath, "push", "--quiet")
 		cancel()
 		if err == nil {
+			breaker.clear(repoPath)
 			return nil
 		}
+		lastOut = outStr
 
 		// LFS objects missing — try reconciliation before giving up.
 		// ReconcileLFS strips orphaned pointer stubs and squashes history so the
-		// poisoned blobs no longer appear in the push pack. One shot only.
+		// poisoned blobs no longer appear in the push pack.
+		//
+		// When the repair errors or changes nothing the push cannot succeed on
+		// any retry, so trip the breaker: every pusher then skips this repo until
+		// the backoff elapses instead of repeating the rejection and the repair.
+		// Without a ReconcileLFS callback nothing was tried, so nothing is
+		// remembered — another pusher that does have a repair must still get its
+		// chance.
 		if strings.Contains(outStr, lfsObjectsMissing) {
-			if opts.ReconcileLFS != nil {
-				log.Info("push failed (LFS objects missing), attempting reconciliation", "attempt", attempt)
-				changed, reconcileErr := opts.ReconcileLFS(repoPath)
-				if reconcileErr != nil {
-					log.Warn("lfs reconciliation failed", "error", reconcileErr)
-					// don't surface reconciliation internals to the user —
-					// they see the push error, we log the reconciliation error
-					return fmt.Errorf("git push failed (not retryable): %s", outStr)
-				}
-				if changed {
-					log.Info("lfs reconciliation made changes, retrying push")
-					continue // retry immediately
-				}
+			if opts.ReconcileLFS == nil {
+				return fmt.Errorf("git push failed (not retryable): %s", outStr)
 			}
-			return fmt.Errorf("git push failed (not retryable): %s", outStr)
+			log.Info("push failed (LFS objects missing), attempting reconciliation", "attempt", attempt)
+			changed, reconcileErr := opts.ReconcileLFS(repoPath)
+			if reconcileErr != nil {
+				log.Warn("lfs reconciliation failed", "error", reconcileErr)
+				// don't surface reconciliation internals to the user —
+				// they see the push error, we log the reconciliation error
+				return tripPushWedge(log, breaker, repoPath, outStr, "reconcile_failed")
+			}
+			if changed {
+				log.Info("lfs reconciliation made changes, retrying push")
+				continue // retry immediately
+			}
+			return tripPushWedge(log, breaker, repoPath, outStr, "reconcile_no_change")
 		}
 
 		// fail fast on permanent errors
@@ -182,9 +329,12 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 			// the same clone lock as daemon pulls and doctor repairs.
 			rebaseErr := WithRepoLock(ctx, repoPath, func() error {
 				if IsRebaseInProgress(repoPath) {
-					abortCtx, abortCancel := context.WithTimeout(ctx, opTimeout)
-					_, _ = RunGit(abortCtx, repoPath, "rebase", "--abort")
-					abortCancel()
+					// This rebase appeared after the function's initial safety
+					// check, so this retry did not create it. It may belong to a
+					// concurrent or crashed operation and must be left untouched.
+					// Rebases created by the pull below are still aborted by the
+					// corresponding failure branches that own them.
+					return fmt.Errorf("repo blocked: rebase started after push preflight; leaving it untouched")
 				}
 
 				pullCtx, pullCancel := context.WithTimeout(ctx, opTimeout)
@@ -283,5 +433,26 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 		}
 	}
 
-	return nil // unreachable
+	// Reached only when the last attempt was spent on a rejected push that
+	// reconcile reported fixing: the retry the repair earned never ran. Report
+	// the failure rather than a success the caller would act on by pruning the
+	// only copy of the data.
+	if strings.Contains(lastOut, lfsObjectsMissing) {
+		return tripPushWedge(log, breaker, repoPath, lastOut, "reconcile_exhausted_attempts")
+	}
+	return fmt.Errorf("git push failed after %d attempts: %s", maxRetries, lastOut)
+}
+
+// tripPushWedge opens the breaker for repoPath and returns the error for the
+// push that caused it. Logs exactly one warning per trip. With a nil breaker
+// (caller did not opt in) it only formats the error.
+func tripPushWedge(log *slog.Logger, breaker *pushBreaker, repoPath, pushOutput, reason string) error {
+	if breaker == nil {
+		// not opted in: report the rejection as before, remember nothing
+		return fmt.Errorf("git push failed (not retryable): %s", pushOutput)
+	}
+	until := breaker.trip(repoPath)
+	log.Warn("ledger push wedged: LFS objects missing and repair did not unblock it, suspending pushes",
+		"repo", repoPath, "reason", reason, "until", until.Format(time.RFC3339))
+	return fmt.Errorf("git push failed (not retryable): %s: %w", pushOutput, ErrPushWedged)
 }

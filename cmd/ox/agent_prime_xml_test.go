@@ -1663,3 +1663,47 @@ func TestEmitTeamRules_Globs(t *testing.T) {
 		}
 	})
 }
+
+// TestEmitWithheldTeamSkills: a withheld skill is INVISIBLE from the repository
+// — it looks exactly as it would if nobody had authored it. The teammate who
+// wrote it has no way to learn from their own machine that it never arrived, so
+// silence here is indistinguishable from the skill not existing.
+//
+// The second subtest is the one that constrains the design: prime is trimmed to
+// fit a hook budget, so a section reporting "nothing is wrong" in every session
+// is what pushes something useful into the deferred file.
+func TestEmitWithheldTeamSkills(t *testing.T) {
+	render := func(withheld []prime.WithheldSkill) string {
+		var sb strings.Builder
+		emitWithheldTeamSkills(&sb, newBookkeeper(&sb), withheld)
+		return sb.String()
+	}
+
+	t.Run("names the skill and what it would be approving", func(t *testing.T) {
+		out := render([]prime.WithheldSkill{
+			{Name: "deploy", Reason: "needs approval: bundled-script (scripts/run.sh (under scripts/))"},
+		})
+		if !strings.Contains(out, "deploy") {
+			t.Errorf("the withheld skill is not named:\n%s", out)
+		}
+		if !strings.Contains(out, "scripts/run.sh") {
+			t.Errorf("the reason is missing, so the reader cannot tell what they would be approving:\n%s", out)
+		}
+		if !strings.Contains(out, "ox skills status") {
+			t.Errorf("no next action:\n%s", out)
+		}
+	})
+
+	t.Run("a healthy repository pays nothing", func(t *testing.T) {
+		if out := render(nil); out != "" {
+			t.Errorf("a session with nothing withheld was charged for the section:\n%q", out)
+		}
+	})
+
+	t.Run("team-supplied text is escaped", func(t *testing.T) {
+		out := render([]prime.WithheldSkill{{Name: "x", Reason: `<script>&"`}})
+		if strings.Contains(out, "<script>") {
+			t.Errorf("a team-authored reason reached the XML unescaped:\n%s", out)
+		}
+	})
+}

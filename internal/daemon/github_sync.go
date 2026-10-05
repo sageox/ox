@@ -188,7 +188,7 @@ func (m *GitHubSyncManager) doSync(ctx context.Context, ledgerPath string) {
 		}()
 
 		if pushErr != nil {
-			m.handleError(fmt.Errorf("commit/push: %w", pushErr))
+			m.handlePushError(pushErr)
 			return
 		}
 	}
@@ -245,6 +245,18 @@ func (m *GitHubSyncManager) resolveRemote() (string, string, error) {
 	}
 
 	return "", "", fmt.Errorf("no GitHub remote found")
+}
+
+// handlePushError records a failed commit/push. The data is committed locally
+// and rides out with the next push that gets through, so a wedged ledger is not
+// a GitHub failure: counting it would suspend GitHub sync for good once
+// failCount passes its limit, long after the ledger recovered.
+func (m *GitHubSyncManager) handlePushError(pushErr error) {
+	if errors.Is(pushErr, gitutil.ErrPushWedged) {
+		m.logger.Debug("github sync push deferred: ledger push wedged", "error", pushErr)
+		return
+	}
+	m.handleError(fmt.Errorf("commit/push: %w", pushErr))
 }
 
 func (m *GitHubSyncManager) handleError(err error) {
@@ -321,6 +333,7 @@ func (m *GitHubSyncManager) pushLedger(ctx context.Context, ledgerPath string) e
 	return gitutil.PushWithRetry(ctx, ledgerPath, gitutil.PushOpts{
 		AutoResolvePrefixes: ledger.AutoResolvePrefixes,
 		Logger:              m.logger,
+		SuspendWhenWedged:   true,
 		PrePush: func(repoPath string) error {
 			if ep != "" {
 				if err := gitserver.RefreshRemoteCredentials(repoPath, ep); err != nil {
@@ -337,7 +350,7 @@ func (m *GitHubSyncManager) pushLedger(ctx context.Context, ledgerPath string) e
 			if err != nil {
 				return false, err
 			}
-			return result.Replaced > 0, nil
+			return result.Changed(), nil
 		},
 	})
 }

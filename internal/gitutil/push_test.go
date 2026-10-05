@@ -570,6 +570,46 @@ func TestPushWithRetry_RebaseInProgressAborted(t *testing.T) {
 	assert.Contains(t, err.Error(), "broken rebase state")
 }
 
+func TestPushWithRetry_RebaseAppearingAfterPreflightIsPreserved(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git push with retry")
+	}
+	repo, bare := initBareRemoteRepo(t)
+
+	second := filepath.Join(t.TempDir(), "second")
+	run(t, "", "git", "clone", "--quiet", bare, second)
+	run(t, second, "git", "config", "user.email", "test@test.local")
+	run(t, second, "git", "config", "user.name", "Test")
+	addCommit(t, second, "remote.txt", "remote", "remote commit")
+	run(t, second, "git", "push", "--quiet")
+	addCommit(t, repo, "local.txt", "local", "local commit")
+	headBefore := strings.TrimSpace(captureGit(t, repo, "rev-parse", "HEAD"))
+
+	err := PushWithRetry(context.Background(), repo, PushOpts{
+		MaxRetries: 3,
+		OpTimeout:  10 * time.Second,
+		PrePush: func(repoPath string) error {
+			// Simulate another operation starting an intact, abortable rebase
+			// after PushWithRetry's preflight but before its first push.
+			stateDir := filepath.Join(repoPath, ".git", "rebase-merge")
+			require.NoError(t, os.MkdirAll(stateDir, 0o755))
+			for name, value := range map[string]string{
+				"head-name": "refs/heads/main\n",
+				"orig-head": headBefore + "\n",
+				"onto":      headBefore + "\n",
+			} {
+				require.NoError(t, os.WriteFile(filepath.Join(stateDir, name), []byte(value), 0o644))
+			}
+			return nil
+		},
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "rebase started after push preflight")
+	assert.True(t, IsRebaseInProgress(repo), "the retry must not abort a rebase it did not create")
+	assert.Equal(t, headBefore, strings.TrimSpace(captureGit(t, repo, "rev-parse", "HEAD")))
+}
+
 // Only a successful hook that completes the rebase may allow another push.
 // Failure paths must preserve both replicas' commits and release the repo lock.
 // TestPushWithRetry_OnUnresolvedConflictsHookCalled verifies that failed or

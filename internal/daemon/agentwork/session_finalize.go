@@ -191,6 +191,9 @@ type SessionFinalizeHandler struct {
 	// deferred" warning was already logged, so a permanently corrupt recording
 	// state warns once per daemon lifetime instead of once per scan.
 	staleRecoveryWarned sync.Map
+	// warnedOnce remembers which "<site>|<session>" conditions already logged a
+	// Warn, for conditions that persist across detect scans (see warnOnce).
+	warnedOnce sync.Map
 	// afterStageTestHook is called right after `git add` stages the session
 	// path, before the commit. Nil in production; tests use it to perturb the
 	// worktree between staging and commit and confirm the commit still
@@ -258,6 +261,28 @@ func (h *SessionFinalizeHandler) SetJudgeCompleter(c summaryeval.Completer) {
 // deadlines — triggering ErrShutdownTimeout that operators see as hangs.
 func (h *SessionFinalizeHandler) SetDaemonContext(ctx context.Context) {
 	h.daemonCtx = ctx
+}
+
+// rootContext is the context for git work the handler starts itself: the
+// daemon's, so shutdown cancels a push in flight instead of waiting it out.
+// Falls back to Background only where no daemon context was ever wired (tests,
+// the CLI's in-process use).
+func (h *SessionFinalizeHandler) rootContext() context.Context {
+	if h.daemonCtx != nil {
+		return h.daemonCtx
+	}
+	return context.Background()
+}
+
+// warnOnce logs msg at Warn the first time site+session is seen and at Debug on
+// every repeat, so a condition that persists across scans (each detectCooldown,
+// per dead agent) announces itself once instead of every few minutes forever.
+func (h *SessionFinalizeHandler) warnOnce(site, session, msg string, args ...any) {
+	level := slog.LevelDebug
+	if _, seen := h.warnedOnce.LoadOrStore(site+"|"+session, struct{}{}); !seen {
+		level = slog.LevelWarn
+	}
+	h.logger.Log(context.Background(), level, msg, args...)
 }
 
 // SetTelemetry installs an optional telemetry sink. The handler emits a
@@ -402,9 +427,18 @@ func (h *SessionFinalizeHandler) Detect(ledgerPath string) ([]*WorkItem, error) 
 		}
 	}
 
+	// Sessions that only need their upload retried are counted here rather than
+	// logged one line each: with a backlog that is thousands of lines per scan.
+	uploadOnly := 0
+	for _, item := range items {
+		if p, ok := item.Payload.(*SessionFinalizePayload); ok && p.UploadOnly {
+			uploadOnly++
+		}
+	}
 	h.logger.Info("session finalize detect complete",
 		"ledger", ledgerPath,
 		"items", len(items),
+		"upload_only", uploadOnly,
 		"skipped_with_content", skips.total(),
 	)
 	// A separate Warn rather than more keys on the line above: `items=0` is
@@ -502,7 +536,8 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 			// the reader to ignore the line that matters.
 			if hasSessionContent(rawPath) {
 				skips.addUnreadableMeta(name)
-				h.logger.Warn("skipping session with unreadable meta.json, transcript stranded",
+				h.warnOnce("detect-unreadable-meta", name,
+					"skipping session with unreadable meta.json, transcript stranded",
 					"session", name, "err", metaErr)
 			} else {
 				h.logger.Debug("skipping session with unreadable meta.json",
@@ -702,7 +737,7 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 			// would then look complete and never be retried — the cache prune is
 			// the only signal that actually means "it reached the remote".
 			if isInLedgerCacheDir(sessionDir, ledgerPath) {
-				h.logger.Info("session needs upload (fully finalized, not pushed)",
+				h.logger.Debug("session needs upload (fully finalized, not pushed)",
 					"session", name,
 				)
 				items = append(items, &WorkItem{
@@ -884,7 +919,8 @@ func (h *SessionFinalizeHandler) DetectOrphanedForAgent(ledgerPath, agentID stri
 			// had (#966). It now sits after that check; see there.
 			_, isDraft, metaErr := lfs.PreservedSessionIDAndDraft(sessionDir)
 			if metaErr != nil {
-				h.logger.Warn("skipping session with unreadable meta.json",
+				h.warnOnce("orphan-unreadable-meta", name,
+					"skipping session with unreadable meta.json",
 					"session", name, "agent_id", agentID, "err", metaErr)
 				continue
 			}
@@ -982,7 +1018,8 @@ func (h *SessionFinalizeHandler) DetectOrphanedForAgent(ledgerPath, agentID stri
 					return os.Remove(recPath)
 				})
 				if recoverErr != nil {
-					h.logger.Warn("orphaned recording recovery deferred", "session", name, "err", recoverErr)
+					h.warnOnce("orphan-recovery-deferred", name,
+						"orphaned recording recovery deferred", "session", name, "err", recoverErr)
 					continue
 				}
 			} else if err := os.Remove(recPath); err != nil {
@@ -1551,7 +1588,7 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 		h.logger.Warn("gitignore setup failed", "err", err)
 	}
 
-	pushed := h.gitCommitAndPush(payload, fileRefs)
+	pushed, pushErr := h.gitCommitAndPush(payload, fileRefs)
 
 	// prune cache dir only after a successful push — on push failure the cache
 	// is the only surviving copy of the session content
@@ -1559,6 +1596,14 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 		if err := os.RemoveAll(origCacheDir); err != nil {
 			h.logger.Debug("prune cache after finalize", "dir", origCacheDir, "err", err)
 		}
+	}
+
+	// A push that fails for an ordinary reason leaves the session in the cache,
+	// where detection re-queues it as upload-only. But a ledger-wide blocker will
+	// refuse every later session the same way, so surface it for the manager to
+	// pause the work type instead of repeating the summarize-then-fail cycle.
+	if isLedgerWideBlocker(pushErr) {
+		return pushErr
 	}
 
 	h.logger.Info("session recovered via anti-entropy",
@@ -2053,7 +2098,7 @@ func (h *SessionFinalizeHandler) checkLedgerResolved(ledgerPath string) error {
 	if h.skipGit || ledgerPath == "" {
 		return nil
 	}
-	unmerged, err := gitutil.HasUnmergedEntries(context.Background(), ledgerPath)
+	unmerged, err := gitutil.HasUnmergedEntries(h.rootContext(), ledgerPath)
 	if err != nil {
 		h.logger.Debug("ledger conflict probe failed, continuing", "ledger", ledgerPath, "err", err)
 		return nil
@@ -2088,8 +2133,11 @@ func (h *SessionFinalizeHandler) processUploadOnly(payload *SessionFinalizePaylo
 				}
 			}
 			if len(ordinaryMissing) > 0 {
-				h.logger.Warn("upload-only: pointer stubs reference LFS blobs not in remote — session cannot be pushed, skipping", "session", sessionName, "missing_files", ordinaryMissing)
-				return nil // leave cache intact for manual recovery
+				// Cache stays intact for manual recovery. An error, not nil: nil counts as
+				// success, which clears the failure count and so keeps this session out of
+				// the manager's retry cap forever.
+				h.logger.Warn("upload-only: pointer stubs reference LFS blobs not in remote — session cannot be pushed", "session", sessionName, "missing_files", ordinaryMissing)
+				return fmt.Errorf("upload-only: session %s has pointer stubs whose LFS blobs are missing from the remote: %s", sessionName, strings.Join(ordinaryMissing, ", "))
 			}
 			if payload.omitTraces {
 				h.logger.Warn("trace pointers omitted: backing blobs unavailable", "session", sessionName)
@@ -2101,7 +2149,7 @@ func (h *SessionFinalizeHandler) processUploadOnly(payload *SessionFinalizePaylo
 	origCacheDir, err := h.stageSessionInLedger(payload)
 	if err != nil {
 		h.logger.Warn("upload-only: failed to stage session", "session", sessionName, "err", err)
-		return nil
+		return fmt.Errorf("upload-only: stage session %s: %w", sessionName, err)
 	}
 
 	// Failed LFS uploads defer publication; keep source content for retry.
@@ -2178,7 +2226,7 @@ func (h *SessionFinalizeHandler) processUploadOnly(payload *SessionFinalizePaylo
 		h.logger.Warn("upload-only: gitignore setup failed", "err", err)
 	}
 
-	pushed := h.gitCommitAndPush(payload, fileRefs)
+	pushed, pushErr := h.gitCommitAndPush(payload, fileRefs)
 
 	// Keep the source cache until the pointer commit reaches the remote.
 	if pushed {
@@ -2195,17 +2243,34 @@ func (h *SessionFinalizeHandler) processUploadOnly(payload *SessionFinalizePaylo
 	// "agent work complete status=success" for 897 consecutive failed commits in
 	// a single day, which is why the wedge stayed invisible while the backlog
 	// grew to ~3,000 sessions.
+	if pushErr != nil {
+		return fmt.Errorf("upload-only: session %s not committed or pushed: %w", sessionName, pushErr)
+	}
 	return fmt.Errorf("upload-only: session %s not committed or pushed", sessionName)
 }
 
+// isLedgerWideBlocker reports whether err means every later push of this ledger
+// would fail the same way, so retrying other sessions is pointless.
+func isLedgerWideBlocker(err error) bool {
+	return errors.Is(err, ErrLedgerUnresolved) || errors.Is(err, ErrLedgerPushWedged)
+}
+
 // gitCommitAndPush stages, commits, and pushes the finalized session.
-// Returns true if the push succeeded, false otherwise.
+// Returns true if the push succeeded, false otherwise. The error says why when
+// the cause is a ledger-wide blocker (ErrLedgerUnresolved, ErrLedgerPushWedged)
+// that the manager pauses the work type on; it is non-nil for any other failure
+// too, for the caller's message, but only the sentinels are acted on.
 // Uploaded files become pointers before the first commit. Callers retain the
 // source cache until this returns true.
-func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayload, fileRefs map[string]lfs.FileRef) bool {
+//
+// Every git step runs under the daemon's context, so shutdown cancels a stuck
+// push instead of leaving this goroutine holding ledgerMu past the daemon's
+// goroutine-wait deadline.
+func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayload, fileRefs map[string]lfs.FileRef) (bool, error) {
 	if h.skipGit {
-		return true // treat skip as success so tests can prune cache
+		return true, nil // treat skip as success so tests can prune cache
 	}
+	ctx := h.rootContext()
 
 	// serialize with daemon's ledger git ops (sync, murmur push, github sync)
 	if h.ledgerMu != nil {
@@ -2222,14 +2287,14 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 	// content into stubs that Detect and doctor both skip.
 	if !isGitTrackedLedgerSession(payload.SessionDir, ledgerPath) {
 		h.logger.Warn("session dir is outside the ledger sessions tree; skipping commit", "session", sessionName, "dir", payload.SessionDir)
-		return false
+		return false, nil
 	}
 
 	// relative path from ledger root for git add
 	relDir, err := filepath.Rel(ledgerPath, payload.SessionDir)
 	if err != nil {
 		h.logger.Warn("could not compute relative session path", "err", err)
-		return false
+		return false, nil
 	}
 
 	// A zero-delta commit is the NORMAL outcome for a session whose files already
@@ -2246,18 +2311,18 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 	// commit prevents a CLI pull from restoring an autostash between those
 	// steps. Release before PushWithRetry, which takes the same non-reentrant
 	// lock if a non-fast-forward retry needs to pull.
-	if err := gitutil.WithRepoLock(context.Background(), ledgerPath, func() error {
+	if err := gitutil.WithRepoLock(ctx, ledgerPath, func() error {
 		// Index removals for optional traces must never resolve a real conflict.
 		// Check before either pointer writes or staging mutate this transaction.
 		if err := gitutil.IsSafeForGitOps(ledgerPath); err != nil {
 			return err
 		}
-		unmerged, err := gitutil.HasUnmergedEntries(context.Background(), ledgerPath)
+		unmerged, err := gitutil.HasUnmergedEntries(ctx, ledgerPath)
 		if err != nil {
 			return err
 		}
 		if unmerged {
-			return fmt.Errorf("ledger has unresolved index conflicts")
+			return fmt.Errorf("commit blocked: %w", ErrLedgerUnresolved)
 		}
 		// A raw-only first push can trigger GitLab GC before a second pointer
 		// push, unlinking the newly uploaded objects from the project. Publish
@@ -2283,14 +2348,20 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 		// (or a stray concurrent writer) that rewrites a file in relDir between
 		// the git add above and here cannot ride along into this commit; the
 		// bytes published are exactly the bytes staged.
-		staged, err = gitutil.CommitLedgerSnapshot(context.Background(), ledgerPath, msg, relDir+"/")
+		staged, err = gitutil.CommitLedgerSnapshot(ctx, ledgerPath, msg, relDir+"/")
 		if err != nil {
+			// write-tree is what refuses an unmerged index, and it reports that as
+			// prose. Ask the index directly rather than reading the message, so a
+			// conflict that appeared mid-transaction still pauses the work type.
+			if unmerged, probeErr := gitutil.HasUnmergedEntries(ctx, ledgerPath); probeErr == nil && unmerged {
+				return fmt.Errorf("commit session snapshot: %w: %w", ErrLedgerUnresolved, err)
+			}
 			return fmt.Errorf("commit session snapshot: %w", err)
 		}
 		return nil
 	}); err != nil {
 		h.logger.Warn("session commit transaction failed", "session", sessionName, "err", err)
-		return false
+		return false, err
 	}
 	if !staged {
 		// Fall through to the push: the commit may exist locally from an earlier
@@ -2300,25 +2371,31 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 
 	// push with retry (best-effort — failures are non-fatal)
 	ep := endpoint.GetForProject(h.projectRoot)
-	if err := gitutil.PushWithRetry(context.Background(), ledgerPath, gitutil.PushOpts{
+	if err := gitutil.PushWithRetry(ctx, ledgerPath, gitutil.PushOpts{
 		AutoResolvePrefixes: ledger.AutoResolvePrefixes,
 		Logger:              h.logger,
+		SuspendWhenWedged:   true,
 		ReconcileLFS: func(repoPath string) (bool, error) {
 			if ep == "" {
 				return false, nil
 			}
-			result, reconcileErr := lfs.ReconcileUnpushedPointers(
-				context.Background(), repoPath, ep, h.logger)
+			result, reconcileErr := lfs.ReconcileUnpushedPointers(ctx, repoPath, ep, h.logger)
 			if reconcileErr != nil {
 				return false, reconcileErr
 			}
-			return result.Replaced > 0, nil
+			return result.Changed(), nil
 		},
 	}); err != nil {
+		if errors.Is(err, gitutil.ErrPushWedged) {
+			// PushWithRetry already warned once when the breaker opened; a skipped
+			// push is expected for the whole backoff and not worth a line each.
+			h.logger.Debug("git push skipped: ledger push wedged", "session", sessionName, "err", err)
+			return false, fmt.Errorf("%w: %w", ErrLedgerPushWedged, err)
+		}
 		h.logger.Warn("git push failed (non-fatal)", "err", err)
-		return false
+		return false, fmt.Errorf("git push: %w", err)
 	}
-	return true
+	return true, nil
 }
 
 // synthesizeMeta builds a minimal meta.json from the raw.jsonl header for a
@@ -2404,9 +2481,15 @@ func recordingCarrierFields(sessionDir string, stored *session.StoredSession) ([
 // Pins the locale so git's error text in logs stays stable and grep-able
 // regardless of the daemon host's language settings.
 func (h *SessionFinalizeHandler) runGit(repoPath string, args ...string) error {
-	fullArgs := append([]string{"-C", repoPath}, args...)
-	cmd := exec.Command("git", fullArgs...)
+	// core.excludesFile= drops the coworker's personal global gitignore: the
+	// Ledger is ox-owned, and a global "*.gz" there made `git add` refuse the
+	// session's trace files and fail every finalize on that machine. The
+	// Ledger's own .gitignore still applies.
+	fullArgs := append([]string{"-C", repoPath, "-c", "core.excludesFile="}, args...)
+	// the daemon's context: shutdown kills a stuck git instead of waiting on it
+	cmd := exec.CommandContext(h.rootContext(), "git", fullArgs...)
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C", "LANG=C")
+	cmd.WaitDelay = 2 * time.Second // a killed git's children may keep the pipes open
 
 	out, err := cmd.CombinedOutput()
 	if err != nil {
