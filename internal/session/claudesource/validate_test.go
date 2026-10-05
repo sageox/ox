@@ -3,6 +3,7 @@ package claudesource
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -106,15 +107,16 @@ func TestValidateDeletedCwdIsJudgedByWhereItStood(t *testing.T) {
 			t.Fatalf("%s must be refused as foreign, got %v", name, err)
 		}
 	}
-	path := filepath.Join(t.TempDir(), id+".jsonl")
-	if err := os.WriteFile(path, []byte(fmt.Sprintf("{\"type\":\"user\",\"sessionId\":%q,\"cwd\":%q}\n", id, nested)), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	// the workspace itself is gone (archived): turns that stood inside it are
+	// still its own, and a turn that stood elsewhere is still foreign
 	if err := os.Remove(root); err != nil {
 		t.Fatal(err)
 	}
-	if err := Validate(path, root+string(os.PathSeparator), id); err == nil || errors.Is(err, ErrUntrustedSource) {
-		t.Fatalf("a removed project root cannot be validated, but proves nothing about the turn: %v", err)
+	if err := validate(t, nested); err != nil {
+		t.Fatalf("a deleted workspace is placed where it stood, and its own turns pass: %v", err)
+	}
+	if err := validate(t, filepath.Join(filepath.Dir(root), "removed-workspace")); !errors.Is(err, ErrUntrustedSource) {
+		t.Fatalf("a turn outside the deleted workspace must still be refused, got %v", err)
 	}
 }
 
@@ -136,6 +138,88 @@ func TestValidateDanglingSymlinkCwdIsUncheckableNotOwned(t *testing.T) {
 	}
 	if err := Validate(path, root, id); err == nil || errors.Is(err, ErrUntrustedSource) {
 		t.Fatalf("a dangling link cannot be placed, so it defers instead of claiming the repo: %v", err)
+	}
+}
+
+// One cwd the validator cannot place must not hide a later turn that proves the
+// session crossed repositories, and "cannot place" must not masquerade as
+// "the file is gone".
+func TestValidateKeepsScanningPastAnUncheckableCwd(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const id = "77b16b24-5b7d-4598-aacf-4c9afeb4b5ca"
+	link := filepath.Join(root, "shortcut")
+	if err := os.Symlink(filepath.Join(filepath.Dir(root), "removed-elsewhere"), link); err != nil {
+		t.Fatal(err)
+	}
+	uncheckable := fmt.Sprintf("{\"type\":\"user\",\"sessionId\":%q,\"cwd\":%q}\n", id, filepath.Join(link, "pkg"))
+	foreign := fmt.Sprintf("{\"type\":\"user\",\"sessionId\":%q,\"cwd\":%q}\n", id, filepath.Dir(root))
+	owned := fmt.Sprintf("{\"type\":\"user\",\"sessionId\":%q,\"cwd\":%q}\n", id, root)
+	for name, tt := range map[string]struct {
+		body string
+		want error
+	}{
+		"foreign after uncheckable":  {uncheckable + foreign, ErrUntrustedSource},
+		"foreign before uncheckable": {foreign + uncheckable, ErrUntrustedSource},
+		"owned after uncheckable":    {uncheckable + owned, ErrUncheckable},
+	} {
+		path := filepath.Join(t.TempDir(), id+".jsonl")
+		if err := os.WriteFile(path, []byte(tt.body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		err := Validate(path, root, id)
+		if !errors.Is(err, tt.want) {
+			t.Fatalf("%s: want %v, got %v", name, tt.want, err)
+		}
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, ErrSourceGone) {
+			t.Fatalf("%s: an unplaceable directory must not read as a missing source: %v", name, err)
+		}
+	}
+}
+
+func TestValidateReportsAMissingSourceAsGone(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(t.TempDir(), "77b16b24-5b7d-4598-aacf-4c9afeb4b5ca.jsonl")
+	if err := Validate(path, root, ""); !errors.Is(err, ErrSourceGone) {
+		t.Fatalf("a missing native file is ErrSourceGone, got %v", err)
+	}
+}
+
+// Claude writes canonical paths. A vanished cwd spelled with ".." names no
+// place the validator can trust, and an existing one resolves physically.
+func TestValidateDoesNotTrustDotDotSpelling(t *testing.T) {
+	outer, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(outer, "repo")
+	elsewhere := filepath.Join(outer, "elsewhere", "deep")
+	for _, dir := range []string{root, elsewhere} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(elsewhere, filepath.Join(root, "link")); err != nil {
+		t.Fatal(err)
+	}
+	const id = "77b16b24-5b7d-4598-aacf-4c9afeb4b5ca"
+	for name, cwd := range map[string]string{
+		// lexically root, physically outer/elsewhere
+		"existing path through a symlink then ..": root + "/link/..",
+		// lexically inside root once cleaned, but written the way Claude never would
+		"vanished path with ..": root + "/gone/../sub",
+		"vanished path with .":  root + "/./gone",
+		"vanished path with //": root + "//gone",
+	} {
+		path := filepath.Join(t.TempDir(), id+".jsonl")
+		if err := os.WriteFile(path, []byte(fmt.Sprintf("{\"type\":\"user\",\"sessionId\":%q,\"cwd\":%q}\n", id, cwd)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := Validate(path, root, id); !errors.Is(err, ErrUntrustedSource) {
+			t.Fatalf("%s must be refused as foreign, got %v", name, err)
+		}
 	}
 }
 
@@ -338,5 +422,112 @@ func TestValidateRecordedIgnoresTurnsBeforeTheRecordingStarted(t *testing.T) {
 	}
 	if err := ValidateRecorded(path, repo, id, int64(len(earlier)), snapshot); !errors.Is(err, ErrUntrustedSource) {
 		t.Fatalf("a foreign turn inside the recorded range must still be refused: %v", err)
+	}
+}
+
+func TestValidateReportsWhatItCannotAttribute(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const id = "77b16b24-5b7d-4598-aacf-4c9afeb4b5ca"
+	file := filepath.Join(root, "a-regular-file")
+	if err := os.WriteFile(file, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	turn := func(cwd, sessionField string) string {
+		return fmt.Sprintf("{\"type\":\"user\",\"sessionId\":%s,\"cwd\":%q}\n", sessionField, cwd)
+	}
+	write := func(t *testing.T, body string) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), id+".jsonl")
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	for name, tt := range map[string]struct {
+		path, root, sessionID string
+		want                  error // nil means "any error that is neither untrusted nor uncheckable"
+		wantNone              bool  // expect success
+	}{
+		"relative repo root": {path: write(t, turn(root, `"`+id+`"`)), root: "relative/root", sessionID: id},
+		"repo root below a regular file": {
+			path: write(t, turn(root, `"`+id+`"`)), root: filepath.Join(file, "repo"), sessionID: id, want: ErrUncheckable,
+		},
+		"cwd below a regular file": {
+			path: write(t, turn(filepath.Join(file, "pkg"), `"`+id+`"`)), root: root, sessionID: id, want: ErrUncheckable,
+		},
+		"session ID that is not the filename": {
+			path: write(t, turn(root, `"`+id+`"`)), root: root, sessionID: "another-session", want: ErrUntrustedSource,
+		},
+		"session ID that is not a string": {
+			path: write(t, turn(root, `123`)), root: root, sessionID: id, want: ErrUntrustedSource,
+		},
+		"no repository metadata at all": {
+			path: write(t, `{"type":"summary"}`+"\n"), root: root, sessionID: id,
+		},
+		"an owned turn": {path: write(t, turn(root, `"`+id+`"`)), root: root, sessionID: id, wantNone: true},
+	} {
+		err := Validate(tt.path, tt.root, tt.sessionID)
+		switch {
+		case tt.wantNone:
+			if err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+		case tt.want != nil:
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("%s: want %v, got %v", name, tt.want, err)
+			}
+		default:
+			if err == nil || errors.Is(err, ErrUntrustedSource) || errors.Is(err, ErrUncheckable) {
+				t.Fatalf("%s: want a plain refusal, got %v", name, err)
+			}
+		}
+	}
+}
+
+// A repo root that is itself a linked worktree keeps its submodules under the git
+// dir its own .git file names, not under a .git directory.
+func TestValidateAcceptsASubmoduleOfALinkedWorktreeRoot(t *testing.T) {
+	outer, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitDir := filepath.Join(outer, "main", ".git", "worktrees", "wt")
+	root := filepath.Join(outer, "wt")
+	submodule := filepath.Join(root, "tools", "lib")
+	for _, dir := range []string{filepath.Join(gitDir, "modules", "tools", "lib"), submodule} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(submodule, ".git"), []byte("gitdir: "+filepath.Join(gitDir, "modules", "tools", "lib")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const id = "77b16b24-5b7d-4598-aacf-4c9afeb4b5ca"
+	path := filepath.Join(t.TempDir(), id+".jsonl")
+	if err := os.WriteFile(path, []byte(fmt.Sprintf("{\"type\":\"user\",\"sessionId\":%q,\"cwd\":%q}\n", id, submodule)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(root, ".git"), []byte("gitdir: "+gitDir+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Validate(path, root, id); err != nil {
+		t.Fatalf("a submodule of a linked worktree belongs to it: %v", err)
+	}
+
+	// a root whose .git file names nothing usable cannot vouch for any gitlink
+	for name, rootGit := range map[string]string{
+		"not a gitlink":          "junk\n",
+		"names a missing gitdir": "gitdir: " + filepath.Join(outer, "gone") + "\n",
+	} {
+		if err := os.WriteFile(filepath.Join(root, ".git"), []byte(rootGit), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := Validate(path, root, id); !errors.Is(err, ErrUntrustedSource) {
+			t.Fatalf("%s: a submodule cannot be vouched for, got %v", name, err)
+		}
 	}
 }

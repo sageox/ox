@@ -18,6 +18,22 @@ import (
 // to this recording. It should be preserved locally, not retried or uploaded.
 var ErrUntrustedSource = errors.New("claude source has untrusted ownership")
 
+// ErrUncheckable means ownership cannot be decided right now: a directory the
+// session visited cannot be resolved, or the source changed while it was read.
+// It proves nothing about the recording, so callers retry or, for a capture
+// already validated batch by batch, finalize it anyway.
+var ErrUncheckable = errors.New("claude source ownership cannot be checked")
+
+// ErrSourceGone means the native session file itself no longer exists. It is
+// distinct from a vanished directory the session once visited, which is judged
+// by where it stood.
+var ErrSourceGone = errors.New("claude source file is gone")
+
+// errNonCanonicalCwd marks a vanished cwd whose text cannot be trusted to name a
+// place: Claude records canonical paths, so one with "..", "." or doubled
+// separators was not written by it.
+var errNonCanonicalCwd = errors.New("cwd is not in canonical form")
+
 // Validate checks every complete native record before discovery or final upload.
 // A partial trailing record is left for the next read, like the native reader.
 func Validate(path, repoRoot, sessionID string) error {
@@ -43,12 +59,15 @@ func ValidateRead(path, repoRoot, sessionID string, offset int64, full bool, bef
 		return err
 	}
 	after, err := os.Stat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("%w: %w", ErrSourceGone, err)
+	}
 	if err != nil {
 		return err
 	}
 	if before == nil || !os.SameFile(before, after) || after.Size() < before.Size() ||
 		(after.Size() == before.Size() && !after.ModTime().Equal(before.ModTime())) {
-		return fmt.Errorf("claude source changed while reading; retry without advancing cursor")
+		return fmt.Errorf("%w: claude source changed while reading; retry without advancing cursor", ErrUncheckable)
 	}
 	return nil
 }
@@ -73,11 +92,11 @@ func validate(path, repoRoot, sessionID string, offset int64, requireInitialIden
 	if !filepath.IsAbs(repoRoot) {
 		return fmt.Errorf("claude source repository root must be absolute")
 	}
-	repoRoot = filepath.Clean(repoRoot)
-	if resolved, err := filepath.EvalSymlinks(repoRoot); err == nil {
-		repoRoot = resolved
-	} else {
-		return fmt.Errorf("resolve Claude source repository root: %w", err)
+	// A workspace that has since been archived or deleted is placed where it
+	// stood, like a deleted cwd: its absence is not a reason to stop checking.
+	repoRoot, err := resolveVanished(filepath.Clean(repoRoot), false)
+	if err != nil {
+		return fmt.Errorf("%w: resolve Claude source repository root: %v", ErrUncheckable, err)
 	}
 	fileID := strings.TrimSuffix(filepath.Base(path), ".jsonl")
 	if sessionID != "" && fileID != sessionID {
@@ -85,9 +104,12 @@ func validate(path, repoRoot, sessionID string, offset int64, requireInitialIden
 	}
 
 	seenCwd, seenID := false, false
-	checkedCwd := make(map[string]bool)
-	var ownershipErr error
-	_, _, _, err := adapterruntime.TailJSONLWithStats(path, offset, func(line []byte) ([]adapterprotocol.RawEntry, error) {
+	checkedCwd := make(map[string]cwdVerdict)
+	// ownershipErr is proof the source is foreign and ends the scan. A cwd that
+	// cannot be checked only defers: the scan goes on, because a later turn may
+	// still prove the session crossed repositories.
+	var ownershipErr, deferredErr error
+	_, _, _, err = adapterruntime.TailJSONLWithStats(path, offset, func(line []byte) ([]adapterprotocol.RawEntry, error) {
 		if ownershipErr != nil {
 			return nil, nil
 		}
@@ -122,37 +144,39 @@ func validate(path, repoRoot, sessionID string, offset int64, requireInitialIden
 			seenID = true
 		}
 		if cwd != "" {
-			valid, checked := checkedCwd[cwd]
+			verdict, checked := checkedCwd[cwd]
 			if !checked {
-				// A directory the session visited may be gone by now (a build
-				// directory, an archived workspace). Where it stood is still
-				// decidable, so it is judged by its resolved location; only a
-				// path that cannot be resolved at all defers, rather than
-				// permanently quarantining an uncheckable filesystem state.
-				resolved, err := resolveVanished(cwd)
-				if err != nil {
-					ownershipErr = fmt.Errorf("cannot verify Claude source cwd: %w", err)
-					return nil, nil
+				var judgeErr error
+				verdict, judgeErr = judgeCwd(repoRoot, cwd)
+				checkedCwd[cwd] = verdict
+				if verdict == cwdUnknown && deferredErr == nil {
+					deferredErr = judgeErr
 				}
-				valid = withinRepo(repoRoot, resolved)
-				checkedCwd[cwd] = valid
 			}
-			if !valid {
+			switch verdict {
+			case cwdForeign:
 				ownershipErr = fmt.Errorf("%w: cwd outside repo", ErrUntrustedSource)
 				return nil, nil
+			case cwdOwned:
+				seenCwd = true
 			}
-			seenCwd = true
 		}
 		if (meta.Type == "user" || meta.Type == "assistant") && (cwd == "" || id == "") {
 			ownershipErr = fmt.Errorf("%w: turn has missing ownership metadata", ErrUntrustedSource)
 		}
 		return nil, nil
 	})
+	if errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("%w: %w", ErrSourceGone, err)
+	}
 	if err != nil {
 		return err
 	}
 	if ownershipErr != nil {
 		return ownershipErr
+	}
+	if deferredErr != nil {
+		return deferredErr
 	}
 	if requireInitialIdentity && (!seenCwd || (sessionID != "" && !seenID)) {
 		return fmt.Errorf("claude source has invalid or missing repository metadata")
@@ -160,12 +184,52 @@ func validate(path, repoRoot, sessionID string, offset int64, requireInitialIden
 	return nil
 }
 
+type cwdVerdict int
+
+const (
+	cwdUnknown cwdVerdict = iota
+	cwdOwned
+	cwdForeign
+)
+
+// judgeCwd decides whether a directory a session visited lies inside the repo.
+// The error is set only for cwdUnknown.
+func judgeCwd(repoRoot, cwd string) (cwdVerdict, error) {
+	// A directory the session visited may be gone by now (a build directory, an
+	// archived workspace). Where it stood is still decidable, so it is judged by
+	// its resolved location; only a path that cannot be resolved at all defers,
+	// rather than permanently quarantining an uncheckable filesystem state.
+	resolved, err := resolveVanished(cwd, true)
+	if errors.Is(err, errNonCanonicalCwd) {
+		return cwdForeign, nil
+	}
+	if err != nil {
+		return cwdUnknown, fmt.Errorf("%w: cannot verify Claude source cwd: %v", ErrUncheckable, err)
+	}
+	if withinRepo(repoRoot, resolved) {
+		return cwdOwned, nil
+	}
+	return cwdForeign, nil
+}
+
 // resolveVanished resolves symlinks in the longest prefix of path that still
 // exists and re-attaches the part that does not, so a deleted directory is
-// placed where it stood rather than left unknown.
-func resolveVanished(path string) (string, error) {
+// placed where it stood rather than left unknown. With strict set, a vanished
+// part that is not written in canonical form is refused: lexical text can only
+// stand in for a place when it is unambiguous.
+func resolveVanished(path string, strict bool) (string, error) {
 	if !filepath.IsAbs(path) {
 		return path, nil // withinRepo refuses relative paths
+	}
+	// resolve the path as written: EvalSymlinks follows ".." physically, which
+	// cleaning it first would not
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved, nil
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return "", err
+	}
+	if strict && path != filepath.Clean(path) {
+		return "", errNonCanonicalCwd
 	}
 	var vanished []string
 	for dir := filepath.Clean(path); ; {
