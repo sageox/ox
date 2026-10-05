@@ -7,10 +7,12 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/sageox/agentx"
@@ -163,6 +165,7 @@ func runSessionImport(cmd *cobra.Command, _ []string) error {
 		return renderImportFailure(out, opts.jsonOut, *failure)
 	}
 	env.deps = productionImportDeps(env)
+	env.progress = cmd.ErrOrStderr()
 	return runSessionImportFlow(ctx, out, opts, env, dest)
 }
 
@@ -449,6 +452,18 @@ func runLockedImport(ctx context.Context, out io.Writer, opts importOptions, env
 	if batch <= 0 {
 		batch = importPushBatch
 	}
+	// From here an interrupt finishes cleanly: the session being summarized
+	// stops, no new one starts, and what is already committed is still pushed.
+	// The first interrupt restores default handling, so a second quits at once.
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	context.AfterFunc(ctx, stop)
+	progress := io.Discard
+	if !opts.jsonOut {
+		progress = out
+	} else if env.progress != nil {
+		progress = env.progress
+	}
 	var pending []*importCandidate // committed, not yet pushed
 	var pushErr error
 	sinceFlush := 0
@@ -458,7 +473,13 @@ func runLockedImport(ctx context.Context, out io.Writer, opts importOptions, env
 		if len(pending) == 0 {
 			return
 		}
-		if pushErr = env.deps.push(ctx, env.ledgerPath); pushErr != nil {
+		pushCtx := ctx
+		if ctx.Err() != nil {
+			var cancel context.CancelFunc
+			pushCtx, cancel = context.WithTimeout(context.WithoutCancel(ctx), importInterruptedPushTimeout)
+			defer cancel()
+		}
+		if pushErr = env.deps.push(pushCtx, env.ledgerPath); pushErr != nil {
 			return // they stay pending: the next push carries their commits too
 		}
 		for _, c := range pending {
@@ -467,15 +488,31 @@ func runLockedImport(ctx context.Context, out io.Writer, opts importOptions, env
 		}
 		pending = nil
 	}
+	interrupted := false
 	for i, c := range selected {
+		if ctx.Err() != nil {
+			if !interrupted {
+				interrupted = true
+				fmt.Fprintln(progress, "Interrupted: publishing the sessions already done. Press Ctrl-C again to quit now.")
+			}
+			failed = true
+			c.Outcome, c.Detail, c.Retry = "failed", "not started: the import was interrupted", importRetryCommand(opts, c)
+			continue
+		}
 		if !opts.jsonOut {
 			fmt.Fprintf(out, "[%d/%d] %s %-6s %s summarizing… ", i+1, len(selected), c.Session.StartedAt.Local().Format("2006-01-02"), c.Session.Agent, nativeShortID(c.Session.NativeID))
+		} else {
+			// stdout is one JSON document at the end; a summary can take minutes.
+			fmt.Fprintf(progress, "[%d/%d] summarizing %s %s…\n", i+1, len(selected), c.Session.Agent, nativeShortID(c.Session.NativeID))
 		}
 		skip, err := publishImport(ctx, env, c)
 		switch {
 		case err != nil:
 			failed = true
 			c.Outcome, c.Detail = "failed", strings.TrimPrefix(err.Error(), errImportHeld.Error()+": ")
+			if ctx.Err() != nil {
+				c.Detail = "interrupted"
+			}
 			c.Retry = importRetryCommand(opts, c)
 		case skip != "":
 			c.Outcome, c.Detail = "skipped", skip

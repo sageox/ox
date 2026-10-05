@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -27,6 +28,10 @@ const (
 	// importPushBatch bounds how many committed imports wait for one push. Each
 	// push may pull, rebase and autostash; batching keeps a bulk run to a few.
 	importPushBatch = 10
+
+	// importInterruptedPushTimeout bounds the push that still publishes the
+	// already committed sessions after an interrupt.
+	importInterruptedPushTimeout = 2 * time.Minute
 
 	importReadTimeout     = 2 * time.Minute
 	importSummaryTimeout  = 5 * time.Minute
@@ -74,6 +79,7 @@ type importEnv struct {
 	stagingRoot string
 	summarizer  nativeimport.Agent // "" means each session's own vendor
 	pushBatch   int                // commits per push; 0 means importPushBatch
+	progress    io.Writer          // per-session progress while stdout carries JSON; nil discards
 	deps        importDeps
 	logger      *slog.Logger
 	lfs         *lfs.Client
@@ -320,6 +326,9 @@ func summarizeImport(ctx context.Context, env *importEnv, c *importCandidate, st
 			err = fmt.Errorf("%s exited with code %d%s", c.Summarizer, result.ExitCode, cliMessage(result.Output))
 		}
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err() // interrupted: a retry or the fallback summary would mask it
+			}
 			runnerErr = err
 			continue
 		}

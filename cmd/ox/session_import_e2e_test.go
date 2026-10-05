@@ -161,7 +161,7 @@ type fakeSummarizer struct {
 
 func (s *fakeSummarizer) Available() bool { return !s.unavailable }
 
-func (s *fakeSummarizer) Run(_ context.Context, req agentwork.RunRequest) (*agentwork.RunResult, error) {
+func (s *fakeSummarizer) Run(ctx context.Context, req agentwork.RunRequest) (*agentwork.RunResult, error) {
 	s.mu.Lock()
 	s.prompts = append(s.prompts, req.Prompt)
 	s.isolated = append(s.isolated, req.Isolated)
@@ -169,6 +169,9 @@ func (s *fakeSummarizer) Run(_ context.Context, req agentwork.RunRequest) (*agen
 	s.mu.Unlock()
 	if before != nil {
 		before(req.Prompt)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err // the real runner's CLI is killed with its context
 	}
 	if fail != nil {
 		if err := fail(req.Prompt); err != nil {
@@ -230,6 +233,8 @@ type importFixture struct {
 	unusable       bool  // no summarizer CLI is installed and logged in
 	interactive    bool  // a coworker at a terminal can answer
 	confirm        func(prompt string) (bool, error)
+	ctx            context.Context // the run's context; nil means context.Background()
+	progress       bytes.Buffer    // what a JSON run reports while it works
 
 	mu       sync.Mutex
 	native   map[string][]adapters.RawEntry // adapter output by native file
@@ -415,8 +420,12 @@ func (f *importFixture) run(t *testing.T, opts importOptions) importRun {
 func (f *importFixture) runOn(t *testing.T, ledgerPath string, opts importOptions) importRun {
 	t.Helper()
 	env, dest := f.envFor(ledgerPath, opts)
+	ctx := f.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	var buf bytes.Buffer
-	r := importRun{err: runSessionImportFlow(context.Background(), &buf, opts, env, dest)}
+	r := importRun{err: runSessionImportFlow(ctx, &buf, opts, env, dest)}
 	r.out = buf.String()
 	if opts.jsonOut {
 		require.NoError(t, json.Unmarshal(buf.Bytes(), &r.report), r.out)
@@ -453,6 +462,7 @@ func (f *importFixture) envFor(ledgerPath string, opts importOptions) (*importEn
 		env.deps.push = f.push
 	}
 	env.pushBatch = f.pushBatch
+	env.progress = &f.progress
 	return env, importDestination{Team: e2eTeam, RepoID: e2eRepoID, Visibility: f.visibility, Ledger: ledgerPath, verified: true}
 }
 
