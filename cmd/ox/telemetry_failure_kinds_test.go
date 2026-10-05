@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/agentx"
+
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/gitserver"
@@ -20,10 +22,25 @@ import (
 // error_kind=other with an empty error_detail, so the dashboard cannot tell a
 // missing setup step from an ox bug.
 func TestSetupFailures_CarryAKindAndDetail(t *testing.T) {
-	for _, v := range []string{"SAGEOX_AGENT_ID", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID",
-		"AGENT_ENV", "CODEX_CI", "CODEX_SANDBOX", "CODEX_THREAD_ID"} {
+	// Every variable agentx v0.1.14 reads to detect a coding agent, plus ox's
+	// own: run from inside any AI coworker, the dispatcher would otherwise find
+	// that session and take a different branch.
+	for _, v := range []string{"SAGEOX_AGENT_ID", "AGENT_ENV", "_",
+		"CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID",
+		"CODEX_CI", "CODEX_SANDBOX", "CODEX_THREAD_ID",
+		"PI_CODING_AGENT", "PI_CODING_AGENT_DIR", "PI_SESSION_ID", "OMP_SESSION_ID",
+		"AIDER", "AIDER_AGENT", "AMP", "AMP_AGENT", "AMP_THREAD_URL", "CLINE", "CLINE_AGENT",
+		"CODEIUM_AGENT", "CODE_PUPPY", "CODE_PUPPY_AGENT", "CODY_AGENT", "CONTINUE_AGENT",
+		"COPILOT_AGENT", "CURSOR_AGENT", "DROID", "DROID_AGENT", "FACTORY_DROID",
+		"GEMINI", "GEMINI_AGENT", "GOOSE", "GOOSE_AGENT", "KIRO", "KIRO_AGENT",
+		"OPENCODE", "OPENCODE_AGENT", "WINDSURF_AGENT"} {
+		// Unset, not empty: some detectors test presence (Pi reads
+		// PI_CODING_AGENT_DIR with LookupEnv). t.Setenv restores it after.
 		t.Setenv(v, "")
+		require.NoError(t, os.Unsetenv(v))
 	}
+	t.Chdir(t.TempDir()) // no .codex/ or other agent directory to fall back to
+	require.Nil(t, agentx.CurrentAgent(), "isolation: no coding agent may be detected")
 
 	t.Run("not in a SageOx project", func(t *testing.T) {
 		t.Chdir(t.TempDir())

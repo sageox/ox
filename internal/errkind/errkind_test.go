@@ -46,8 +46,8 @@ func TestOf(t *testing.T) {
 // blamed on the person's login.
 func TestHTTPStatus(t *testing.T) {
 	for code, want := range map[int]Kind{401: Auth, 403: Auth, 404: Other, 429: Other, 500: Other, 502: Other} {
-		if got := HTTPStatus(code); got != want {
-			t.Errorf("HTTPStatus(%d) = %q, want %q", code, got, want)
-		}
+		t.Run(fmt.Sprint(code), func(t *testing.T) {
+			assert.Equal(t, want, HTTPStatus(code))
+		})
 	}
 }
