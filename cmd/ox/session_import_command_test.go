@@ -216,6 +216,29 @@ func TestParseImportSince(t *testing.T) {
 	}
 }
 
+// A session the Ledger holds only in part stays grouped under its label, and
+// the text preview still says, per session, what the Ledger lacks.
+//
+// Failure prevented: the text preview said "already imported, continued since"
+// without saying whether the continuation is anywhere in the Ledger.
+func TestImportTextPreviewSaysWhatTheLedgerLacks(t *testing.T) {
+	cand := func(id string, state importState, reason string) *importCandidate {
+		return &importCandidate{Session: nativeimport.Session{Agent: nativeimport.AgentCodex, NativeID: id}, State: state, Reason: reason}
+	}
+	cands := []*importCandidate{
+		cand(e2eCodexA, stateAlreadyImported, "continued after it was imported; the later part is not in the Ledger"),
+		cand(e2eCodexB, stateRecordedLive, "ox recorded it only from 2026-09-10 10:00 UTC; the part before that is not in the Ledger"),
+		cand(e2eClaudeA, stateAlreadyImported, ""),
+	}
+	var out bytes.Buffer
+	require.NoError(t, renderImportPreview(&out, importOptions{}, importDestination{Team: e2eTeam}, cands, importIgnored{}, true))
+	text := out.String()
+	assert.Contains(t, text, "  already imported, continued since (1)\n    "+nativeShortID(e2eCodexA)+": continued after it was imported; the later part is not in the Ledger\n")
+	assert.Contains(t, text, "  recorded live by ox, not from its start (1)\n    "+nativeShortID(e2eCodexB)+": ox recorded it only from")
+	assert.Contains(t, text, "  already imported (1)\n", "a session held in full needs no note")
+	assert.NotContains(t, text, nativeShortID(e2eClaudeA)+":")
+}
+
 // The preview's skip labels and counts are what a coworker reads to decide;
 // each state must say what it means.
 func TestImportPreviewLabels(t *testing.T) {

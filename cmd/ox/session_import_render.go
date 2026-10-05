@@ -105,6 +105,7 @@ func renderImportPreview(w io.Writer, opts importOptions, dest importDestination
 	}
 
 	skipped := map[string]int{}
+	notes := map[string][]string{} // per label: what the Ledger lacks of each partly held session
 	var hints []string
 	for _, c := range cands {
 		if c.Selected || c.State == stateReady {
@@ -112,6 +113,9 @@ func renderImportPreview(w io.Writer, opts importOptions, dest importDestination
 		}
 		label := skipLabel(c)
 		skipped[label]++
+		if (c.State == stateAlreadyImported || c.State == stateRecordedLive) && c.Reason != "" {
+			notes[label] = append(notes[label], nativeShortID(c.Session.NativeID)+": "+c.Reason)
+		}
 		if c.State == stateInProgress && !importHasString(hints, "in progress → finish it, then rerun") {
 			hints = append(hints, "in progress → finish it, then rerun")
 		}
@@ -128,6 +132,9 @@ func renderImportPreview(w io.Writer, opts importOptions, dest importDestination
 		sort.Strings(labels)
 		for _, label := range labels {
 			fmt.Fprintf(w, "  %s (%d)\n", label, skipped[label])
+			for _, note := range notes[label] {
+				fmt.Fprintf(w, "    %s\n", note)
+			}
 		}
 		for _, h := range hints {
 			fmt.Fprintf(w, "  %s\n", h)
