@@ -95,11 +95,13 @@ func TestFinalize_WedgedPushPausesTypeAndNothingElsePushes(t *testing.T) {
 	handler := newGitBackedHandler()
 	handler.logger = logger
 	// the fake LFS store has the uploaded blobs but 404s the raw OID on the
-	// download check the repair makes; the cache still holds the real bytes, so
-	// the repair refuses to blank them and errors — the shape of a wedge the
-	// repair cannot fix
+	// download check the repair makes. The repair re-uploads the object from the
+	// recovery cache (the cache holds the exact bytes), and the store refuses it
+	// the second time — the shape of a wedge the repair cannot fix. Without that
+	// refusal the repair succeeds and the push is legitimately retried.
 	rawOID := lfs.ComputeOID([]byte(testRawContent))
-	enableLocalFinalizeLFS(t, handler, ledger, rawOID)
+	service := enableLocalFinalizeLFS(t, handler, ledger, rawOID)
+	service.refuseRepeatOf.Store(&rawOID)
 
 	m := NewManager(NewMockRunner(true), logger, func() *config.AgentWorkerConfig { return enabledConfigWith(1, 1000) }, make(chan struct{}, 1), ledger, "")
 	m.RegisterHandler(handler)
