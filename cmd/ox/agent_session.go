@@ -201,6 +201,10 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 		}
 		sessionsBase := filepath.Join(contextPath, "sessions")
 		sessionPath := filepath.Join(sessionsBase, sessionName)
+		// never write into, or clean up, a held session's folder
+		if session.IsHeld(sessionPath) {
+			return fmt.Errorf("%w: %s", session.ErrHeldSessionPath, sessionPath)
+		}
 
 		if err := os.MkdirAll(sessionPath, 0755); err != nil {
 			return fmt.Errorf("create session dir: %w", err)
@@ -710,6 +714,9 @@ func recordSessionObservation(projectRoot string, result *agentSessionResult, du
 	if result == nil || result.EntryCount == 0 {
 		return // nothing interesting to record
 	}
+	if result.Held {
+		return // a held session leaves nothing on the team's side, not even a snippet
+	}
 
 	tc := config.FindRepoTeamContext(projectRoot)
 	if tc == nil {
@@ -750,6 +757,9 @@ func outputTextSummary(projectRoot string, state *session.RecordingState, durati
 	if processResult != nil {
 		if processResult.Model != "" {
 			fmt.Printf("  Model: %s\n", processResult.Model)
+		}
+		if processResult.Held {
+			fmt.Printf("  %s\n", processResult.UploadWarning)
 		}
 
 		// show generated files with descriptions
@@ -872,6 +882,10 @@ func outputSessionStopJSON(projectRoot string, inst *agentinstance.Instance, sta
 		// async mode: summary_prompt is empty, update guidance
 		if processResult.SummaryPrompt == "" {
 			output.Guidance = "Session stopped and saved. Upload and summary generation happen automatically in the background."
+		}
+		output.Held = processResult.Held
+		if processResult.Held {
+			output.Guidance = heldSessionGuidance
 		}
 	} else {
 		output.UploadWarning = "no session file found — session data was not uploaded to ledger"
@@ -1202,6 +1216,13 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	summarizerMode := config.GetAgentSummarizer(projectRoot)
 	summarizerOff := summarizerMode == config.AgentSummarizerOff
 
+	// A held session gets its hold before anything the daemon reacts to, and
+	// no summary prompt: push-summary publishes (GH #1093).
+	held := stopHoldsSession(projectRoot, state)
+	if held {
+		holdStoppedSession(result, filepath.Dir(result.RawPath), "session_stop")
+	}
+
 	// Compress raw.jsonl into the ledger cache (.sageox/cache/summary-input/)
 	// before the summarizer reads it. ConversationOnly mode keeps user+assistant
 	// turns verbatim, tool entries become compact markers, system entries are
@@ -1211,7 +1232,7 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	//
 	// Skip compression entirely when summarizer is off — no summarizer will
 	// ever read the optimized file, so the work is pure waste.
-	if !summarizerOff {
+	if !summarizerOff && !held {
 		summaryInputPath := writeOptimizedJSONLForSummary(result.RawPath, ledgerPath, sessionName)
 		if summaryInputPath == "" {
 			summaryInputPath = result.RawPath
@@ -1253,13 +1274,10 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 		}
 	}
 
-	// check session publishing mode before attempting upload
-	publishMode := config.GetSessionPublishing(projectRoot)
-	if publishMode == config.SessionPublishingManual {
-		// manual mode: save locally, skip upload
-		slog.Info("session publishing mode is manual, skipping upload", "session", sessionName)
+	if held {
+		slog.Info("session held on this machine, skipping upload", "session", sessionName)
 		result.LedgerSessionDir = ""
-		result.UploadWarning = "Session saved locally (publishing mode: manual). Use 'ox session upload' to publish."
+		result.UploadWarning = heldSessionWarning(sessionName)
 		return result, nil
 	}
 

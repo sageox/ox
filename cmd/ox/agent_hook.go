@@ -15,7 +15,6 @@ import (
 
 	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/config"
-	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/logger"
 	"github.com/sageox/ox/internal/paths"
@@ -354,21 +353,8 @@ func stopSessionForClear(ctx *HookContext, agentID string) {
 	// gone; hand it the native session ids and the stop time on a footer
 	_ = stampRecordingCarrierAtStop(state, now)
 
-	// fire-and-forget IPC to daemon to finalize the stopped session
-	if state.SessionPath != "" {
-		if ledgerPath := deriveLedgerPath(state.SessionPath); ledgerPath != "" {
-			client := daemon.NewClientForCurrentRepoWithTimeout(100 * time.Millisecond)
-			sessionName := filepath.Base(state.SessionPath)
-			if ipcErr := client.SessionFinalize(daemon.SessionFinalizeIPCPayload{
-				SessionName: sessionName,
-				LedgerPath:  ledgerPath,
-				CachePath:   state.SessionPath,
-				ProjectRoot: ctx.ProjectRoot,
-			}); ipcErr != nil {
-				slog.Debug("hook: clear finalize IPC failed", "error", ipcErr)
-			}
-		}
-	}
+	// fire-and-forget IPC to daemon to finalize the stopped session, or hold it
+	finalizeOrHoldOnHookStop(ctx, state, "clear")
 
 	// clear recording state so prime starts a fresh session
 	if clearErr := session.ClearRecordingStateForAgent(ctx.ProjectRoot, agentID); clearErr != nil {
@@ -436,20 +422,7 @@ func handleEnd(ctx *HookContext) error {
 	// dispatch delegated finalization via daemon IPC. Best-effort: if the
 	// daemon is unreachable, the daemon's anti-entropy sweep will still
 	// pick up the StoppedAt-marked recording within the 24h stale window.
-	if state.SessionPath != "" {
-		if ledgerPath := deriveLedgerPath(state.SessionPath); ledgerPath != "" {
-			client := daemon.NewClientForCurrentRepoWithTimeout(100 * time.Millisecond)
-			sessionName := filepath.Base(state.SessionPath)
-			if ipcErr := client.SessionFinalize(daemon.SessionFinalizeIPCPayload{
-				SessionName: sessionName,
-				LedgerPath:  ledgerPath,
-				CachePath:   state.SessionPath,
-				ProjectRoot: ctx.ProjectRoot,
-			}); ipcErr != nil {
-				slog.Debug("hook: end finalize IPC failed", "error", ipcErr)
-			}
-		}
-	}
+	finalizeOrHoldOnHookStop(ctx, state, "end")
 
 	if clearErr := session.ClearRecordingStateForAgent(ctx.ProjectRoot, agentID); clearErr != nil {
 		slog.Debug("hook: end could not remove recording state", "agent_id", agentID, "error", clearErr)

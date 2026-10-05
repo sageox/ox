@@ -296,10 +296,17 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 	if ledgerErr == nil {
 		result.LedgerSessionDir = filepath.Join(ledgerPath, "sessions", sessionName)
 	}
-	result.SummaryPrompt = session.BuildSummaryPrompt(sessionEntries, result.RawPath, result.LedgerSessionDir)
 
+	// A held session gets its hold before anything the daemon reacts to, and
+	// no summary prompt: push-summary publishes (GH #1093).
 	sessionCacheDir := filepath.Dir(result.RawPath)
-	_ = session.WriteNeedsSummaryMarker(sessionCacheDir, result.RawPath, result.LedgerSessionDir)
+	held := stopHoldsSession(projectRoot, state)
+	if held {
+		holdStoppedSession(result, sessionCacheDir, "session_stop")
+	} else {
+		result.SummaryPrompt = session.BuildSummaryPrompt(sessionEntries, result.RawPath, result.LedgerSessionDir)
+		_ = session.WriteNeedsSummaryMarker(sessionCacheDir, result.RawPath, result.LedgerSessionDir)
+	}
 
 	// generate all session artifacts via shared path
 	artifactPaths, artifactErr := session.WriteSessionArtifacts(filepath.Dir(result.RawPath), storedSession, summaryResp)
@@ -327,11 +334,10 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 	}
 
 	// ledger upload
-	publishMode := config.GetSessionPublishing(projectRoot)
-	if publishMode == config.SessionPublishingManual {
-		slog.Info("session publishing mode is manual, skipping upload", "session", sessionName)
+	if held {
+		slog.Info("session held on this machine, skipping upload", "session", sessionName)
 		result.LedgerSessionDir = ""
-		result.UploadWarning = "Session saved locally (publishing mode: manual). Use 'ox session upload' to publish."
+		result.UploadWarning = heldSessionWarning(sessionName)
 		return result, nil
 	}
 
