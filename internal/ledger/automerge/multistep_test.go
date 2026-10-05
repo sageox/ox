@@ -81,7 +81,8 @@ func TestResolve_CarriesRebaseThroughSequentialConflicts(t *testing.T) {
 	var resolvedSteps int
 	r.runLLM = func(ctx context.Context, binary, prompt string) (string, error) {
 		resolvedSteps++
-		return fmt.Sprintf("merged at step %d\n", resolvedSteps), nil
+		// a lossless merge: keep every line from both sides of the hunk
+		return strings.Join(conflictSideLines([]byte(prompt)), "\n") + "\n", nil
 	}
 
 	ok, err := r.Resolve(context.Background(), repo)

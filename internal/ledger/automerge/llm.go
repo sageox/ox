@@ -117,6 +117,13 @@ func (r *Resolver) mergeOneWithLLM(ctx context.Context, repoPath, path string) e
 	if gitutil.HasConflictMarkersBytes([]byte(merged)) {
 		return fmt.Errorf("llm output still contains conflict markers")
 	}
+	// Marker-free output is only syntactically clean. The prompt asks the
+	// model to keep both sides; this enforces it, so a merge that silently
+	// drops or paraphrases one side's lines is refused instead of committed.
+	if dropped := droppedSideLines(conflictSideLines(data), merged); len(dropped) > 0 {
+		r.logger.Warn("automerge.llm.dropped_content", "path", path, "lines_dropped", len(dropped))
+		return fmt.Errorf("llm output dropped %d line(s) from a conflict side", len(dropped))
+	}
 
 	// preserve original file mode (info from the Lstat above; we already
 	// confirmed it's a regular file)
@@ -129,6 +136,66 @@ func (r *Resolver) mergeOneWithLLM(ctx context.Context, repoPath, path string) e
 	}
 	r.logger.Info("automerge.llm.merged", "path", path, "bytes_in", len(data), "bytes_out", len(merged))
 	return nil
+}
+
+// conflictSideLines returns the non-blank lines inside every conflict hunk,
+// from both the "ours" and "theirs" sections. A diff3 base section
+// ("|||||||" up to "=======") is skipped: it is the common ancestor, which a
+// correct merge may legitimately discard.
+func conflictSideLines(data []byte) []string {
+	const (
+		outside = iota
+		side
+		base
+	)
+	state := outside
+	var lines []string
+	for _, line := range strings.Split(string(data), "\n") {
+		bare := strings.TrimSuffix(line, "\r")
+		switch {
+		case strings.HasPrefix(bare, gitutil.ConflictMarkerStart):
+			state = side
+		case state != outside && strings.HasPrefix(bare, "|||||||"):
+			state = base
+		case state != outside && bare == "=======":
+			state = side
+		case state != outside && strings.HasPrefix(bare, ">>>>>>>"):
+			state = outside
+		case state == side:
+			if n := normalizeMergeLine(bare); n != "" {
+				lines = append(lines, n)
+			}
+		}
+	}
+	return lines
+}
+
+// droppedSideLines returns the conflict-side lines that do not appear in
+// merged. Lines are compared after normalizeMergeLine, so re-indenting or
+// adding the comma a union of two list entries needs is not a drop.
+//
+// A conflict where both sides rewrote the same line cannot pass: keeping
+// both is the only merge this accepts. That is deliberate — the tier then
+// fails exactly as it does with no LLM configured, and the conflict is left
+// for a person rather than resolved by discarding someone's record.
+func droppedSideLines(sides []string, merged string) []string {
+	present := make(map[string]bool)
+	for _, line := range strings.Split(merged, "\n") {
+		present[normalizeMergeLine(line)] = true
+	}
+	var dropped []string
+	for _, line := range sides {
+		if !present[line] {
+			dropped = append(dropped, line)
+		}
+	}
+	return dropped
+}
+
+// normalizeMergeLine strips whitespace and one trailing comma.
+func normalizeMergeLine(line string) string {
+	line = strings.TrimSpace(line)
+	return strings.TrimSpace(strings.TrimSuffix(line, ","))
 }
 
 // buildPrompt assembles the per-file prompt. Both 'ours' and 'theirs' are

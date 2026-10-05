@@ -170,7 +170,7 @@ func TestResolve_LLMTier(t *testing.T) {
 	}
 	r.opts.LLMBinary = gitBin
 	r.runLLM = func(ctx context.Context, binary, prompt string) (string, error) {
-		return "version = \"ours-and-theirs\"\n", nil
+		return "version = \"ours\"\nversion = \"theirs\"\n", nil
 	}
 
 	ok, err := r.Resolve(context.Background(), repo)
@@ -181,7 +181,7 @@ func TestResolve_LLMTier(t *testing.T) {
 		t.Fatal("expected ok=true")
 	}
 	got := readFile(t, repo, "config.toml")
-	if !strings.Contains(got, "ours-and-theirs") {
+	if !strings.Contains(got, "\"ours\"") || !strings.Contains(got, "\"theirs\"") {
 		t.Errorf("expected merged content, got: %s", got)
 	}
 }

@@ -191,3 +191,71 @@ func TestMergeOneWithLLM_HonorsTimeout(t *testing.T) {
 		t.Errorf("timeout not respected: took %s", time.Since(start))
 	}
 }
+
+// TestMergeOneWithLLM_ContentPreservation covers the post-condition beyond
+// "no markers left": every line from both conflict sides must survive.
+// Failure prevented: a model keeps one side (or paraphrases both) and the
+// lossy result is staged as a resolved merge of the team's memory.
+func TestMergeOneWithLLM_ContentPreservation(t *testing.T) {
+	t.Parallel()
+	const conflicted = "# Memory\n<<<<<<< HEAD\n- Devon chose Postgres\n=======\n- Avery chose SQLite\n>>>>>>> br\ntail\n"
+	cases := []struct {
+		name    string
+		in      string
+		out     string
+		wantErr bool
+	}{
+		{"union keeps both", conflicted, "# Memory\n- Devon chose Postgres\n- Avery chose SQLite\ntail\n", false},
+		{"reorder keeps both", conflicted, "# Memory\n- Avery chose SQLite\n- Devon chose Postgres\ntail\n", false},
+		{"drops theirs", conflicted, "# Memory\n- Devon chose Postgres\ntail\n", true},
+		{"drops ours", conflicted, "# Memory\n- Avery chose SQLite\ntail\n", true},
+		{"paraphrases both", conflicted, "# Memory\n- Team weighed Postgres vs SQLite\ntail\n", true},
+		{
+			"json union may add a comma and reindent",
+			"{\n<<<<<<< HEAD\n  \"a\": 1\n=======\n  \"b\": 2\n>>>>>>> br\n}\n",
+			"{\n    \"a\": 1,\n    \"b\": 2\n}\n",
+			false,
+		},
+		{
+			"diff3 base may be discarded",
+			"<<<<<<< HEAD\nours\n||||||| base\nancestor\n=======\ntheirs\n>>>>>>> br\n",
+			"ours\ntheirs\n",
+			false,
+		},
+		{
+			"same line rewritten on both sides is refused",
+			"<<<<<<< HEAD\nversion: 2\n=======\nversion: 3\n>>>>>>> br\n",
+			"version: 3\n",
+			true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			repo := initTestRepo(t, t.TempDir())
+			path := "MEMORY.md"
+			writeFile(t, repo, path, tc.in)
+
+			r := New(Options{LLMBinary: "fake"})
+			r.runLLM = func(ctx context.Context, binary, prompt string) (string, error) {
+				return tc.out, nil
+			}
+			err := r.mergeOneWithLLM(context.Background(), repo, path)
+			if tc.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "dropped") {
+					t.Fatalf("expected dropped-content rejection, got: %v", err)
+				}
+				if got := readFile(t, repo, path); got != tc.in {
+					t.Errorf("rejected merge must leave the file untouched, got %q", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("mergeOneWithLLM: %v", err)
+			}
+			if got := readFile(t, repo, path); got != tc.out {
+				t.Errorf("file content = %q, want %q", got, tc.out)
+			}
+		})
+	}
+}
