@@ -235,7 +235,17 @@ func validateStructured(path, merged string) error {
 	case ".toml":
 		return toml.Unmarshal([]byte(merged), &v)
 	case ".yaml", ".yml":
-		return yaml.Unmarshal([]byte(merged), &v)
+		// Unmarshal reads only the first document; walk every one after "---".
+		dec := yaml.NewDecoder(strings.NewReader(merged))
+		for {
+			var doc any
+			if err := dec.Decode(&doc); err != nil {
+				if errors.Is(err, io.EOF) {
+					return nil
+				}
+				return err
+			}
+		}
 	}
 	return nil
 }

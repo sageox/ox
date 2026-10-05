@@ -268,6 +268,20 @@ func TestMergeOneWithLLM_ContentPreservation(t *testing.T) {
 			"not valid",
 		},
 		{
+			"yaml duplicate key in a later document is refused",
+			"config.yaml",
+			"name: x\n---\n<<<<<<< HEAD\nversion: 2\n=======\nversion: 3\n>>>>>>> br\n",
+			"name: x\n---\nversion: 2\nversion: 3\n",
+			"not valid",
+		},
+		{
+			"valid multi-document yaml passes",
+			"config.yaml",
+			"name: x\n---\n<<<<<<< HEAD\nours: 1\n=======\ntheirs: 2\n>>>>>>> br\n",
+			"name: x\n---\nours: 1\ntheirs: 2\n",
+			"",
+		},
+		{
 			"json union missing its comma is refused",
 			"state.json",
 			"{\n<<<<<<< HEAD\n  \"a\": 1\n=======\n  \"b\": 2\n>>>>>>> br\n}\n",
