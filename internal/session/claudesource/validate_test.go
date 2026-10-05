@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -530,4 +531,70 @@ func TestValidateAcceptsASubmoduleOfALinkedWorktreeRoot(t *testing.T) {
 			t.Fatalf("%s: a submodule cannot be vouched for, got %v", name, err)
 		}
 	}
+}
+
+// A directory that resolves but cannot be searched, or a .git file that cannot be
+// read, is "cannot check", not "another repository". Treating it as foreign
+// quarantines the session permanently, and a release re-runs the same check.
+func TestValidateDefersWhenAMarkerCannotBeInspected(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs enforced Unix permissions")
+	}
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const id = "77b16b24-5b7d-4598-aacf-4c9afeb4b5ca"
+	write := func(t *testing.T, cwd string) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), id+".jsonl")
+		if err := os.WriteFile(path, []byte(fmt.Sprintf("{\"type\":\"user\",\"sessionId\":%q,\"cwd\":%q}\n", id, cwd)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	t.Run("directory that is not searchable", func(t *testing.T) {
+		locked := filepath.Join(root, "locked")
+		if err := os.Mkdir(locked, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(locked, 0o000); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+		err := Validate(write(t, locked), root, id)
+		if !errors.Is(err, ErrUncheckable) || errors.Is(err, ErrUntrustedSource) {
+			t.Fatalf("an uninspectable directory defers, got %v", err)
+		}
+	})
+
+	t.Run("gitlink that cannot be read", func(t *testing.T) {
+		sub := filepath.Join(root, "sub")
+		if err := os.Mkdir(sub, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		gitlink := filepath.Join(sub, ".git")
+		if err := os.WriteFile(gitlink, []byte("gitdir: ../.git/modules/sub\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(gitlink, 0o000); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(gitlink, 0o600) })
+		err := Validate(write(t, sub), root, id)
+		if !errors.Is(err, ErrUncheckable) || errors.Is(err, ErrUntrustedSource) {
+			t.Fatalf("an unreadable gitlink defers, got %v", err)
+		}
+	})
+
+	t.Run("an owned directory still passes", func(t *testing.T) {
+		ok := filepath.Join(root, "fine")
+		if err := os.Mkdir(ok, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := Validate(write(t, ok), root, id); err != nil {
+			t.Fatalf("ordinary subdirectory: %v", err)
+		}
+	})
 }

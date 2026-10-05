@@ -208,7 +208,13 @@ func judgeCwd(repoRoot, cwd string) (cwdVerdict, error) {
 	if err != nil {
 		return cwdUnknown, fmt.Errorf("%w: cannot verify Claude source cwd: %s", ErrUncheckable, err.Error())
 	}
-	if withinRepo(repoRoot, resolved) {
+	inside, err := withinRepo(repoRoot, resolved)
+	if err != nil {
+		// a marker that cannot be looked at (a directory that is readable but not
+		// searchable, an I/O error) proves nothing about ownership: defer
+		return cwdUnknown, fmt.Errorf("%w: cannot verify Claude source cwd: %s", ErrUncheckable, err.Error())
+	}
+	if inside {
 		return cwdOwned, nil
 	}
 	return cwdForeign, nil
@@ -258,79 +264,105 @@ func resolveVanished(path string, strict bool) (string, error) {
 
 // withinRepo reports whether cwd, already symlink-resolved, lies inside
 // repoRoot and outside any nested repository.
-func withinRepo(repoRoot, cwd string) bool {
+func withinRepo(repoRoot, cwd string) (bool, error) {
 	if !filepath.IsAbs(cwd) {
-		return false
+		return false, nil
 	}
 	rel, err := filepath.Rel(repoRoot, cwd)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
-		return false
+		return false, nil
 	}
 	// A nested Git worktree or initialized Ox project owns its own ledger;
-	// containment in the parent's filesystem tree does not imply ownership.
+	// containment in the parent's filesystem tree does not imply ownership. Only
+	// "not there" counts as absence: any other failure to look (EACCES, I/O) is an
+	// error, because a marker that cannot be seen cannot be ruled out.
 	for dir := cwd; dir != repoRoot; {
 		for _, marker := range []string{".git", filepath.Join(".sageox", "config.json"), filepath.Join(".sageox", "config.yaml")} {
 			info, err := os.Lstat(filepath.Join(dir, marker))
-			if err != nil && os.IsNotExist(err) {
+			if errors.Is(err, fs.ErrNotExist) {
 				continue
+			}
+			if err != nil {
+				return false, fmt.Errorf("inspect %s: %w", filepath.Join(dir, marker), err)
 			}
 			// a submodule is checked out inside this repo and recorded in its
 			// history; its .git file points back into this repo's own git dir
-			if err == nil && marker == ".git" && info.Mode().IsRegular() && isOwnSubmodule(repoRoot, dir) {
-				continue
+			if marker == ".git" && info.Mode().IsRegular() {
+				own, ownErr := isOwnSubmodule(repoRoot, dir)
+				if ownErr != nil {
+					return false, ownErr
+				}
+				if own {
+					continue
+				}
 			}
-			return false
+			return false, nil
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			return false // do not spin if a malformed root never matches
+			return false, nil // do not spin if a malformed root never matches
 		}
 		dir = parent
 	}
-	return true
+	return true, nil
 }
 
 // isOwnSubmodule reports whether dir's .git file is a gitlink into repoRoot's
 // own modules directory. A linked worktree or a separate clone also has a .git
-// file, but its git dir lives elsewhere, so it stays foreign.
-func isOwnSubmodule(repoRoot, dir string) bool {
-	gitdir, ok := readGitlink(filepath.Join(dir, ".git"))
-	if !ok {
-		return false
+// file, but its git dir lives elsewhere, so it stays foreign. A file that cannot
+// be read is an error, not a verdict.
+func isOwnSubmodule(repoRoot, dir string) (bool, error) {
+	gitdir, ok, err := readGitlink(filepath.Join(dir, ".git"))
+	if err != nil || !ok {
+		return false, err
 	}
-	gitdir, err := filepath.EvalSymlinks(gitdir)
+	gitdir, err = filepath.EvalSymlinks(gitdir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil // a gitlink to nowhere cannot be vouched for
+	}
 	if err != nil {
-		return false
+		return false, err
 	}
 	repoGitDir := filepath.Join(repoRoot, ".git")
-	if info, err := os.Lstat(repoGitDir); err == nil && info.Mode().IsRegular() {
+	if info, statErr := os.Lstat(repoGitDir); statErr == nil && info.Mode().IsRegular() {
 		// repoRoot is itself a linked worktree: its submodules live under
 		// the git dir its own .git file names
-		if repoGitDir, ok = readGitlink(repoGitDir); !ok {
-			return false
+		repoGitDir, ok, err = readGitlink(repoGitDir)
+		if err != nil || !ok {
+			return false, err
 		}
 	}
 	repoGitDir, err = filepath.EvalSymlinks(repoGitDir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
 	if err != nil {
-		return false
+		return false, err
 	}
 	rel, err := filepath.Rel(filepath.Join(repoGitDir, "modules"), gitdir)
-	return err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
+	return err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)), nil
 }
 
-// readGitlink returns the absolute git dir a ".git" file points at.
-func readGitlink(path string) (string, bool) {
+// readGitlink returns the absolute git dir a ".git" file points at. ok is false
+// for a file that is not a gitlink; err is set when it could not be read.
+func readGitlink(path string) (target string, ok bool, err error) {
 	data, err := os.ReadFile(path)
-	if err != nil || len(data) > 4096 {
-		return "", false
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", false, nil
 	}
-	target, ok := strings.CutPrefix(strings.TrimSpace(string(data)), "gitdir:")
+	if err != nil {
+		return "", false, err
+	}
+	if len(data) > 4096 {
+		return "", false, nil
+	}
+	target, ok = strings.CutPrefix(strings.TrimSpace(string(data)), "gitdir:")
 	if !ok {
-		return "", false
+		return "", false, nil
 	}
 	target = strings.TrimSpace(target)
 	if !filepath.IsAbs(target) {
 		target = filepath.Join(filepath.Dir(path), target)
 	}
-	return target, true
+	return target, true, nil
 }
