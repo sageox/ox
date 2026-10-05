@@ -270,6 +270,7 @@ func rejectDuplicateJSONKeys(data string) error {
 	}
 	var stack []*frame
 	dec := json.NewDecoder(strings.NewReader(data))
+	dec.UseNumber() // no float64 conversion: valid numbers like 1e400 must not error
 	for {
 		tok, err := dec.Token()
 		if errors.Is(err, io.EOF) {

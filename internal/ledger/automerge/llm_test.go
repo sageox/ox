@@ -303,6 +303,13 @@ func TestMergeOneWithLLM_ContentPreservation(t *testing.T) {
 			"",
 		},
 		{
+			"json number beyond float64 range passes",
+			"state.json",
+			"{\n<<<<<<< HEAD\n  \"big\": 1e400\n=======\n  \"small\": 2\n>>>>>>> br\n}\n",
+			"{\n  \"big\": 1e400,\n  \"small\": 2\n}\n",
+			"",
+		},
+		{
 			"json union missing its comma is refused",
 			"state.json",
 			"{\n<<<<<<< HEAD\n  \"a\": 1\n=======\n  \"b\": 2\n>>>>>>> br\n}\n",
