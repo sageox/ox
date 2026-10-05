@@ -390,3 +390,60 @@ func TestFinalizeHandlerDropsAQuarantinedRecording(t *testing.T) {
 		})
 	}
 }
+
+// Quarantining sets one flag under the recording-state lock. The daemon read the
+// recording earlier; a hook or CLI update committed since then (hook counters,
+// the cursor, a rediscovered source) must survive, and the daemon's own
+// in-memory edits must not be persisted.
+func TestQuarantineWritesOnlyTheFlag(t *testing.T) {
+	repo, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const id = "77b16b24-5b7d-4598-aacf-4c9afeb4b5ca"
+	source := filepath.Join(t.TempDir(), id+".jsonl")
+	foreign := fmt.Sprintf("{\"type\":\"user\",\"sessionId\":%q,\"cwd\":%q}\n", id, filepath.Dir(repo))
+	if err := os.WriteFile(source, []byte(foreign), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := claudesource.Snapshot(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionDir := t.TempDir()
+	recPath := filepath.Join(sessionDir, recordingMarker)
+	// what the daemon read at the start of recovery
+	stale := session.RecordingState{
+		AgentID: "OxFlag", SessionID: "ses_flag", AdapterName: "claude-code", WatchMode: "hook",
+		WorkspacePath: repo, SessionFile: source, AgentSessionID: id,
+	}
+	// what is on disk now: a hook committed since
+	onDisk := stale
+	onDisk.HookInvocations = 7
+	onDisk.LastHookStatus = "ok"
+	onDisk.SourceOffset = 4096
+	writeRecordingState(t, recPath, onDisk)
+
+	// the daemon edits its own copy on the way (a rewritten source path, say)
+	edited := stale
+	edited.SessionFile = filepath.Join(t.TempDir(), "rewritten.jsonl")
+
+	err = validateClaudeRecoverySource(&edited, repo, sessionDir, snapshot)
+	if !errors.Is(err, claudesource.ErrUntrustedSource) {
+		t.Fatalf("a foreign turn is refused, got %v", err)
+	}
+
+	got, err := session.ReadRecordingStateFile(sessionDir)
+	if err != nil || got == nil {
+		t.Fatalf("read marker: %v", err)
+	}
+	if !got.SourceRejected {
+		t.Fatal("the quarantine must be recorded")
+	}
+	if got.HookInvocations != 7 || got.LastHookStatus != "ok" || got.SourceOffset != 4096 {
+		t.Fatalf("an update committed since the daemon read the recording was overwritten: %+v", got)
+	}
+	if got.SessionFile != source {
+		t.Fatalf("the daemon's in-memory edit must not be persisted, SessionFile=%q", got.SessionFile)
+	}
+}
