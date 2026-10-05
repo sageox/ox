@@ -73,7 +73,8 @@ const maxIntrospectBody = 1 << 20
 //	 "scope": "...", "token_type": "Bearer", "expires_at": <timestamp|null>,
 //	 "user": {"id","email","name","tier"} | null,
 //	 "team": {"team_id"} | null,
-//	 "token": {"prefix","name"} | null}
+//	 "token": {"prefix","name"} | null,
+//	 "coworker": {"id","display_name"} | null}
 //
 // Exactly one of User/Team is non-nil, matching PrincipalKind.
 type IntrospectResult struct {
@@ -85,6 +86,10 @@ type IntrospectResult struct {
 	User          *IntrospectUser      `json:"user"`
 	Team          *IntrospectTeam      `json:"team"`
 	Token         *IntrospectTokenInfo `json:"token"`
+	// Coworker stays undecoded because a missing key and null mean different
+	// things: a server older than the field sends no key, while null says the
+	// team token has no AI coworker attached. See TeamCoworker.
+	Coworker json.RawMessage `json:"coworker"`
 }
 
 // FlexTime tolerates every timestamp encoding a conforming server might
@@ -168,10 +173,14 @@ type IntrospectTokenInfo struct {
 // string-matching. The underlying transport error stays discoverable via
 // errors.As.
 func Introspect(ep, accessToken string) (*IntrospectResult, error) {
+	return introspect(context.Background(), ep, accessToken)
+}
+
+func introspect(ctx context.Context, ep, accessToken string) (*IntrospectResult, error) {
 	ep = endpoint.NormalizeEndpoint(ep)
 	url := strings.TrimSuffix(ep, "/") + IntrospectEndpoint
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	req, err := useragent.NewRequest(ctx, "GET", url, nil)

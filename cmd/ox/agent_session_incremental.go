@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
+	"github.com/sageox/ox/internal/session/claudesource"
 	"github.com/sageox/ox/internal/version"
 )
 
@@ -108,10 +110,45 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 			slog.Info("finalize: final drain", "source", state.SessionFile, "file_size", fi.Size(), "read_offset", readOffset, "start_offset", state.StartOffset)
 		}
 
-		entries, newOffset, readErr := reader.ReadFromOffset(state.SessionFile, readOffset)
-		if readErr != nil {
-			return nil, fmt.Errorf("read final session entries: %w", readErr)
-		} else if len(entries) > 0 {
+		var sourceSnapshot os.FileInfo
+		// A native transcript or workspace that no longer exists cannot be
+		// drained or rechecked, but raw.jsonl was ownership-checked batch by
+		// batch as it was written. Finalize that capture rather than fail
+		// every stop and recover on a source that will never come back.
+		skipDrain := false
+		if state.AdapterName == "claude-code" {
+			var snapshotErr error
+			sourceSnapshot, snapshotErr = claudesource.Snapshot(state.SessionFile)
+			if errors.Is(snapshotErr, fs.ErrNotExist) {
+				slog.Warn("finalize: native session is gone; finalizing the captured recording", "source", state.SessionFile)
+				skipDrain = true
+			} else if snapshotErr != nil {
+				return nil, fmt.Errorf("stat native session before final drain: %w", snapshotErr)
+			}
+		}
+		var entries []adapters.RawEntry
+		var newOffset int64
+		if !skipDrain {
+			var readErr error
+			entries, newOffset, readErr = reader.ReadFromOffset(state.SessionFile, readOffset)
+			if readErr != nil {
+				return nil, fmt.Errorf("read final session entries: %w", readErr)
+			}
+		}
+		if state.AdapterName == "claude-code" && !skipDrain {
+			repoRoot := state.WorkspacePath
+			if repoRoot == "" {
+				repoRoot = projectRoot
+			}
+			if err := claudesource.ValidateRecorded(state.SessionFile, repoRoot, state.AgentSessionID, state.StartOffset, sourceSnapshot); errors.Is(err, claudesource.ErrSourceGone) {
+				// the transcript itself vanished mid-check: nothing read can be vouched for
+				slog.Warn("finalize: native session cannot be rechecked; finalizing the captured recording", "source", state.SessionFile, "error", err)
+				entries = nil
+			} else if err != nil {
+				return nil, fmt.Errorf("claude source changed repository during final drain: %w", err)
+			}
+		}
+		if len(entries) > 0 {
 			slog.Info("finalize: drain result", "entries_read", len(entries), "new_offset", newOffset)
 
 			// filter entries by timestamp — strict After() to prevent boundary leaks

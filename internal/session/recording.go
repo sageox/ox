@@ -8,10 +8,13 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/sageox/agentx"
+	"github.com/sageox/ox/internal/auth"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/paths"
@@ -25,6 +28,11 @@ var (
 
 	// ErrAlreadyRecording is returned when start is called but already recording
 	ErrAlreadyRecording = errors.New("already recording a session")
+
+	// ErrQuarantinedSessionPath is returned when a new recording would land in
+	// the session folder of a quarantined one (session names are minute-granular).
+	// The quarantined recording is left untouched and the start is refused.
+	ErrQuarantinedSessionPath = errors.New("a quarantined recording occupies this session folder")
 
 	// ErrNoLedger is returned when session recording is attempted but no ledger is configured
 	ErrNoLedger = errors.New("no ledger configured for this project")
@@ -121,6 +129,9 @@ type RecordingState struct {
 	Model          string `json:"model,omitempty"`           // LLM model for generic adapters where ReadMetadata returns nil
 	ParentPID      int    `json:"parent_pid,omitempty"`      // parent agent process ID for liveness detection
 	SourceOffset   int64  `json:"source_offset,omitempty"`   // byte offset in source file for incremental reading
+	// Preserve a rejected native source and captured prefix for manual ownership
+	// review, but do not keep retrying or publish a mixed-repository session.
+	SourceRejected bool `json:"source_rejected,omitempty"`
 	// Committed with SourceOffset, so crash replay restores the same privacy state.
 	CommandRedactionVersion  int               `json:"command_redaction_version,omitempty"`
 	PendingCommandRedactions map[string]string `json:"pending_command_redactions,omitempty"`
@@ -374,6 +385,9 @@ func LoadRecordingState(projectRoot string) (*RecordingState, error) {
 			if err := json.Unmarshal(data, &state); err != nil {
 				continue // invalid JSON, skip
 			}
+			if state.SourceRejected {
+				continue // held for review, not recording
+			}
 
 			return &state, nil
 		}
@@ -468,6 +482,11 @@ func LoadAllRecordingStates(projectRoot string) ([]*RecordingState, error) {
 // Returns nil, nil if no recording for that agent exists.
 // Use this instead of LoadRecordingState when you have an agent ID to avoid
 // accidentally operating on another concurrent agent's recording.
+//
+// A quarantined recording (SourceRejected) is held for ownership review and is
+// not the agent's active recording: it neither captures nor blocks a new one,
+// so the agent's next recording can start while it waits. Use
+// LoadQuarantinedRecordingsForAgent to find it.
 func LoadRecordingStateForAgent(projectRoot, agentID string) (*RecordingState, error) {
 	if agentID == "" {
 		return nil, fmt.Errorf("%w: agent ID", ErrEmptyPath)
@@ -477,7 +496,7 @@ func LoadRecordingStateForAgent(projectRoot, agentID string) (*RecordingState, e
 		return nil, err
 	}
 	for _, s := range states {
-		if s.AgentID == agentID {
+		if s.AgentID == agentID && !s.SourceRejected {
 			if s.CacheDir != "" && s.CacheDir != paths.CacheDir() {
 				slog.Debug("recording found in different cache dir",
 					"agent_id", agentID,
@@ -489,6 +508,26 @@ func LoadRecordingStateForAgent(projectRoot, agentID string) (*RecordingState, e
 		}
 	}
 	return nil, nil
+}
+
+// LoadQuarantinedRecordingsForAgent returns the agent's recordings held back for
+// ownership review, newest first. They keep their captured data and marker.
+func LoadQuarantinedRecordingsForAgent(projectRoot, agentID string) ([]*RecordingState, error) {
+	if agentID == "" {
+		return nil, fmt.Errorf("%w: agent ID", ErrEmptyPath)
+	}
+	states, err := LoadAllRecordingStates(projectRoot)
+	if err != nil {
+		return nil, err
+	}
+	var held []*RecordingState
+	for _, s := range states {
+		if s.AgentID == agentID && s.SourceRejected {
+			held = append(held, s)
+		}
+	}
+	sort.SliceStable(held, func(i, j int) bool { return held[i].StartedAt.After(held[j].StartedAt) })
+	return held, nil
 }
 
 // LoadRecordingStateForWorkspace finds the recording whose WorkspacePath
@@ -511,6 +550,9 @@ func LoadRecordingStateForWorkspace(projectRoot, workspace string) (*RecordingSt
 		return nil, err
 	}
 	for _, s := range states {
+		if s.SourceRejected {
+			continue // held for review, not recording
+		}
 		candidate := s.WorkspacePath
 		if r, err := filepath.EvalSymlinks(candidate); err == nil {
 			candidate = r
@@ -872,6 +914,9 @@ func cleanupStaleEmptyRecordings(projectRoot string) {
 	}
 
 	for _, state := range states {
+		if state.SourceRejected {
+			continue // a quarantined source is not a disposable empty stub
+		}
 		if time.Since(state.StartedAt) < staleEmptyThreshold {
 			continue
 		}
@@ -879,8 +924,9 @@ func cleanupStaleEmptyRecordings(projectRoot string) {
 			continue
 		}
 		// A native log can hold the session even when the watcher never wrote
-		// an entry. Let finalization read it before classifying this as empty.
-		if state.AdapterName != "" && (state.SessionFile != "" || state.WatchMode == "tail") {
+		// an entry. Claude hook discovery can fail with an unverifiable cwd,
+		// leaving SessionFile empty despite a real native conversation.
+		if state.AdapterName != "" && (state.SessionFile != "" || state.WatchMode == "tail" || state.AdapterName == "claude-code") {
 			continue
 		}
 		// only clean phantom stubs — a header-only or missing raw.jsonl. Since
@@ -946,7 +992,7 @@ func cleanupGhosts(states []*RecordingState) GhostCleanupResult {
 	var result GhostCleanupResult
 
 	for _, state := range states {
-		if state.SessionPath == "" {
+		if state.SessionPath == "" || state.SourceRejected {
 			continue
 		}
 
@@ -966,8 +1012,8 @@ func cleanupGhosts(states []*RecordingState) GhostCleanupResult {
 		if !state.StartedAt.IsZero() && time.Since(state.StartedAt) < GhostGracePeriod {
 			continue
 		}
-		if state.AdapterName != "" && (state.SessionFile != "" || state.WatchMode == "tail") {
-			continue // native source must be checked by finalization first
+		if state.AdapterName != "" && (state.SessionFile != "" || state.WatchMode == "tail" || state.AdapterName == "claude-code") {
+			continue // native source may exist even before hook discovery succeeds
 		}
 
 		// parent is dead — check if there's any recoverable data. Classify
@@ -1099,8 +1145,8 @@ func CleanupOrphanedStubsInDir(cacheSessionsDir string) GhostCleanupResult {
 		// present-parseable-and-PID-dead.
 		if data, readErr := os.ReadFile(recordingStatePath(sessionPath)); readErr == nil {
 			var state RecordingState
-			if json.Unmarshal(data, &state) != nil || state.IsAgentAlive() {
-				continue // unreadable-as-JSON or still alive → keep
+			if json.Unmarshal(data, &state) != nil || state.IsAgentAlive() || state.SourceRejected {
+				continue // unreadable-as-JSON, still alive, or held for ownership review → keep
 			}
 			if state.AdapterName != "" && (state.SessionFile != "" || state.WatchMode == "tail") {
 				continue // native source must be checked by finalization first
@@ -1202,6 +1248,13 @@ func StartRecording(projectRoot string, opts StartRecordingOptions) (*RecordingS
 		return nil, fmt.Errorf("%w: project root", ErrEmptyPath)
 	}
 
+	// A team token with no AI coworker attached would record the session under
+	// the git identity of the machine running it.
+	coworker, err := auth.TeamCoworker(endpoint.GetForProject(projectRoot))
+	if err != nil {
+		return nil, err
+	}
+
 	// clean up stale empty recording stubs to prevent accumulation
 	cleanupStaleEmptyRecordings(projectRoot)
 
@@ -1281,6 +1334,15 @@ func StartRecording(projectRoot string, opts StartRecordingOptions) (*RecordingS
 	// create session folder path
 	sessionPath := filepath.Join(sessionsBasePath, sessionName)
 
+	// A quarantined recording is evidence for manual review. If it holds this
+	// minute's folder, writing a new state there would overwrite the quarantine.
+	if data, readErr := os.ReadFile(recordingStatePath(sessionPath)); readErr == nil {
+		var occupant RecordingState
+		if json.Unmarshal(data, &occupant) == nil && occupant.SourceRejected {
+			return nil, fmt.Errorf("%w: agent_id=%s path=%s", ErrQuarantinedSessionPath, opts.AgentID, sessionPath)
+		}
+	}
+
 	// create the session directory
 	if err := os.MkdirAll(sessionPath, 0755); err != nil {
 		return nil, fmt.Errorf("create session dir=%s: %w", sessionPath, err)
@@ -1292,10 +1354,15 @@ func StartRecording(projectRoot string, opts StartRecordingOptions) (*RecordingS
 		sessionFile = filepath.Join(sessionPath, "raw.jsonl")
 	}
 
-	// auto-detect session origin if not explicitly provided
+	// auto-detect session origin if not explicitly provided; an AI coworker's
+	// session has no human in the loop
 	origin := opts.Origin
 	if origin == "" {
-		origin = string(agentx.DetectOriginFromOS(""))
+		var explicit agentx.SessionOrigin
+		if coworker != nil {
+			explicit = agentx.OriginAgent
+		}
+		origin = string(agentx.DetectOriginFromOS(explicit))
 	}
 
 	continuedFromSessionID := opts.ContinuedFromSessionID
@@ -1383,6 +1450,25 @@ func UpdateRecordingStateForAgent(projectRoot, agentID string, updateFn func(*Re
 	}
 	return MutateRecordingStateFile(recordingStatePath(state.SessionPath), func(current *RecordingState) error { updateFn(current); return nil })
 
+}
+
+// MarkSourceRejected quarantines an ambiguous recording without deleting the
+// native source or captured prefix. Only a confirmed ownership violation should
+// use this; transient discovery failures must remain retryable.
+func MarkSourceRejected(projectRoot, agentID string) error {
+	return UpdateRecordingStateForAgent(projectRoot, agentID, func(s *RecordingState) {
+		s.SourceRejected = true
+	})
+}
+
+// SetSourceRejectedAt sets or clears the quarantine on the recording sessionID
+// stored under sessionPath. Callers that already hold a loaded state use it
+// instead of the agent-keyed form: once a quarantined recording leaves the
+// agent's active slot, an agent lookup would find a newer recording.
+func SetSourceRejectedAt(sessionPath, sessionID string, rejected bool) error {
+	return UpdateRecordingStateAt(sessionPath, sessionID, func(s *RecordingState) {
+		s.SourceRejected = rejected
+	})
 }
 
 // UpdateRecordingState updates and persists the recording state.

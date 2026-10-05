@@ -83,6 +83,36 @@ func uniqueNonEmpty(vals ...string) []string {
 	return out
 }
 
+// currentUserIdentity returns the name, aliases and kind prime reports as you=,
+// you_aliases= and you_kind=. A person's aliases collect ALL name forms from
+// ALL sources (OAuth, git config, derived) because sessions use DisplayName,
+// murmurs use Username, discussions use full Name, and git commits use git
+// config user.name/user.email — each may differ. The AI coworker a team token
+// acts as goes by its name and slug only: the git identity on its machine is
+// not its own. kind is "ai" for that coworker and "" for a person.
+func currentUserIdentity(ep string) (name string, aliases []string, kind string) {
+	attr := identity.ResolveAttribution(ep, config.GetDisplayName())
+	if attr.AI {
+		return attr.DisplayName, uniqueNonEmpty(attr.DisplayName, attr.Username), "ai"
+	}
+	aliasInputs := []string{
+		attr.DisplayName,
+		attr.Name,
+		attr.Username,
+		attr.Email,
+		identity.FirstNameFromSlug(attr.Username),
+	}
+	if gitIdent, err := repotools.DetectGitIdentity(); err == nil && gitIdent != nil {
+		aliasInputs = append(aliasInputs, gitIdent.Name, gitIdent.Email)
+	}
+	if ep != "" {
+		if token, err := auth.GetTokenForEndpoint(ep); err == nil && token != nil {
+			aliasInputs = append(aliasInputs, token.UserInfo.Name, token.UserInfo.Email)
+		}
+	}
+	return attr.DisplayName, uniqueNonEmpty(aliasInputs...), ""
+}
+
 // withAttributionGuidance delegates to prime.WithAttributionGuidance.
 func withAttributionGuidance(content string, loggedIn bool, attr config.ResolvedAttribution) string {
 	return prime.WithAttributionGuidance(content, loggedIn, attr)
@@ -347,32 +377,18 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// anti-entropy: ensure Claude Code hooks are installed
 	hooksInstalled := ensureClaudeHooks(projectRoot)
 
+	// anti-entropy: retry plan commits/pushes a review session could not land
+	// (detached; a no-op ReadDir when nothing is pending — plan_push_pending.go)
+	if config.IsInitialized(projectRoot) {
+		kickPendingPlanPushes(projectRoot)
+	}
+
 	// get project-specific endpoint (single source of truth)
 	projectEndpoint := endpoint.GetForProject(projectRoot)
 
 	// resolve current user's identity early so all output paths (fresh, degraded, unavailable)
 	// can include it. Agents use this to distinguish self vs teammate in attribution.
-	// collect ALL name forms from ALL sources (OAuth, git config, derived) because
-	// sessions use DisplayName, murmurs use Username, discussions use full Name,
-	// and git commits use git config user.name/user.email — each may differ.
-	userAttribution := identity.ResolveAttribution(projectEndpoint, config.GetDisplayName())
-	currentUserName := userAttribution.DisplayName
-	aliasInputs := []string{
-		userAttribution.DisplayName,
-		userAttribution.Name,
-		userAttribution.Username,
-		userAttribution.Email,
-		identity.FirstNameFromSlug(userAttribution.Username),
-	}
-	if gitIdent, err := repotools.DetectGitIdentity(); err == nil && gitIdent != nil {
-		aliasInputs = append(aliasInputs, gitIdent.Name, gitIdent.Email)
-	}
-	if projectEndpoint != "" {
-		if token, err := auth.GetTokenForEndpoint(projectEndpoint); err == nil && token != nil {
-			aliasInputs = append(aliasInputs, token.UserInfo.Name, token.UserInfo.Email)
-		}
-	}
-	currentUserAliases := uniqueNonEmpty(aliasInputs...)
+	currentUserName, currentUserAliases, currentUserKind := currentUserIdentity(projectEndpoint)
 
 	// generate agentID and start recording BEFORE auth check — recording is local,
 	// auth is only needed for upload and cloud features
@@ -495,6 +511,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 				Session:            sessionStat,
 				CurrentUserName:    currentUserName,
 				CurrentUserAliases: currentUserAliases,
+				CurrentUserKind:    currentUserKind,
 				Message:            msg + " Session recording is active locally — data will be uploaded after authentication.",
 			}
 			if sessionStat != nil && sessionStat.UserNotification != "" {
@@ -558,8 +575,13 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// reads it. The healthy path is a lockfile read and two comparisons; a plan is
 	// only built once a mismatch is proven. Failures never reach the session.
 	skillReconcileStart := time.Now()
-	if n := reconcileSkillInventoryIfStale(projectRoot); n > 0 {
-		timing["skills_reconciled"] = int64(n)
+	reconciled, withheldDecisions := reconcileSkillInventoryIfStale(projectRoot)
+	if reconciled > 0 {
+		timing["skills_reconciled"] = int64(reconciled)
+	}
+	withheldTeamSkills := make([]prime.WithheldSkill, 0, len(withheldDecisions))
+	for _, d := range withheldDecisions {
+		withheldTeamSkills = append(withheldTeamSkills, prime.WithheldSkill{Name: d.Name, Reason: d.Reason})
 	}
 	timing["skills_reconcile"] = time.Since(skillReconcileStart).Milliseconds()
 
@@ -676,6 +698,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	output := agentPrimeOutput{
 		Status:             "fresh",
 		AgentID:            agentID,
+		WithheldTeamSkills: withheldTeamSkills,
 		Guidance:           guidance,
 		SessionID:          inst.ServerSessionID,
 		AgentType:          agentType,
@@ -703,6 +726,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		HooksInstalled:     hooksInstalled,
 		CurrentUserName:    currentUserName,
 		CurrentUserAliases: currentUserAliases,
+		CurrentUserKind:    currentUserKind,
 	}
 
 	// Hook cap: Claude Code injects at most claudeHookOutputCap characters
@@ -1475,6 +1499,11 @@ func startSessionRecording(projectRoot, agentID, agentType, parentAgentID, conti
 	notificationMsg := "Recording session. Discussions may be shared with your team. Run ox agent session stop to end recording."
 	if resolved.IsAuto() {
 		notificationMsg += " (Tip: Disable auto-start with 'ox config set session_recording manual')"
+	}
+	// say so when an earlier recording from this agent is being held back, so a
+	// missing session does not look like a recording that never happened
+	if held, heldErr := session.LoadQuarantinedRecordingsForAgent(projectRoot, agentID); heldErr == nil && len(held) > 0 {
+		notificationMsg += " An earlier recording from this session is held back because its session file also covers another repository; run 'ox doctor' to review it."
 	}
 
 	return &sessionStatus{

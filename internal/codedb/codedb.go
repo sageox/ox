@@ -49,6 +49,18 @@ func OpenSQLOnly(root string) (*DB, error) {
 	return &DB{store: s}, nil
 }
 
+// OpenSQLReadOnly opens a CodeDB's SQL half for queries only: it never migrates
+// and never deletes, which a writable open may. Same bleve restrictions as
+// OpenSQLOnly. See store.OpenSQLReadOnly for the tradeoff; callers must be
+// fail-open.
+func OpenSQLReadOnly(root string) (*DB, error) {
+	s, err := store.OpenSQLReadOnly(root)
+	if err != nil {
+		return nil, fmt.Errorf("open codedb store read-only: %w", err)
+	}
+	return &DB{store: s}, nil
+}
+
 // Close releases all resources.
 func (db *DB) Close() error {
 	return db.store.Close()

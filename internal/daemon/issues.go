@@ -120,6 +120,10 @@ const (
 	IssueTypeGCFailed                 = "gc_failed"
 	IssueTypeSessionConflictWedge     = "session_conflict_wedge"
 	IssueTypeSessionConflictRecovered = "session_conflict_recovered"
+	// IssueTypeLedgerPushWedged: ledger pushes are suspended because the remote
+	// rejected them for missing LFS objects and the automatic repair could not
+	// fix it. Commits keep landing locally; nothing reaches the team until it clears.
+	IssueTypeLedgerPushWedged = "ledger_push_wedged"
 	// IssueTypeRepoIntegrity: a managed clone is structurally unusable —
 	// git itself cannot read it (unreadable/corrupt .git/index, permission
 	// denied). Distinct from IssueTypeMergeConflict, which asserts a

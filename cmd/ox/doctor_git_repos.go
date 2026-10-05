@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -185,8 +187,17 @@ func checkGitRepoState() checkResult {
 		lines := strings.Split(strings.TrimSpace(string(output)), "\n")
 		hasUnstaged := false
 		count := 0
+		var perMachine []string
 		for _, line := range lines {
 			if line == "" {
+				continue
+			}
+			// a staged deletion falls through: committing it is how the file leaves the repo
+			if path, ok := perMachineStatusPath(line); ok && line[0] != 'D' {
+				// untracked waits on the .gitignore check; anything else is in the index and must come out
+				if line[:2] != "??" {
+					perMachine = append(perMachine, path)
+				}
 				continue
 			}
 			count++
@@ -194,6 +205,11 @@ func checkGitRepoState() checkResult {
 			if len(line) >= 2 && line[1] != ' ' {
 				hasUnstaged = true
 			}
+		}
+		if len(perMachine) > 0 {
+			return WarningCheck("Repo state",
+				fmt.Sprintf("%d per-machine file(s) in the index under .sageox/", len(perMachine)),
+				"Do not commit these; unstage with 'git rm --cached "+strings.Join(perMachine, " ")+"'")
 		}
 		if count > 0 {
 			if hasUnstaged {
@@ -209,6 +225,22 @@ func checkGitRepoState() checkResult {
 	}
 
 	return PassedCheck("Repo state", "committed and up to date")
+}
+
+// perMachineStatusPath returns the path from a `git status --porcelain` line when it names
+// a file ox's own .gitignore excludes: per-machine state, not config to commit (#1062).
+// ox writes these only directly under .sageox/, which also keeps the path in the doctor hint
+// a fixed name rather than arbitrary text from the working tree.
+func perMachineStatusPath(line string) (string, bool) {
+	if len(line) <= 3 {
+		return "", false
+	}
+	path := line[3:]
+	// a staged rename reads "old -> new"; the destination is what sits in the index
+	if _, dest, ok := strings.Cut(path, " -> "); ok {
+		path = dest
+	}
+	return path, filepath.Dir(path) == ".sageox" && slices.Contains(requiredGitignoreEntries, filepath.Base(path))
 }
 
 // checkGitRemotes validates configured git remotes.
@@ -598,48 +630,83 @@ func checkGitLockFiles() checkResult {
 	if gitRoot == "" {
 		return SkippedCheck("git locks", "not in git repo", "")
 	}
+	return gitLockFilesResult("git locks", filepath.Join(gitRoot, ".git"), time.Now())
+}
 
-	gitDir := filepath.Join(gitRoot, ".git")
-	lockFiles := []string{
-		"index.lock",
-		"shallow.lock",
-		"config.lock",
-		"HEAD.lock",
+// checkLedgerGitLockFiles runs the same lock check against the ledger. A stale
+// ledger index.lock blocks every ledger write — including doctor's own
+// `git rebase --abort` — and the project-repo check never looked there.
+// Report-only: an ownerless index.lock carries no PID, so whether a git process
+// still holds it is the user's call (gitutil.AbandonedLockAge explains why age
+// alone is not proof).
+func checkLedgerGitLockFiles() checkResult {
+	const name = "ledger git locks"
+	gitRoot := findGitRoot()
+	if gitRoot == "" {
+		return SkippedCheck(name, "not in git repo", "")
 	}
+	ledgerPath := resolveLocalLedgerPath(gitRoot)
+	if ledgerPath == "" {
+		return SkippedCheck(name, "no ledger configured", "")
+	}
+	return ledgerGitLockFilesResult(name, filepath.Join(ledgerPath, ".git"), time.Now())
+}
 
-	var found []string
-	var oldLocks []string
-	oneHourAgo := time.Now().UTC().Add(-1 * time.Hour)
+// ledgerGitLockFilesResult skips only a ledger that is genuinely not cloned.
+// A permission or I/O error on .git is reported, not skipped: "could not look"
+// must not read as "nothing to see" on the check meant to explain a stuck ledger.
+func ledgerGitLockFilesResult(name, gitDir string, now time.Time) checkResult {
+	info, err := os.Stat(gitDir)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return SkippedCheck(name, "ledger not cloned", "")
+	case err != nil:
+		return FailedCheck(name, "cannot inspect ledger git dir", fmt.Sprintf("stat %s: %v", gitDir, err))
+	case !info.IsDir():
+		return SkippedCheck(name, "ledger not cloned", "")
+	}
+	return gitLockFilesResult(name, gitDir, now)
+}
 
-	for _, lock := range lockFiles {
+// gitLockFilesResult reports git lock files in gitDir. Locks older than an hour
+// fail; younger ones warn, since a live git may still hold them. The remove
+// command lists each full path, shell-quoted: a one-element brace expansion
+// ({index.lock}) is not expanded by the shell, so the old form named a file that
+// does not exist, and an unquoted path with a space would split into two targets.
+func gitLockFilesResult(name, gitDir string, now time.Time) checkResult {
+	var found, paths, oldLocks []string
+	oneHourAgo := now.Add(-1 * time.Hour)
+	for _, lock := range gitutil.HasLockFiles(gitDir) {
 		path := filepath.Join(gitDir, lock)
-		if info, err := os.Stat(path); err == nil {
-			found = append(found, lock)
-			if info.ModTime().UTC().Before(oneHourAgo) {
-				oldLocks = append(oldLocks, lock)
-			}
+		info, err := os.Stat(path)
+		if err != nil {
+			continue
+		}
+		found = append(found, lock)
+		paths = append(paths, shellQuote(path))
+		if info.ModTime().Before(oneHourAgo) {
+			oldLocks = append(oldLocks, lock)
 		}
 	}
 
 	if len(found) == 0 {
-		return PassedCheck("git locks", "no stale lock files")
+		return PassedCheck(name, "no stale lock files")
 	}
 
 	detail := fmt.Sprintf(
 		"Lock files found: %s\n"+
 			"If no git commands are running, remove with:\n"+
-			"  rm %s/{%s}",
+			"  rm -- %s",
 		strings.Join(found, ", "),
-		gitDir,
-		strings.Join(found, ","))
+		strings.Join(paths, " "))
 
 	if len(oldLocks) > 0 {
-		return FailedCheck("git locks",
+		return FailedCheck(name,
 			fmt.Sprintf("%d stale lock file(s) > 1 hour old", len(oldLocks)),
 			detail).WithFixInfo(CheckSlugGitLock, FixLevelSuggested)
 	}
 
-	return WarningCheck("git locks",
+	return WarningCheck(name,
 		"lock files present (may be from active git process)",
 		detail)
 }

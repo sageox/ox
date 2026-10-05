@@ -92,7 +92,13 @@ func isolateAgentDetection(t *testing.T) {
 		// other agents' native session ids, so a test naming one agent is
 		// never silently competing with another
 		"CODEX_THREAD_ID", "AMP_THREAD_URL", "CURSOR_SESSION_ID",
+		// Pi exports a runtime marker as well as a native session ID to subprocesses.
+		"PI_CODING_AGENT", "PI_SESSION_ID",
 	} {
 		t.Setenv(v, "")
 	}
+	// Pi treats the *presence* of its config override as a runtime signal,
+	// even when empty. Register restoration through t.Setenv, then unset it.
+	t.Setenv("PI_CODING_AGENT_DIR", "")
+	_ = os.Unsetenv("PI_CODING_AGENT_DIR")
 }

@@ -31,7 +31,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -214,6 +213,11 @@ type SyncScheduler struct {
 	// shared mutex for all ledger git operations (pull, push, etc.)
 	ledgerMu sync.Mutex
 
+	// backoffWarned remembers, per workspace id, the failure count the "sync in
+	// backoff" warning last announced, so a workspace that stays in backoff warns
+	// when it enters it (or fails again) rather than on every tick.
+	backoffWarned sync.Map
+
 	// agent work signal channel — notified after successful ledger pull
 	agentWorkSignal chan<- struct{}
 
@@ -225,6 +229,12 @@ type SyncScheduler struct {
 
 	// tracks last ledger HEAD sha to detect changes and trigger ledger index rebuilds
 	lastLedgerSha string
+
+	// single-flight + cooldown state for ledger index rebuilds (guarded by mu).
+	// a full rebuild walks every ledger commit, so it must never overlap itself
+	// and must not re-run more often than LedgerIndexMinInterval.
+	ledgerBuildRunning  bool
+	lastLedgerBuildDone time.Time
 
 	// settings fetcher for CLI feature flag polling
 	settingsFetcher *SettingsFetcher
@@ -1158,10 +1168,13 @@ func isNewerSemver(a, b string) bool {
 // If forceSync is false (background ticker) and backoff is active, logs and returns false.
 func (s *SyncScheduler) shouldSyncOrBypass(id string, forceSync bool) bool {
 	if s.workspaceRegistry.ShouldSync(id) {
+		// the backoff (if any) is over; the next one announces itself again
+		s.backoffWarned.Delete(id)
 		return true
 	}
 	if forceSync {
 		s.workspaceRegistry.ClearSyncFailures(id)
+		s.backoffWarned.Delete(id)
 		return true
 	}
 	if s.workspaceRegistry.IsSyncSuspended(id) {
@@ -1181,7 +1194,14 @@ func (s *SyncScheduler) shouldSyncOrBypass(id string, forceSync bool) bool {
 		return false
 	}
 	failures, nextRetry := s.workspaceRegistry.GetSyncRetryInfo(id)
-	s.logger.Warn("sync in backoff, skipping", "id", id, "failures", failures, "next_retry", nextRetry)
+	// Warn on entering backoff and whenever another failure extends it; the
+	// ticks in between skip silently. This line was ~800 per day per workspace.
+	if prev, announced := s.backoffWarned.Load(id); !announced || prev != failures {
+		s.backoffWarned.Store(id, failures)
+		s.logger.Warn("sync in backoff, skipping", "id", id, "failures", failures, "next_retry", nextRetry)
+	} else {
+		s.logger.Debug("sync in backoff, skipping", "id", id, "failures", failures, "next_retry", nextRetry)
+	}
 	if s.issues != nil {
 		s.issues.SetIssue(DaemonIssue{
 			Type:     IssueTypeSyncBackoff,
@@ -1270,6 +1290,7 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 	if s.config.LedgerPath == "" {
 		return nil
 	}
+	s.reportLedgerPushWedge(s.config.LedgerPath)
 
 	// check if ledger is a valid git repo - if not, try to auto-clone
 	// handles both missing directories and directories left behind by failed clones
@@ -1638,9 +1659,37 @@ func shouldPushMurmurs(logOutput string) (blockingSubject string, ok bool) {
 	return "", sawMurmur
 }
 
+// reportLedgerPushWedge mirrors the push circuit breaker into the issue
+// tracker, so a ledger whose pushes are suspended shows up in `ox status` and
+// the prime warning instead of only in the daemon log. While wedged, every
+// commit stays local: the coworker's sessions are not reaching the team.
+func (s *SyncScheduler) reportLedgerPushWedge(ledgerPath string) {
+	if s.issues == nil {
+		return
+	}
+	until, wedged := gitutil.PushWedgedUntil(ledgerPath)
+	if !wedged {
+		s.issues.ClearIssue(IssueTypeLedgerPushWedged, "ledger")
+		return
+	}
+	s.issues.SetIssue(DaemonIssue{
+		Type:     IssueTypeLedgerPushWedged,
+		Severity: SeverityWarning,
+		Repo:     "ledger",
+		Summary:  fmt.Sprintf("Ledger push blocked: the server is missing LFS objects the automatic repair could not restore; work is saved locally, retrying at %s", until.Format(time.Kitchen)),
+	})
+}
+
 func (s *SyncScheduler) pushMurmurCommits(ctx context.Context, ledgerPath string) {
 	ctx, span := perf.Start(ctx, "daemon:push_murmurs")
 	defer span.End()
+
+	// the murmur commits are already local; a wedged ledger only means they ride
+	// out with the next push that gets through
+	if until, wedged := gitutil.PushWedgedUntil(ledgerPath); wedged {
+		s.logger.Debug("skipping murmur push: ledger push wedged", "path", ledgerPath, "until", until)
+		return
+	}
 
 	// Subjects of every unpushed commit, one per line. Detection is by subject,
 	// NOT a data/murmurs/ pathspec: a pathspec finds murmur commits but is blind
@@ -1669,6 +1718,7 @@ func (s *SyncScheduler) pushMurmurCommits(ctx context.Context, ledgerPath string
 	if err := gitutil.PushWithRetry(ctx, ledgerPath, gitutil.PushOpts{
 		AutoResolvePrefixes: ledger.AutoResolvePrefixes,
 		Logger:              s.logger,
+		SuspendWhenWedged:   true,
 		PrePush: func(repoPath string) error {
 			if ep != "" {
 				return gitserver.RefreshRemoteCredentials(repoPath, ep)
@@ -1676,6 +1726,10 @@ func (s *SyncScheduler) pushMurmurCommits(ctx context.Context, ledgerPath string
 			return nil
 		},
 	}); err != nil {
+		if errors.Is(err, gitutil.ErrPushWedged) {
+			s.logger.Debug("murmur push skipped: ledger push wedged", "error", err)
+			return
+		}
 		s.logger.Warn("murmur push failed (non-fatal)", "error", err)
 	}
 }
@@ -1925,6 +1979,12 @@ func (s *SyncScheduler) pushSessionDraftCommits(ctx context.Context, ledgerPath 
 	ctx, span := perf.Start(ctx, "daemon:push_session_drafts")
 	defer span.End()
 
+	// the draft commits are already local; see pushMurmurCommits
+	if until, wedged := gitutil.PushWedgedUntil(ledgerPath); wedged {
+		s.logger.Debug("skipping session-draft push: ledger push wedged", "path", ledgerPath, "until", until)
+		return
+	}
+
 	// Subjects of every unpushed commit, one per line.
 	out, err := s.git.RunGit(ctx, ledgerPath, "log", "--format=%s", "@{upstream}..HEAD")
 	if err != nil || strings.TrimSpace(out) == "" {
@@ -1948,6 +2008,7 @@ func (s *SyncScheduler) pushSessionDraftCommits(ctx context.Context, ledgerPath 
 	if err := gitutil.PushWithRetry(ctx, ledgerPath, gitutil.PushOpts{
 		AutoResolvePrefixes: ledger.AutoResolvePrefixes,
 		Logger:              s.logger,
+		SuspendWhenWedged:   true,
 		PrePush: func(repoPath string) error {
 			if ep != "" {
 				return gitserver.RefreshRemoteCredentials(repoPath, ep)
@@ -1955,6 +2016,10 @@ func (s *SyncScheduler) pushSessionDraftCommits(ctx context.Context, ledgerPath 
 			return nil
 		},
 	}); err != nil {
+		if errors.Is(err, gitutil.ErrPushWedged) {
+			s.logger.Debug("session-draft push skipped: ledger push wedged", "error", err)
+			return
+		}
 		s.logger.Warn("session-draft push failed (non-fatal)", "error", err)
 	}
 }
@@ -1983,9 +2048,15 @@ func (s *SyncScheduler) syncFromWatcher(ctx context.Context) {
 	s.checkCodeDBFreshness(ctx)
 }
 
-// triggerLedgerIndexRebuild checks if content sources (ledger, team contexts) have
-// changed since the last ledger index build and fires a background rebuild if so.
+// triggerLedgerIndexRebuild checks if the ledger has changed since the last
+// ledger index build and fires a background rebuild if so.
 // Runs on its own tick (LedgerCheckInterval), independent of ledger pull cadence.
+//
+// A full rebuild walks every ledger commit (minutes to tens of minutes on large
+// ledgers), so rebuilds are single-flight and rate limited: a trigger that arrives
+// while a build is running, or inside the LedgerIndexMinInterval cooldown after
+// one finished, is coalesced. The fingerprint is recomputed on every tick, so the
+// next eligible tick always builds against the latest HEAD (latest wins).
 func (s *SyncScheduler) triggerLedgerIndexRebuild(ctx context.Context) {
 	if s.codedb == nil {
 		return
@@ -1995,54 +2066,52 @@ func (s *SyncScheduler) triggerLedgerIndexRebuild(ctx context.Context) {
 		return
 	}
 
-	// build composite fingerprint from all content sources
 	fingerprint := s.contentSourceFingerprint(ctx, ledger.Path)
+
 	s.mu.Lock()
 	if fingerprint == "" || fingerprint == s.lastLedgerSha {
 		s.mu.Unlock()
 		return
 	}
 	oldFingerprint := s.lastLedgerSha
+	if s.ledgerBuildRunning {
+		s.mu.Unlock()
+		s.logger.Info("codedb ledger index rebuild coalesced", "reason", "build_in_progress", "new_fingerprint", fingerprint)
+		return
+	}
+	minInterval := s.config.LedgerIndexMinInterval
+	if sinceDone := time.Since(s.lastLedgerBuildDone); !s.lastLedgerBuildDone.IsZero() && sinceDone < minInterval {
+		s.mu.Unlock()
+		s.logger.Info("codedb ledger index rebuild deferred", "reason", "cooldown", "retry_after", (minInterval - sinceDone).Round(time.Second), "new_fingerprint", fingerprint)
+		return
+	}
+	s.ledgerBuildRunning = true
 	s.mu.Unlock()
 
 	s.logger.Info("codedb ledger index rebuild triggered", "old_fingerprint", oldFingerprint, "new_fingerprint", fingerprint)
 	go func(fp, ledgerPath string) {
 		s.codedb.BuildLedgerIndex(ctx, ledgerPath)
-		// only advance fingerprint after successful build so failed builds retry
+		// advance fingerprint and cooldown clock together; a failed build still
+		// starts the cooldown so errors cannot turn into a retry storm
 		s.mu.Lock()
 		s.lastLedgerSha = fp
+		s.lastLedgerBuildDone = time.Now()
+		s.ledgerBuildRunning = false
 		s.mu.Unlock()
 	}(fingerprint, ledger.Path)
 }
 
-// contentSourceFingerprint returns a composite hash of HEAD shas from all content
-// sources: ledger + team contexts. Any change in any source triggers a rebuild.
+// contentSourceFingerprint returns the HEAD sha of the ledger, the only content
+// source BuildLedgerIndex indexes (it runs IndexLocalRepo on the ledger path alone).
+// Team context repos are deliberately excluded: they are not indexed here, so their
+// commits must not force a full rebuild.
 func (s *SyncScheduler) contentSourceFingerprint(ctx context.Context, ledgerPath string) string {
-	// start with ledger HEAD
 	out, err := exec.CommandContext(ctx, "git", "-C", ledgerPath, "rev-parse", "HEAD").Output()
 	if err != nil {
 		s.logger.Debug("codedb ledger: failed to get ledger HEAD", "error", err)
 		return ""
 	}
-	parts := []string{"ledger=" + strings.TrimSpace(string(out))}
-
-	// append team context HEADs sorted by path for deterministic fingerprint
-	teamContexts := s.workspaceRegistry.GetTeamContexts()
-	sort.Slice(teamContexts, func(i, j int) bool {
-		return teamContexts[i].Path < teamContexts[j].Path
-	})
-	for _, tc := range teamContexts {
-		if tc.Path == "" || !tc.Exists {
-			continue
-		}
-		tcOut, tcErr := exec.CommandContext(ctx, "git", "-C", tc.Path, "rev-parse", "HEAD").Output()
-		if tcErr != nil {
-			continue // skip unavailable team contexts
-		}
-		parts = append(parts, tc.Path+"="+strings.TrimSpace(string(tcOut)))
-	}
-
-	return strings.Join(parts, ":")
+	return "ledger=" + strings.TrimSpace(string(out))
 }
 
 // Sync performs an immediate full sync. Used for manual requests via IPC.

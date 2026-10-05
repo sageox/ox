@@ -8,6 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // gitIn runs a git command in dir and fails the test on error.
@@ -247,12 +250,12 @@ func makeAbortableStrandedWedge(t *testing.T) (dir string, strandedHead string) 
 // The rescue branch must capture the PRE-abort HEAD. On an abortable state the
 // abort resets HEAD to orig-head, so a rescue cut afterwards would point at the
 // wrong commit and the session data would be unreferenced. Inverting the order in
-// RescueThenAbort must fail this test — that inversion was run and it does.
-func TestRescueThenAbort_RescueBranchPrecedesAbort(t *testing.T) {
+// RescueIfNeededThenAbort must fail this test — that inversion was run and it does.
+func TestRescueIfNeededThenAbort_RescueBranchPrecedesAbort(t *testing.T) {
 	dir, strandedHead := makeAbortableStrandedWedge(t)
 	ctx := context.Background()
 
-	rescueRef, err := RescueThenAbort(ctx, dir, "test", nil)
+	rescueRef, err := RescueIfNeededThenAbort(ctx, dir, "test", nil)
 	if rescueRef == "" {
 		t.Fatalf("no rescue branch created (err=%v)", err)
 	}
@@ -277,4 +280,32 @@ func TestRescueThenAbort_RescueBranchPrecedesAbort(t *testing.T) {
 			t.Errorf("%s missing from the rescue branch tree: %q", want, files)
 		}
 	}
+}
+
+func TestRescueIfNeededThenAbort_NoStrandedCommitsUsesOrdinaryRecovery(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: spawns git subprocesses")
+	}
+	repo, _ := makeZombieRebase(t)
+
+	rescueRef, err := RescueIfNeededThenAbort(context.Background(), repo, "test", quietLogger())
+
+	require.NoError(t, err)
+	assert.Empty(t, rescueRef, "branch-attached zombie has no stranded commits to rescue")
+	assert.False(t, IsRebaseInProgress(repo), "ordinary abort-or-clear fallback must clear the zombie state")
+}
+
+func TestRescueIfNeededThenAbort_DetachedZombieRescuesButStaysLoud(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: spawns git subprocesses")
+	}
+	repo := makeStrandedWedge(t, 2)
+	strandedHead := gitIn(t, repo, "rev-parse", "HEAD")
+
+	rescueRef, err := RescueIfNeededThenAbort(context.Background(), repo, "test", quietLogger())
+
+	require.Error(t, err, "detached zombie must remain a surfaced error")
+	require.NotEmpty(t, rescueRef, "stranded commits must be rescued before the unsafe quit is refused")
+	assert.Equal(t, strandedHead, gitIn(t, repo, "rev-parse", rescueRef))
+	assert.True(t, IsRebaseInProgress(repo), "detached-HEAD protection must leave the semantic wedge for review")
 }

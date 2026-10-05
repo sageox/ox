@@ -16,9 +16,9 @@ func getGitConfig(key string) string {
 	return strings.TrimSpace(string(output))
 }
 
-// slugify converts a string to a filesystem-safe slug
+// Slugify converts a string to a filesystem-safe slug
 // Replaces non-alphanumeric characters with hyphens and lowercases
-func slugify(s string) string {
+func Slugify(s string) string {
 	// replace non-alphanumeric chars with hyphens
 	re := regexp.MustCompile(`[^a-zA-Z0-9]+`)
 	slug := re.ReplaceAllString(s, "-")

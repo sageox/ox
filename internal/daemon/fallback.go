@@ -205,6 +205,9 @@ func ensureDaemonImpl(wait bool) error {
 		return fmt.Errorf("failed to create log directory: %w", err)
 	}
 
+	// keep the log bounded: nothing rotates it while the daemon runs
+	RotateDaemonLog(logPath)
+
 	// open log file
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
@@ -244,6 +247,35 @@ func ensureDaemonImpl(wait bool) error {
 	}
 
 	return fmt.Errorf("daemon started but not responding")
+}
+
+// maxDaemonLogBytes is the size above which the daemon log is rotated at
+// startup. One week of an unthrottled daemon produced a 96 MB log; 10 MB keeps
+// roughly a day of normal output while bounding disk use to ~20 MB with the
+// single rotated generation.
+const maxDaemonLogBytes = 10 << 20
+
+// RotateDaemonLog renames the daemon log at path to path+".1" (replacing any
+// previous ".1") when it exceeds maxDaemonLogBytes. Call it before the log is
+// opened with O_APPEND: the new daemon's stdout/stderr then starts a fresh file
+// and the previous run's output survives one generation.
+//
+// Best effort by design — a log that cannot be rotated (permissions, a Windows
+// sharing violation from a lingering writer) must never block daemon startup,
+// so failures are logged at debug level and reported only as a false return.
+// Returns true when the log was rotated.
+func RotateDaemonLog(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil || info.Size() <= maxDaemonLogBytes {
+		return false
+	}
+	rotated := path + ".1"
+	if err := os.Rename(path, rotated); err != nil {
+		slog.Debug("daemon log rotation failed", "path", path, "size", info.Size(), "error", err)
+		return false
+	}
+	slog.Debug("rotated daemon log", "path", path, "rotated_to", rotated, "size", info.Size())
+	return true
 }
 
 // signalProcessFn is the process-signaling seam KillStaleDaemon uses.

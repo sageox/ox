@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/gitutil"
@@ -27,6 +28,7 @@ import (
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
+	"github.com/sageox/ox/internal/session/claudesource"
 	"github.com/sageox/ox/internal/session/pipeline"
 	"github.com/sageox/ox/pkg/sessionsummary"
 	"github.com/sageox/ox/pkg/summaryeval"
@@ -185,6 +187,13 @@ type SessionFinalizeHandler struct {
 	// second test's flush handshake outlives the budget, recovery defers, and
 	// the test fails on a timing accident rather than a real regression.
 	captureLockWait time.Duration
+	// staleRecoveryWarned remembers sessions whose "stale recording recovery
+	// deferred" warning was already logged, so a permanently corrupt recording
+	// state warns once per daemon lifetime instead of once per scan.
+	staleRecoveryWarned sync.Map
+	// warnedOnce remembers which "<site>|<session>" conditions already logged a
+	// Warn, for conditions that persist across detect scans (see warnOnce).
+	warnedOnce sync.Map
 	// afterStageTestHook is called right after `git add` stages the session
 	// path, before the commit. Nil in production; tests use it to perturb the
 	// worktree between staging and commit and confirm the commit still
@@ -252,6 +261,28 @@ func (h *SessionFinalizeHandler) SetJudgeCompleter(c summaryeval.Completer) {
 // deadlines — triggering ErrShutdownTimeout that operators see as hangs.
 func (h *SessionFinalizeHandler) SetDaemonContext(ctx context.Context) {
 	h.daemonCtx = ctx
+}
+
+// rootContext is the context for git work the handler starts itself: the
+// daemon's, so shutdown cancels a push in flight instead of waiting it out.
+// Falls back to Background only where no daemon context was ever wired (tests,
+// the CLI's in-process use).
+func (h *SessionFinalizeHandler) rootContext() context.Context {
+	if h.daemonCtx != nil {
+		return h.daemonCtx
+	}
+	return context.Background()
+}
+
+// warnOnce logs msg at Warn the first time site+session is seen and at Debug on
+// every repeat, so a condition that persists across scans (each detectCooldown,
+// per dead agent) announces itself once instead of every few minutes forever.
+func (h *SessionFinalizeHandler) warnOnce(site, session, msg string, args ...any) {
+	level := slog.LevelDebug
+	if _, seen := h.warnedOnce.LoadOrStore(site+"|"+session, struct{}{}); !seen {
+		level = slog.LevelWarn
+	}
+	h.logger.Log(context.Background(), level, msg, args...)
 }
 
 // SetTelemetry installs an optional telemetry sink. The handler emits a
@@ -396,9 +427,18 @@ func (h *SessionFinalizeHandler) Detect(ledgerPath string) ([]*WorkItem, error) 
 		}
 	}
 
+	// Sessions that only need their upload retried are counted here rather than
+	// logged one line each: with a backlog that is thousands of lines per scan.
+	uploadOnly := 0
+	for _, item := range items {
+		if p, ok := item.Payload.(*SessionFinalizePayload); ok && p.UploadOnly {
+			uploadOnly++
+		}
+	}
 	h.logger.Info("session finalize detect complete",
 		"ledger", ledgerPath,
 		"items", len(items),
+		"upload_only", uploadOnly,
 		"skipped_with_content", skips.total(),
 	)
 	// A separate Warn rather than more keys on the line above: `items=0` is
@@ -496,7 +536,8 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 			// the reader to ignore the line that matters.
 			if hasSessionContent(rawPath) {
 				skips.addUnreadableMeta(name)
-				h.logger.Warn("skipping session with unreadable meta.json, transcript stranded",
+				h.warnOnce("detect-unreadable-meta", name,
+					"skipping session with unreadable meta.json, transcript stranded",
 					"session", name, "err", metaErr)
 			} else {
 				h.logger.Debug("skipping session with unreadable meta.json",
@@ -559,8 +600,19 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 			hasRaw = true
 		}
 
-		// act on the recording marker probed above
+		// Reuse the liveness probe above; do not let a second probe race with
+		// draft classification or override its evidence.
 		if hasRecordingMarker {
+			// Rejected sources remain local for manual ownership review. Never
+			// restart recovery or clear their recording markers.
+			if marker, readErr := os.ReadFile(recPath); readErr == nil {
+				var rejected struct {
+					SourceRejected bool `json:"source_rejected"`
+				}
+				if json.Unmarshal(marker, &rejected) == nil && rejected.SourceRejected {
+					continue
+				}
+			}
 			if !recStale {
 				h.logger.Debug("skipping session with active recording", "session", name)
 				continue
@@ -572,7 +624,7 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 				// A busy capture writer can be retried on the next detect pass.
 				recoverErr := fileutil.WithFileLockTimeout(context.Background(), rawPath, h.captureLockWait, func() error {
 					var err error
-					hasRaw, err = recoverRawFromSessionFile(h.logger, recPath, sessionDir, rawPath)
+					hasRaw, err = recoverRawFromSessionFile(h.logger, recPath, sessionDir, rawPath, h.projectRoot)
 					if err != nil {
 						return err
 					}
@@ -581,7 +633,7 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 					return os.Remove(recPath)
 				})
 				if recoverErr != nil {
-					h.logger.Warn("stale recording recovery deferred", "session", name, "err", recoverErr)
+					h.logStaleRecoveryDeferred(name, recoverErr)
 					continue // preserve raw and the cursor so a later pass can retry
 				}
 			} else if err := os.Remove(recPath); err != nil {
@@ -685,7 +737,7 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 			// would then look complete and never be retried — the cache prune is
 			// the only signal that actually means "it reached the remote".
 			if isInLedgerCacheDir(sessionDir, ledgerPath) {
-				h.logger.Info("session needs upload (fully finalized, not pushed)",
+				h.logger.Debug("session needs upload (fully finalized, not pushed)",
 					"session", name,
 				)
 				items = append(items, &WorkItem{
@@ -867,7 +919,8 @@ func (h *SessionFinalizeHandler) DetectOrphanedForAgent(ledgerPath, agentID stri
 			// had (#966). It now sits after that check; see there.
 			_, isDraft, metaErr := lfs.PreservedSessionIDAndDraft(sessionDir)
 			if metaErr != nil {
-				h.logger.Warn("skipping session with unreadable meta.json",
+				h.warnOnce("orphan-unreadable-meta", name,
+					"skipping session with unreadable meta.json",
 					"session", name, "agent_id", agentID, "err", metaErr)
 				continue
 			}
@@ -881,14 +934,15 @@ func (h *SessionFinalizeHandler) DetectOrphanedForAgent(ledgerPath, agentID stri
 			}
 
 			var state struct {
-				AgentID   string     `json:"agent_id"`
-				ParentPID int        `json:"parent_pid,omitempty"`
-				StoppedAt *time.Time `json:"stopped_at,omitempty"`
+				AgentID        string     `json:"agent_id"`
+				ParentPID      int        `json:"parent_pid,omitempty"`
+				StoppedAt      *time.Time `json:"stopped_at,omitempty"`
+				SourceRejected bool       `json:"source_rejected,omitempty"`
 			}
 			if jsonErr := json.Unmarshal(data, &state); jsonErr != nil {
 				continue
 			}
-			if state.AgentID != agentID {
+			if state.AgentID != agentID || state.SourceRejected {
 				continue
 			}
 
@@ -957,14 +1011,15 @@ func (h *SessionFinalizeHandler) DetectOrphanedForAgent(ledgerPath, agentID stri
 			if sessionsDir != filepath.Join(ledgerPath, "sessions") {
 				recoverErr := fileutil.WithFileLockTimeout(context.Background(), rawPath, h.captureLockWait, func() error {
 					var err error
-					hasRaw, err = recoverRawFromSessionFile(h.logger, recPath, sessionDir, rawPath)
+					hasRaw, err = recoverRawFromSessionFile(h.logger, recPath, sessionDir, rawPath, h.projectRoot)
 					if err != nil {
 						return err
 					}
 					return os.Remove(recPath)
 				})
 				if recoverErr != nil {
-					h.logger.Warn("orphaned recording recovery deferred", "session", name, "err", recoverErr)
+					h.warnOnce("orphan-recovery-deferred", name,
+						"orphaned recording recovery deferred", "session", name, "err", recoverErr)
 					continue
 				}
 			} else if err := os.Remove(recPath); err != nil {
@@ -1024,6 +1079,12 @@ func (h *SessionFinalizeHandler) BuildPrompt(item *WorkItem) (RunRequest, error)
 	payload, err := extractPayload(item)
 	if err != nil {
 		return RunRequest{}, err
+	}
+
+	// Held for ownership review: do not spend an LLM run on it. ProcessResult
+	// drops the item.
+	if sessionHeldForReview(payload.SessionDir) {
+		return RunRequest{SkipLLM: true}, nil
 	}
 
 	if payload.UploadOnly {
@@ -1162,7 +1223,24 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 		return err
 	}
 
+	// Every way into this handler (the periodic scan, an agent's own orphan
+	// sweep, a caller's IPC request) ends here, so this is the one place that
+	// keeps a quarantined recording's transcript out of the Ledger. Dropped, not
+	// failed: retrying cannot change the answer, only a coworker's release can.
+	if sessionHeldForReview(payload.SessionDir) {
+		h.logger.Info("session finalize dropped: recording is held for ownership review",
+			"session", filepath.Base(payload.SessionDir))
+		return nil
+	}
+
 	payload.omitTraces = false
+
+	// Nothing below can reach git while the ledger index holds unmerged entries,
+	// but LFS upload comes first. Refuse before it: a wedged ledger once caused
+	// ~1,000 pointless LFS re-uploads of the same session blobs in 29 hours.
+	if err := h.checkLedgerResolved(payload.LedgerPath); err != nil {
+		return err
+	}
 
 	if payload.UploadOnly {
 		return h.processUploadOnly(payload)
@@ -1526,7 +1604,7 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 		h.logger.Warn("gitignore setup failed", "err", err)
 	}
 
-	pushed := h.gitCommitAndPush(payload, fileRefs)
+	pushed, pushErr := h.gitCommitAndPush(payload, fileRefs)
 
 	// prune cache dir only after a successful push — on push failure the cache
 	// is the only surviving copy of the session content
@@ -1534,6 +1612,14 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 		if err := os.RemoveAll(origCacheDir); err != nil {
 			h.logger.Debug("prune cache after finalize", "dir", origCacheDir, "err", err)
 		}
+	}
+
+	// A push that fails for an ordinary reason leaves the session in the cache,
+	// where detection re-queues it as upload-only. But a ledger-wide blocker will
+	// refuse every later session the same way, so surface it for the manager to
+	// pause the work type instead of repeating the summarize-then-fail cycle.
+	if isLedgerWideBlocker(pushErr) {
+		return pushErr
 	}
 
 	h.logger.Info("session recovered via anti-entropy",
@@ -2011,6 +2097,34 @@ func (h *SessionFinalizeHandler) stageSessionInLedger(payload *SessionFinalizePa
 	return cacheDir, nil
 }
 
+// logStaleRecoveryDeferred warns the first time a session's stale-recording
+// recovery is deferred and logs repeats at debug.
+func (h *SessionFinalizeHandler) logStaleRecoveryDeferred(name string, err error) {
+	if _, seen := h.staleRecoveryWarned.LoadOrStore(name, struct{}{}); seen {
+		h.logger.Debug("stale recording recovery deferred", "session", name, "err", err)
+		return
+	}
+	h.logger.Warn("stale recording recovery deferred", "session", name, "err", err)
+}
+
+// checkLedgerResolved returns ErrLedgerUnresolved when the ledger index holds
+// unmerged entries. A probe failure is not treated as a wedge (fail open): the
+// commit transaction re-checks and is the authority.
+func (h *SessionFinalizeHandler) checkLedgerResolved(ledgerPath string) error {
+	if h.skipGit || ledgerPath == "" {
+		return nil
+	}
+	unmerged, err := gitutil.HasUnmergedEntries(h.rootContext(), ledgerPath)
+	if err != nil {
+		h.logger.Debug("ledger conflict probe failed, continuing", "ledger", ledgerPath, "err", err)
+		return nil
+	}
+	if unmerged {
+		return fmt.Errorf("finalize blocked: %w", ErrLedgerUnresolved)
+	}
+	return nil
+}
+
 // processUploadOnly handles sessions that are fully finalized in the cache
 // but were never committed/pushed to the ledger. Skips LLM summarization.
 func (h *SessionFinalizeHandler) processUploadOnly(payload *SessionFinalizePayload) error {
@@ -2035,8 +2149,11 @@ func (h *SessionFinalizeHandler) processUploadOnly(payload *SessionFinalizePaylo
 				}
 			}
 			if len(ordinaryMissing) > 0 {
-				h.logger.Warn("upload-only: pointer stubs reference LFS blobs not in remote — session cannot be pushed, skipping", "session", sessionName, "missing_files", ordinaryMissing)
-				return nil // leave cache intact for manual recovery
+				// Cache stays intact for manual recovery. An error, not nil: nil counts as
+				// success, which clears the failure count and so keeps this session out of
+				// the manager's retry cap forever.
+				h.logger.Warn("upload-only: pointer stubs reference LFS blobs not in remote — session cannot be pushed", "session", sessionName, "missing_files", ordinaryMissing)
+				return fmt.Errorf("upload-only: session %s has pointer stubs whose LFS blobs are missing from the remote: %s", sessionName, strings.Join(ordinaryMissing, ", "))
 			}
 			if payload.omitTraces {
 				h.logger.Warn("trace pointers omitted: backing blobs unavailable", "session", sessionName)
@@ -2048,7 +2165,7 @@ func (h *SessionFinalizeHandler) processUploadOnly(payload *SessionFinalizePaylo
 	origCacheDir, err := h.stageSessionInLedger(payload)
 	if err != nil {
 		h.logger.Warn("upload-only: failed to stage session", "session", sessionName, "err", err)
-		return nil
+		return fmt.Errorf("upload-only: stage session %s: %w", sessionName, err)
 	}
 
 	// Failed LFS uploads defer publication; keep source content for retry.
@@ -2125,7 +2242,7 @@ func (h *SessionFinalizeHandler) processUploadOnly(payload *SessionFinalizePaylo
 		h.logger.Warn("upload-only: gitignore setup failed", "err", err)
 	}
 
-	pushed := h.gitCommitAndPush(payload, fileRefs)
+	pushed, pushErr := h.gitCommitAndPush(payload, fileRefs)
 
 	// Keep the source cache until the pointer commit reaches the remote.
 	if pushed {
@@ -2142,17 +2259,34 @@ func (h *SessionFinalizeHandler) processUploadOnly(payload *SessionFinalizePaylo
 	// "agent work complete status=success" for 897 consecutive failed commits in
 	// a single day, which is why the wedge stayed invisible while the backlog
 	// grew to ~3,000 sessions.
+	if pushErr != nil {
+		return fmt.Errorf("upload-only: session %s not committed or pushed: %w", sessionName, pushErr)
+	}
 	return fmt.Errorf("upload-only: session %s not committed or pushed", sessionName)
 }
 
+// isLedgerWideBlocker reports whether err means every later push of this ledger
+// would fail the same way, so retrying other sessions is pointless.
+func isLedgerWideBlocker(err error) bool {
+	return errors.Is(err, ErrLedgerUnresolved) || errors.Is(err, ErrLedgerPushWedged)
+}
+
 // gitCommitAndPush stages, commits, and pushes the finalized session.
-// Returns true if the push succeeded, false otherwise.
+// Returns true if the push succeeded, false otherwise. The error says why when
+// the cause is a ledger-wide blocker (ErrLedgerUnresolved, ErrLedgerPushWedged)
+// that the manager pauses the work type on; it is non-nil for any other failure
+// too, for the caller's message, but only the sentinels are acted on.
 // Uploaded files become pointers before the first commit. Callers retain the
 // source cache until this returns true.
-func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayload, fileRefs map[string]lfs.FileRef) bool {
+//
+// Every git step runs under the daemon's context, so shutdown cancels a stuck
+// push instead of leaving this goroutine holding ledgerMu past the daemon's
+// goroutine-wait deadline.
+func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayload, fileRefs map[string]lfs.FileRef) (bool, error) {
 	if h.skipGit {
-		return true // treat skip as success so tests can prune cache
+		return true, nil // treat skip as success so tests can prune cache
 	}
+	ctx := h.rootContext()
 
 	// serialize with daemon's ledger git ops (sync, murmur push, github sync)
 	if h.ledgerMu != nil {
@@ -2169,14 +2303,14 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 	// content into stubs that Detect and doctor both skip.
 	if !isGitTrackedLedgerSession(payload.SessionDir, ledgerPath) {
 		h.logger.Warn("session dir is outside the ledger sessions tree; skipping commit", "session", sessionName, "dir", payload.SessionDir)
-		return false
+		return false, nil
 	}
 
 	// relative path from ledger root for git add
 	relDir, err := filepath.Rel(ledgerPath, payload.SessionDir)
 	if err != nil {
 		h.logger.Warn("could not compute relative session path", "err", err)
-		return false
+		return false, nil
 	}
 
 	// A zero-delta commit is the NORMAL outcome for a session whose files already
@@ -2193,18 +2327,18 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 	// commit prevents a CLI pull from restoring an autostash between those
 	// steps. Release before PushWithRetry, which takes the same non-reentrant
 	// lock if a non-fast-forward retry needs to pull.
-	if err := gitutil.WithRepoLock(context.Background(), ledgerPath, func() error {
+	if err := gitutil.WithRepoLock(ctx, ledgerPath, func() error {
 		// Index removals for optional traces must never resolve a real conflict.
 		// Check before either pointer writes or staging mutate this transaction.
 		if err := gitutil.IsSafeForGitOps(ledgerPath); err != nil {
 			return err
 		}
-		unmerged, err := gitutil.HasUnmergedEntries(context.Background(), ledgerPath)
+		unmerged, err := gitutil.HasUnmergedEntries(ctx, ledgerPath)
 		if err != nil {
 			return err
 		}
 		if unmerged {
-			return fmt.Errorf("ledger has unresolved index conflicts")
+			return fmt.Errorf("commit blocked: %w", ErrLedgerUnresolved)
 		}
 		// A raw-only first push can trigger GitLab GC before a second pointer
 		// push, unlinking the newly uploaded objects from the project. Publish
@@ -2230,14 +2364,20 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 		// (or a stray concurrent writer) that rewrites a file in relDir between
 		// the git add above and here cannot ride along into this commit; the
 		// bytes published are exactly the bytes staged.
-		staged, err = gitutil.CommitLedgerSnapshot(context.Background(), ledgerPath, msg, relDir+"/")
+		staged, err = gitutil.CommitLedgerSnapshot(ctx, ledgerPath, msg, relDir+"/")
 		if err != nil {
+			// write-tree is what refuses an unmerged index, and it reports that as
+			// prose. Ask the index directly rather than reading the message, so a
+			// conflict that appeared mid-transaction still pauses the work type.
+			if unmerged, probeErr := gitutil.HasUnmergedEntries(ctx, ledgerPath); probeErr == nil && unmerged {
+				return fmt.Errorf("commit session snapshot: %w: %w", ErrLedgerUnresolved, err)
+			}
 			return fmt.Errorf("commit session snapshot: %w", err)
 		}
 		return nil
 	}); err != nil {
 		h.logger.Warn("session commit transaction failed", "session", sessionName, "err", err)
-		return false
+		return false, err
 	}
 	if !staged {
 		// Fall through to the push: the commit may exist locally from an earlier
@@ -2247,25 +2387,31 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 
 	// push with retry (best-effort — failures are non-fatal)
 	ep := endpoint.GetForProject(h.projectRoot)
-	if err := gitutil.PushWithRetry(context.Background(), ledgerPath, gitutil.PushOpts{
+	if err := gitutil.PushWithRetry(ctx, ledgerPath, gitutil.PushOpts{
 		AutoResolvePrefixes: ledger.AutoResolvePrefixes,
 		Logger:              h.logger,
+		SuspendWhenWedged:   true,
 		ReconcileLFS: func(repoPath string) (bool, error) {
 			if ep == "" {
 				return false, nil
 			}
-			result, reconcileErr := lfs.ReconcileUnpushedPointers(
-				context.Background(), repoPath, ep, h.logger)
+			result, reconcileErr := lfs.ReconcileUnpushedPointers(ctx, repoPath, ep, h.logger)
 			if reconcileErr != nil {
 				return false, reconcileErr
 			}
-			return result.Replaced > 0, nil
+			return result.Changed(), nil
 		},
 	}); err != nil {
+		if errors.Is(err, gitutil.ErrPushWedged) {
+			// PushWithRetry already warned once when the breaker opened; a skipped
+			// push is expected for the whole backoff and not worth a line each.
+			h.logger.Debug("git push skipped: ledger push wedged", "session", sessionName, "err", err)
+			return false, fmt.Errorf("%w: %w", ErrLedgerPushWedged, err)
+		}
 		h.logger.Warn("git push failed (non-fatal)", "err", err)
-		return false
+		return false, fmt.Errorf("git push: %w", err)
 	}
-	return true
+	return true, nil
 }
 
 // synthesizeMeta builds a minimal meta.json from the raw.jsonl header for a
@@ -2351,9 +2497,15 @@ func recordingCarrierFields(sessionDir string, stored *session.StoredSession) ([
 // Pins the locale so git's error text in logs stays stable and grep-able
 // regardless of the daemon host's language settings.
 func (h *SessionFinalizeHandler) runGit(repoPath string, args ...string) error {
-	fullArgs := append([]string{"-C", repoPath}, args...)
-	cmd := exec.Command("git", fullArgs...)
+	// core.excludesFile= drops the coworker's personal global gitignore: the
+	// Ledger is ox-owned, and a global "*.gz" there made `git add` refuse the
+	// session's trace files and fail every finalize on that machine. The
+	// Ledger's own .gitignore still applies.
+	fullArgs := append([]string{"-C", repoPath, "-c", "core.excludesFile="}, args...)
+	// the daemon's context: shutdown kills a stuck git instead of waiting on it
+	cmd := exec.CommandContext(h.rootContext(), "git", fullArgs...)
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C", "LANG=C")
+	cmd.WaitDelay = 2 * time.Second // a killed git's children may keep the pipes open
 
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -2747,11 +2899,18 @@ func stampCarrierBeforeReclaim(logger *slog.Logger, sessionDir, rawPath string, 
 	}
 }
 
+// sessionHeldForReview reports whether the recording marker in sessionDir says
+// its native source was quarantined. An unreadable marker is not a quarantine.
+func sessionHeldForReview(sessionDir string) bool {
+	state, err := session.ReadRecordingStateFile(sessionDir)
+	return err == nil && state != nil && state.SourceRejected
+}
+
 // recoverRawFromSessionFile recovers missing capture and drains a dead tail
 // recording from its persisted cursor. The watcher must be stopped first.
 // false, nil means the source was verified empty; errors leave the marker and
 // captured data intact so finalization can retry without losing the native tail.
-func recoverRawFromSessionFile(logger *slog.Logger, recPath, sessionDir, rawPath string) (bool, error) {
+func recoverRawFromSessionFile(logger *slog.Logger, recPath, sessionDir, rawPath string, fallbackProjectRoot ...string) (bool, error) {
 	data, err := os.ReadFile(recPath)
 	if err != nil {
 		return false, fmt.Errorf("read recording state: %w", err)
@@ -2759,6 +2918,11 @@ func recoverRawFromSessionFile(logger *slog.Logger, recPath, sessionDir, rawPath
 	var state session.RecordingState
 	if err := json.Unmarshal(data, &state); err != nil {
 		return false, fmt.Errorf("parse recording state: %w", err)
+	}
+	// Checked before the journal settles: a quarantined recording is kept
+	// exactly as it is, and settling would roll back or rewrite raw.jsonl.
+	if state.SourceRejected {
+		return false, fmt.Errorf("native source quarantined for manual ownership review")
 	}
 	// A capture that died mid-batch leaves raw.jsonl.append.json beside the
 	// transcript. Settle it against the persisted cursor before anything reads
@@ -2770,7 +2934,7 @@ func recoverRawFromSessionFile(logger *slog.Logger, recPath, sessionDir, rawPath
 	}
 
 	hasRaw := session.HasSubstantiveEntries(rawPath)
-	if state.StoppedAt != nil || (hasRaw && state.WatchMode != "tail") {
+	if state.StoppedAt != nil || (hasRaw && state.WatchMode != "tail" && state.AdapterName != "claude-code") {
 		if hasRaw {
 			stampCarrierBeforeReclaim(logger, sessionDir, rawPath, &state)
 		}
@@ -2821,6 +2985,54 @@ func recoverRawFromSessionFile(logger *slog.Logger, recPath, sessionDir, rawPath
 	if state.AdapterName == "" {
 		return hasRaw, nil
 	}
+	repoRoot := state.WorkspacePath
+	if state.AdapterName == "pi" && !filepath.IsAbs(repoRoot) {
+		return false, fmt.Errorf("cannot establish repository for legacy Pi recording")
+	}
+	if state.AdapterName == "claude-code" && repoRoot == "" {
+		// Old markers omitted WorkspacePath. Only use the daemon's project
+		// when the captured header binds it to the same repo ID; a native
+		// source path or session filename alone cannot establish ownership.
+		if len(fallbackProjectRoot) > 0 && filepath.IsAbs(fallbackProjectRoot[0]) {
+			if headerRepoID, ok := meta["repo_id"].(string); ok && headerRepoID != "" && headerRepoID == config.GetRepoID(fallbackProjectRoot[0]) {
+				repoRoot = fallbackProjectRoot[0]
+			}
+		}
+		if repoRoot == "" {
+			headerRepoID, _ := meta["repo_id"].(string)
+			if hasRaw && state.WatchMode != "tail" && headerRepoID == "" {
+				// the header names no repository, so nothing proves this capture
+				// foreign and nothing can recheck it: finalize what the hooks
+				// wrote, as before. A header that names another repository is
+				// the opposite of a missing one and is held for review below.
+				logger.Warn("legacy Claude hook capture has no repository to recheck; finalizing it", "session_dir", sessionDir)
+				stampCarrierBeforeReclaim(logger, sessionDir, rawPath, &state)
+				return hasRaw, nil
+			}
+			return false, fmt.Errorf("cannot establish repository for legacy Claude recording")
+		}
+	}
+	if state.AdapterName == "claude-code" && hasRaw && state.WatchMode != "tail" {
+		// A dead hook-mode recording. Every batch in raw.jsonl was ownership-
+		// checked as a hook appended it, so the captured file is finalized
+		// unless the native source PROVES the session crossed repositories.
+		// A source that cannot be rechecked (transcript pruned, worktree
+		// archived, a visited directory deleted) is not proof: refusing to
+		// finalize on that would strand validated data behind a retry loop
+		// that can never succeed.
+		if err := recheckClaudeHookSource(&state, repoRoot, sessionDir); errors.Is(err, claudesource.ErrUntrustedSource) {
+			return false, fmt.Errorf("validate Claude hook source before finalization: %w", err)
+		} else if err != nil {
+			logger.Warn("native Claude source not rechecked; finalizing the validated capture", "session_dir", sessionDir, "err", err)
+		}
+		stampCarrierBeforeReclaim(logger, sessionDir, rawPath, &state)
+		return hasRaw, nil
+	}
+	if state.AdapterName == "claude-code" && state.SessionFile == "" && state.WatchMode != "tail" {
+		// No discovered source does not prove the session was empty. Keep the
+		// marker so later recovery can retry without losing the native identity.
+		return false, fmt.Errorf("cannot verify undiscovered Claude hook source before finalization")
+	}
 	adapter, err := adapters.GetAdapter(state.AdapterName)
 	if err != nil {
 		return false, fmt.Errorf("resolve recovery adapter: %w", err)
@@ -2830,7 +3042,7 @@ func recoverRawFromSessionFile(logger *slog.Logger, recPath, sessionDir, rawPath
 			return hasRaw, nil
 		}
 		state.SessionFile, err = adapter.FindSessionFile(adapters.SessionLookup{
-			RepoRoot: state.WorkspacePath, AgentID: state.AgentID,
+			RepoRoot: repoRoot, AgentID: state.AgentID,
 			Since: state.StartedAt.Add(-5 * time.Minute), AgentSessionID: state.AgentSessionID,
 		})
 		if err != nil {
@@ -2851,6 +3063,13 @@ func recoverRawFromSessionFile(logger *slog.Logger, recPath, sessionDir, rawPath
 		}
 	}
 
+	var sourceSnapshot os.FileInfo
+	if state.AdapterName == "claude-code" {
+		sourceSnapshot, err = claudesource.Snapshot(state.SessionFile)
+		if err != nil {
+			return false, fmt.Errorf("stat native session before recovery: %w", err)
+		}
+	}
 	var rawEntries []adapters.RawEntry
 	if reader, ok := adapter.(adapters.IncrementalReader); ok {
 		offset := state.StartOffset
@@ -2872,6 +3091,13 @@ func recoverRawFromSessionFile(logger *slog.Logger, recPath, sessionDir, rawPath
 	}
 	if err != nil {
 		return false, fmt.Errorf("read native session: %w", err)
+	}
+	if state.AdapterName == "claude-code" {
+		// Cached paths are not permanent authorization: a live Claude session
+		// can append foreign-repo turns after discovery or the last watcher poll.
+		if err := validateClaudeRecoverySource(&state, repoRoot, sessionDir, sourceSnapshot); err != nil {
+			return false, fmt.Errorf("validate native session before recovery: %w", err)
+		}
 	}
 
 	var filtered []adapters.RawEntry
@@ -2940,7 +3166,7 @@ func recoverRawFromSessionFile(logger *slog.Logger, recPath, sessionDir, rawPath
 	// failure. All newly imported content passes through RawWriter's full
 	// command, built-in, custom and extra-detector redaction stack.
 	tmpPath := rawPath + ".tmp"
-	rw, err := session.NewRawWriterTruncate(tmpPath, state.WorkspacePath)
+	rw, err := session.NewRawWriterTruncate(tmpPath, repoRoot)
 	if err != nil {
 		return false, err
 	}
@@ -2987,6 +3213,34 @@ func recoverRawFromSessionFile(logger *slog.Logger, recPath, sessionDir, rawPath
 	}
 	logger.Info("recovered native session", "session_dir", sessionDir, "entries", written, "source", state.SessionFile)
 	return written > 0, nil
+}
+
+// recheckClaudeHookSource re-verifies a dead hook-mode recording's native
+// source. Only an error wrapping claudesource.ErrUntrustedSource is proof of a
+// foreign turn; every other error means the source could not be checked.
+func recheckClaudeHookSource(state *session.RecordingState, repoRoot, sessionDir string) error {
+	if state.SessionFile == "" {
+		return errors.New("recording does not name a native source")
+	}
+	snapshot, err := claudesource.Snapshot(state.SessionFile)
+	if err != nil {
+		return fmt.Errorf("stat Claude hook source: %w", err)
+	}
+	return validateClaudeRecoverySource(state, repoRoot, sessionDir, snapshot)
+}
+
+func validateClaudeRecoverySource(state *session.RecordingState, repoRoot, sessionDir string, snapshot os.FileInfo) error {
+	err := claudesource.ValidateRecorded(state.SessionFile, repoRoot, state.AgentSessionID, state.StartOffset, snapshot)
+	if errors.Is(err, claudesource.ErrUntrustedSource) {
+		state.SourceRejected = true
+		state.SessionPath = sessionDir
+		// under the state lock and keyed to this recording: a whole-file save of
+		// the copy read earlier would revert a cursor a live capture committed
+		if markErr := session.SetSourceRejectedAt(sessionDir, state.SessionID, true); markErr != nil {
+			return fmt.Errorf("quarantine untrusted native source: %w", errors.Join(err, markErr))
+		}
+	}
+	return err
 }
 
 // isPIDAlive checks if a process with the given PID exists.

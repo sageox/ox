@@ -186,7 +186,12 @@ type ObjectError struct {
 
 // BatchUpload requests upload URLs for the given objects.
 func (c *Client) BatchUpload(objects []BatchObject) (*BatchResponse, error) {
-	return c.doBatch(context.Background(), "upload", objects)
+	return c.BatchUploadContext(context.Background(), objects)
+}
+
+// BatchUploadContext requests upload URLs within the caller's deadline.
+func (c *Client) BatchUploadContext(ctx context.Context, objects []BatchObject) (*BatchResponse, error) {
+	return c.doBatch(ctx, "upload", objects)
 }
 
 // BatchDownload requests download URLs for the given objects.

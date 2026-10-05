@@ -30,6 +30,7 @@ import (
 	"github.com/sageox/ox/internal/ledger/automerge"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/perf"
+	"github.com/sageox/ox/internal/session"
 )
 
 // gcSwapWaitBound is how long the CLI will wait for a daemon-side blue-green
@@ -131,6 +132,11 @@ func checkUploadAccess(projectRoot string) error {
 // No OAuth needed — LFS upload uses the Git PAT (HTTP Basic auth).
 // Access control is enforced at push time by the PAT, not by a pre-check.
 func uploadSessionLFS(projectRoot, sessionPath string) (map[string]lfs.FileRef, error) {
+	// Every caller (upload, regenerate, migrate, retry) ends here, so this is the
+	// one place that keeps a quarantined recording's content out of the Ledger.
+	if recording, readErr := session.ReadRecordingStateFile(sessionPath); readErr == nil && recording != nil && recording.SourceRejected {
+		return nil, fmt.Errorf("session %s is held back for ownership review and was not uploaded; run 'ox agent %s session recover --release-quarantine' to re-check it", filepath.Base(sessionPath), recording.AgentID)
+	}
 	client, err := getLFSClient(projectRoot)
 	if err != nil {
 		return nil, fmt.Errorf("create LFS client: %w", err)
@@ -570,6 +576,6 @@ func makeLFSReconciler(ep string) func(string) (bool, error) {
 		if err != nil {
 			return false, err
 		}
-		return result.Replaced > 0, nil
+		return result.Changed(), nil
 	}
 }

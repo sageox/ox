@@ -64,6 +64,10 @@ type HealthStatus struct {
 	// StopIncompleteAge is how long since the incomplete stop occurred
 	StopIncompleteAge time.Duration
 
+	// QuarantinedRecordings are recordings held back because their native
+	// source was proven to cross repositories. Nothing publishes them.
+	QuarantinedRecordings []*RecordingState
+
 	// PendingCount is the number of sessions pending commit
 	PendingCount int
 
@@ -215,10 +219,22 @@ func checkRecordingState(status *HealthStatus, projectRoot string) {
 		return
 	}
 
-	states, err := LoadAllRecordingStates(projectRoot)
+	all, err := LoadAllRecordingStates(projectRoot)
 	if err != nil {
 		status.Errors = append(status.Errors, fmt.Sprintf("read recording state project=%s: %v", projectRoot, err))
 		return
+	}
+
+	// A quarantined recording is held for review, not recording. It must stay
+	// out of everything below: the stale-recording fix clears a stale recording's
+	// marker, and without the marker nothing would still say it is quarantined.
+	var states []*RecordingState
+	for _, state := range all {
+		if state.SourceRejected {
+			status.QuarantinedRecordings = append(status.QuarantinedRecordings, state)
+			continue
+		}
+		states = append(states, state)
 	}
 
 	if len(states) == 0 {

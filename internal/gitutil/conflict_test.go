@@ -72,6 +72,61 @@ func TestHasConflictMarkers_MissingFile(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// orphanedTailFixture is the session meta.json shape from #1056: the opening
+// marker is gone but the rest of the stash pop conflict survived.
+const orphanedTailFixture = `{
+  "stopped_at": "2026-09-22T16:59:31.860617Z",
+=======
+  "summary_status": "unrecoverable",
+  "summary_attempts": 3,
+>>>>>>> Stashed changes
+}`
+
+// TestHasConflictMarkersBytes_OrphanedTailIsConflicted checks that a hunk which
+// lost its opening marker still counts as a conflict.
+// Failure prevented: a half-resolved file passes the guard and an automatic writer publishes it.
+func TestHasConflictMarkersBytes_OrphanedTailIsConflicted(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		content string
+	}{
+		{name: "orphaned tail", content: orphanedTailFixture},
+		{name: "orphaned tail with CRLF", content: strings.ReplaceAll(orphanedTailFixture, "\n", "\r\n")},
+		{name: "full conflict", content: conflictMarkerFixture},
+		{name: "lone opening marker", content: "<<<<<<< Updated upstream\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.True(t, HasConflictMarkersBytes([]byte(tc.content)))
+		})
+	}
+}
+
+// TestHasConflictMarkersBytes_MarkerLookalikesStayClean pins content that looks
+// like part of a conflict, including samples seen in real ledgers (#1056).
+// Failure prevented: a clean Ledger is refused as conflicted and sync suspends (#962).
+func TestHasConflictMarkersBytes_MarkerLookalikesStayClean(t *testing.T) {
+	t.Parallel()
+	const htmlBars = "<!--\n=====================================\nPlan styles\n=====================================  -->\n"
+	const quotedEnd = "expected = \"\"\"ours\n>>>>>>> origin/main\"\"\",\n"
+	for _, tc := range []struct {
+		name    string
+		content string
+	}{
+		{name: "lone separator", content: "Heading\n=======\n\nbody\n"},
+		{name: "HTML comment bars", content: htmlBars},
+		{name: "quoted closing marker without separator", content: quotedEnd},
+		{name: "HTML comment bars above a quoted closing marker", content: htmlBars + quotedEnd},
+		{name: "closing marker above a separator", content: quotedEnd + "=======\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.False(t, HasConflictMarkersBytes([]byte(tc.content)))
+		})
+	}
+}
+
 func TestValidateLedgerBlob(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -87,6 +142,7 @@ func TestValidateLedgerBlob(t *testing.T) {
 		{name: "null session metadata", path: "sessions/example/meta.json", content: `null`, wantErr: "invalid JSON object"},
 		{name: "invalid JSON outside session metadata", path: "data/github/event.json", content: `{"partial":`},
 		{name: "conflict marker in any artifact", path: "sessions/example/summary.md", content: conflictMarkerFixture, wantErr: "unresolved conflict"},
+		{name: "orphaned conflict tail outside session metadata", path: "data/github/event.json", content: orphanedTailFixture, wantErr: "unresolved conflict"},
 		{name: "nested path named meta is not session metadata", path: "sessions/example/nested/meta.json", content: `{"partial":`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

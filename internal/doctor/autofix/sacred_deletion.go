@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/sacred"
 )
@@ -26,8 +25,8 @@ const commitMarker = "\x1e"
 
 // checkLedgerSacredDeletion is the daemon's periodic deep check for the
 // data-loss class the 2026-08-25 Ox Dot wipe belongs to: a single commit that
-// deleted every saved plan + session. It resolves the workspace's ledger and
-// scans recent history for any commit that removed more than
+// deleted every saved plan + session. It receives a canonical Ledger checkout
+// and scans recent history for any commit that removed more than
 // sacred.DetectorEntityThreshold whole plans/sessions.
 //
 // DETECTION ONLY — it never restores. Per ADR-024 sacred-data deletion needs
@@ -39,20 +38,11 @@ const commitMarker = "\x1e"
 // Counts entities REMOVED, not sacred files touched. Deleting artifacts from
 // inside a session — a sweep of stale `.rej` files, say — loses no session and
 // is not reported, which the previous file count could not express.
-func checkLedgerSacredDeletion(ctx context.Context, repoPath string) CheckResult {
-	if repoPath == "" {
+func checkLedgerSacredDeletion(ctx context.Context, ledgerPath string) CheckResult {
+	if ledgerPath == "" {
 		return CheckResult{Status: StatusClean}
 	}
-	pctx, err := config.LoadProjectContext(repoPath)
-	if err != nil || pctx == nil {
-		// uninitialized workspace or no ledger configured — nothing to scan
-		return CheckResult{Status: StatusClean, Repo: repoPath}
-	}
-	ledgerPath := pctx.DefaultLedgerPath()
-	if ledgerPath == "" {
-		return CheckResult{Status: StatusClean, Repo: repoPath}
-	}
-	return scanLedgerSacredDeletions(ctx, ledgerPath, repoPath)
+	return scanLedgerSacredDeletions(ctx, ledgerPath, ledgerPath)
 }
 
 // scanLedgerSacredDeletions is the side-effect-free core, split out so tests can

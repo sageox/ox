@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sageox/ox/internal/prime"
 	"github.com/sageox/ox/internal/teamdocs"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
@@ -187,4 +188,63 @@ func TestTopLevelSections_SelfClosingLineOpensNoSection(t *testing.T) {
 	}
 	assert.Equal(t, []string{"team-knowledge/docs", "team-knowledge/team-rules", "team-knowledge/memory"}, names,
 		"every child after the self-closing bulletin line must still be a trim candidate")
+}
+
+// TestFitPrimeToHookCap_KeepsTheHeldBackSkillReportOverCatalogs: the report is a
+// defect notice — a team skill that was published and never arrived — so when
+// the hook cap leaves room for only ONE of it and a catalog, the report wins.
+// Removing the entry from hookCapSectionPriority leaves it unlisted, and an
+// unlisted section loses every such contest, which is exactly the wrong end.
+//
+// The budget is calibrated from the trimmer's own accounting (everything
+// deferred, plus what the catalog costs to keep) so the two sections genuinely
+// compete: slack for both would not test the order, and slack for neither would
+// not either.
+func TestFitPrimeToHookCap_KeepsTheHeldBackSkillReportOverCatalogs(t *testing.T) {
+	// several skills, so the section outweighs the <deferred> pointer's own
+	// ~330-byte header; a one-skill report is smaller than the notice that
+	// would replace it, and deferring it would not even save space.
+	skills := make([]prime.WithheldSkill, 0, 6)
+	for _, name := range []string{"deploy-prod", "rotate-keys", "restore-backup", "release-notes", "triage-oncall", "db-migrate"} {
+		skills = append(skills, prime.WithheldSkill{Name: name, Reason: "withheld, the manifest itself needs approval: allowed-tools (SKILL.md)"})
+	}
+	var held strings.Builder
+	emitWithheldTeamSkills(&held, newBookkeeper(&held), skills)
+	docs := "\n<docs>\n" + strings.Repeat("a catalog row a coworker can Read on demand\n", 40) + "</docs>\n"
+	require.Greater(t, len(docs), len(held.String()), "the catalog must be the larger section or the contest is not a contest")
+
+	doc := "<ox-prime>\n\n<team-knowledge>\n" + held.String() + docs + "\n</team-knowledge>\n\n</ox-prime>\n"
+	const path = "/cache/prime/Oxheld1-full.xml"
+
+	// a zero budget defers every candidate, which is the document at its smallest
+	// plus the pointer; keeping the catalog costs its span less its pointer line.
+	allDeferred, _ := fitPrimeToHookCap(doc, 0, path)
+	budget := len(allDeferred) + len(docs) - len(deferredLine("team-knowledge/docs"))
+
+	trimmed, deferred := fitPrimeToHookCap(doc, budget, path)
+
+	assert.Equal(t, []string{"team-knowledge/docs"}, deferred,
+		"the catalog must be deferred before the held-back report")
+	assert.Contains(t, trimmed, "<team-skills-held", "the held-back report lost the byte race to a catalog")
+}
+
+// TestHookCapDeferredHints_EveryDeferrableSectionHasOne: a deferred section is
+// only worth a Read if its pointer line says when. The always-kept head of the
+// list is exempt; everything after it is deferrable, so a new section added to
+// hookCapSectionPriority without a hint is a pointer the agent has no reason to
+// follow — the one that most needs it being a report of a skill that never
+// arrived.
+func TestHookCapDeferredHints_EveryDeferrableSectionHasOne(t *testing.T) {
+	deferrable := false
+	for _, name := range hookCapSectionPriority {
+		if name == "consult-first" {
+			deferrable = true // everything after the always-kept head
+			continue
+		}
+		if !deferrable {
+			continue
+		}
+		assert.NotEmpty(t, hookCapDeferredHints[name],
+			"%s is deferrable but its <deferred> pointer line carries no hint", name)
+	}
 }

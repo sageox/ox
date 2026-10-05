@@ -81,7 +81,8 @@ func TestResolve_CarriesRebaseThroughSequentialConflicts(t *testing.T) {
 	var resolvedSteps int
 	r.runLLM = func(ctx context.Context, binary, prompt string) (string, error) {
 		resolvedSteps++
-		return fmt.Sprintf("merged at step %d\n", resolvedSteps), nil
+		// a lossless merge: keep every line from both sides of the hunk
+		return hunkUnion(prompt), nil
 	}
 
 	ok, err := r.Resolve(context.Background(), repo)
@@ -198,4 +199,26 @@ func TestResolveOneStep_LaterPassWithCleanIndexDelegatesToContinue(t *testing.T)
 	if !done && !rebaseStillInProgress(t, repo) {
 		t.Error("reported not-done while no rebase state remains")
 	}
+}
+
+// hunkUnion is a lossless fake merge: every line from both sides of each
+// conflict hunk in s, in order, markers and diff3 base dropped.
+func hunkUnion(s string) string {
+	var out []string
+	inHunk, inBase := false, false
+	for _, line := range strings.Split(s, "\n") {
+		switch {
+		case strings.HasPrefix(line, "<<<<<<<"):
+			inHunk, inBase = true, false
+		case inHunk && strings.HasPrefix(line, "|||||||"):
+			inBase = true
+		case inHunk && line == "=======":
+			inBase = false
+		case inHunk && strings.HasPrefix(line, ">>>>>>>"):
+			inHunk = false
+		case inHunk && !inBase:
+			out = append(out, line)
+		}
+	}
+	return strings.Join(out, "\n") + "\n"
 }

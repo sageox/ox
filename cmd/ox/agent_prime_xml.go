@@ -457,6 +457,8 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 				emitTeamRules(&sb, bk, output.TeamContext.TeamRules)
 			}
 
+			emitWithheldTeamSkills(&sb, bk, output.WithheldTeamSkills)
+
 			// team memory (inlined content): framing ours, body is team's
 			if output.TeamContext.MemoryContent != "" {
 				sb.WriteString("\n<memory>\n")
@@ -541,6 +543,13 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 
 	} // !compact — end of the static + slow-changing tier (see top of function)
 
+	// A held-back skill is reported once: the reconcile that found it recorded its
+	// revision, so no later prime will see it again. A compact re-prime skips team
+	// knowledge, so it must carry the report here or the coworker never learns of it.
+	if compact {
+		emitWithheldTeamSkills(&sb, bk, output.WithheldTeamSkills)
+	}
+
 	// ════════════════════════════════════════════════════════════
 	// CACHE BOUNDARY — everything below here is unique per session.
 	// Adding content above this line? It MUST be identical across
@@ -560,6 +569,9 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 	fmt.Fprintf(&sb, " status=%q", output.Status)
 	if output.CurrentUserName != "" {
 		fmt.Fprintf(&sb, " you=\"%s\"", escapeXML(output.CurrentUserName))
+		if output.CurrentUserKind != "" {
+			fmt.Fprintf(&sb, " you_kind=%q", output.CurrentUserKind)
+		}
 		if len(output.CurrentUserAliases) > 0 {
 			fmt.Fprintf(&sb, " you_aliases=\"%s\"", escapeXML(strings.Join(output.CurrentUserAliases, ", ")))
 		}
@@ -799,7 +811,7 @@ func writePlanEnrichmentGuidance(sb *strings.Builder, agentType string) {
 	sb.WriteString("A plan follows a creed: don't waste human attention, delight them, educate them visually and crisply.\n")
 	// Cross-agent mandate: planning should ALWAYS draw on SageOx conversation
 	// intelligence first, regardless of agent tier.
-	sb.WriteString("Before planning non-trivial work, consult SageOx conversation intelligence: `ox query \"&lt;topic&gt;\"` (discussions+sessions), `ox code search` (code+history) — plans ignoring recent team context get re-litigated.\n")
+	sb.WriteString("Before planning non-trivial work, consult SageOx conversation intelligence: `ox query \"&lt;topic&gt;\"` (discussions+sessions), `ox conversation search` (who/when), `ox code search` (code+history) — plans ignoring recent team context get re-litigated.\n")
 	if prime.ClassifyAgentTier(agentType) == prime.TierBronze {
 		// lighter tier: surface the surface, don't promise real-time nudges.
 		sb.WriteString("When you produce a plan: run `ox plan enrich` (JSON) WHILE drafting. For material work author `plan.html`, save it canonically with `ox plan save --file plan.html`, then present it through `ox plan render --file plan.html --open` so ox injects team context without replacing the page. Verify with `ox plan lint &lt;slug&gt; [--strict]`. Browse prior plans: `ox plan list`. Run `ox guide plan-enrichment` for the full workflow.\n")
@@ -807,11 +819,12 @@ func writePlanEnrichmentGuidance(sb *strings.Builder, agentType string) {
 		sb.WriteString("</plan-enrichment-guidance>\n")
 		return
 	}
-	sb.WriteString("Plan any non-trivial work — design, GTM, rollout, engineering (multi-file OR architectural OR hotspot/open-PR OR ~5+ steps): run `ox plan enrich` WHILE drafting — JSON team context (collisions, prior art, expert routing) at zero LLM/network cost. This is your default plan-enrichment call.\n")
-	// HTML + review loop are HUMAN-opt-in: the agent recommends, the human runs.
-	// The authored page leads; ox supplies canonical storage, enrichment chrome,
-	// and review without becoming a second renderer or source of truth.
-	sb.WriteString("For a material plan — or a mockup, review sheet, or evidence page, which belong in the ledger too — author a purpose-built `plan.html`, save it as the single record with `ox plan save --file plan.html --kind plan|mockup|review|evidence`, then present it through `ox plan render --file plan.html --open`; ox preserves the page, derives markdown, and injects team context (prior art, collisions, expert routing, knowledge bubbles, team memory), attribution, and review chrome. Never use legacy `--plan + --html`: competing sources can make review discard the authored page. Verify with `ox plan lint --file plan.html` BEFORE the first save, `ox plan lint &lt;slug&gt;` after. After presenting, proactively OFFER the live review loop: on the human's yes, launch `ox plan review &lt;slug&gt;` (they mark up in-browser, you address items live) — never auto-start without the yes. `ox plan list` flags open review items on resume.\n")
+	// ONE rule + pointer. The why (zero-cost enrichment, why the authored page
+	// must be the single record, lint-before-save, the review-loop etiquette,
+	// the share link) lives in `ox guide plan-enrichment`: this block ships on
+	// every prime and every token competes with the developer's own context.
+	// HTML + review loop stay HUMAN-opt-in: the agent offers, the human runs.
+	sb.WriteString("Material work (multi-file, architectural, hotspot/open-PR, ~5+ steps) or any authored mockup/review page: `ox plan enrich` while drafting; author `plan.html`; `ox plan save --file plan.html --kind plan|mockup|review|evidence`; `ox plan render --open`; check with `ox plan lint`; offer `ox plan review &lt;slug&gt;` on the human's yes. Details: `ox guide plan-enrichment`.\n")
 	// Two-audience structure: a plan is read by the ~10-min human approver AND
 	// the agent that implements it. Steer agents to layer, not average — detail
 	// relocated to the end, never inlined up top or deleted (see buildGuidance).
@@ -857,6 +870,39 @@ func writeDecisionRecordGuidance(sb *strings.Builder) {
 	sb.WriteString("Mid-implementation, before a nontrivial design choice: check for a standing constraint first — `ox code search \"&lt;topic&gt;\" --decisions`.\n")
 	sb.WriteString("Paste citation comments VERBATIM, never hand-composed. Run `ox guide decision-records` for the credit and amendment rules.\n")
 	sb.WriteString("</decision-record-guidance>\n")
+}
+
+// emitWithheldTeamSkills names the team skills ox declined to install.
+//
+// Emitted ONLY when something is held, so a healthy repository — the common case
+// — pays nothing. Prime is already trimmed to fit a hook budget, and a section
+// that reports "nothing is wrong" in every session is what pushes something
+// useful into the deferred file.
+//
+// It exists because a withheld skill is INVISIBLE from the repository: it looks
+// exactly as it would if nobody had authored it. The teammate who wrote it has
+// no way to discover from their own machine that it never arrived, so silence
+// here is indistinguishable from the skill not existing.
+//
+// One line per skill and a pointer, not a table: the detail belongs in
+// `ox skills status`, which can afford it.
+func emitWithheldTeamSkills(sb *strings.Builder, bk *bookkeeper, withheld []prime.WithheldSkill) {
+	if len(withheld) == 0 {
+		return
+	}
+	sb.WriteString("\n<team-skills-held hint=\"published by your team but held back in part or in full — a bundled script is dropped until approved, a manifest that grants tools is withheld outright. Run `ox skills status` for detail.\">\n")
+	bk.charge(prime.BudgetSourceSageox)
+	for _, skill := range withheld {
+		fmt.Fprintf(sb, "- %s", escapeXMLText(skill.Name))
+		bk.charge(prime.BudgetSourceTeam)
+		if skill.Reason != "" {
+			fmt.Fprintf(sb, ": %s", escapeXMLText(skill.Reason))
+			bk.charge(prime.BudgetSourceTeam)
+		}
+		sb.WriteString("\n")
+	}
+	sb.WriteString("</team-skills-held>\n")
+	bk.charge(prime.BudgetSourceSageox)
 }
 
 // emitTeamRules writes <team-rules> and <team-rules-budget> blocks for the

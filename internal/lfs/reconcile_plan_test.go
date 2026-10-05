@@ -19,7 +19,12 @@ import (
 // to the HTTP code the server reports for it (0 == present, no error).
 func fakeLFSDownloadServer(t *testing.T, codeByOID map[string]int) *Client {
 	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 		var req struct {
 			Operation string `json:"operation"`
 			Objects   []struct {
@@ -38,6 +43,7 @@ func fakeLFSDownloadServer(t *testing.T, codeByOID map[string]int) *Client {
 		}
 		type actions struct {
 			Download *dl `json:"download,omitempty"`
+			Upload   *dl `json:"upload,omitempty"`
 		}
 		type obj struct {
 			OID     string   `json:"oid"`
@@ -51,7 +57,9 @@ func fakeLFSDownloadServer(t *testing.T, codeByOID map[string]int) *Client {
 		}{Transfer: "basic"}
 		for _, o := range req.Objects {
 			ob := obj{OID: o.OID, Size: o.Size}
-			if code := codeByOID[o.OID]; code != 0 {
+			if req.Operation == "upload" && codeByOID[o.OID] != 0 {
+				ob.Actions = &actions{Upload: &dl{Href: srv.URL + "/objects/" + o.OID}}
+			} else if code := codeByOID[o.OID]; code != 0 {
 				ob.Error = &oerr{Code: code, Message: "x"}
 			} else {
 				// reconcile only reads Error (BatchDownload), never fetches — a
@@ -93,7 +101,7 @@ func TestReconcile_WalksPlanPointers(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(planDir, "plan.html"),
 		[]byte(lfsPointerContent(strings.Repeat("b", 64), 20)), 0o644))
 
-	result, _ := ReconcileUnpushedPointers(context.Background(), dir, "", nil)
+	result, _ := ReconcileAllPointers(context.Background(), dir, "", nil)
 	assert.Equal(t, 2, result.ScannedPointers,
 		"reconcile must scan BOTH sessions/ and data/plans/ (a plan pointer was invisible before)")
 }
@@ -109,7 +117,7 @@ func TestReconcile_PlanOnlyPointerIsScanned(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(planDir, "plan.html"),
 		[]byte(lfsPointerContent(strings.Repeat("c", 64), 30)), 0o644))
 
-	result, _ := ReconcileUnpushedPointers(context.Background(), dir, "", nil)
+	result, _ := ReconcileAllPointers(context.Background(), dir, "", nil)
 	assert.Equal(t, 1, result.ScannedPointers, "a plan-only pointer must be scanned")
 }
 

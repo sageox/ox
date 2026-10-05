@@ -16,6 +16,7 @@ import (
 
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
+	"github.com/sageox/ox/internal/gitserver"
 	"github.com/stretchr/testify/require"
 )
 
@@ -40,8 +41,35 @@ type oxE2E struct {
 	TeamID string
 	RepoID string
 
-	mu       sync.Mutex
-	requests []string // every path the CLI actually called, in order
+	mu         sync.Mutex
+	requests   []string                             // every path the CLI actually called, in order
+	teams      []api.TeamMembership                 // what GET /api/v1/cli/repos reports for this user
+	initBodies []api.RepoInitRequest                // every POST /api/v1/repo/init body, in order
+	register   func(api.RepoInitRequest) (int, any) // optional override of the init reply
+}
+
+// SetTeams replaces the team list the stub reports on GET /api/v1/cli/repos.
+func (e *oxE2E) SetTeams(teams ...api.TeamMembership) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.teams = teams
+}
+
+// OnRegister replaces the stub's reply to POST /api/v1/repo/init, so a test can
+// play the server being the authority on a team the user's list does not show.
+func (e *oxE2E) OnRegister(fn func(api.RepoInitRequest) (int, any)) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.register = fn
+}
+
+// InitRequests returns the bodies the command POSTed to /api/v1/repo/init. Asserting
+// on these is what proves WHICH team ID init actually asked the server to register
+// against, rather than trusting that a flag was resolved.
+func (e *oxE2E) InitRequests() []api.RepoInitRequest {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]api.RepoInitRequest(nil), e.initBodies...)
 }
 
 // Requested returns the API paths the command hit, so a test can assert on the
@@ -59,6 +87,12 @@ func newOxE2E(t *testing.T) *oxE2E {
 	skipIntegration(t)
 
 	env := &oxE2E{TeamID: "team-e2e", RepoID: "repo-e2e"}
+	// Two teams, so a resolution test has to pick the right one rather than
+	// pass by returning the only candidate.
+	env.teams = []api.TeamMembership{
+		{ID: env.TeamID, Name: "E2E Team", Slug: "e2e-team", Role: "owner"},
+		{ID: "team-e2e-other", Name: "Other Team", Slug: "other-team", Role: "member"},
+	}
 
 	env.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		env.mu.Lock()
@@ -78,10 +112,41 @@ func newOxE2E(t *testing.T) *oxE2E {
 				"expires_at":     time.Now().Add(time.Hour).Format(time.RFC3339),
 				"user":           map[string]any{"id": "user-e2e", "email": "e2e@example.com"},
 			})
+		case "/api/v1/cli/repos":
+			// ox init resolves --team against this list. Left unstubbed it 404s,
+			// fetchTeamMemberships fails, and every --team test silently takes the
+			// pass-through branch — green while proving none of the resolution.
+			// No repos and no token: the same reply is read again after
+			// registration to sync git credentials, which must stay a no-op here.
+			env.mu.Lock()
+			teams := append([]api.TeamMembership(nil), env.teams...)
+			env.mu.Unlock()
+			_ = json.NewEncoder(w).Encode(api.ReposResponse{Teams: teams, Repos: map[string]api.RepoInfo{}})
 		case "/api/v1/repo/init":
+			var req api.RepoInitRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			env.mu.Lock()
+			env.initBodies = append(env.initBodies, req)
+			register := env.register
+			env.mu.Unlock()
+			if register != nil {
+				status, body := register(req)
+				w.WriteHeader(status)
+				_ = json.NewEncoder(w).Encode(body)
+				return
+			}
+			// Echo the requested team, as the real server does for a team the
+			// user belongs to; fall back to the harness team when none was sent.
+			teamID := env.TeamID
+			if len(req.Teams) > 0 {
+				teamID = req.Teams[0]
+			}
 			_ = json.NewEncoder(w).Encode(api.RepoInitResponse{
 				RepoID: env.RepoID,
-				TeamID: env.TeamID,
+				TeamID: teamID,
 			})
 		default:
 			// Unstubbed routes 404 loudly rather than hanging. Requested()
@@ -101,6 +166,14 @@ func newOxE2E(t *testing.T) *oxE2E {
 	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, "cache"))
 	t.Setenv("SAGEOX_ENDPOINT", env.Server.URL)
+
+	// HOME isolation does not reach the OS keychain. Now that /api/v1/cli/repos is
+	// stubbed, runInit's post-registration credential sync succeeds and SAVES what
+	// it fetched — into the developer's real login keychain unless file storage is
+	// forced (observed: init blocked on the `security` CLI, and left a keychain
+	// entry for a throwaway localhost endpoint).
+	priorStorage := gitserver.TestSetForceFileStorage(true)
+	t.Cleanup(func() { gitserver.TestSetForceFileStorage(priorStorage) })
 
 	// No daemon. runInit and runAgentPrime both start one on a real machine, and
 	// a spawned daemon OUTLIVES the test: it keeps the test binary's process

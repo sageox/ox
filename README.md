@@ -4,12 +4,7 @@
 [![License](https://img.shields.io/github/license/sageox/ox)](LICENSE)
 [![Go Report Card](https://goreportcard.com/badge/github.com/sageox/ox)](https://goreportcard.com/report/github.com/sageox/ox)
 [![docs: ai-human-docs](https://raw.githubusercontent.com/rsnodgrass/ai-human-docs/main/badges/ai-human-docs.svg)](https://github.com/rsnodgrass/ai-human-docs)
-
-<!-- CI badge intentionally omitted: ci.yml is currently disabled (ci.yml.disabled).
-     Only docs.yml and smoke-test.yml are active, and neither is a build signal.
-     Re-enable CI, then uncomment:
-[![Build](https://img.shields.io/github/actions/workflow/status/sageox/ox/ci.yml?branch=main&label=build)](https://github.com/sageox/ox/actions)
--->
+[![Build](https://img.shields.io/github/actions/workflow/status/sageox/ox/ci.yml?branch=main&label=build)](https://github.com/sageox/ox/actions/workflows/ci.yml)
 
 **The hivemind for human-agent teams.** `ox` is the open-source CLI for
 [SageOx](https://sageox.ai). It loads your team's decisions, conventions, and

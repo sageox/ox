@@ -103,6 +103,10 @@ func OxCapabilities() []Capability {
 					Command: "`ox query \"<question>\"` (semantic; default `--source=team` covers discussions, docs, and session history). Add `--source=all` to include code.",
 				},
 				{
+					Cue:     `Who/when in a recorded conversation`,
+					Command: "`ox conversation search --participant NAME --since DATE`",
+				},
+				{
 					Cue:     `"Who or what touched this code?"`,
 					Command: "`ox code search \"<pattern>\"` / `ox code insights`.",
 				},
@@ -112,7 +116,7 @@ func OxCapabilities() []Capability {
 				},
 				{
 					Cue:     `A pasted sageox.ai recording link (…/c/rec_…, …/recordings/rec_…)`,
-					Command: "`ox conversation show <link>` — never web-fetch it (sign-in wall). Requires `ox login` and team membership; on `not_authenticated` / `no_team_access`, stop and tell the user. A screen walkthrough: then `ox conversation transcript <link> --frames`.",
+					Command: "`ox conversation show <link>` — never web-fetch it (sign-in wall). Requires `ox login` and team membership; on `not_authenticated` / `no_team_access`, stop and tell the user. A screen walkthrough: then `ox conversation walkthrough <link>` (what was on screen, clicked, and pointed at, with keyframes).",
 				},
 			},
 		},
@@ -171,6 +175,12 @@ func OxCapabilities() []Capability {
 		// deterministic floor for citation-walking is prime's KB guidance,
 		// which names `ox conversation` for every adapter).
 		{ID: "ox-cli-conversation", MechanismClass: MechanismSkill, Supports: CapabilitySupport{Slash: true, AutoActivate: true}},
+		// ox-cli-walkthrough is a fat playbook: reading a screen walkthrough
+		// spans walkthrough, transcript, and ox fetch plus opening images,
+		// which no single subcommand backs. Its deterministic floor is the
+		// consult-first recording-link route above, which names
+		// `ox conversation walkthrough` for every adapter.
+		{ID: "ox-cli-walkthrough", MechanismClass: MechanismSkill, Supports: CapabilitySupport{Slash: true, AutoActivate: true}},
 	}
 }
 

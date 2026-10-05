@@ -89,8 +89,11 @@ func TestTriggerLedgerIndexRebuild_ShaChanged(t *testing.T) {
 	firstSha := s.lastLedgerSha
 	s.mu.Unlock()
 
-	// add a new commit — sha changes
+	// add a new commit — sha changes; pretend the cooldown after the first build elapsed
 	addCommit(t, ledgerDir, "second commit")
+	s.mu.Lock()
+	s.lastLedgerBuildDone = time.Now().Add(-2 * s.config.LedgerIndexMinInterval)
+	s.mu.Unlock()
 
 	// second call — different sha, should trigger rebuild
 	s.triggerLedgerIndexRebuild(ctx)
@@ -271,10 +274,11 @@ func TestTriggerLedgerIndexRebuild_LedgerNotExists_Noop(t *testing.T) {
 	assert.False(t, hookCalled, "BuildLedgerIndex should not fire when ledger.Exists is false")
 }
 
-// TestContentSourceFingerprint_IncludesTeamContexts verifies that the fingerprint
-// changes when team context HEAD changes, not just the ledger.
-// Failure prevented: team discussion updates not triggering index rebuild.
-func TestContentSourceFingerprint_IncludesTeamContexts(t *testing.T) {
+// TestContentSourceFingerprint_IgnoresTeamContexts verifies that team context HEADs
+// are not part of the fingerprint: BuildLedgerIndex only indexes the ledger repo.
+// Failure prevented: any commit to any team context forcing a full 39k-commit
+// ledger rebuild (the production rebuild storm).
+func TestContentSourceFingerprint_IgnoresTeamContexts(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: git operations")
 	}
@@ -302,15 +306,14 @@ func TestContentSourceFingerprint_IncludesTeamContexts(t *testing.T) {
 
 	fp1 := s.contentSourceFingerprint(ctx, ledgerDir)
 	require.NotEmpty(t, fp1)
-	// fingerprint should contain path=sha entries for both ledger and team context
 	assert.True(t, strings.HasPrefix(fp1, "ledger="), "fingerprint should start with ledger=")
-	assert.Contains(t, fp1, tcDir+"=", "fingerprint should contain team context path")
+	assert.NotContains(t, fp1, tcDir, "fingerprint must not contain team context paths")
 
 	// add a commit to team context only (ledger stays the same)
 	addCommit(t, tcDir, "team discussion")
 
 	fp2 := s.contentSourceFingerprint(ctx, ledgerDir)
-	assert.NotEqual(t, fp1, fp2, "fingerprint must change when team context HEAD changes")
+	assert.Equal(t, fp1, fp2, "fingerprint must not change when only a team context HEAD changes")
 }
 
 // TestContentSourceFingerprint_LedgerOnly_NoTeamContexts verifies fingerprint works

@@ -82,6 +82,9 @@ var curatedOxSkills = map[string]bool{
 	"ox-cli-skill-manager": true,
 	"ox-cli-plan":          true,
 	"ox-cli-recap":         true,
+	// Reading a screen walkthrough as data (not as a video) is invisible
+	// from tool use: nothing else tells a coworker the layers exist.
+	"ox-cli-walkthrough": true,
 }
 
 var skillsListCmd = &cobra.Command{

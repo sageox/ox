@@ -41,6 +41,8 @@ func TestMaintainPrunesOrphanBlobs(t *testing.T) {
 	_, _ = s.Exec("INSERT INTO commits (id, repo_id, hash, timestamp) VALUES (1, 1, 'abc123', ?)", time.Now().Unix())
 	_, _ = s.Exec("INSERT INTO blobs (id, content_hash, language) VALUES (100, 'hash-referenced', 'go')")
 	_, _ = s.Exec("INSERT INTO file_revs (commit_id, path, blob_id) VALUES (1, 'main.go', 100)")
+	// a live snapshot is one a ref points at; an unreferenced one is pruned as dead
+	_, _ = s.Exec("INSERT INTO refs (repo_id, name, commit_id) VALUES (1, 'refs/heads/main', 1)")
 
 	// insert orphan blobs (not referenced by any file_rev)
 	_, _ = s.Exec("INSERT INTO blobs (id, content_hash, language) VALUES (200, 'hash-orphan-1', 'go')")
@@ -122,25 +124,6 @@ func TestMaintainPrunesOldDiffs(t *testing.T) {
 	_ = s.QueryRow("SELECT COUNT(*) FROM diffs").Scan(&count)
 	if count != 2 {
 		t.Errorf("expected 2 diffs remaining, got %d", count)
-	}
-}
-
-func TestMaintainVacuumsAfterLargePrune(t *testing.T) {
-	t.Parallel()
-	s := openStore(t)
-
-	// insert >100 orphan blobs to trigger vacuum (no file_revs reference them)
-	for i := 1; i <= 150; i++ {
-		_, _ = s.Exec("INSERT INTO blobs (content_hash, language) VALUES (?, 'go')", randomHash(i))
-	}
-
-	result := s.Maintain(context.Background())
-
-	if result.OrphanBlobsPruned != 150 {
-		t.Errorf("expected 150 orphan blobs pruned, got %d", result.OrphanBlobsPruned)
-	}
-	if !result.Vacuumed {
-		t.Error("expected vacuum after pruning >100 rows")
 	}
 }
 

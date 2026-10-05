@@ -224,6 +224,7 @@ const (
 
 	// Ledger Infrastructure checks
 	CheckSlugLedgerSparseCheckout = "ledger-sparse-checkout"
+	CheckSlugLedgerFleetHealth    = "ledger-fleet-health"
 
 	// Credential hygiene checks (ox-zyg7, ox-yeae): audit local Ledgers for
 	// credential exposure without uploading findings off-machine.

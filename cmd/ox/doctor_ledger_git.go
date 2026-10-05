@@ -744,73 +744,81 @@ func parseUnmergedPaths(porcelain string) []unmergedPath {
 func fixLedgerUnmergedPaths(ledgerPath string, unmerged []unmergedPath) checkResult {
 	const name = "Ledger unmerged paths"
 
-	op, hint := detectInProgressGitOp(ledgerPath)
-	if op == "" {
-		// Autostash conflicts have no in-progress operation to abort. Repair
-		// agreeing metadata under the same lock as daemon pulls; never choose
-		// a side when the data differs or the worktree has further edits.
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		var resolved bool
-		resolveErr := gitutil.WithRepoLock(ctx, ledgerPath, func() error {
-			var err error
-			resolved, err = gitutil.ResolveAutostashConflicts(ctx, ledgerPath, ledger.AutoResolvePrefixes, nil)
-			return err
-		})
-		if resolveErr == nil {
-			if resolved {
-				return PassedCheck(name, "resolved agreeing session metadata from autostash")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	var result checkResult
+	lockErr := gitutil.WithRepoLock(ctx, ledgerPath, func() error {
+		// Re-detect under the clone lock so doctor never aborts an operation
+		// that replaced the one observed by the initial read-only check.
+		op, hint := detectInProgressGitOp(ledgerPath)
+		if op == "" {
+			resolved, resolveErr := gitutil.ResolveAutostashConflicts(ctx, ledgerPath, ledger.AutoResolvePrefixes, nil)
+			if resolveErr == nil {
+				if resolved {
+					result = PassedCheck(name, "resolved agreeing session metadata from autostash")
+				} else {
+					result = PassedCheck(name, "conflicts already resolved")
+				}
+				return nil
 			}
-			return PassedCheck(name, "conflicts already resolved")
+			sample := unmerged[0].Path
+			if len(unmerged) > 1 {
+				sample = fmt.Sprintf("%s (+%d more)", sample, len(unmerged)-1)
+			}
+			prefix := ""
+			if hint != "" {
+				prefix = fmt.Sprintf("could not inspect .git for in-progress operation (%s).\n       ", hint)
+			}
+			prefix += fmt.Sprintf("Automatic recovery could not resolve the conflict: %s.\n       ", resolveErr)
+			detail := prefix + fmt.Sprintf(
+				"%d unmerged file(s) but no merge/rebase/cherry-pick in progress (%s).\n       "+
+					"This can happen when restoring an autostash or after manual edits. Resolve by hand:\n       "+
+					"  cd %s\n       "+
+					"  git status                       # inspect the conflict\n       "+
+					"  git checkout --ours <file>       # or --theirs, depending on intent\n       "+
+					"  git reset HEAD <file>            # if you want to discard the staged conflict",
+				len(unmerged), sample, ledgerPath,
+			)
+			result = FailedCheck(name, "manual resolution required", detail)
+			result.slug = CheckSlugLedgerUnmergedPaths
+			return nil
 		}
-		if gitutil.IsRepoLockBusy(resolveErr) {
-			r := WarningCheck(name, "ledger busy, recovery deferred",
-				"Another ox operation is using the ledger; retry `ox doctor --fix` shortly.")
-			r.slug = CheckSlugLedgerUnmergedPaths
-			return r
-		}
-		sample := unmerged[0].Path
-		if len(unmerged) > 1 {
-			sample = fmt.Sprintf("%s (+%d more)", sample, len(unmerged)-1)
-		}
-		// Surface the inspection error when present so a permission/IO failure
-		// in os.Stat(.git) is visible instead of silently downgraded to
-		// "manually-staged conflict."
-		prefix := ""
-		if hint != "" {
-			prefix = fmt.Sprintf("could not inspect .git for in-progress operation (%s).\n       ", hint)
-		}
-		prefix += fmt.Sprintf("Automatic recovery could not resolve the conflict: %s.\n       ", resolveErr)
-		detail := prefix + fmt.Sprintf(
-			"%d unmerged file(s) but no merge/rebase/cherry-pick in progress (%s).\n       "+
-				"This can happen when restoring an autostash or after manual edits. Resolve by hand:\n       "+
-				"  cd %s\n       "+
-				"  git status                       # inspect the conflict\n       "+
-				"  git checkout --ours <file>       # or --theirs, depending on intent\n       "+
-				"  git reset HEAD <file>            # if you want to discard the staged conflict",
-			len(unmerged), sample, ledgerPath,
-		)
-		r := FailedCheck(name, "manual resolution required", detail)
-		r.slug = CheckSlugLedgerUnmergedPaths
-		return r
-	}
 
-	// AuditAndAbort: structured pre/post audit so silent recovery from a
-	// wedged ledger leaves a trail. See ox-ooy3 and .claude/rules/daemon-git.md.
-	abortCtx, abortCancel := context.WithTimeout(context.Background(), 15*time.Second)
-	abortErr := gitutil.AuditAndAbort(abortCtx, ledgerPath, gitutil.AuditableOp(op), "doctor --fix unmerged-paths wedge", slog.Default())
-	abortCancel()
-	if abortErr != nil {
-		return FailedCheck(name,
-			fmt.Sprintf("git %s --abort failed", op),
-			fmt.Sprintf("error: %s\n       %s", abortErr, hint))
-	}
+		var rescueRef string
+		var abortErr error
+		if op == "rebase" {
+			if age, ok := gitutil.RebaseAge(ledgerPath); ok && age < gitutil.StaleRebaseThreshold {
+				result = WarningCheck(name, "fresh rebase left in progress", "The rebase may still be active; retry `ox doctor --fix` after five minutes if it remains stuck.")
+				result.slug = CheckSlugLedgerUnmergedPaths
+				return nil
+			}
+			rescueRef, abortErr = gitutil.RescueIfNeededThenAbort(ctx, ledgerPath, "doctor --fix unmerged-paths wedge", slog.Default())
+		} else {
+			abortErr = gitutil.AuditAndAbort(ctx, ledgerPath, gitutil.AuditableOp(op), "doctor --fix unmerged-paths wedge", slog.Default())
+		}
+		if abortErr != nil {
+			result = FailedCheck(name,
+				fmt.Sprintf("git %s --abort failed", op),
+				fmt.Sprintf("error: %s\n       %s\n       rescue ref: %s", abortErr, hint, rescueRef))
+			return nil
+		}
 
-	slog.Info("ledger unmerged-paths wedge cleared",
-		"op", op, "ledger", ledgerPath, "files", len(unmerged),
-	)
-	return PassedCheck(name,
-		fmt.Sprintf("aborted stuck %s (%d file(s) cleared)", op, len(unmerged)))
+		slog.Info("ledger unmerged-paths wedge cleared", "op", op, "ledger", ledgerPath, "files", len(unmerged), "rescue_ref", rescueRef)
+		result = PassedCheck(name, fmt.Sprintf("aborted stuck %s (%d file(s) cleared, rescue ref %q)", op, len(unmerged), rescueRef))
+		return nil
+	})
+	if lockErr == nil {
+		return result
+	}
+	if gitutil.IsRepoLockBusy(lockErr) {
+		result = WarningCheck(name, "ledger busy, recovery deferred", "Another ox operation is using the ledger; retry `ox doctor --fix` shortly.")
+		result.slug = CheckSlugLedgerUnmergedPaths
+		return result
+	}
+	result = FailedCheck(name, "could not acquire ledger lock", lockErr.Error())
+	result.slug = CheckSlugLedgerUnmergedPaths
+	return result
 }
 
 // detectInProgressGitOp inspects the ledger's .git directory for markers
@@ -870,17 +878,24 @@ func detectInProgressGitOp(ledgerPath string) (op, hint string) {
 // every ledger pull fails with "already a rebase-merge directory" — the exact
 // production wedge in bd ox-j3cl.
 //
-// With fix=true, a rebase is cleared via gitutil.AbortOrClearRebase (abort, then
-// `--quit` for a zombie dir); a merge/cherry-pick/revert via the audited abort.
+// With fix=true, a rebase first rescues any otherwise-unreachable commits, then
+// clears via abort (or `--quit` for an attached zombie dir); a
+// merge/cherry-pick/revert clears via the audited abort.
 // A fresh rebase (younger than StaleRebaseThreshold) is left alone — it's almost
 // always a live daemon pull --rebase or a human mid-operation.
 func checkLedgerStuckOperation(fix bool) checkResult {
-	const name = "Ledger stuck operation"
-
 	ledgerPath := getLedgerPath()
 	if ledgerPath == "" {
-		return SkippedCheck(name, "no ledger found", "")
+		return SkippedCheck("Ledger stuck operation", "no ledger found", "")
 	}
+	return checkLedgerStuckOperationAt(ledgerPath, fix)
+}
+
+// checkLedgerStuckOperationAt is the path-explicit core shared by the current
+// project's doctor row and the endpoint-wide Ledger fleet check.
+func checkLedgerStuckOperationAt(ledgerPath string, fix bool) checkResult {
+	const name = "Ledger stuck operation"
+
 	if !isGitRepo(ledgerPath) {
 		return SkippedCheck(name, "ledger not a git repo", "")
 	}
@@ -925,31 +940,60 @@ func stuckOperationFailure(name, ledgerPath, op, hint string) checkResult {
 }
 
 // fixLedgerStuckOperation clears a stuck operation. A rebase goes through
-// gitutil.AbortOrClearRebase (reversible `git rebase --abort`, escalating to
-// `git rebase --quit` for a structurally-incomplete zombie dir that abort
-// cannot clear). A merge/cherry-pick/revert clears via the audited abort — its
-// state is always intact enough to abort. Extracted for direct unit testing.
-func fixLedgerStuckOperation(ledgerPath, op, hint string) checkResult {
+// gitutil.RescueIfNeededThenAbort so unique commits are anchored before a
+// reversible `git rebase --abort` can move HEAD. Attached zombie state may
+// escalate to `git rebase --quit`; detached zombie state remains surfaced for
+// human review. Other operation types clear via the audited abort.
+func fixLedgerStuckOperation(ledgerPath, _, _ string) checkResult {
 	const name = "Ledger stuck operation"
 
-	var clearErr error
-	if op == "rebase" {
-		clearErr = gitutil.AbortOrClearRebase(context.Background(), ledgerPath, "doctor --fix stuck rebase", slog.Default())
-	} else {
-		abortCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		clearErr = gitutil.AuditAndAbort(abortCtx, ledgerPath, gitutil.AuditableOp(op), "doctor --fix stuck "+op, slog.Default())
-		cancel()
-	}
-	if clearErr != nil {
-		r := FailedCheck(name,
-			fmt.Sprintf("could not clear stuck %s", op),
-			fmt.Sprintf("error: %s\n       %s", clearErr, hint))
-		r.slug = CheckSlugLedgerStuckOperation
-		return r
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
-	slog.Info("ledger stuck-operation wedge cleared", "op", op, "ledger", ledgerPath)
-	return PassedCheck(name, fmt.Sprintf("cleared stuck %s", op))
+	var result checkResult
+	lockErr := gitutil.WithRepoLock(ctx, ledgerPath, func() error {
+		op, hint := detectInProgressGitOp(ledgerPath)
+		if op == "" {
+			result = PassedCheck(name, "operation already cleared")
+			return nil
+		}
+		if op == "rebase" {
+			if age, ok := gitutil.RebaseAge(ledgerPath); ok && age < gitutil.StaleRebaseThreshold {
+				result = PassedCheck(name, fmt.Sprintf("rebase in progress (%s, fresh)", age.Round(time.Second)))
+				return nil
+			}
+		}
+
+		var rescueRef string
+		var clearErr error
+		if op == "rebase" {
+			rescueRef, clearErr = gitutil.RescueIfNeededThenAbort(ctx, ledgerPath, "doctor --fix stuck rebase", slog.Default())
+		} else {
+			clearErr = gitutil.AuditAndAbort(ctx, ledgerPath, gitutil.AuditableOp(op), "doctor --fix stuck "+op, slog.Default())
+		}
+		if clearErr != nil {
+			result = FailedCheck(name,
+				fmt.Sprintf("could not clear stuck %s", op),
+				fmt.Sprintf("error: %s\n       %s\n       rescue ref: %s", clearErr, hint, rescueRef))
+			result.slug = CheckSlugLedgerStuckOperation
+			return nil
+		}
+
+		slog.Info("ledger stuck-operation wedge cleared", "op", op, "ledger", ledgerPath, "rescue_ref", rescueRef)
+		result = PassedCheck(name, fmt.Sprintf("cleared stuck %s (rescue ref %q)", op, rescueRef))
+		return nil
+	})
+	if lockErr == nil {
+		return result
+	}
+	if gitutil.IsRepoLockBusy(lockErr) {
+		result = WarningCheck(name, "ledger busy, recovery deferred", "Another ox operation is using the ledger; retry `ox doctor --fix` shortly.")
+		result.slug = CheckSlugLedgerStuckOperation
+		return result
+	}
+	result = FailedCheck(name, "could not acquire ledger lock", lockErr.Error())
+	result.slug = CheckSlugLedgerStuckOperation
+	return result
 }
 
 // checkLedgerCleanWorkdir checks for uncommitted changes in the ledger repository.

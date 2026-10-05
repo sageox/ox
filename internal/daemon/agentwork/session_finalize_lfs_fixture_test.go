@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -20,6 +21,14 @@ import (
 type localFinalizeLFS struct {
 	batchUnavailable atomic.Bool
 	blobUnavailable  atomic.Bool
+	// refuseRepeatOf names one object whose second upload (only the second) the
+	// store refuses, which is what an LFS repair that re-uploads from the recovery
+	// cache runs into when the store rejects the blob. Other objects, including
+	// identical artifacts uploaded under several names, and later sessions that
+	// upload the same bytes afresh, are unaffected.
+	refuseRepeatOf atomic.Pointer[string]
+	batchCalls     atomic.Int32
+	blobUploads    sync.Map // OID -> *atomic.Int32
 }
 
 // enableLocalFinalizeLFS keeps git-behavior fixtures on the real publication
@@ -36,6 +45,7 @@ func enableLocalFinalizeLFS(t *testing.T, handler *SessionFinalizeHandler, ledge
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/objects/batch"):
+			service.batchCalls.Add(1)
 			if service.batchUnavailable.Load() {
 				http.Error(w, "LFS batch unavailable", http.StatusServiceUnavailable)
 				return
@@ -66,6 +76,11 @@ func enableLocalFinalizeLFS(t *testing.T, handler *SessionFinalizeHandler, ledge
 			data, err := io.ReadAll(r.Body)
 			if err != nil || lfs.ComputeOID(data) != filepath.Base(r.URL.Path) {
 				http.Error(w, "invalid content", http.StatusBadRequest)
+				return
+			}
+			counter, _ := service.blobUploads.LoadOrStore(filepath.Base(r.URL.Path), new(atomic.Int32))
+			if refused := service.refuseRepeatOf.Load(); refused != nil && *refused == filepath.Base(r.URL.Path) && counter.(*atomic.Int32).Add(1) == 2 {
+				http.Error(w, "LFS store refuses this blob again", http.StatusServiceUnavailable)
 				return
 			}
 			w.WriteHeader(http.StatusOK)

@@ -12,6 +12,9 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/pelletier/go-toml/v2"
+	"gopkg.in/yaml.v3"
+
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/llmprompt"
 )
@@ -114,8 +117,19 @@ func (r *Resolver) mergeOneWithLLM(ctx context.Context, repoPath, path string) e
 		return fmt.Errorf("llm: %w", err)
 	}
 	merged = stripFences(merged)
-	if hasConflictMarkers([]byte(merged)) {
+	if gitutil.HasConflictMarkersBytes([]byte(merged)) {
 		return fmt.Errorf("llm output still contains conflict markers")
+	}
+	// Marker-free output is only syntactically clean. The prompt asks the
+	// model to keep both sides; this enforces it, so a merge that silently
+	// drops or paraphrases one side's lines is refused instead of committed.
+	if dropped := droppedLines(requiredLines(data), merged); dropped > 0 {
+		r.logger.Warn("automerge.llm.dropped_content", "path", path, "lines_dropped", dropped)
+		return fmt.Errorf("llm output dropped %d line(s) from the conflicted file", dropped)
+	}
+	if err := validateStructured(path, merged); err != nil {
+		r.logger.Warn("automerge.llm.invalid_structure", "path", path, "error", err)
+		return fmt.Errorf("llm output is not valid %s: %w", filepath.Ext(path), err)
 	}
 
 	// preserve original file mode (info from the Lstat above; we already
@@ -129,6 +143,169 @@ func (r *Resolver) mergeOneWithLLM(ctx context.Context, repoPath, path string) e
 	}
 	r.logger.Info("automerge.llm.merged", "path", path, "bytes_in", len(data), "bytes_out", len(merged))
 	return nil
+}
+
+// requiredLines counts, per normalized non-blank line, how many times a
+// lossless merge must contain it: once per occurrence outside the conflict
+// hunks, plus, for each hunk, the larger of its "ours" and "theirs" counts.
+// Taking the larger count lets a line both sides added appear once, while a
+// line one side repeats must keep every copy. A diff3 base section
+// ("|||||||" up to "=======") is skipped: it is the common ancestor, which a
+// correct merge may legitimately discard.
+func requiredLines(data []byte) map[string]int {
+	const (
+		outside = iota
+		ours
+		base
+		theirs
+	)
+	required := make(map[string]int)
+	var oursCount, theirsCount map[string]int
+	state := outside
+	for _, line := range strings.Split(string(data), "\n") {
+		bare := strings.TrimSuffix(line, "\r")
+		switch {
+		case strings.HasPrefix(bare, gitutil.ConflictMarkerStart):
+			state = ours
+			oursCount, theirsCount = make(map[string]int), make(map[string]int)
+		case state != outside && strings.HasPrefix(bare, "|||||||"):
+			state = base
+		case state != outside && bare == "=======":
+			state = theirs
+		case state != outside && strings.HasPrefix(bare, ">>>>>>>"):
+			for l, n := range oursCount {
+				required[l] += max(n, theirsCount[l])
+			}
+			for l, n := range theirsCount {
+				if _, seen := oursCount[l]; !seen {
+					required[l] += n
+				}
+			}
+			state = outside
+		default:
+			n := normalizeMergeLine(bare)
+			if n == "" {
+				continue
+			}
+			switch state {
+			case outside:
+				required[n]++
+			case ours:
+				oursCount[n]++
+			case theirs:
+				theirsCount[n]++
+			}
+		}
+	}
+	return required
+}
+
+// droppedLines returns how many required occurrences merged is missing.
+// Lines are compared after normalizeMergeLine, so re-indenting or adding the
+// comma a union of two list entries needs is not a drop.
+//
+// A conflict where both sides rewrote the same line cannot pass: keeping
+// both is the only merge this accepts. That is deliberate — the tier then
+// fails exactly as it does with no LLM configured, and the conflict is left
+// for a person rather than resolved by discarding someone's record.
+func droppedLines(required map[string]int, merged string) int {
+	have := make(map[string]int)
+	for _, line := range strings.Split(merged, "\n") {
+		have[normalizeMergeLine(line)]++
+	}
+	dropped := 0
+	for line, want := range required {
+		if have[line] < want {
+			dropped += want - have[line]
+		}
+	}
+	return dropped
+}
+
+// validateStructured parses merged as the format its extension names, so a
+// union that keeps both sides of the same key is refused rather than staged.
+// go-toml and yaml.v3 both reject duplicate keys. Other extensions pass.
+func validateStructured(path, merged string) error {
+	var v any
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".json":
+		if !json.Valid([]byte(merged)) {
+			return errors.New("invalid JSON")
+		}
+		// json.Valid accepts duplicate keys, and a decoder keeps only the
+		// last one, so a union holding both sides' value would drop one.
+		return rejectDuplicateJSONKeys(merged)
+	case ".toml":
+		return toml.Unmarshal([]byte(merged), &v)
+	case ".yaml", ".yml":
+		// Unmarshal reads only the first document; walk every one after "---".
+		dec := yaml.NewDecoder(strings.NewReader(merged))
+		for {
+			var doc any
+			if err := dec.Decode(&doc); err != nil {
+				if errors.Is(err, io.EOF) {
+					return nil
+				}
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// normalizeMergeLine strips whitespace and one trailing comma.
+func normalizeMergeLine(line string) string {
+	line = strings.TrimSpace(line)
+	return strings.TrimSpace(strings.TrimSuffix(line, ","))
+}
+
+// rejectDuplicateJSONKeys walks data token by token and errors on the first
+// object that defines a key twice. data must already be valid JSON.
+func rejectDuplicateJSONKeys(data string) error {
+	// keys is nil for an array; inValue means the object's next token is the
+	// value for a key just read, not another key.
+	type frame struct {
+		keys    map[string]bool
+		inValue bool
+	}
+	var stack []*frame
+	dec := json.NewDecoder(strings.NewReader(data))
+	dec.UseNumber() // no float64 conversion: valid numbers like 1e400 must not error
+	for {
+		tok, err := dec.Token()
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		var top *frame
+		if len(stack) > 0 {
+			top = stack[len(stack)-1]
+		}
+		if d, ok := tok.(json.Delim); ok && (d == '}' || d == ']') {
+			stack = stack[:len(stack)-1]
+			continue
+		}
+		if top != nil && top.keys != nil && !top.inValue {
+			key := tok.(string) // an object key is always a string token
+			if top.keys[key] {
+				return fmt.Errorf("duplicate JSON key %q", key)
+			}
+			top.keys[key] = true
+			top.inValue = true
+			continue
+		}
+		if top != nil {
+			top.inValue = false
+		}
+		switch tok {
+		case json.Delim('{'):
+			stack = append(stack, &frame{keys: map[string]bool{}})
+		case json.Delim('['):
+			stack = append(stack, &frame{})
+		}
+	}
 }
 
 // buildPrompt assembles the per-file prompt. Both 'ours' and 'theirs' are

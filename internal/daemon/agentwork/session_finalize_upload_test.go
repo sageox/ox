@@ -660,7 +660,7 @@ func TestGitCommitAndPush_LeavesOutOfLedgerSessionIntact(t *testing.T) {
 
 			handler := NewSessionFinalizeHandler(slog.Default())
 			payload := &SessionFinalizePayload{SessionDir: sessionDir, RawPath: filepath.Join(sessionDir, "raw.jsonl"), LedgerPath: ledgerPath}
-			if handler.gitCommitAndPush(payload, map[string]lfs.FileRef{"raw.jsonl": lfs.NewFileRef(raw)}) {
+			if pushed, _ := handler.gitCommitAndPush(payload, map[string]lfs.FileRef{"raw.jsonl": lfs.NewFileRef(raw)}); pushed {
 				t.Fatal("a session outside the ledger must not report a successful push")
 			}
 
@@ -704,7 +704,7 @@ func TestGitCommitAndPush_RefusesConflictMarkers(t *testing.T) {
 	handler.skipLFS = true
 	handler.ledgerMu = &sync.Mutex{}
 	headBefore := gitOutput(t, ledgerPath, "rev-parse", "HEAD")
-	pushed := handler.gitCommitAndPush(&SessionFinalizePayload{
+	pushed, _ := handler.gitCommitAndPush(&SessionFinalizePayload{
 		SessionDir: sessionDir,
 		RawPath:    filepath.Join(sessionDir, "raw.jsonl"),
 		LedgerPath: ledgerPath,
@@ -755,7 +755,7 @@ func TestGitCommitAndPush_CommitsStagedBytesNotWorktree(t *testing.T) {
 		}
 	}
 
-	pushed := handler.gitCommitAndPush(&SessionFinalizePayload{
+	pushed, _ := handler.gitCommitAndPush(&SessionFinalizePayload{
 		SessionDir: sessionDir,
 		RawPath:    filepath.Join(sessionDir, "raw.jsonl"),
 		LedgerPath: ledgerPath,
@@ -785,7 +785,8 @@ func TestGitCommitAndPush_RefusesUnuploadedArtifacts(t *testing.T) {
 	require.NoError(t, os.WriteFile(rawPath, []byte(testRawContent), 0o644))
 	before := gitOutput(t, ledgerPath, "rev-parse", "HEAD")
 	handler := newGitBackedHandler()
-	require.False(t, handler.gitCommitAndPush(&SessionFinalizePayload{SessionDir: sessionDir, RawPath: rawPath, LedgerPath: ledgerPath}, nil))
+	pushed, _ := handler.gitCommitAndPush(&SessionFinalizePayload{SessionDir: sessionDir, RawPath: rawPath, LedgerPath: ledgerPath}, nil)
+	require.False(t, pushed)
 	require.Equal(t, before, gitOutput(t, ledgerPath, "rev-parse", "HEAD"))
 	content, err := os.ReadFile(rawPath)
 	require.NoError(t, err)

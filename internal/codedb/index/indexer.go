@@ -857,7 +857,7 @@ func (st *indexState) processRef(ctx context.Context, ri refInfo, refIdx, totalR
 	}
 
 	// Build file_revs for tip
-	return st.buildTipFileRevs(ri)
+	return st.buildTipFileRevs(ctx, ri)
 }
 
 // indexCommit inserts a single commit and its diffs into the database and Bleve.
@@ -1060,9 +1060,16 @@ func (st *indexState) insertDiff(commitDBID int64, path string, oldBlobDBID sql.
 	return nil
 }
 
-// buildTipFileRevs rebuilds the file_revs table for a ref's tip commit.
-func (st *indexState) buildTipFileRevs(ri refInfo) error {
-	ctx := context.Background()
+// maxSnapshotsPrunedPerBuild bounds the dead-snapshot prune that runs inside the
+// build's single transaction. Steady state needs one (the snapshot the ref just
+// left); the cap only matters for a legacy index carrying hundreds, which
+// Store.Maintain drains in separate transactions instead of one multi-GB WAL.
+const maxSnapshotsPrunedPerBuild = 8
+
+// buildTipFileRevs rebuilds the file_revs table for a ref's tip commit, then
+// drops the snapshots no ref points at any more — chiefly the one this ref just
+// moved away from — so file_revs stays at one snapshot per live ref.
+func (st *indexState) buildTipFileRevs(ctx context.Context, ri refInfo) error {
 	q := codedbsqlc.New(st.tx)
 
 	tipHex := ri.tipOID.String()
@@ -1071,7 +1078,7 @@ func (st *indexState) buildTipFileRevs(ri refInfo) error {
 		return nil // skip if tip not indexed
 	}
 
-	if err := q.DeleteFileRevsByCommit(ctx, tipCommitDBID); err != nil {
+	if _, err := q.DeleteFileRevsByCommit(ctx, tipCommitDBID); err != nil {
 		return fmt.Errorf("delete file_revs: %w", err)
 	}
 
@@ -1108,6 +1115,12 @@ func (st *indexState) buildTipFileRevs(ri refInfo) error {
 		CommitID: tipCommitDBID,
 	}); err != nil {
 		return fmt.Errorf("upsert ref: %w", err)
+	}
+
+	// Only after the ref moved: until the upsert the old snapshot is still the
+	// one this ref points at.
+	if _, err := store.PruneDeadFileRevsForRepo(ctx, q, st.repoID, maxSnapshotsPrunedPerBuild); err != nil {
+		return fmt.Errorf("prune dead file_revs: %w", err)
 	}
 
 	return nil

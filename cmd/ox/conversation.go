@@ -31,6 +31,8 @@ SageOx at most once an hour; offline, a confirmation from the last hour
 still counts) before it reads anything.
 
 Commands disclose progressively: list -> show -> topics -> topic -> transcript.
+A screen walkthrough adds one more: walkthrough, what was on screen, clicked,
+and pointed at, with the keyframe images.
 Each JSON envelope's guidance field names the next step, and token_estimate
 reports what reading the payload costs. With no subcommand, behaves like
 ` + "`ox conversation list`" + `.
@@ -61,6 +63,7 @@ func init() {
 	conversationCmd.AddCommand(conversationTranscriptCmd)
 	conversationCmd.AddCommand(conversationTopicsCmd)
 	conversationCmd.AddCommand(conversationTopicCmd)
+	conversationCmd.AddCommand(conversationWalkthroughCmd)
 	rootCmd.AddCommand(conversationCmd)
 }
 

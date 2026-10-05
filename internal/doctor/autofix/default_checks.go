@@ -43,6 +43,7 @@ func Default() *Registry {
 	r.Register(&Check{
 		Slug:        "session-meta-titles",
 		Description: "Recover empty meta.title from summary.json after summarization; skip draft and pending sessions; never counts summary attempts",
+		Scope:       ScopeLedger,
 		MinInterval: 30 * time.Minute,
 		BlastRadius: "single ledger; per-session meta.json rewrite only when summary.json holds a title or summary holds leaked error prose",
 		Run:         checkSessionMetaTitles,
@@ -57,6 +58,7 @@ func Default() *Registry {
 	r.Register(&Check{
 		Slug:        "ledger-rebase-wedge",
 		Description: "Clear a STALE wedged rebase on the ledger — including a structurally-incomplete rebase-merge dir git rebase --abort cannot clear — so background sync resumes unattended",
+		Scope:       ScopeLedger,
 		MinInterval: 30 * time.Minute,
 		BlastRadius: "single ledger; git rebase --abort/--quit on a STALE wedge only (fresh in-flight rebases untouched); no history rewrite, HEAD unchanged",
 		Run:         checkLedgerRebaseWedge,
@@ -71,6 +73,7 @@ func Default() *Registry {
 	r.Register(&Check{
 		Slug:        "ledger-sacred-deletion",
 		Description: "Detect and alert on any commit in recent ledger history that mass-deleted sacred plans/sessions (ADR-024 data-loss guard); detection only, never auto-restores",
+		Scope:       ScopeLedger,
 		MinInterval: 15 * time.Minute,
 		BlastRadius: "read-only; scans recent ledger history and reports, no writes",
 		Run:         checkLedgerSacredDeletion,
@@ -88,20 +91,11 @@ func Default() *Registry {
 // Complements the daemon's in-line recoverPreexistingRebase (which fires on the
 // pull pipeline): this is an independent trigger with structured telemetry, so
 // a self-heal is visible in the field rather than silent.
-func checkLedgerRebaseWedge(ctx context.Context, repoPath string) CheckResult {
-	if repoPath == "" {
+func checkLedgerRebaseWedge(ctx context.Context, ledgerPath string) CheckResult {
+	if ledgerPath == "" {
 		return CheckResult{Status: StatusClean}
 	}
-	pctx, err := config.LoadProjectContext(repoPath)
-	if err != nil || pctx == nil {
-		// uninitialized workspace or no ledger configured — nothing to do
-		return CheckResult{Status: StatusClean, Repo: repoPath}
-	}
-	ledgerPath := pctx.DefaultLedgerPath()
-	if ledgerPath == "" {
-		return CheckResult{Status: StatusClean, Repo: repoPath}
-	}
-	return repairLedgerRebaseWedge(ctx, ledgerPath, repoPath)
+	return repairLedgerRebaseWedge(ctx, ledgerPath, ledgerPath)
 }
 
 // repairLedgerRebaseWedge is the side-effect-free-on-healthy core of
@@ -110,25 +104,36 @@ func checkLedgerRebaseWedge(ctx context.Context, repoPath string) CheckResult {
 // gitutil.StaleRebaseThreshold) is recovered — a fresh one is almost always the
 // daemon's own in-flight pull and must be left alone.
 func repairLedgerRebaseWedge(ctx context.Context, ledgerPath, repoPath string) CheckResult {
-	age, inProgress := gitutil.RebaseAge(ledgerPath)
-	if !inProgress {
-		return CheckResult{Status: StatusClean, Repo: repoPath}
-	}
-	if age < gitutil.StaleRebaseThreshold {
-		return CheckResult{Status: StatusClean, Repo: repoPath}
-	}
-	if err := gitutil.AbortOrClearRebase(ctx, ledgerPath, "autofix stale ledger rebase wedge", slog.Default()); err != nil {
-		return CheckResult{
-			Status:  StatusError,
-			Repo:    repoPath,
-			Summary: fmt.Sprintf("stale rebase wedge recovery failed: %v", err),
+	lockCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	result := CheckResult{Status: StatusClean, Repo: repoPath}
+	lockErr := gitutil.WithRepoLock(lockCtx, ledgerPath, func() error {
+		// The age check belongs inside the clone lock. A rebase can cross the
+		// stale threshold while this check waits, and a peer may finish or
+		// replace it before the lock becomes available.
+		age, inProgress := gitutil.RebaseAge(ledgerPath)
+		if !inProgress || age < gitutil.StaleRebaseThreshold {
+			return nil
 		}
+
+		rescueRef, err := gitutil.RescueIfNeededThenAbort(lockCtx, ledgerPath, "autofix stale ledger rebase wedge", slog.Default())
+		if err != nil {
+			result.Status = StatusError
+			result.Summary = fmt.Sprintf("stale rebase wedge recovery failed (rescue_ref=%q): %v", rescueRef, err)
+			return nil
+		}
+		result.Status = StatusFixed
+		result.Summary = fmt.Sprintf("cleared stale wedged rebase on ledger (age %s, rescue_ref=%q)", age.Round(time.Second), rescueRef)
+		return nil
+	})
+	if lockErr == nil {
+		return result
 	}
-	return CheckResult{
-		Status:  StatusFixed,
-		Repo:    repoPath,
-		Summary: fmt.Sprintf("cleared stale wedged rebase on ledger (age %s)", age.Round(time.Second)),
+	if gitutil.IsRepoLockBusy(lockErr) {
+		return CheckResult{Status: StatusClean, Repo: repoPath, Summary: "ledger busy; rebase recovery deferred"}
 	}
+	return CheckResult{Status: StatusError, Repo: repoPath, Summary: fmt.Sprintf("acquire ledger lock for rebase recovery: %v", lockErr)}
 }
 
 // checkInitReverted is the daemon-side counterpart of cmd/ox/doctor_init_reverted.go.
@@ -303,38 +308,39 @@ func checkSessionInlineSummaryRetry(_ context.Context, repoPath string) CheckRes
 }
 
 // checkSessionMetaTitles is the daemon-side empty-title repair. It
-// resolves the ledger for repoPath, walks sessions/, and runs
+// receives a canonical Ledger path, walks sessions/, and runs
 // lfs.RecoverEmptyTitleMeta on each session whose meta.title is
 // empty. Draft and pending sessions are left to their recording and
 // summarization paths. For other sessions, it recovers from summary.json
 // when possible and otherwise leaves the session alone: only the finalize
 // worker counts summary attempts (GH #1107).
 //
-// Why per-ledger and not per-session: the autofix scheduler iterates
-// repoPaths (workspaces). The session repair lives on the LEDGER
-// (separate path), so each tick we resolve the workspace's ledger
-// once and walk it. Skipping a workspace whose ledger isn't on disk
-// yet is normal during clone.
+// Why per-ledger and not per-session: the global-sync owner enumerates every
+// canonical Ledger checkout once, including repos that are not currently open.
 //
 // Blast radius: per-session meta.json rewrites, only where there is a title
 // to recover or leaked error prose to move. No git operations, no LFS calls,
 // no network. Worst-case if the
 // recovery is wrong: the affected session row title shows the wrong
 // string, fixable by a future regenerate.
-func checkSessionMetaTitles(_ context.Context, repoPath string) CheckResult {
-	if repoPath == "" {
+func checkSessionMetaTitles(ctx context.Context, ledgerPath string) CheckResult {
+	if ledgerPath == "" {
 		return CheckResult{Status: StatusClean}
 	}
-	ctx, err := config.LoadProjectContext(repoPath)
-	if err != nil || ctx == nil {
-		// uninitialized workspace or no ledger configured — nothing to do
-		return CheckResult{Status: StatusClean, Repo: repoPath}
+	lockCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	result := CheckResult{Status: StatusClean, Repo: ledgerPath}
+	lockErr := gitutil.WithRepoLock(lockCtx, ledgerPath, func() error {
+		result = repairLedgerSessionTitles(filepath.Join(ledgerPath, "sessions"), ledgerPath)
+		return nil
+	})
+	if lockErr == nil {
+		return result
 	}
-	ledgerPath := ctx.DefaultLedgerPath()
-	if ledgerPath == "" {
-		return CheckResult{Status: StatusClean, Repo: repoPath}
+	if gitutil.IsRepoLockBusy(lockErr) {
+		return CheckResult{Status: StatusClean, Repo: ledgerPath, Summary: "ledger busy; session title repair deferred"}
 	}
-	return repairLedgerSessionTitles(filepath.Join(ledgerPath, "sessions"), repoPath)
+	return CheckResult{Status: StatusError, Repo: ledgerPath, Summary: fmt.Sprintf("acquire ledger lock for session title repair: %v", lockErr)}
 }
 
 // repairLedgerSessionTitles is the side-effect-free-on-healthy core of

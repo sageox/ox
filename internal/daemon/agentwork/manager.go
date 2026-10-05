@@ -2,6 +2,7 @@ package agentwork
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"runtime/debug"
@@ -27,11 +28,66 @@ const (
 	// Prevents expensive ledger scans from running on every sync signal.
 	detectCooldown = 5 * time.Minute
 
+	// parkBackoffBase is how long an item that exhausted maxRetries (or a work
+	// type paused by an unresolved ledger) stays out of detection. It doubles
+	// per further failure up to parkBackoffMax so a wedge that a human fixes
+	// resumes within an hour without the daemon hammering it meanwhile.
+	parkBackoffBase = detectCooldown
+	parkBackoffMax  = time.Hour
+
+	// stopGracePeriod bounds how long Start waits for in-flight work items once
+	// its context is canceled. Items observe that same cancellation (their git
+	// runs with it), so they normally return at once; the bound only matters for
+	// one stuck outside a context-aware call. It stays below the daemon's 5s
+	// goroutine-wait deadline so waiting never turns a clean stop into a forced one.
+	stopGracePeriod = 3 * time.Second
+
 	// status constants for AgentProcess
 	statusRunning   = "running"
 	statusCompleted = "completed"
 	statusFailed    = "failed"
 )
+
+// ErrLedgerUnresolved is returned by a handler whose work cannot succeed until
+// a human resolves the ledger (unmerged index entries). The manager pauses the
+// whole work type instead of counting a failure per item, because every item
+// would fail identically and re-running the expensive part (LFS upload) of each
+// one achieves nothing.
+var ErrLedgerUnresolved = errors.New("ledger has unresolved index conflicts")
+
+// ErrLedgerPushWedged is returned by a handler whose work cannot reach the
+// remote because the ledger's push is wedged: the remote rejects it for LFS
+// objects it does not have and the repair could not fix that. Like
+// ErrLedgerUnresolved it pauses the whole work type — every item's push would be
+// refused the same way — rather than burning a retry per item.
+var ErrLedgerPushWedged = errors.New("ledger push is wedged")
+
+// retryState tracks consecutive ProcessResult failures for one dedup key. It
+// outlives the queue entry: Complete() clears the dedup key, so without this the
+// next detector scan re-enqueues the item as brand new with Attempts=0.
+type retryState struct {
+	failures int
+	retryAt  time.Time
+}
+
+// typePause suspends detection and execution for a work type.
+type typePause struct {
+	failures int
+	until    time.Time
+}
+
+// parkBackoff returns how long to park after the given number of consecutive
+// failures (>= maxRetries): base, then doubling, capped at parkBackoffMax.
+func parkBackoff(failures int) time.Duration {
+	shift := failures - maxRetries
+	if shift < 0 {
+		shift = 0
+	}
+	if shift > 10 {
+		return parkBackoffMax
+	}
+	return min(parkBackoffBase<<shift, parkBackoffMax)
+}
 
 // AgentWorkStats tracks cumulative invocation metrics.
 type AgentWorkStats struct {
@@ -88,11 +144,22 @@ type Manager struct {
 	// detection cooldown: tracks last detect time per handler type
 	lastDetect map[string]time.Time
 
+	// retry tracking across detector scans (guarded by mu)
+	retries     map[string]*retryState // keyed by dedup key
+	pausedTypes map[string]*typePause  // keyed by work type
+	now         func() time.Time       // injectable clock for tests
+
 	// observability
 	mu     sync.Mutex
 	stats  AgentWorkStats
 	active map[string]AgentProcess // keyed by WorkItem.ID
 	recent []AgentProcess
+
+	// inFlight tracks work-item goroutines so Start can wait for them on stop.
+	// Only processQueue adds, and only Start's own goroutine calls it and waits,
+	// so Add never races a Wait.
+	inFlight  sync.WaitGroup
+	stopGrace time.Duration // injectable for tests; defaults to stopGracePeriod
 
 	// callbacks
 	onComplete func(result WorkResult)
@@ -148,6 +215,10 @@ func NewManager(
 		logger:        logger,
 		handlers:      make(map[string]WorkHandler),
 		lastDetect:    make(map[string]time.Time),
+		retries:       make(map[string]*retryState),
+		pausedTypes:   make(map[string]*typePause),
+		now:           time.Now,
+		stopGrace:     stopGracePeriod,
 		active:        make(map[string]AgentProcess),
 		rateLimiter:   NewRateLimiter(maxPerHour, time.Hour),
 		sem:           make(chan struct{}, maxConcurrent),
@@ -203,6 +274,9 @@ func (m *Manager) Start(ctx context.Context) {
 	doctorTicker := time.NewTicker(doctorInterval)
 	defer doctorTicker.Stop()
 	defer m.releaseLedgerAntiEntropy()
+	// Runs before the lease is released (defers are LIFO): an item still
+	// finishing its git work must not have lost the claim on the ledger.
+	defer m.waitForInFlight()
 
 	m.logger.Info("agent work manager started")
 
@@ -237,6 +311,25 @@ func (m *Manager) Start(ctx context.Context) {
 			m.detectAndEnqueue(cfg)
 			m.processQueue(ctx)
 		}
+	}
+}
+
+// waitForInFlight blocks until every started work item has returned, or the
+// stop grace period elapses. Without it the daemon's goroutine wait never saw
+// these items (they were bare goroutines), so a finalize mid-push could outlive
+// shutdown still holding the ledger lock the sync scheduler needs to exit.
+func (m *Manager) waitForInFlight() {
+	done := make(chan struct{})
+	go func() {
+		m.inFlight.Wait()
+		close(done)
+	}()
+	timer := time.NewTimer(m.stopGrace)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+		m.logger.Warn("agent work items still running at shutdown", "waited", m.stopGrace)
 	}
 }
 
@@ -310,7 +403,7 @@ func (m *Manager) detectAndEnqueue(cfg *config.AgentWorkerConfig) {
 	}
 	m.mu.Unlock()
 
-	now := time.Now()
+	now := m.now()
 	for _, h := range handlers {
 		if !isHandlerEnabled(cfg, h.Type()) {
 			m.logger.Debug("handler disabled by config", "type", h.Type())
@@ -340,10 +433,18 @@ func (m *Manager) detectAndEnqueue(cfg *config.AgentWorkerConfig) {
 		m.lastDetect[h.Type()] = now
 		m.mu.Unlock()
 
+		suppressed := 0
 		for _, item := range items {
+			if m.isSuppressed(item, now) {
+				suppressed++
+				continue
+			}
 			if m.queue.Enqueue(item) {
 				m.logger.Info("detected agent work", "type", item.Type, "dedup_key", item.DedupKey)
 			}
+		}
+		if suppressed > 0 {
+			m.logger.Debug("detected work suppressed (parked or paused)", "type", h.Type(), "suppressed", suppressed)
 		}
 
 		// one line per cycle, not one per rejected item
@@ -474,8 +575,12 @@ func (m *Manager) ForceDetect() int {
 	}
 	m.mu.Unlock()
 
+	// an explicit operator retry (e.g. after fixing the ledger) must not wait out
+	// a backoff window
+	m.clearSuppression()
+
 	total := 0
-	now := time.Now()
+	now := m.now()
 	for _, h := range handlers {
 		if !isHandlerEnabled(cfg, h.Type()) {
 			m.logger.Debug("handler disabled by config", "type", h.Type())
@@ -551,7 +656,9 @@ func (m *Manager) processQueue(ctx context.Context) {
 			return
 		}
 
+		m.inFlight.Add(1)
 		go func(item *WorkItem) {
+			defer m.inFlight.Done()
 			defer func() {
 				<-m.sem
 				// signal queue to pick up next item immediately
@@ -579,6 +686,13 @@ func (m *Manager) executeItem(ctx context.Context, item *WorkItem) {
 			m.recordFailure(item, time.Now(), 0, fmt.Sprintf("panic: %v", r))
 		}
 	}()
+
+	// the type was paused after this item was queued (an earlier item hit an
+	// unresolved ledger); drop it, detection re-offers it after the pause
+	if m.isTypePaused(item.Type, m.now()) {
+		m.queue.Complete(item.DedupKey)
+		return
+	}
 
 	m.mu.Lock()
 	handler, ok := m.handlers[item.Type]
@@ -672,7 +786,7 @@ func (m *Manager) executeItem(ctx context.Context, item *WorkItem) {
 
 	// process result through handler
 	if err := handler.ProcessResult(item, result); err != nil {
-		m.logger.Error("handler process result failed", "type", item.Type, "error", err)
+		m.logProcessFailure(item, err)
 		m.queue.Complete(item.DedupKey)
 		m.recordFailure(item, start, result.ExitCode, fmt.Sprintf("process result: %v", err))
 		return
@@ -680,6 +794,7 @@ func (m *Manager) executeItem(ctx context.Context, item *WorkItem) {
 
 	// success
 	m.queue.Complete(item.DedupKey)
+	m.clearFailures(item)
 
 	m.mu.Lock()
 	m.stats.TotalInvocations++
@@ -715,6 +830,142 @@ func (m *Manager) executeItem(ctx context.Context, item *WorkItem) {
 		"target", target,
 		"duration", duration,
 	)
+}
+
+// logProcessFailure counts a ProcessResult failure against the item's dedup key
+// and parks the key once maxRetries is reached. Logs exactly one warn when the
+// key is first parked; later failures after a backoff resume log at debug.
+func (m *Manager) logProcessFailure(item *WorkItem, err error) {
+	now := m.now()
+
+	if errors.Is(err, ErrLedgerUnresolved) || errors.Is(err, ErrLedgerPushWedged) {
+		if until, started := m.pauseType(item, now); started {
+			msg := "ledger has unresolved index conflicts; session finalize paused until resolved (run `ox doctor`)"
+			if errors.Is(err, ErrLedgerPushWedged) {
+				msg = "ledger push is wedged by LFS objects missing from the remote; session finalize paused until pushes recover"
+			}
+			m.logger.Warn(msg,
+				"type", item.Type,
+				"retry_after", until.Sub(now),
+			)
+		}
+		return
+	}
+
+	item.Attempts++
+	item.LastErr = err.Error()
+
+	m.mu.Lock()
+	st := m.retries[item.DedupKey]
+	if st == nil {
+		st = &retryState{}
+		m.retries[item.DedupKey] = st
+	}
+	st.failures++
+	failures := st.failures
+	parked := failures >= maxRetries
+	var backoff time.Duration
+	if parked {
+		backoff = parkBackoff(failures)
+		st.retryAt = now.Add(backoff)
+	}
+	m.mu.Unlock()
+
+	switch {
+	case failures == maxRetries:
+		m.logger.Warn("agent work parked after repeated failures",
+			"type", item.Type,
+			"dedup_key", item.DedupKey,
+			"attempts", failures,
+			"retry_after", backoff,
+			"error", err,
+		)
+	case parked:
+		m.logger.Debug("agent work failed again after backoff, parked longer",
+			"type", item.Type,
+			"dedup_key", item.DedupKey,
+			"attempts", failures,
+			"retry_after", backoff,
+			"error", err,
+		)
+	default:
+		m.logger.Error("handler process result failed",
+			"type", item.Type,
+			"dedup_key", item.DedupKey,
+			"attempt", failures,
+			"max_attempts", maxRetries,
+			"error", err,
+		)
+	}
+}
+
+// pauseType suspends a work type after a ledger-wide blocker. Items already
+// queued are dropped as they are dequeued. Reports when the pause ends and
+// whether this call started it (false: one was already active), so the caller
+// logs once per pause window.
+func (m *Manager) pauseType(item *WorkItem, now time.Time) (until time.Time, started bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p := m.pausedTypes[item.Type]
+	if p == nil {
+		p = &typePause{}
+		m.pausedTypes[item.Type] = p
+	}
+	if now.Before(p.until) {
+		return p.until, false
+	}
+	p.failures++
+	p.until = now.Add(parkBackoff(maxRetries + p.failures - 1))
+	return p.until, true
+}
+
+// isSuppressed reports whether detection should skip this item: its type is
+// paused, or its dedup key is parked and the backoff has not elapsed.
+func (m *Manager) isSuppressed(item *WorkItem, now time.Time) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if p := m.pausedTypes[item.Type]; p != nil && now.Before(p.until) {
+		return true
+	}
+	if st := m.retries[item.DedupKey]; st != nil && now.Before(st.retryAt) {
+		return true
+	}
+	return false
+}
+
+func (m *Manager) isTypePaused(workType string, now time.Time) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p := m.pausedTypes[workType]
+	return p != nil && now.Before(p.until)
+}
+
+// clearFailures forgets failure history after a success: the condition that
+// wedged the item is gone, so the next failure starts a fresh count.
+func (m *Manager) clearFailures(item *WorkItem) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.retries, item.DedupKey)
+	// a success from an item already in flight when the type was paused proves
+	// nothing about the ledger (several ProcessResult paths return nil before
+	// touching git), so an unexpired pause stays; ForceDetect lifts it explicitly
+	if p := m.pausedTypes[item.Type]; p != nil && !m.now().Before(p.until) {
+		delete(m.pausedTypes, item.Type)
+	}
+}
+
+// clearSuppression lifts every park and pause. Failure counts stay, so an item
+// that is still broken re-parks on its next failure instead of getting fresh
+// attempts.
+func (m *Manager) clearSuppression() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, st := range m.retries {
+		st.retryAt = time.Time{}
+	}
+	for _, p := range m.pausedTypes {
+		p.until = time.Time{}
+	}
 }
 
 // recordFailure updates stats and recent list for a failed item, then fires

@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -34,6 +33,7 @@ import (
 	"github.com/sageox/ox/internal/selfexec"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
+	"github.com/sageox/ox/internal/session/claudesource"
 	"github.com/sageox/ox/internal/session/pipeline"
 	"github.com/sageox/ox/internal/telemetry"
 	"github.com/sageox/ox/internal/useragent"
@@ -418,8 +418,13 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 		return fmt.Errorf("could not find project root: %w", err)
 	}
 
-	// check if actually recording
+	// check if actually recording. A quarantined recording is held for review,
+	// not recording: stop never finalizes it, since that would publish a session
+	// already known to span repositories.
 	if !session.IsRecordingForAgent(projectRoot, inst.AgentID) {
+		if held, heldErr := session.LoadQuarantinedRecordingsForAgent(projectRoot, inst.AgentID); heldErr == nil && len(held) > 0 {
+			return fmt.Errorf("not currently recording; a recording is held back for ownership review and was not finalized\nrun 'ox doctor' to see how to release or discard it")
+		}
 		return fmt.Errorf("not currently recording\nRun 'ox agent %s session start' to begin recording", inst.AgentID)
 	}
 
@@ -527,14 +532,8 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 						break
 					}
 				}
-
-				// last resort: time-window scan across all Claude project directories
-				if state.SessionFile == "" && state.AdapterName == "claude-code" {
-					if sf := scanClaudeProjectsForSession(state.AgentID, state.StartedAt); sf != "" {
-						slog.Info("session file discovered via time-window scan", "file", sf)
-						state.SessionFile = sf
-					}
-				}
+				// Do not scan other project buckets by time/agent ID here: that
+				// bypasses the adapter's native session ID and repo checks.
 			}
 
 			// if still not found after all retries, set rich recovery marker
@@ -590,6 +589,12 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 		})
 		timing["process_ms"] = time.Since(processStart).Milliseconds()
 		if err != nil {
+			if errors.Is(err, claudesource.ErrUntrustedSource) {
+				if markErr := session.SetSourceRejectedAt(state.SessionPath, state.SessionID, true); markErr != nil {
+					return fmt.Errorf("quarantine untrusted source: %w", errors.Join(err, markErr))
+				}
+				return fmt.Errorf("claude source has untrusted repository ownership; recording preserved for manual review: %w", err)
+			}
 			// set marker so future ox agent prime knows doctor is needed
 			_ = doctor.SetNeedsDoctorAgent(projectRoot) // best effort
 			return fmt.Errorf("failed to process session: %w\nrecording state preserved; run 'ox agent %s session recover' or retry stop", err, inst.AgentID)
@@ -696,92 +701,6 @@ func sessionPathVariants(repoRoot string) []string {
 	}
 
 	return variants
-}
-
-// scanClaudeProjectsForSession is a last-resort recovery that scans all
-// ~/.claude/projects/ directories for JSONL files modified within the session's
-// time window. This catches cases where the project hash doesn't match due to
-// path normalization differences (trailing slash, case, mount points).
-func scanClaudeProjectsForSession(agentID string, startedAt time.Time) string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	projectsDir := filepath.Join(home, ".claude", "projects")
-	projectDirs, err := os.ReadDir(projectsDir)
-	if err != nil {
-		return ""
-	}
-
-	// allow 30s buffer before session start for timing drift
-	searchStart := startedAt.Add(-30 * time.Second)
-
-	type candidate struct {
-		path    string
-		modTime time.Time
-	}
-	var candidates []candidate
-
-	for _, dir := range projectDirs {
-		if !dir.IsDir() {
-			continue
-		}
-		dirPath := filepath.Join(projectsDir, dir.Name())
-		files, err := os.ReadDir(dirPath)
-		if err != nil {
-			continue
-		}
-		for _, f := range files {
-			if f.IsDir() || !strings.HasSuffix(f.Name(), ".jsonl") {
-				continue
-			}
-			info, err := f.Info()
-			if err != nil {
-				continue
-			}
-			if info.ModTime().Before(searchStart) {
-				continue
-			}
-			candidates = append(candidates, candidate{
-				path:    filepath.Join(dirPath, f.Name()),
-				modTime: info.ModTime(),
-			})
-		}
-	}
-
-	if len(candidates) == 0 {
-		return ""
-	}
-
-	// sort most recently modified first
-	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].modTime.After(candidates[j].modTime)
-	})
-
-	// check up to 10 candidates for the agent ID (avoid scanning thousands of files)
-	limit := 10
-	if len(candidates) < limit {
-		limit = len(candidates)
-	}
-	for _, c := range candidates[:limit] {
-		if fileContainsString(c.path, agentID) {
-			return c.path
-		}
-	}
-	return ""
-}
-
-// fileContainsString checks if a file contains the given string, reading at most 64KB.
-func fileContainsString(path, needle string) bool {
-	f, err := os.Open(path)
-	if err != nil {
-		return false
-	}
-	defer f.Close()
-
-	buf := make([]byte, 64*1024)
-	n, _ := f.Read(buf)
-	return strings.Contains(string(buf[:n]), needle)
 }
 
 // recordSessionObservation writes a session summary observation to team memory.
@@ -1033,6 +952,11 @@ func rawEntryMap(entry session.Entry) map[string]any {
 }
 
 func processAgentSession(projectRoot string, state *session.RecordingState) (*agentSessionResult, error) {
+	// Stop reloads state under the capture lock; a watcher can quarantine the
+	// source after the caller's initial check. Never process that newer state.
+	if state.SourceRejected {
+		return nil, fmt.Errorf("claude source has untrusted repository ownership; recording preserved for manual review")
+	}
 	result := &agentSessionResult{}
 
 	// resolve project endpoint for auth lookups
@@ -1085,10 +1009,42 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 		return finalizeIncrementalSession(projectRoot, state, rawPath, adapter, result)
 	}
 
-	// read entries from session file
-	rawEntries, err := adapter.Read(state.SessionFile)
+	// Snapshot before the adapter opens the path: validation must apply to
+	// the same file whose entries we are about to import.
+	var sourceSnapshot os.FileInfo
+	if state.AdapterName == "claude-code" {
+		sourceSnapshot, err = claudesource.Snapshot(state.SessionFile)
+		if err != nil {
+			return nil, fmt.Errorf("stat native session before read: %w", err)
+		}
+	}
+	// read entries from session file. A Claude source is read from the same
+	// offset it is validated from: entries before it are never imported, so a
+	// foreign turn in that window can neither condemn nor ride along.
+	var rawEntries []adapters.RawEntry
+	if reader, ok := adapter.(adapters.IncrementalReader); ok && state.AdapterName == "claude-code" && state.StartOffset > 0 {
+		rawEntries, _, err = reader.ReadFromOffset(state.SessionFile, state.StartOffset)
+	} else {
+		rawEntries, err = adapter.Read(state.SessionFile)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to read session: %w", err)
+	}
+	if state.AdapterName == "claude-code" {
+		repoRoot := state.WorkspacePath
+		if repoRoot == "" {
+			repoRoot = projectRoot
+		}
+		// A native turn can be appended while Read runs. Check everything this
+		// recording could import before using any returned entries, even when
+		// it read none. Turns from before the recording began are filtered out
+		// below and never published, so they do not decide ownership.
+		if err := claudesource.ValidateRecorded(state.SessionFile, repoRoot, state.AgentSessionID, state.StartOffset, sourceSnapshot); err != nil {
+			if errors.Is(err, claudesource.ErrUntrustedSource) {
+				return nil, fmt.Errorf("claude source no longer belongs to repository: %w", err)
+			}
+			return nil, fmt.Errorf("cannot verify claude source ownership right now: %w", err)
+		}
 	}
 
 	// filter out entries from before session recording started.
@@ -2515,8 +2471,18 @@ func isGenericDropFileEmpty(state *session.RecordingState) bool {
 
 // reloadRecordingForFinalDrain must run under the expected session's raw lock.
 // Hooks, like watchers, may commit a batch while stop waits for that lock.
+//
+// The recording is read from its own folder, not found by agent: an agent can
+// hold a newer active recording beside a quarantined one it is finalizing, and
+// an agent lookup would answer with the wrong one.
 func reloadRecordingForFinalDrain(projectRoot string, expected *session.RecordingState) (*session.RecordingState, error) {
-	latest, err := session.LoadRecordingStateForAgent(projectRoot, expected.AgentID)
+	var latest *session.RecordingState
+	var err error
+	if expected.SessionPath != "" {
+		latest, err = session.ReadRecordingStateFile(expected.SessionPath)
+	} else {
+		latest, err = session.LoadRecordingStateForAgent(projectRoot, expected.AgentID)
+	}
 	if err != nil {
 		return nil, err
 	}

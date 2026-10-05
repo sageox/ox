@@ -149,16 +149,21 @@ func TestSessionStop_NativeSessionsAndCallIDsReachBareRemote(t *testing.T) {
 	f.sessionStart(t, second, "clear")
 
 	// ... with one tool call and its result captured from Claude Code's transcript.
-	sourceFile := filepath.Join(t.TempDir(), "session.jsonl")
+	// The file name and every native turn must identify the post-/clear
+	// session; otherwise ownership validation must refuse the upload.
+	sourceFile := filepath.Join(t.TempDir(), second+".jsonl")
 	require.NoError(t, os.WriteFile(sourceFile, nil, 0o644))
 	require.NoError(t, session.UpdateRecordingStateForAgent(f.projectRoot, f.agentID, func(s *session.RecordingState) {
 		s.SessionFile = sourceFile
 	}))
+	cwd, err := json.Marshal(f.projectRoot)
+	require.NoError(t, err)
 	at := time.Now().Add(time.Second)
 	appendLines(t, sourceFile,
-		`{"type":"user","timestamp":"`+at.Format(time.RFC3339Nano)+`","message":{"role":"user","content":"Run the tests and tell me if they pass"}}`,
-		`{"type":"assistant","timestamp":"`+at.Add(time.Second).Format(time.RFC3339Nano)+`","message":{"role":"assistant","content":[{"type":"text","text":"Running them now."},{"type":"tool_use","id":"`+callID+`","name":"Bash","input":{"command":"go test ./..."}}]}}`,
-		`{"type":"user","timestamp":"`+at.Add(2*time.Second).Format(time.RFC3339Nano)+`","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"`+callID+`","content":"ok"}]}}`,
+		fmt.Sprintf(`{"type":"session","sessionId":%q,"cwd":%s}`, second, cwd),
+		fmt.Sprintf(`{"type":"user","sessionId":%q,"cwd":%s,"timestamp":%q,"message":{"role":"user","content":"Run the tests and tell me if they pass"}}`, second, cwd, at.Format(time.RFC3339Nano)),
+		fmt.Sprintf(`{"type":"assistant","sessionId":%q,"cwd":%s,"timestamp":%q,"message":{"role":"assistant","content":[{"type":"text","text":"Running them now."},{"type":"tool_use","id":%q,"name":"Bash","input":{"command":"go test ./..."}}]}}`, second, cwd, at.Add(time.Second).Format(time.RFC3339Nano), callID),
+		fmt.Sprintf(`{"type":"user","sessionId":%q,"cwd":%s,"timestamp":%q,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":%q,"content":"ok"}]}}`, second, cwd, at.Add(2*time.Second).Format(time.RFC3339Nano), callID),
 	)
 	require.NoError(t, handleAfterTool(&HookContext{
 		Phase: phaseAfterTool, AgentType: "claude-code", ProjectRoot: f.projectRoot,

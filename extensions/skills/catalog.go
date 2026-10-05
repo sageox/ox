@@ -31,7 +31,7 @@ type Bundle struct {
 // Catalog is intentionally a slice: declaration order is the human-facing
 // order, while selection below remains deterministic and duplicate-safe.
 var Catalog = []Bundle{
-	{ID: "core", Description: "Everyday SageOx workflows and skill manager", Default: true, SkillIDs: []string{"ox-cli-consult", "ox-cli-conversation", "ox-cli-decision", "ox-cli-plan", "ox-cli-pr-header", "ox-cli-recap", "ox-cli-session-review", "ox-cli-skill-manager", "ox-cli-viz"}},
+	{ID: "core", Description: "Everyday SageOx workflows and skill manager", Default: true, SkillIDs: []string{"ox-cli-consult", "ox-cli-conversation", "ox-cli-decision", "ox-cli-plan", "ox-cli-pr-header", "ox-cli-recap", "ox-cli-session-review", "ox-cli-skill-manager", "ox-cli-viz", "ox-cli-walkthrough"}},
 	{ID: "onramp", Description: "The single committed SageOx on-ramp skill", Default: true, SkillIDs: []string{"sageox"}},
 	// A "team" bundle of curated, non-CLI-wrapper skills (post-cutoff) used to
 	// live here with Default: false. Per ADR-032 D6, curated team knowledge is

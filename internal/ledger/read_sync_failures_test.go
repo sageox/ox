@@ -8,8 +8,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -245,6 +247,88 @@ func TestReadSyncRejectsBrokenCommitHistory(t *testing.T) {
 	require.Nil(t, result.LastSuccessfulSync)
 	readTestGit(t, f.opts.Path, "update-ref", "HEAD", first.Head)
 	require.True(t, ReadSync(ctx, f.opts).Ready)
+}
+
+// Failure prevented: the budget runs out or a signal lands while verification
+// asks Git about history, and the killed check is read as Git's answer. The
+// result claims a whole history is missing (incomplete_history, and history
+// "shallow" for the shallow check), so a consumer escalates what a retry
+// fixes and an operator is told the checkout lost history it still has
+// (ox #1007).
+func TestReadSyncHistoryCheckCutShortIsInterrupted(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("stands in for Git with a POSIX shell script on PATH")
+	}
+	f := newReadFixture(t)
+	require.True(t, ReadSync(context.Background(), f.opts).Ready)
+	for _, tc := range []struct {
+		entry, arg string
+		// before counts the calls naming arg that run ahead of the one that hangs.
+		before int
+	}{
+		{"check", "--is-shallow-repository", 0},
+		{"cold sync", "--is-shallow-repository", 0},
+		// A refresh asks once before it fetches, then again in verification.
+		{"refresh before fetch", "--is-shallow-repository", 0},
+		{"refresh", "--is-shallow-repository", 1},
+		{"check", "--count", 0},
+		{"cold sync", "--count", 0},
+		{"refresh", "--count", 0},
+	} {
+		t.Run(tc.entry+" "+tc.arg, func(t *testing.T) {
+			opts := f.opts
+			if tc.entry == "cold sync" {
+				opts.Path = filepath.Join(t.TempDir(), "checkout")
+			}
+			run := func(ctx context.Context) ReadSyncResult {
+				if tc.entry == "check" {
+					return CheckReadiness(ctx, opts.Path, opts.RepoID, opts.Endpoint)
+				}
+				return ReadSync(ctx, opts)
+			}
+			reached := filepath.Join(t.TempDir(), "reached")
+			hangReadGitCall(t, tc.arg, tc.before, reached)
+
+			// The budget running out and a signal both end ctx, and either kills
+			// the check. End it once the check is hanging.
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			finished := make(chan ReadSyncResult, 1)
+			go func() { finished <- run(ctx) }()
+			require.Eventually(t, func() bool {
+				_, err := os.Stat(reached)
+				return err == nil
+			}, 30*time.Second, 5*time.Millisecond, "the check never ran")
+			cancel()
+			result := <-finished
+			require.False(t, result.Ready)
+			require.Equal(t, "interrupted", result.ErrorClass, "%+v", result)
+			require.Equal(t, "unknown", result.History, "a killed check says nothing about history")
+
+			// Nothing is wrong with the history, so the retry "interrupted" asks for succeeds.
+			retried := run(context.Background())
+			require.True(t, retried.Ready, "%+v", retried)
+			require.Equal(t, "full", retried.History)
+		})
+	}
+}
+
+// hangReadGitCall puts a Git on PATH that runs every call as the fixture's Git,
+// except the call naming arg that follows before others: that one creates
+// reached and hangs until its process group is killed.
+func hangReadGitCall(t *testing.T, arg string, before int, reached string) {
+	t.Helper()
+	fixtureGit, err := exec.LookPath("git")
+	require.NoError(t, err)
+	bin, calls := t.TempDir(), filepath.Join(t.TempDir(), "calls")
+	quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
+	script := "#!/bin/sh\nfor arg in \"$@\"; do\n" +
+		"\tif [ \"$arg\" = " + quote(arg) + " ]; then\n" +
+		"\t\techo >> " + quote(calls) + "\n" +
+		"\t\tif [ $(wc -l < " + quote(calls) + ") -eq " + strconv.Itoa(before+1) + " ]; then : > " + quote(reached) + "; exec sleep 60; fi\n" +
+		"\tfi\ndone\nexec " + quote(fixtureGit) + " \"$@\"\n"
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0700))
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
 // Failure prevented: non-regular or unexpectedly missing tracked content is

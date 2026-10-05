@@ -308,6 +308,7 @@ func TestConversationE2E_LoggedOut(t *testing.T) {
 		{"conversation", "show", "https://sageox.ai/c/" + convE2EFullRec},
 		{"conversation", "transcript", convE2EFullCnv, "--cues", "1-2"},
 		{"conversation", "topics", convE2EFullCnv},
+		{"conversation", "walkthrough", convE2EFullCnv},
 	} {
 		out, exit := e2e.Run(t, args...)
 		require.Equal(t, 1, exit, "%v\nout:\n%s", args, out)

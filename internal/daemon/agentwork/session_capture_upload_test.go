@@ -201,8 +201,28 @@ func TestSessionCapture_UploadsNativeEntries(t *testing.T) {
 				}))
 				require.NoError(t, writer.CloseAndSync())
 
+				firstBatch, lastBatch := tc.firstBatch, tc.lastBatch
 				var sourceContent string
-				for _, batch := range []string{tc.firstBatch, tc.lastBatch} {
+				if tc.name == "claude-code" {
+					cwd, err := json.Marshal(projectRoot)
+					require.NoError(t, err)
+					// Claude native turns carry their session ID and cwd. Without
+					// these fields the ownership guard must reject the fixture.
+					identity := `"sessionId":"session","cwd":` + string(cwd) + `,`
+					addIdentity := func(batch string) string {
+						lines := strings.SplitAfter(batch, "\n")
+						for i, line := range lines {
+							// Only annotate top-level turns, not nested tool-use blocks.
+							if strings.HasPrefix(line, `{"type":`) {
+								lines[i] = strings.Replace(line, `{"type":`, `{`+identity+`"type":`, 1)
+							}
+						}
+						return strings.Join(lines, "")
+					}
+					firstBatch, lastBatch = addIdentity(firstBatch), addIdentity(lastBatch)
+					sourceContent = `{"type":"session","sessionId":"session","cwd":` + string(cwd) + `}` + "\n"
+				}
+				for _, batch := range []string{firstBatch, lastBatch} {
 					sourceContent += strings.NewReplacer(
 						"STAMP", time.Now().UTC().Format(time.RFC3339Nano),
 						"PROMPT", userPrompt, "FIRST", firstResponse, "FINAL", finalResponse,

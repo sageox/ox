@@ -275,7 +275,7 @@ func TestCheckIntegrity_CorruptDB(t *testing.T) {
 		t.Fatalf("write corrupt db: %v", err)
 	}
 
-	// Open should detect corruption via PRAGMA integrity_check and return ErrCorrupt
+	// Open should detect the damaged header and return ErrCorrupt
 	_, err = Open(tmp)
 	if err == nil {
 		t.Fatal("expected error from corrupt database, got nil")

@@ -105,6 +105,25 @@ func TestMergeOneWithLLM_RejectsOutputWithMarkers(t *testing.T) {
 	}
 }
 
+// TestMergeOneWithLLM_RejectsOutputWithOrphanedTail covers a model that strips
+// the opening marker but leaves the "=======" and ">>>>>>>" lines.
+// Failure prevented: the half-merged output is written and staged as resolved.
+func TestMergeOneWithLLM_RejectsOutputWithOrphanedTail(t *testing.T) {
+	t.Parallel()
+	repo := initTestRepo(t, t.TempDir())
+	path := "a.txt"
+	writeFile(t, repo, path, "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> br\n")
+
+	r := New(Options{LLMBinary: "fake"})
+	r.runLLM = func(ctx context.Context, binary, prompt string) (string, error) {
+		return "ours\n=======\ntheirs\n>>>>>>> br\n", nil
+	}
+	err := r.mergeOneWithLLM(context.Background(), repo, path)
+	if err == nil || !strings.Contains(err.Error(), "conflict markers") {
+		t.Fatalf("expected conflict-marker rejection, got: %v", err)
+	}
+}
+
 func TestMergeOneWithLLM_WritesAndStages(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -170,5 +189,171 @@ func TestMergeOneWithLLM_HonorsTimeout(t *testing.T) {
 	}
 	if time.Since(start) > time.Second {
 		t.Errorf("timeout not respected: took %s", time.Since(start))
+	}
+}
+
+// TestMergeOneWithLLM_ContentPreservation covers the post-condition beyond
+// "no markers left": every line from both conflict sides must survive.
+// Failure prevented: a model keeps one side (or paraphrases both) and the
+// lossy result is staged as a resolved merge of the team's memory.
+func TestMergeOneWithLLM_ContentPreservation(t *testing.T) {
+	t.Parallel()
+	const conflicted = "# Memory\n<<<<<<< HEAD\n- Devon chose Postgres\n=======\n- Avery chose SQLite\n>>>>>>> br\ntail\n"
+	cases := []struct {
+		name    string
+		path    string // defaults to MEMORY.md
+		in      string
+		out     string
+		wantErr string // substring of the expected error; empty means success
+	}{
+		{"union keeps both", "", conflicted, "# Memory\n- Devon chose Postgres\n- Avery chose SQLite\ntail\n", ""},
+		{"reorder keeps both", "", conflicted, "# Memory\n- Avery chose SQLite\n- Devon chose Postgres\ntail\n", ""},
+		{"drops theirs", "", conflicted, "# Memory\n- Devon chose Postgres\ntail\n", "dropped"},
+		{"drops ours", "", conflicted, "# Memory\n- Avery chose SQLite\ntail\n", "dropped"},
+		{"paraphrases both", "", conflicted, "# Memory\n- Team weighed Postgres vs SQLite\ntail\n", "dropped"},
+		{
+			"json union may add a comma and reindent",
+			"state.json",
+			"{\n<<<<<<< HEAD\n  \"a\": 1\n=======\n  \"b\": 2\n>>>>>>> br\n}\n",
+			"{\n    \"a\": 1,\n    \"b\": 2\n}\n",
+			"",
+		},
+		{
+			"diff3 base may be discarded",
+			"",
+			"<<<<<<< HEAD\nours\n||||||| base\nancestor\n=======\ntheirs\n>>>>>>> br\n",
+			"ours\ntheirs\n",
+			"",
+		},
+		{
+			"same line rewritten on both sides is refused",
+			"",
+			"<<<<<<< HEAD\nversion: 2\n=======\nversion: 3\n>>>>>>> br\n",
+			"version: 3\n",
+			"dropped",
+		},
+		{
+			"a line one side repeats keeps every copy",
+			"",
+			"<<<<<<< HEAD\n- task\n- task\n=======\n- other\n>>>>>>> br\n",
+			"- task\n- other\n",
+			"dropped",
+		},
+		{
+			"a line both sides added may appear once",
+			"",
+			"<<<<<<< HEAD\n- same\n- a\n=======\n- same\n- b\n>>>>>>> br\n",
+			"- same\n- a\n- b\n",
+			"",
+		},
+		{
+			"dropping context outside the hunk is refused",
+			"",
+			conflicted,
+			"- Devon chose Postgres\n- Avery chose SQLite\n",
+			"dropped",
+		},
+		{
+			"toml union keeping both values of one key is refused",
+			"config.toml",
+			"<<<<<<< HEAD\nversion = 2\n=======\nversion = 3\n>>>>>>> br\n",
+			"version = 2\nversion = 3\n",
+			"not valid",
+		},
+		{
+			"yaml union keeping both values of one key is refused",
+			"config.yaml",
+			"<<<<<<< HEAD\nversion: 2\n=======\nversion: 3\n>>>>>>> br\n",
+			"version: 2\nversion: 3\n",
+			"not valid",
+		},
+		{
+			"yaml duplicate key in a later document is refused",
+			"config.yaml",
+			"name: x\n---\n<<<<<<< HEAD\nversion: 2\n=======\nversion: 3\n>>>>>>> br\n",
+			"name: x\n---\nversion: 2\nversion: 3\n",
+			"not valid",
+		},
+		{
+			"valid multi-document yaml passes",
+			"config.yaml",
+			"name: x\n---\n<<<<<<< HEAD\nours: 1\n=======\ntheirs: 2\n>>>>>>> br\n",
+			"name: x\n---\nours: 1\ntheirs: 2\n",
+			"",
+		},
+		{
+			"json union keeping both values of one key is refused",
+			"state.json",
+			"{\n<<<<<<< HEAD\n  \"version\": 2\n=======\n  \"version\": 3\n>>>>>>> br\n}\n",
+			"{\n  \"version\": 2,\n  \"version\": 3\n}\n",
+			"not valid",
+		},
+		{
+			"json duplicate key in a nested object is refused",
+			"state.json",
+			"{\"a\": {\n<<<<<<< HEAD\n\"k\": [1, {\"x\": 1}]\n=======\n\"k\": 2\n>>>>>>> br\n}}\n",
+			"{\"a\": {\n\"k\": [1, {\"x\": 1}],\n\"k\": 2\n}}\n",
+			"not valid",
+		},
+		{
+			"same key in sibling objects passes",
+			"state.json",
+			"[\n<<<<<<< HEAD\n{\"id\": 1, \"tags\": [\"a\"]}\n=======\n{\"id\": 2, \"tags\": [\"b\"]}\n>>>>>>> br\n]\n",
+			"[\n{\"id\": 1, \"tags\": [\"a\"]},\n{\"id\": 2, \"tags\": [\"b\"]}\n]\n",
+			"",
+		},
+		{
+			"json number beyond float64 range passes",
+			"state.json",
+			"{\n<<<<<<< HEAD\n  \"big\": 1e400\n=======\n  \"small\": 2\n>>>>>>> br\n}\n",
+			"{\n  \"big\": 1e400,\n  \"small\": 2\n}\n",
+			"",
+		},
+		{
+			"json union missing its comma is refused",
+			"state.json",
+			"{\n<<<<<<< HEAD\n  \"a\": 1\n=======\n  \"b\": 2\n>>>>>>> br\n}\n",
+			"{\n  \"a\": 1\n  \"b\": 2\n}\n",
+			"not valid",
+		},
+		{
+			"valid toml union passes",
+			"config.toml",
+			"<<<<<<< HEAD\nours = 1\n=======\ntheirs = 2\n>>>>>>> br\n",
+			"ours = 1\ntheirs = 2\n",
+			"",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			repo := initTestRepo(t, t.TempDir())
+			path := tc.path
+			if path == "" {
+				path = "MEMORY.md"
+			}
+			writeFile(t, repo, path, tc.in)
+
+			r := New(Options{LLMBinary: "fake"})
+			r.runLLM = func(ctx context.Context, binary, prompt string) (string, error) {
+				return tc.out, nil
+			}
+			err := r.mergeOneWithLLM(context.Background(), repo, path)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("expected error containing %q, got: %v", tc.wantErr, err)
+				}
+				if got := readFile(t, repo, path); got != tc.in {
+					t.Errorf("rejected merge must leave the file untouched, got %q", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("mergeOneWithLLM: %v", err)
+			}
+			if got := readFile(t, repo, path); got != tc.out {
+				t.Errorf("file content = %q, want %q", got, tc.out)
+			}
+		})
 	}
 }

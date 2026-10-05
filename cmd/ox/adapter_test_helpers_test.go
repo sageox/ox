@@ -4,12 +4,62 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
+	"github.com/stretchr/testify/require"
 )
+
+// setupHandleAfterToolTest creates a project with an active recording and a
+// Claude Code source JSONL file. It is shared by both short and full test tiers.
+func setupHandleAfterToolTest(t *testing.T) (projectRoot string, agentID string, sourceFile string) {
+	t.Helper()
+
+	adapters.Register(&testClaudeCodeAdapter{})
+	t.Cleanup(func() { adapters.Unregister("claude-code") })
+
+	cacheDir := t.TempDir()
+	projectRoot = t.TempDir()
+
+	sageoxDir := filepath.Join(projectRoot, ".sageox")
+	require.NoError(t, os.MkdirAll(sageoxDir, 0755))
+	cfg := `{"config_version":"2","repo_id":"test-repo-hook","endpoint":"http://test.sageox.local","session_publishing":"manual"}`
+	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "config.json"), []byte(cfg), 0644))
+
+	t.Setenv("OX_XDG_ENABLE", "1")
+	t.Setenv("HOME", cacheDir)
+	t.Setenv("XDG_CACHE_HOME", cacheDir)
+	t.Setenv("XDG_DATA_HOME", cacheDir)
+
+	agentID = "OxHook1"
+	state, err := session.StartRecording(projectRoot, session.StartRecordingOptions{
+		AgentID:     agentID,
+		AdapterName: "claude-code",
+		Username:    "testuser",
+	})
+	require.NoError(t, err)
+
+	// create a source JSONL file (simulates Claude Code's session file)
+	sourceDir := t.TempDir()
+	sourceFile = filepath.Join(sourceDir, "session.jsonl")
+	nativeHeader := fmt.Sprintf("{\"type\":\"session\",\"sessionId\":\"session\",\"cwd\":%q}\n", projectRoot)
+	require.NoError(t, os.WriteFile(sourceFile, []byte(nativeHeader), 0644))
+
+	// update recording state with source file and session path
+	require.NoError(t, session.UpdateRecordingStateForAgent(projectRoot, agentID, func(s *session.RecordingState) {
+		s.SessionFile = sourceFile
+	}))
+
+	// write the raw.jsonl header
+	require.NoError(t, writeRawHeader(projectRoot, state))
+
+	return projectRoot, agentID, sourceFile
+}
 
 // testClaudeCodeAdapter is a minimal mock of the removed ClaudeCodeAdapter.
 // Parses the Claude Code JSONL format used in hook and session tests.

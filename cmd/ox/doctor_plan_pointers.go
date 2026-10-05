@@ -75,7 +75,7 @@ func checkPlanPointersMissing(fix bool) checkResult {
 	}
 
 	return evaluatePlanPointers(client, pointers, fix, func() (*lfs.ReconcileResult, error) {
-		return lfs.ReconcileUnpushedPointers(context.Background(), ledgerPath, endpoint.GetForProject(findGitRoot()), slog.Default())
+		return lfs.ReconcileAllPointers(context.Background(), ledgerPath, endpoint.GetForProject(findGitRoot()), slog.Default())
 	})
 }
 
