@@ -344,6 +344,7 @@ type SessionInfo struct {
 	Title           string              `json:"title,omitempty"`              // from meta.json
 	Summary         string              `json:"summary,omitempty"`            // from meta.json
 	Recording       bool                `json:"recording,omitempty"`          // true if session is actively being recorded
+	Held            bool                `json:"held,omitempty"`               // kept on this machine until 'ox session upload' (.held marker)
 	AgentID         string              `json:"agent_id,omitempty"`           // from .recording.json when recording
 	EntryCount      int                 `json:"entry_count,omitempty"`        // from .recording.json or meta.json
 	IsSubagent      bool                `json:"is_subagent,omitempty"`        // true if spawned by a parent session
@@ -573,6 +574,7 @@ func (s *Store) listSessionSessions(since time.Time) ([]SessionInfo, error) {
 			StopResetsAtRaw: stopMetaString(meta, func(m *lfs.SessionMeta) string { return m.StopResetsAtRaw }),
 			StopResetsAt:    stopMetaTime(meta),
 			Draft:           isDraft,
+			Held:            IsHeld(sessionPath),
 		})
 	}
 
