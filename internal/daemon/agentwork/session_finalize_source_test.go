@@ -348,3 +348,45 @@ func TestRecoverClaudeWithoutWorkspacePathRequiresMatchingHeaderRepo(t *testing.
 		})
 	}
 }
+
+// Whatever queued the work (the periodic scan, an agent's orphan sweep, an IPC
+// request), a quarantined recording's transcript must not reach the Ledger.
+func TestFinalizeHandlerDropsAQuarantinedRecording(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git ledger")
+	}
+	_, ledger := setupBareAndCloneLedger(t)
+	handler := newGitBackedHandler()
+	for _, uploadOnly := range []bool{true, false} {
+		name := "2026-01-15T10-00-testuser-OxHeldDaemon"
+		if !uploadOnly {
+			name = "2026-01-15T11-00-testuser-OxHeldDaemonB"
+		}
+		t.Run(fmt.Sprintf("upload_only=%v", uploadOnly), func(t *testing.T) {
+			item := uploadOnlyWorkItem(t, ledger, name)
+			payload := item.Payload.(*SessionFinalizePayload)
+			payload.UploadOnly = uploadOnly
+			marker := filepath.Join(payload.SessionDir, recordingMarker)
+			writeRecordingState(t, marker, session.RecordingState{AgentID: "OxHeldDaemon", AdapterName: "claude-code", SourceRejected: true})
+			headBefore := gitOutput(t, ledger, "rev-parse", "HEAD")
+
+			prompt, err := handler.BuildPrompt(item)
+			if err != nil || !prompt.SkipLLM {
+				t.Fatalf("a held recording must not cost an LLM run, skip=%v err=%v", prompt.SkipLLM, err)
+			}
+			if err := handler.ProcessResult(item, &RunResult{}); err != nil {
+				t.Fatalf("a held recording is dropped, not failed: %v", err)
+			}
+
+			if got := gitOutput(t, ledger, "rev-parse", "HEAD"); got != headBefore {
+				t.Fatalf("nothing may be committed for a held recording: %s -> %s", headBefore, got)
+			}
+			if _, err := os.Stat(filepath.Join(ledger, "sessions", name)); err == nil {
+				t.Fatal("a held recording must not be staged into the Ledger")
+			}
+			if _, err := os.Stat(marker); err != nil {
+				t.Fatalf("the quarantine marker must survive: %v", err)
+			}
+		})
+	}
+}

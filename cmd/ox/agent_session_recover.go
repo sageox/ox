@@ -37,6 +37,16 @@ type sessionRecoverOutput struct {
 	LedgerSessionDir string `json:"ledger_session_dir,omitempty"`
 }
 
+// recoverPromptsEnabled and recoverConfirm are the cache-recovery prompts, as
+// variables so a test can answer them: a test process has no terminal.
+var (
+	recoverPromptsEnabled = cli.IsInteractive
+	recoverConfirm        = cli.ConfirmYesNo
+)
+
+// recoverForRelease is the recovery a release attempts once its re-check passes.
+var recoverForRelease = recoverRecording
+
 // quarantineHeldMessage tells a coworker why a recording was not recovered and
 // how to get it back.
 func quarantineHeldMessage(agentID string) string {
@@ -90,13 +100,23 @@ func releaseAndRecover(inst *agentinstance.Instance, projectRoot string) error {
 	}
 	state.SourceRejected = false
 	slog.Info("released source quarantine for recovery", "agent_id", inst.AgentID, "session_path", state.SessionPath)
-	if err := recoverRecording(inst, projectRoot, state); err != nil {
+	recoverErr := recoverForRelease(inst, projectRoot, state)
+	// Only a recording that was published and cleared leaves the quarantine
+	// behind. A failure, or a recovery that returned success without publishing
+	// (the coworker declined both upload and discard at the prompt), puts it back.
+	if recoverErr != nil || !recordingCleared(state) {
 		if restoreErr := session.SetSourceRejectedAt(state.SessionPath, state.SessionID, true); restoreErr != nil && !errors.Is(restoreErr, os.ErrNotExist) {
-			slog.Warn("could not restore source quarantine after failed recovery", "agent_id", inst.AgentID, "error", restoreErr)
+			slog.Warn("could not restore source quarantine after recovery that did not publish", "agent_id", inst.AgentID, "error", restoreErr)
 		}
-		return err
 	}
-	return nil
+	return recoverErr
+}
+
+// recordingCleared reports whether the recording's marker is gone or now names a
+// different recording, which is what a finished recovery leaves behind.
+func recordingCleared(state *session.RecordingState) bool {
+	current, err := session.ReadRecordingStateFile(state.SessionPath)
+	return err == nil && (current == nil || current.SessionID != state.SessionID)
 }
 
 // runAgentSessionRecover recovers a stale/crashed session.
@@ -298,12 +318,12 @@ func recoverFromCache(inst *agentinstance.Instance, projectRoot string, state *s
 	}
 
 	// interactive confirmation: prompt human users before uploading orphaned sessions
-	if cli.IsInteractive() {
+	if recoverPromptsEnabled() {
 		prompt := fmt.Sprintf("Found orphaned session from %s (%d entries). Upload to ledger?",
 			state.StartedAt.Format("2006-01-02 15:04"), entryCount)
-		if !cli.ConfirmYesNo(prompt, false) {
+		if !recoverConfirm(prompt, false) {
 			// user declined -- offer to discard
-			if cli.ConfirmYesNo("Discard the orphaned session data?", false) {
+			if recoverConfirm("Discard the orphaned session data?", false) {
 				if err := discardCachedRecording(projectRoot, state, rawPath); err != nil {
 					return err
 				}

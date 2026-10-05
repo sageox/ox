@@ -1081,6 +1081,12 @@ func (h *SessionFinalizeHandler) BuildPrompt(item *WorkItem) (RunRequest, error)
 		return RunRequest{}, err
 	}
 
+	// Held for ownership review: do not spend an LLM run on it. ProcessResult
+	// drops the item.
+	if sessionHeldForReview(payload.SessionDir) {
+		return RunRequest{SkipLLM: true}, nil
+	}
+
 	if payload.UploadOnly {
 		return RunRequest{SkipLLM: true}, nil
 	}
@@ -1215,6 +1221,16 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 	payload, err := extractPayload(item)
 	if err != nil {
 		return err
+	}
+
+	// Every way into this handler (the periodic scan, an agent's own orphan
+	// sweep, a caller's IPC request) ends here, so this is the one place that
+	// keeps a quarantined recording's transcript out of the Ledger. Dropped, not
+	// failed: retrying cannot change the answer, only a coworker's release can.
+	if sessionHeldForReview(payload.SessionDir) {
+		h.logger.Info("session finalize dropped: recording is held for ownership review",
+			"session", filepath.Base(payload.SessionDir))
+		return nil
 	}
 
 	payload.omitTraces = false
@@ -2881,6 +2897,13 @@ func stampCarrierBeforeReclaim(logger *slog.Logger, sessionDir, rawPath string, 
 	}); err != nil {
 		logger.Debug("could not stamp raw.jsonl carrier before reclaim", "session_dir", sessionDir, "err", err)
 	}
+}
+
+// sessionHeldForReview reports whether the recording marker in sessionDir says
+// its native source was quarantined. An unreadable marker is not a quarantine.
+func sessionHeldForReview(sessionDir string) bool {
+	state, err := session.ReadRecordingStateFile(sessionDir)
+	return err == nil && state != nil && state.SourceRejected
 }
 
 // recoverRawFromSessionFile recovers missing capture and drains a dead tail

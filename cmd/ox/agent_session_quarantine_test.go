@@ -572,3 +572,105 @@ func (a *vanishingClaudeAdapter) ReadFromOffset(path string, offset int64) ([]ad
 	_ = os.Remove(path)
 	return entries, next, err
 }
+
+// `ox doctor` runs this scan on every invocation, and the quarantine notice
+// itself sends users to `ox doctor`. A stale or stop-incomplete recording is
+// reclaimed here (marker deleted, transcript uploaded); a quarantined one must
+// be left exactly as it is.
+func TestFindOrphanedSessions_NeverReclaimsAQuarantinedRecording(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		recState string
+		orphan   bool
+	}{
+		{"quarantined and stale", `{"agent_id":"OxHeld","source_rejected":true,"started_at":"2001-02-03T04:05:00Z"}`, false},
+		{"quarantined and stop-incomplete", `{"agent_id":"OxHeld","source_rejected":true,"stop_incomplete":true}`, false},
+		// the same recordings without the quarantine are the orphans the scan exists for
+		{"stale", `{"agent_id":"OxHeld","started_at":"2001-02-03T04:05:00Z"}`, true},
+		{"stop-incomplete", `{"agent_id":"OxHeld","stop_incomplete":true}`, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			cacheDir := filepath.Join(tmpDir, "cache", "sessions")
+			ledgerDir := filepath.Join(tmpDir, "ledger")
+			require.NoError(t, os.MkdirAll(cacheDir, 0o755))
+			require.NoError(t, os.MkdirAll(filepath.Join(ledgerDir, "sessions"), 0o755))
+			dir := filepath.Join(cacheDir, "2026-01-15T10-30-ryan-OxHeld")
+			require.NoError(t, os.MkdirAll(dir, 0o755))
+			writeTestRawJSONL(t, filepath.Join(dir, ledgerFileRaw))
+			marker := filepath.Join(dir, ".recording.json")
+			require.NoError(t, os.WriteFile(marker, []byte(tt.recState), 0o644))
+			rawBefore, err := os.ReadFile(filepath.Join(dir, ledgerFileRaw))
+			require.NoError(t, err)
+
+			orphans := findTestOrphans(t, cacheDir, ledgerDir)
+
+			if tt.orphan {
+				assert.Len(t, orphans, 1)
+				assert.NoFileExists(t, marker)
+				return
+			}
+			assert.Empty(t, orphans, "a quarantined recording must never be queued for upload")
+			assert.FileExists(t, marker, "the marker that records the quarantine must survive")
+			rawAfter, err := os.ReadFile(filepath.Join(dir, ledgerFileRaw))
+			require.NoError(t, err)
+			assert.Equal(t, string(rawBefore), string(rawAfter))
+		})
+	}
+}
+
+// Upload, regenerate, migrate and doctor's retry all publish through one helper.
+// It must refuse a session folder whose recording is quarantined, before it
+// builds a client or touches the network.
+func TestUploadSessionLFS_RefusesAQuarantinedSession(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "2026-01-15T10-30-ryan-OxHeld")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	writeTestRawJSONL(t, filepath.Join(dir, ledgerFileRaw))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".recording.json"), []byte(`{"agent_id":"OxHeld","source_rejected":true}`), 0o644))
+
+	refs, err := uploadSessionLFS(t.TempDir(), dir)
+
+	require.Error(t, err)
+	assert.Nil(t, refs)
+	assert.Contains(t, err.Error(), "held back for ownership review")
+	assert.Contains(t, err.Error(), "ox agent OxHeld session recover --release-quarantine")
+}
+
+// A release lifts the quarantine only for a recovery that publishes. When the
+// coworker declines both the upload and the discard, recovery reports success
+// without publishing anything; the recording must go back to being quarantined,
+// not be left as an ordinary stale recording the next sweep would publish.
+func TestReleaseQuarantine_DecliningThePromptsPutsTheQuarantineBack(t *testing.T) {
+	projectRoot, agentID, _ := setupHandleAfterToolTest(t)
+	t.Chdir(projectRoot)
+	held, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+	require.NoError(t, err)
+	require.NoError(t, session.MarkSourceRejected(projectRoot, agentID))
+	raw := filepath.Join(held.SessionPath, "raw.jsonl")
+	rawBefore, err := os.ReadFile(raw)
+	require.NoError(t, err)
+
+	// the cache-recovery path, with a coworker who answers no to every question
+	prompted := 0
+	oldEnabled, oldConfirm, oldRecover := recoverPromptsEnabled, recoverConfirm, recoverForRelease
+	t.Cleanup(func() { recoverPromptsEnabled, recoverConfirm, recoverForRelease = oldEnabled, oldConfirm, oldRecover })
+	recoverPromptsEnabled = func() bool { return true }
+	recoverConfirm = func(string, bool) bool { prompted++; return false }
+	recoverForRelease = func(inst *agentinstance.Instance, projectRoot string, state *session.RecordingState) error {
+		return recoverFromCache(inst, projectRoot, state, filepath.Join(state.SessionPath, "raw.jsonl"))
+	}
+
+	err = recoverAgentSession(&agentinstance.Instance{AgentID: agentID}, true)
+	require.NoError(t, err, "declining is not a failure")
+	assert.Equal(t, 2, prompted, "the coworker was asked to upload and then to discard")
+
+	again := heldRecording(t, projectRoot, agentID)
+	assert.Equal(t, held.SessionID, again.SessionID)
+	assert.True(t, again.SourceRejected, "a release that published nothing must put the quarantine back")
+	rawAfter, err := os.ReadFile(raw)
+	require.NoError(t, err)
+	assert.Equal(t, string(rawBefore), string(rawAfter), "declined means untouched")
+	active, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+	require.NoError(t, err)
+	assert.Nil(t, active, "the recording must not be left looking like an ordinary stale one")
+}

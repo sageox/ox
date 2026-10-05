@@ -151,6 +151,12 @@ func findOrphanedSessionsInDir(cacheSessionsDir, ledgerPath string) ([]orphanedS
 			if json.Unmarshal(recData, &recState) != nil {
 				continue // corrupt, skip
 			}
+			// Held for ownership review. Reclaiming it below would delete the
+			// marker that says so and publish the transcript. This scan runs on
+			// every `ox doctor`, whose own quarantine notice sends users here.
+			if recState.SourceRejected {
+				continue
+			}
 
 			// determine if this recording is stale (older than threshold)
 			isStale := !recState.StartedAt.IsZero() && time.Since(recState.StartedAt) > session.StaleRecordingThreshold
