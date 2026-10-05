@@ -29,9 +29,10 @@ import (
 
 // Client communicates with a Git LFS Batch API server (e.g., GitLab).
 type Client struct {
-	batchURL   string // e.g., https://git.sageox.io/sageox/ledger.git/info/lfs/objects/batch
-	httpClient *http.Client
-	authHeader string // "Basic <base64(username:token)>"
+	batchURL           string // e.g., https://git.sageox.io/sageox/ledger.git/info/lfs/objects/batch
+	httpClient         *http.Client
+	authHeader         string // "Basic <base64(username:token)>"
+	credentialEndpoint string // refresh the Git PAT for this endpoint on rotation or 401
 	// Read clients resolve the selected credential for every request, never cache it.
 	readEndpoint string
 	readRepoID   string
@@ -105,6 +106,9 @@ func NewClient(repoURL, username, token string) *Client {
 	batchURL := strings.TrimSuffix(repoURL, "/") + "/info/lfs/objects/batch"
 
 	// HTTP Basic auth header
+	if username == "" {
+		username = "oauth2"
+	}
 	creds := username + ":" + token
 	authHeader := "Basic " + base64.StdEncoding.EncodeToString([]byte(creds))
 
@@ -246,6 +250,20 @@ func (c *Client) doBatch(ctx context.Context, operation string, objects []BatchO
 	// only User-Agent for external Git host; no X-Orchestrator
 	req.Header.Set("User-Agent", useragent.String())
 	req.Header.Set("Authorization", c.authHeader)
+	if c.credentialEndpoint != "" {
+		creds, err := auth.RefreshGitCredentialsForEndpoint(c.credentialEndpoint, false)
+		if err != nil {
+			return nil, fmt.Errorf("refresh LFS credentials: %w", err)
+		}
+		if creds == nil || creds.Token == "" {
+			return nil, fmt.Errorf("no git credentials found. %s", auth.ReauthenticationRemedy(c.credentialEndpoint))
+		}
+		username := creds.Username
+		if username == "" {
+			username = "oauth2"
+		}
+		req.SetBasicAuth(username, creds.Token)
+	}
 	if c.readURL != "" {
 		if err := gitserver.ValidateReadRequestURL(c.readEndpoint, c.readRepoID, c.readURL, req.URL.String()); err != nil {
 			return nil, err
@@ -260,6 +278,26 @@ func (c *Client) doBatch(ctx context.Context, operation string, objects []BatchO
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("batch request failed: %w", err)
+	}
+	if resp.StatusCode == http.StatusUnauthorized && c.credentialEndpoint != "" {
+		resp.Body.Close()
+		creds, err := auth.RefreshGitCredentialsForEndpoint(c.credentialEndpoint, true)
+		if err != nil {
+			return nil, fmt.Errorf("refresh rejected LFS credentials: %w", err)
+		}
+		username := creds.Username
+		if username == "" {
+			username = "oauth2"
+		}
+		req.SetBasicAuth(username, creds.Token)
+		req.Body, err = req.GetBody()
+		if err != nil {
+			return nil, err
+		}
+		resp, err = c.httpClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("batch retry failed: %w", err)
+		}
 	}
 	defer resp.Body.Close()
 	if c.readURL != "" && (resp.StatusCode < 200 || resp.StatusCode >= 300) {
@@ -333,17 +371,6 @@ func (c *Client) doBatch(ctx context.Context, operation string, objects []BatchO
 // and credentials loaded for the given endpoint. This is a convenience constructor
 // for callers that already have the ledger path (e.g., daemon session finalization).
 func NewClientFromLedger(ledgerPath, endpointURL string) (*Client, error) {
-	creds, err := gitserver.LoadCredentialsForEndpoint(endpointURL)
-	if err != nil {
-		return nil, fmt.Errorf("load credentials: %w", err)
-	}
-	if creds == nil {
-		return nil, fmt.Errorf("no git credentials found (run 'ox login' first)")
-	}
-	if creds.Token == "" {
-		return nil, fmt.Errorf("git credentials have empty token")
-	}
-
 	repoURL, err := gitserver.GetBareRemoteURL(ledgerPath)
 	if err != nil {
 		return nil, fmt.Errorf("get ledger remote URL: %w", err)
@@ -351,6 +378,23 @@ func NewClientFromLedger(ledgerPath, endpointURL string) (*Client, error) {
 	if repoURL == "" {
 		return nil, fmt.Errorf("ledger has no remote URL configured")
 	}
+	return NewClientForEndpoint(repoURL, endpointURL)
+}
 
-	return NewClient(repoURL, creds.Username, creds.Token), nil
+// NewClientForEndpoint follows token rotation and refreshes a rejected Git PAT.
+func NewClientForEndpoint(repoURL, endpointURL string) (*Client, error) {
+	creds, err := auth.RefreshGitCredentialsForEndpoint(endpointURL, false)
+	if err != nil {
+		return nil, fmt.Errorf("load credentials: %w", err)
+	}
+	if creds == nil {
+		return nil, fmt.Errorf("no git credentials found. %s", auth.ReauthenticationRemedy(endpointURL))
+	}
+	if creds.Token == "" {
+		return nil, fmt.Errorf("git credentials have empty token")
+	}
+
+	c := NewClient(repoURL, creds.Username, creds.Token)
+	c.credentialEndpoint = endpointURL
+	return c, nil
 }

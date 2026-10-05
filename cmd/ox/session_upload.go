@@ -148,22 +148,10 @@ func uploadSessionLFS(projectRoot, sessionPath string) (map[string]lfs.FileRef, 
 }
 
 // getLFSClient creates an LFS client using project credentials.
-// Derives the LFS batch URL from the ledger's local git remote, avoiding any
-// dependency on the OAuth API token. Only the Git PAT is needed for LFS auth.
+// Uses the ledger's Git remote and refreshes credentials when the bearer
+// rotates or the server rejects the PAT.
 func getLFSClient(projectRoot string) (*lfs.Client, error) {
 	ep := endpoint.GetForProject(projectRoot)
-
-	// load git credentials (PAT) for LFS HTTP Basic auth
-	creds, err := gitserver.LoadCredentialsForEndpoint(ep)
-	if err != nil {
-		return nil, fmt.Errorf("load credentials: %w", err)
-	}
-	if creds == nil {
-		return nil, errkind.Errorf(errkind.NotLoggedIn, "no git credentials found (run 'ox login' first)")
-	}
-	if creds.Token == "" {
-		return nil, errkind.Errorf(errkind.NotLoggedIn, "git credentials have empty token")
-	}
 
 	// derive LFS repo URL from the ledger's local git remote (no API call needed)
 	ledgerPath, err := resolveLedgerPath()
@@ -179,7 +167,7 @@ func getLFSClient(projectRoot string) (*lfs.Client, error) {
 		return nil, fmt.Errorf("ledger has no remote URL configured")
 	}
 
-	return lfs.NewClient(repoURL, creds.Username, creds.Token), nil
+	return lfs.NewClientForEndpoint(repoURL, ep)
 }
 
 // ensureSessionsGitignore delegates to lfs.EnsureSessionsGitignore.

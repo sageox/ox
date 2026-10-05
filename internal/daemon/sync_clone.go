@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sageox/ox/internal/auth"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitutil"
 )
 
@@ -81,6 +83,7 @@ func (s *SyncScheduler) cloneInBackground(cloneURL, repoPath, repoType, workspac
 	}, nil) // no progress writer for background clones
 
 	if err != nil {
+		s.refreshAfterAuthFailure(err)
 		s.logger.Error("background clone failed", "type", repoType, "path", repoPath, "error", err)
 
 		// semaphore timeout is transient — retry next cycle without escalating backoff
@@ -117,7 +120,7 @@ func (s *SyncScheduler) cloneInBackground(cloneURL, repoPath, repoType, workspac
 
 		hint := "will retry"
 		if permanent {
-			hint = "likely needs 'ox login' or permission fix"
+			hint = auth.ReauthenticationRemedy(endpoint.GetForProject(s.config.ProjectRoot)) + " Check repository permissions."
 		}
 
 		// detect 403/forbidden for more specific guidance

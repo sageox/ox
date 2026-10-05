@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
@@ -69,7 +68,7 @@ func checkGitPATLiveness(fix bool) checkResult {
 				return PassedCheck(name, "auto-repaired: refreshed credentials with repo URLs")
 			}
 			return FailedCheck(name, result.Reason,
-				"auto-repair failed; run `ox login` to re-authenticate")
+				"auto-repair failed; "+auth.ReauthenticationRemedy(projectEndpoint))
 		}
 		return SkippedCheck(name, result.Reason, "")
 	}
@@ -77,7 +76,7 @@ func checkGitPATLiveness(fix bool) checkResult {
 	if !result.Valid {
 		if !fix {
 			return FailedCheck(name, result.Reason,
-				"run `ox login` to re-authenticate and get a fresh PAT")
+				auth.ReauthenticationRemedy(projectEndpoint))
 		}
 
 		// auto-repair: use OAuth token to fetch fresh git credentials
@@ -87,7 +86,7 @@ func checkGitPATLiveness(fix bool) checkResult {
 		}
 
 		return FailedCheck(name, result.Reason,
-			"auto-repair failed (OAuth token may be expired); run `ox login` to re-authenticate")
+			"auto-repair failed; "+auth.ReauthenticationRemedy(projectEndpoint))
 	}
 
 	return PassedCheck(name, "PAT accepted by git server")
@@ -104,8 +103,7 @@ func attemptPATAutoRepair(ep string) bool {
 	}
 
 	// fetch fresh git credentials from the API
-	client := api.NewRepoClientWithEndpoint(ep).WithAuthToken(token.AccessToken)
-	if err := fetchAndSaveGitCredentials(client); err != nil {
+	if _, err := auth.RefreshGitCredentialsForEndpoint(ep, true); err != nil {
 		slog.Debug("PAT auto-repair: credential sync failed", "error", err)
 		return false
 	}

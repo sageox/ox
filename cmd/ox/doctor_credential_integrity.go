@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/sageox/ox/internal/auth"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/paths"
 )
 
@@ -118,5 +120,5 @@ func fixCorruptCredentialFiles(corrupt []string) checkResult {
 	}
 
 	return PassedCheck(name,
-		fmt.Sprintf("removed %d corrupt file(s), run `ox login` to re-authenticate", removed))
+		fmt.Sprintf("removed %d corrupt file(s). %s", removed, auth.ReauthenticationRemedy(endpoint.GetForProject(findGitRoot()))))
 }

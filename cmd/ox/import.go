@@ -618,16 +618,6 @@ func resolveTeamContextByEndpoint(query, ep string) *config.TeamContext {
 // getTeamContextLFSClient creates an LFS client for the team context repo.
 // Fallback chain: cloud API → cached marker → git remote URL.
 func getTeamContextLFSClient(ep string, tc *config.TeamContext) (*lfs.Client, error) {
-	creds, err := gitserver.LoadCredentialsForEndpoint(ep)
-	if err != nil {
-		return nil, fmt.Errorf("load credentials: %w", err)
-	}
-	if creds == nil {
-		return nil, fmt.Errorf("no git credentials found (run 'ox login' first)")
-	}
-	if creds.Token == "" {
-		return nil, fmt.Errorf("git credentials have empty token")
-	}
 
 	repoURL := GetTeamURLWithFallback("", tc.TeamID, ep)
 	if repoURL == "" {
@@ -641,7 +631,7 @@ func getTeamContextLFSClient(ep string, tc *config.TeamContext) (*lfs.Client, er
 		repoURL = strings.TrimSpace(out)
 	}
 
-	return lfs.NewClient(repoURL, creds.Username, creds.Token), nil
+	return lfs.NewClientForEndpoint(repoURL, ep)
 }
 
 // commitAndPushDocImport stages, commits, and pushes imported document files.

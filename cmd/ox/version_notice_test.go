@@ -4,11 +4,37 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/updatenotice"
 	"github.com/sageox/ox/internal/version"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// Failure prevented: a CI team token receives upgrade nags in status or prime,
+// and the suppressed notice consumes the human coworker's notification budget.
+func TestUpdateNotice_TeamTokenIsSilentWithoutConsumingLedger(t *testing.T) {
+	useTestCacheDir(t)
+	atTerminal(t)
+	t.Setenv("SAGEOX_ENDPOINT", "https://sageox.ai")
+	writeTestVersionCache(t, &versionCacheData{LatestVersion: "v99.0.0", CheckedAt: time.Now()})
+	for _, token := range []string{validTeamToken, malformedTeamToken} {
+		t.Run(token, func(t *testing.T) {
+			t.Setenv(auth.EnvVarToken, token)
+			_, due := updateNoticeDue(time.Now())
+			assert.False(t, due, "prime must stay silent under a team token")
+			_, due = calmUpdateNoticeDue(time.Now())
+			assert.False(t, due, "status must stay silent under a team token")
+			assert.True(t, readVersionCache().LastNaggedAt.IsZero())
+			check := checkForUpdates()
+			assert.True(t, check.skipped, "doctor must not suggest an upgrade")
+			assert.Equal(t, "team token", check.message)
+		})
+	}
+	t.Setenv(auth.EnvVarToken, validPersonalToken)
+	_, due := calmUpdateNoticeDue(time.Now())
+	assert.True(t, due, "personal-token notices remain available")
+}
 
 // atTerminal puts a human at stderr and clears machine-output mode, so a test
 // exercises the cadence rather than the audience gate. Neither is true under

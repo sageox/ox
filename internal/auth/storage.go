@@ -136,6 +136,10 @@ func envTokenOrError(ep string) (*StoredToken, error) {
 		// Never interpolate the value: this error is printed to terminals and
 		// carried into logs, and a value that failed a checksum is still a
 		// secret (it may be a correct token with one character lost).
+		if EnvTokenIsTeamFamily(ep) {
+			return nil, fmt.Errorf("%w (endpoint %s): re-copy the team token (a truncated paste is the usual cause). %s",
+				ErrEnvTokenMalformed, ep, ReauthenticationRemedy(ep))
+		}
 		return nil, fmt.Errorf("%w (endpoint %s): refusing to fall back to a stored login — re-copy the token (a truncated paste is the usual cause), or unset %s to use your `ox login` credential",
 			ErrEnvTokenMalformed, ep, EnvVarToken)
 	}

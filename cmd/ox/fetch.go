@@ -188,17 +188,6 @@ func detectRepo(pointerPath string) (string, error) {
 func newFetchLFSClient(projectRoot, repoRoot string) (*lfs.Client, error) {
 	ep := endpoint.GetForProject(projectRoot)
 
-	creds, err := gitserver.LoadCredentialsForEndpoint(ep)
-	if err != nil {
-		return nil, fmt.Errorf("load credentials: %w", err)
-	}
-	if creds == nil {
-		return nil, fmt.Errorf("no git credentials found (run 'ox login' first)")
-	}
-	if creds.Token == "" {
-		return nil, fmt.Errorf("git credentials have empty token")
-	}
-
 	repoURL, err := gitserver.GetBareRemoteURL(repoRoot)
 	if err != nil {
 		return nil, fmt.Errorf("get remote URL: %w", err)
@@ -207,7 +196,7 @@ func newFetchLFSClient(projectRoot, repoRoot string) (*lfs.Client, error) {
 		return nil, fmt.Errorf("repo has no remote URL: %s", repoRoot)
 	}
 
-	return lfs.NewClient(repoURL, creds.Username, creds.Token), nil
+	return lfs.NewClientForEndpoint(repoURL, ep)
 }
 
 // isCacheHit returns true if the cached file exists and its size matches.

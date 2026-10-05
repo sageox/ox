@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"context"
+	"errors"
 	"time"
 
 	"github.com/sageox/ox/internal/api"
@@ -13,97 +15,94 @@ import (
 // before we proactively refresh them (1 hour)
 const credentialRefreshThreshold = 1 * time.Hour
 
-// refreshCredentialsIfNeeded checks if the Git PAT is expired or near expiry,
-// and refreshes from the cloud API if needed. This is LAZY — exits early when
-// the PAT has >1h remaining. Only uses OAuth to obtain a fresh PAT; the PAT
+// refreshCredentialsIfNeeded refreshes a Git PAT after bearer rotation or near
+// expiry. This is LAZY — exits early when the matching PAT has >1h remaining.
+// Only uses the bearer to obtain a fresh PAT; the PAT
 // itself is what git/LFS operations use (HTTP Basic auth, not OAuth bearer).
 // See docs/specs/session-auth-model.md for the credential model.
 func (s *SyncScheduler) refreshCredentialsIfNeeded() {
-	// dedup: stamp-then-release to prevent TOCTOU race where concurrent callers
-	// both observe a stale timestamp and both proceed to hit the API.
-	s.mu.Lock()
-	if !s.lastCredentialRefresh.IsZero() && time.Since(s.lastCredentialRefresh) < 5*time.Minute {
-		s.mu.Unlock()
-		return
-	}
-	s.lastCredentialRefresh = time.Now() // stamp before releasing lock
-	s.mu.Unlock()
+	s.refreshCredentials(false)
+}
 
-	// get the endpoint for this project
+func (s *SyncScheduler) refreshCredentials(force bool) {
 	projectEndpoint := endpoint.GetForProject(s.config.ProjectRoot)
-
-	// load credentials for this specific endpoint
-	creds, err := gitserver.LoadCredentialsForEndpoint(projectEndpoint)
-	if err != nil {
-		s.logger.Debug("failed to load credentials for refresh check", "error", err)
-	}
-
-	// check if credentials exist and are fresh
-	if creds != nil && !creds.ExpiresAt.IsZero() && time.Until(creds.ExpiresAt) > credentialRefreshThreshold {
-		// credentials are still fresh, no refresh needed
-		return
-	}
-
-	refreshReason := "no credentials for endpoint"
-	if creds != nil {
-		refreshReason = "credentials expired or near expiry"
-	}
-
-	s.logger.Info("refreshing git credentials from API", "reason", refreshReason, "endpoint", projectEndpoint)
-
-	// get auth token for this endpoint
 	token, err := auth.GetTokenForEndpoint(projectEndpoint)
 	if err != nil {
 		s.logger.Warn("failed to get auth token for credential refresh", "error", err)
 		return
 	}
-	if token == nil || token.AccessToken == "" {
-		s.logger.Debug("no auth token available for credential refresh")
-		return
+	var bearerHash string
+	if token != nil && token.AccessToken != "" {
+		bearerHash = gitserver.BearerTokenFingerprint(token.AccessToken)
 	}
 
-	// fetch fresh credentials from API using project endpoint
-	client := api.NewRepoClientWithEndpoint(projectEndpoint).WithAuthToken(token.AccessToken)
-	reposResp, err := client.GetRepos()
+	// Rotation and a server rejection bypass the timer, but concurrent fetches
+	// still share one in-flight operation.
+	s.mu.Lock()
+	if s.credentialRefreshInProgress || (!force && bearerHash == s.lastCredentialBearerHash &&
+		!s.lastCredentialRefresh.IsZero() && time.Since(s.lastCredentialRefresh) < 5*time.Minute) {
+		s.mu.Unlock()
+		return
+	}
+	s.credentialRefreshInProgress = true
+	s.lastCredentialRefresh = time.Now()
+	s.lastCredentialBearerHash = bearerHash
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.credentialRefreshInProgress = false
+		s.mu.Unlock()
+	}()
+
+	if bearerHash == "" {
+		return
+	}
+	creds, err := gitserver.LoadCredentialsForEndpoint(projectEndpoint)
 	if err != nil {
-		s.logger.Warn("failed to fetch repos for credential refresh", "error", err)
-		return
+		s.logger.Debug("failed to load credentials for refresh check", "error", err)
 	}
-	if reposResp == nil {
-		s.logger.Debug("no repos returned from API")
-		return
-	}
-
-	// build and save new credentials
-	newCreds := gitserver.GitCredentials{
-		Token:     reposResp.Token,
-		ServerURL: reposResp.ServerURL,
-		Username:  reposResp.Username,
-		ExpiresAt: reposResp.ExpiresAt,
-		Repos:     make(map[string]gitserver.RepoEntry),
-	}
-	for _, repo := range reposResp.Repos {
-		newCreds.AddRepo(gitserver.RepoEntry{
-			Name:   repo.Name,
-			Type:   repo.Type,
-			URL:    repo.URL,
-			TeamID: repo.StableID(),
-			Slug:   repo.Slug,
-		})
-	}
-
-	if err := gitserver.SaveCredentialsForEndpoint(projectEndpoint, newCreds); err != nil {
-		s.logger.Warn("failed to save refreshed credentials", "error", err)
+	if !force && creds != nil && creds.BearerTokenHash == bearerHash &&
+		!creds.ExpiresAt.IsZero() && time.Until(creds.ExpiresAt) > credentialRefreshThreshold {
 		return
 	}
 
-	s.logger.Info("git credentials refreshed successfully", "expires", newCreds.ExpiresAt)
+	// The scheduler refreshes within an hour of expiry; the shared cache
+	// helper also handles a changed bearer and explicit server rejections.
+	_, err = auth.RefreshGitCredentialsForEndpoint(projectEndpoint, true)
+	if err != nil {
+		s.logger.Warn("failed to refresh git credentials", "error", err)
+		if errors.Is(err, api.ErrUnauthorized) && s.issues != nil {
+			s.issues.SetIssue(DaemonIssue{
+				Type: IssueTypeAuthExpiring, Severity: SeverityError,
+				Summary: "Authentication rejected. " + auth.ReauthenticationRemedy(projectEndpoint),
+			})
+		}
+		return
+	}
+	if s.issues != nil {
+		s.issues.ClearIssue(IssueTypeAuthExpiring, "")
+	}
+	s.logger.Info("git credentials refreshed successfully", "endpoint", projectEndpoint)
+}
+
+// refreshAfterAuthFailure repairs a rejected PAT before the next sync attempt.
+func (s *SyncScheduler) refreshAfterAuthFailure(err error) {
+	if err == nil || !gitserver.IsAuthFailure(err.Error()) {
+		return
+	}
+	ep := endpoint.GetForProject(s.config.ProjectRoot)
+	creds, _ := gitserver.LoadCredentialsForEndpoint(ep)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if probe := gitserver.ValidatePATLiveness(ctx, creds); probe.Valid {
+		return // the credential helper already refreshed the rejected PAT
+	}
+	s.refreshCredentials(true)
 }
 
 // discoverTeams re-fetches the team list from the API independently of token refresh.
-// This ensures new teams are discovered promptly even when the credential token is still
-// fresh (far from expiry). Only updates the Repos map in credentials; token/expiry are
-// preserved from the existing credentials.
+// This ensures new teams are discovered promptly even when the credential token is
+// still fresh. The PAT and its bearer fingerprint are saved with the discovered repos.
 func (s *SyncScheduler) discoverTeams() {
 	s.mu.Lock()
 	if !s.lastTeamDiscovery.IsZero() && time.Since(s.lastTeamDiscovery) < teamDiscoveryInterval {
@@ -126,7 +125,7 @@ func (s *SyncScheduler) discoverTeams() {
 		return
 	}
 
-	// use the git PAT from credentials to call the repos API
+	// use the selected bearer to call the repos API
 	token, err := auth.GetTokenForEndpoint(projectEndpoint)
 	if err != nil {
 		s.logger.Debug("failed to get auth token for team discovery", "error", err)
@@ -137,41 +136,33 @@ func (s *SyncScheduler) discoverTeams() {
 	}
 
 	client := api.NewRepoClientWithEndpoint(projectEndpoint).WithAuthToken(token.AccessToken)
-	reposResp, err := client.GetRepos()
+	newCreds, err := client.GetGitCredentials()
 	if err != nil {
 		s.logger.Warn("failed to fetch repos for team discovery", "error", err)
-		return
-	}
-	if reposResp == nil {
-		return
-	}
-
-	// build new repos map from API response
-	newRepos := make(map[string]gitserver.RepoEntry)
-	for _, repo := range reposResp.Repos {
-		entry := gitserver.RepoEntry{
-			Name:   repo.Name,
-			Type:   repo.Type,
-			URL:    repo.URL,
-			TeamID: repo.StableID(),
-			Slug:   repo.Slug,
+		if errors.Is(err, api.ErrUnauthorized) && s.issues != nil {
+			s.issues.SetIssue(DaemonIssue{
+				Type: IssueTypeAuthExpiring, Severity: SeverityError,
+				Summary: "Authentication rejected. " + auth.ReauthenticationRemedy(projectEndpoint),
+			})
 		}
-		newRepos[entry.StableID()] = entry
-	}
-
-	// check if repos changed before writing
-	if reposEqual(creds.Repos, newRepos) {
 		return
 	}
-
-	// update only the repos map; preserve existing token, expiry, server URL
-	creds.Repos = newRepos
-	if err := gitserver.SaveCredentialsForEndpoint(projectEndpoint, *creds); err != nil {
+	if newCreds == nil {
+		return
+	}
+	if s.issues != nil {
+		s.issues.ClearIssue(IssueTypeAuthExpiring, "")
+	}
+	if creds.Token == newCreds.Token && creds.BearerTokenHash == newCreds.BearerTokenHash &&
+		creds.ExpiresAt.Equal(newCreds.ExpiresAt) && creds.ServerURL == newCreds.ServerURL &&
+		creds.Username == newCreds.Username && reposEqual(creds.Repos, newCreds.Repos) {
+		return
+	}
+	if err := gitserver.SaveCredentialsForEndpoint(projectEndpoint, *newCreds); err != nil {
 		s.logger.Warn("failed to save credentials after team discovery", "error", err)
 		return
 	}
-
-	s.logger.Info("team discovery found updated team list", "repo_count", len(newRepos))
+	s.logger.Info("team discovery found updated team list", "repo_count", len(newCreds.Repos))
 }
 
 // reposEqual checks if two repo maps have identical entries.

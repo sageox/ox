@@ -88,7 +88,16 @@ func runGitCredentialHelper(cmd *cobra.Command, args []string) error {
 			return helperReadGet(cmd.InOrStdin(), cmd.OutOrStdout(), ep, repoID, readURL)
 		}
 		return helperGet(cmd.InOrStdin(), cmd.OutOrStdout())
-	case "store", "erase":
+	case "erase":
+		if cmd.Flags().Changed("read-endpoint") || cmd.Flags().Changed("read-repo") || cmd.Flags().Changed("read-url") {
+			return drainStdin(cmd.InOrStdin())
+		}
+		req, err := parseGitCredentialRequest(cmd.InOrStdin())
+		if err == nil && req["protocol"] != "" && req["host"] != "" {
+			_, _ = auth.RefreshGitCredentialsForEndpoint(EndpointURLForHost(req["protocol"], req["host"]), true)
+		}
+		return nil
+	case "store":
 		// ox's credential store is driven by the ox CLI's login/logout flows,
 		// not by git's helper protocol. Silently drain stdin and exit 0 so
 		// git doesn't see a failure when chaining helpers.
@@ -156,7 +165,7 @@ func helperGet(stdin io.Reader, stdout io.Writer) error {
 	endpointHost := strings.TrimPrefix(host, "git.")
 	endpointURL := req["protocol"] + "://" + endpointHost
 
-	creds, err := gitserver.LoadCredentialsForEndpoint(endpointURL)
+	creds, err := auth.RefreshGitCredentialsForEndpoint(endpointURL, false)
 	if err != nil {
 		slog.Debug("git-credential-helper: load credentials failed",
 			"endpoint", endpointURL, "error", err)

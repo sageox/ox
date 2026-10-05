@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sageox/ox/internal/auth"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/logger"
 	"github.com/sageox/ox/internal/useragent"
 	"github.com/sageox/ox/internal/version"
@@ -15,6 +17,9 @@ import (
 
 // checkForUpdates checks GitHub for newer releases
 func checkForUpdates() checkResult {
+	if auth.EnvTokenIsTeamFamily(endpoint.GetForProject(findGitRoot())) {
+		return SkippedCheck("ox version", "team token", "")
+	}
 	latestVersion, err := getLatestGitHubRelease()
 	if err != nil {
 		// fail gracefully - network/API issues shouldn't break doctor

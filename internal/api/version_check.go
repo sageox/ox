@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -38,6 +39,13 @@ func CheckVersionResponse(resp *http.Response) bool {
 		minVersion := resp.Header.Get(HeaderMinVersion)
 		PrintUpgradeRequired(minVersion)
 		return true
+	}
+
+	// Team-token jobs do not have a coworker at the terminal to act on nags.
+	// Use the actual request bearer here: auth imports api, so api cannot call
+	// auth.EnvTokenIsTeamFamily without introducing a dependency cycle.
+	if resp.Request != nil && strings.HasPrefix(resp.Request.Header.Get("Authorization"), "Bearer oxt_") {
+		return false
 	}
 
 	// soft warning: deprecated but still functional

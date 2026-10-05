@@ -855,7 +855,7 @@ func checkGitRepoPaths(fix bool) checkResult {
 				}
 				// not authenticated - suggest login first
 				return WarningCheck("git repo paths", "no repos configured",
-					"Run `ox login` to authenticate, then `ox doctor --fix` to clone repos")
+					auth.ReauthenticationRemedy(endpoint.GetForProject(gitRoot))+" Then run `ox doctor --fix` to clone repos.")
 			}
 			// no .sageox - skip silently
 			return SkippedCheck("git repo paths", "no repos configured", "")

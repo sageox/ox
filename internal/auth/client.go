@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/api"
+	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/logger"
 	"github.com/sageox/ox/internal/resilience"
 	"github.com/sageox/ox/internal/useragent"
@@ -35,6 +37,44 @@ type AuthenticationError struct {
 
 func (e *AuthenticationError) Error() string {
 	return e.Message
+}
+
+// RefreshGitCredentialsForEndpoint refreshes expired, rotated, or rejected Git
+// credentials. A failed fetch preserves the cache but never returns a PAT fetched
+// by another bearer to the caller.
+func RefreshGitCredentialsForEndpoint(endpointURL string, force bool) (*gitserver.GitCredentials, error) {
+	token, err := GetTokenForEndpoint(endpointURL)
+	if err != nil {
+		return nil, err
+	}
+	creds, err := gitserver.LoadCredentialsForEndpoint(endpointURL)
+	if err != nil {
+		return nil, err
+	}
+	if token == nil || token.AccessToken == "" {
+		if force {
+			return nil, api.ErrUnauthorized
+		}
+		return creds, nil // allow existing offline checkouts without a disk login
+	}
+	if creds == nil || creds.BearerTokenHash != gitserver.BearerTokenFingerprint(token.AccessToken) {
+		force = true
+	}
+	if force || gitserver.CheckCredentialStatusForEndpoint(endpointURL).NeedsRefresh() {
+		token, err = EnsureValidTokenForEndpoint(endpointURL, 300)
+		if err != nil {
+			return nil, err
+		}
+		if token == nil || token.AccessToken == "" {
+			return nil, api.ErrUnauthorized
+		}
+	}
+	client := api.NewRepoClientWithEndpoint(endpointURL).WithAuthToken(token.AccessToken)
+	result := gitserver.RefreshCredentialsForEndpoint(endpointURL, client.GetGitCredentials, force)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	return gitserver.LoadCredentialsForEndpoint(endpointURL)
 }
 
 // APIError is raised when API returns an error response
@@ -74,7 +114,7 @@ func AuthenticatedRequest(ctx context.Context, method, url string, data interfac
 
 	if token == nil {
 		return nil, &AuthenticationError{
-			Message: "not logged in. Run 'ox login' first.",
+			Message: "not logged in. " + ReauthenticationRemedy(endpoint.Get()),
 		}
 	}
 
@@ -89,7 +129,7 @@ func AuthenticatedRequest(ctx context.Context, method, url string, data interfac
 		newToken, refreshErr := Handle401Error(token)
 		if refreshErr != nil {
 			return nil, &AuthenticationError{
-				Message: "session expired. Run 'ox login' to re-authenticate.",
+				Message: "session expired. " + ReauthenticationRemedy(endpoint.Get()),
 			}
 		}
 
@@ -233,7 +273,7 @@ func (c *AuthClient) AuthenticatedRequest(ctx context.Context, method, url strin
 
 	if token == nil {
 		return nil, &AuthenticationError{
-			Message: "not logged in. Run 'ox login' first.",
+			Message: "not logged in. " + ReauthenticationRemedy(c.endpoint),
 		}
 	}
 
@@ -248,7 +288,7 @@ func (c *AuthClient) AuthenticatedRequest(ctx context.Context, method, url strin
 		newToken, refreshErr := c.Handle401Error(token)
 		if refreshErr != nil {
 			return nil, &AuthenticationError{
-				Message: "session expired. Run 'ox login' to re-authenticate.",
+				Message: "session expired. " + ReauthenticationRemedy(c.endpoint),
 			}
 		}
 

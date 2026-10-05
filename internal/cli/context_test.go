@@ -282,9 +282,22 @@ func TestOtlpTokenFunc_GatesNetworkExportButNotLocalTracing(t *testing.T) {
 	_, span2 := observability.StartCommand(context.Background(), "ox test-cmd-disabled")
 	span2.End()
 	observability.Shutdown(context.Background())
+	mu.Lock()
+	assert.Equal(t, requestsAfterEnabled, requests, "telemetry off must add zero requests to the OTLP listener")
+	mu.Unlock()
+	assert.Equal(t, int64(2), localSpans.Load(), "local tracing must work with telemetry off")
+
+	// Team-token exports are also dropped with telemetry enabled. Keep the
+	// same provider/local processor path, so local performance traces survive.
+	t.Setenv("SAGEOX_ENDPOINT", srv.URL)
+	t.Setenv(auth.EnvVarToken, "oxt_test_1ljPfr")
+	require.NoError(t, observability.Init(context.Background(), "ox-cli-test", srv.URL, otlpTokenFunc(true, srv.URL, auth.ExportBearerForEndpoint)))
+	_, span3 := observability.StartCommand(context.Background(), "ox test-cmd-team-token")
+	span3.End()
+	observability.Shutdown(context.Background())
 
 	mu.Lock()
 	defer mu.Unlock()
-	assert.Equal(t, requestsAfterEnabled, requests, "telemetry off must add zero new requests to the OTLP listener")
-	assert.Equal(t, int64(2), localSpans.Load(), "local span processor must still see the span when telemetry is off")
+	assert.Equal(t, requestsAfterEnabled, requests, "team tokens must add zero requests to the OTLP listener")
+	assert.Equal(t, int64(3), localSpans.Load(), "local span processor must still see spans with telemetry off or a team token")
 }

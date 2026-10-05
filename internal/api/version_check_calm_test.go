@@ -143,6 +143,23 @@ func TestDeprecationWarning_SilentInMachineOutputMode(t *testing.T) {
 	assert.Empty(t, buf.String())
 }
 
+// Failure prevented: an API deprecation header emits a nag to a team-token
+// job, while a real 426 failure must still explain why the job cannot proceed.
+func TestVersionWarnings_TeamTokenSuppressesNagsButKeepsBlockingErrors(t *testing.T) {
+	calmTestEnv(t)
+	buf := newProcess(t)
+	resp := deprecatedResponse()
+	resp.Request = &http.Request{Header: make(http.Header)}
+	resp.Request.Header.Set("Authorization", "Bearer oxt_test_1ljPfr")
+	assert.False(t, CheckVersionResponse(resp))
+	assert.Empty(t, buf.String())
+	assert.Nil(t, updatenotice.Read(), "suppression must not consume the notification budget")
+
+	resp.StatusCode = http.StatusUpgradeRequired
+	assert.True(t, CheckVersionResponse(resp))
+	assert.Contains(t, buf.String(), "CLI Version No Longer Supported")
+}
+
 // The 426 hard-block path is server-driven and unconditional — it is a failure,
 // not a nag, so the calm ledger must not gate it. (The server never sends 426
 // today; this pins the behavior so a future ledger change cannot mute it.)

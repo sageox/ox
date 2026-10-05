@@ -269,7 +269,7 @@ read summary.has_failed for the result and the process exit code for scripting.`
 				if !authenticated {
 					checks = append(checks, JSONCheckResult{
 						Name: "authentication", Status: "failed",
-						Message: fmt.Sprintf("not logged in — run 'ox login' to authenticate with %s", endpointSlug),
+						Message: fmt.Sprintf("not authenticated to %s — %s", endpointSlug, auth.ReauthenticationRemedy(projectEndpoint)),
 					})
 				}
 				if !projectInitialized {
@@ -294,9 +294,9 @@ read summary.has_failed for the result and the process exit code for scripting.`
 
 			if !authenticated {
 				steps = append(steps,
-					fmt.Sprintf("%s  Step 1: Run %s",
+					fmt.Sprintf("%s  Step 1: %s",
 						ui.AccentStyle.Render(ui.TimelineDot),
-						cli.StyleCommand.Render("ox login")),
+						cli.StyleCommand.Render(auth.ReauthenticationRemedy(projectEndpoint))),
 					fmt.Sprintf("%s  Authenticate with %s",
 						ui.MutedStyle.Render(ui.TimelineBar), endpointSlug),
 				)
@@ -1274,7 +1274,7 @@ func runDoctorChecksWithState(parent context.Context, opts doctorOptions, state 
 			name: "SageOx Service",
 			checks: []checkResult{
 				SkippedCheck("service checks", "NOT LOGGED IN",
-					"Run `ox login` to enable SageOx API, team registration, and cloud diagnostics"),
+					auth.ReauthenticationRemedy(endpoint.GetForProject(findGitRoot()))+" Authentication enables SageOx API, team registration, and cloud diagnostics."),
 			},
 		})
 	}

@@ -296,6 +296,9 @@ func (c *RepoClient) GetRepos() (*ReposResponse, error) {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		errMsg := strings.TrimSpace(string(bodyBytes))
 		if resp.StatusCode == http.StatusUnauthorized {
+			if strings.HasPrefix(c.authToken, "oxt_") {
+				return nil, &teamTokenUnauthorizedError{}
+			}
 			return nil, ErrUnauthorized
 		}
 		if errMsg == "" {
@@ -314,6 +317,32 @@ func (c *RepoClient) GetRepos() (*ReposResponse, error) {
 	}
 
 	return &reposResp, nil
+}
+
+// GetGitCredentials binds the Git PAT returned by discovery to this client's bearer.
+func (c *RepoClient) GetGitCredentials() (*gitserver.GitCredentials, error) {
+	resp, err := c.GetRepos()
+	if err != nil || resp == nil {
+		return nil, err
+	}
+	creds := &gitserver.GitCredentials{
+		BearerTokenHash: gitserver.BearerTokenFingerprint(c.authToken),
+		Token:           resp.Token,
+		ServerURL:       resp.ServerURL,
+		Username:        resp.Username,
+		ExpiresAt:       resp.ExpiresAt,
+		Repos:           make(map[string]gitserver.RepoEntry),
+	}
+	for _, repo := range resp.Repos {
+		creds.AddRepo(gitserver.RepoEntry{
+			Name:   repo.Name,
+			Type:   repo.Type,
+			URL:    repo.URL,
+			TeamID: repo.StableID(),
+			Slug:   repo.Slug,
+		})
+	}
+	return creds, nil
 }
 
 // GetTeamInfo calls GET /api/v1/teams/{id} to fetch team information

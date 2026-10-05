@@ -15,16 +15,19 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/errkind"
+	"github.com/sageox/ox/internal/gitserver"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestNewClient(t *testing.T) {
-	c := NewClient("https://git.sageox.io/sageox/ledger.git", "oauth2", "test-token")
+	c := NewClient("https://git.sageox.io/sageox/ledger.git", "", "test-token")
 	assert.Equal(t, "https://git.sageox.io/sageox/ledger.git/info/lfs/objects/batch", c.batchURL)
-	assert.Contains(t, c.authHeader, "Basic ")
+	assert.Equal(t, "Basic b2F1dGgyOnRlc3QtdG9rZW4=", c.authHeader)
 	assert.Equal(t, 2*time.Minute, c.httpClient.Timeout, "batch API timeout should be 2 minutes")
 }
 
@@ -663,5 +666,70 @@ func TestBatch_HTTPFailureKind(t *testing.T) {
 		assert.Equal(t, tt.kind, errkind.Of(err), "HTTP %d", tt.status)
 		assert.Equal(t, fmt.Sprintf("LFS batch API HTTP %d", tt.status), errkind.DetailOf(err))
 		assert.Contains(t, err.Error(), "refused for user@example.com", "the message a person sees is unchanged")
+	}
+}
+
+// A revoked PAT triggers one forced refresh; a revoked bearer returns the operator's remedy.
+func TestLFSRefreshesRejectedCredentials(t *testing.T) {
+	for _, rejectedBearer := range []bool{false, true} {
+		t.Run(fmt.Sprintf("bearer_rejected=%v", rejectedBearer), func(t *testing.T) {
+			prevDir := gitserver.TestSetConfigDirOverride(t.TempDir())
+			prevFile := gitserver.TestSetForceFileStorage(true)
+			t.Cleanup(func() {
+				gitserver.TestSetConfigDirOverride(prevDir)
+				gitserver.TestSetForceFileStorage(prevFile)
+			})
+			var refreshCalls, batchCalls atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/api/v1/cli/repos" {
+					refreshCalls.Add(1)
+					assert.Equal(t, "Bearer oxt_test_1ljPfr", r.Header.Get("Authorization"))
+					if rejectedBearer {
+						w.WriteHeader(http.StatusUnauthorized)
+						return
+					}
+					json.NewEncoder(w).Encode(api.ReposResponse{Token: "fresh-pat", ExpiresAt: time.Now().Add(24 * time.Hour)})
+					return
+				}
+				batchCalls.Add(1)
+				username, token, _ := r.BasicAuth()
+				assert.Equal(t, "oauth2", username)
+				if token == "old-pat" {
+					w.WriteHeader(http.StatusUnauthorized)
+					return
+				}
+				assert.Equal(t, "fresh-pat", token)
+				var request batchRequest
+				require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+				assert.Equal(t, "upload", request.Operation, "retry retains the request body")
+				assert.Equal(t, []BatchObject{{OID: "abc", Size: 3}}, request.Objects)
+				io.WriteString(w, `{"objects":[]}`)
+			}))
+			defer srv.Close()
+			t.Setenv(endpoint.EnvVar, srv.URL)
+			t.Setenv(auth.EnvVarToken, "oxt_test_1ljPfr")
+			require.NoError(t, gitserver.SaveCredentialsForEndpoint(srv.URL, gitserver.GitCredentials{
+				Token: "old-pat", ExpiresAt: time.Now().Add(24 * time.Hour),
+				BearerTokenHash: gitserver.BearerTokenFingerprint("oxt_test_1ljPfr"),
+			}))
+			client, err := NewClientForEndpoint(srv.URL+"/ledger.git", srv.URL)
+			require.NoError(t, err)
+			_, err = client.BatchUpload([]BatchObject{{OID: "abc", Size: 3}})
+			assert.EqualValues(t, 1, refreshCalls.Load())
+			if rejectedBearer {
+				require.ErrorIs(t, err, api.ErrUnauthorized)
+				assert.Contains(t, err.Error(), "rotate or re-mint")
+				assert.NotContains(t, err.Error(), "ox login")
+				assert.EqualValues(t, 1, batchCalls.Load())
+			} else {
+				require.NoError(t, err)
+				assert.EqualValues(t, 2, batchCalls.Load())
+				// A reused client must also handle logout without dereferencing a missing cache.
+				t.Setenv(auth.EnvVarToken, "")
+				require.NoError(t, gitserver.RemoveCredentialsForEndpoint(srv.URL))
+				_, err = client.BatchUpload(nil)
+				require.ErrorContains(t, err, "no git credentials found")
+			}
+		})
 	}
 }

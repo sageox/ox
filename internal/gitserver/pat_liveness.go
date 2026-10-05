@@ -82,24 +82,7 @@ func ValidatePATLiveness(ctx context.Context, creds *GitCredentials) PATLiveness
 	sanitized := gitutil.SanitizeOutput(strings.TrimSpace(string(output)))
 
 	if err != nil {
-		sanitizedLower := strings.ToLower(sanitized)
-		// 401/403 alone are too weak a signal — a repo path, ref name, or DNS/TLS
-		// error message can contain "401" without being an auth failure. Prefer the
-		// unambiguous git/curl phrasing; fall back to a status code only when it
-		// co-occurs with an auth-specific denial word. A bare "error" is NOT enough:
-		// a non-auth failure can carry both "error" and a stray "401".
-		httpStatusReject := strings.Contains(sanitizedLower, "returned error: 401") ||
-			strings.Contains(sanitizedLower, "returned error: 403")
-		httpAuthReject := httpStatusReject ||
-			((strings.Contains(sanitizedLower, "401") || strings.Contains(sanitizedLower, "403")) &&
-				(strings.Contains(sanitizedLower, "unauthorized") ||
-					strings.Contains(sanitizedLower, "forbidden") ||
-					strings.Contains(sanitizedLower, "denied")))
-		// these phrases are unambiguous auth failures on their own
-		if httpAuthReject ||
-			strings.Contains(sanitizedLower, "authentication failed") ||
-			strings.Contains(sanitizedLower, "could not read username") ||
-			strings.Contains(sanitizedLower, "invalid username or password") {
+		if IsAuthFailure(sanitized) {
 			slog.Debug("PAT liveness: rejected", "output", sanitized)
 			return PATLivenessResult{Valid: false, Reason: "PAT rejected by server (revoked or invalid)"}
 		}
@@ -230,4 +213,26 @@ func writeAskpassScript(token string) (string, error) {
 		return "", err
 	}
 	return f.Name(), nil
+}
+
+// IsAuthFailure recognizes Git authentication denials without mistaking paths or network errors for 401s.
+func IsAuthFailure(output string) bool {
+	sanitizedLower := strings.ToLower(output)
+	// 401/403 alone are too weak a signal — a repo path, ref name, or DNS/TLS
+	// error message can contain "401" without being an auth failure. Prefer the
+	// unambiguous git/curl phrasing; fall back to a status code only when it
+	// co-occurs with an auth-specific denial word. A bare "error" is NOT enough:
+	// a non-auth failure can carry both "error" and a stray "401".
+	httpStatusReject := strings.Contains(sanitizedLower, "returned error: 401") ||
+		strings.Contains(sanitizedLower, "returned error: 403")
+	httpAuthReject := httpStatusReject ||
+		((strings.Contains(sanitizedLower, "401") || strings.Contains(sanitizedLower, "403")) &&
+			(strings.Contains(sanitizedLower, "unauthorized") ||
+				strings.Contains(sanitizedLower, "forbidden") ||
+				strings.Contains(sanitizedLower, "denied")))
+	// these phrases are unambiguous auth failures on their own
+	return httpAuthReject ||
+		strings.Contains(sanitizedLower, "authentication failed") ||
+		strings.Contains(sanitizedLower, "could not read username") ||
+		strings.Contains(sanitizedLower, "invalid username or password")
 }

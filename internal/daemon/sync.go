@@ -36,8 +36,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon/hooks"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/flags"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/gitutil"
@@ -125,9 +127,11 @@ type SyncScheduler struct {
 
 	// per-operation flags to reduce lock contention
 	// each operation only blocks itself, not unrelated operations
-	pullInProgress        bool
-	lastCredentialRefresh time.Time // dedup concurrent credential refresh calls
-	lastTeamDiscovery     time.Time // dedup concurrent team discovery calls
+	pullInProgress              bool
+	lastCredentialRefresh       time.Time // dedup concurrent credential refresh calls
+	lastCredentialBearerHash    string
+	credentialRefreshInProgress bool
+	lastTeamDiscovery           time.Time // dedup concurrent team discovery calls
 
 	// lastWedgeCheck tracks when checkAndRunGC last attempted a ledger
 	// wedge check (the live-fetch-confirming call to ledgerSyncWedged) —
@@ -1094,6 +1098,9 @@ func (s *SyncScheduler) checkCodeDBFreshness(ctx context.Context) {
 // Called periodically by the sync scheduler to keep the version cache warm.
 // If a newer version is detected, injects a broadcast whisper so all active agents are notified.
 func (s *SyncScheduler) checkLatestVersion(ctx context.Context) {
+	if auth.EnvTokenIsTeamFamily(endpoint.GetForProject(s.config.ProjectRoot)) {
+		return
+	}
 	if err := s.versionCache.CheckAndUpdate(ctx); err != nil {
 		s.logger.Warn("version check failed", "error", err)
 		return
@@ -1439,6 +1446,7 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 
 	// handle errors
 	if result.Err != nil {
+		s.refreshAfterAuthFailure(result.Err)
 		s.recordError("ledger", result.Err.Error())
 		s.metrics.RecordPullFailure()
 		s.workspaceRegistry.RecordSyncFailure("ledger")
