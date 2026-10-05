@@ -46,6 +46,11 @@ func checkSessionHealth(opts doctorOptions) []checkResult {
 		results = append(results, dehydratedResult)
 	}
 
+	// sessions kept on this machine, or waiting in the cache (GH #1095, #1077)
+	if heldResult, show := checkHeldSessions(gitRoot, getLedgerPath()); show {
+		results = append(results, heldResult)
+	}
+
 	// create session checks from internal/doctor package
 	checks := []doctor.Check{
 		doctor.NewSessionModeCheck(gitRoot),   // show effective mode and source

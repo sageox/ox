@@ -1,13 +1,17 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
+	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
 )
 
@@ -87,4 +91,90 @@ func sessionHeldByName(sessionPath string) bool {
 		return false
 	}
 	return session.IsHeldInLedger(ledgerPath, filepath.Base(sessionPath))
+}
+
+// unpublishedCacheSessions are cache sessions not yet in the Ledger, by name:
+// Held ones the coworker keeps on this machine (GH #1095), and Waiting ones
+// the daemon reclaims once their AI coworker exits (GH #1077).
+type unpublishedCacheSessions struct {
+	Held    []string
+	Waiting []string
+}
+
+// listUnpublishedCacheSessions scans every cache location for the Ledger at
+// ledgerPath. A name appears once, and a hold on any copy wins. Live
+// recordings and sessions with no conversation are left out.
+func listUnpublishedCacheSessions(ledgerPath string) unpublishedCacheSessions {
+	var out unpublishedCacheSessions
+	if ledgerPath == "" {
+		return out
+	}
+	seen := map[string]bool{}
+	for _, dir := range session.HeldSessionDirs(ledgerPath) {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			name := e.Name()
+			if !e.IsDir() || seen[name] {
+				continue
+			}
+			sessionDir := filepath.Join(dir, name)
+			if session.IsHeldInLedger(ledgerPath, name) {
+				seen[name] = true
+				out.Held = append(out.Held, name)
+				continue
+			}
+			if _, err := os.Stat(filepath.Join(sessionDir, ".recording.json")); err == nil {
+				continue // a recording: other checks own it
+			}
+			if session.ClassifyRawFile(filepath.Join(sessionDir, ledgerFileRaw)) != session.RawSubstantive {
+				continue
+			}
+			meta, err := lfs.ReadSessionMeta(filepath.Join(ledgerPath, "sessions", name))
+			if errors.Is(err, os.ErrNotExist) || (err == nil && meta.IsDraft()) {
+				seen[name] = true
+				out.Waiting = append(out.Waiting, name)
+			}
+		}
+	}
+	slices.Sort(out.Held)
+	slices.Sort(out.Waiting)
+	return out
+}
+
+// checkHeldSessions is the doctor's view of unpublished cache sessions. It is
+// information only and never publishes. In manual mode a cache-only session
+// with no hold (stopped before holds existed) is held first: the coworker's
+// standing choice is to publish explicitly.
+func checkHeldSessions(projectRoot, ledgerPath string) (checkResult, bool) {
+	sessions := listUnpublishedCacheSessions(ledgerPath)
+	if config.GetSessionPublishing(projectRoot) == config.SessionPublishingManual && len(sessions.Waiting) > 0 {
+		for _, name := range sessions.Waiting {
+			for _, dir := range session.HeldSessionDirs(ledgerPath) {
+				if _, err := os.Stat(filepath.Join(dir, name, ledgerFileRaw)); err == nil {
+					_ = session.WriteHoldMarker(filepath.Join(dir, name), session.HoldManualPublishing, "doctor")
+				}
+			}
+		}
+		sessions = listUnpublishedCacheSessions(ledgerPath)
+	}
+	if len(sessions.Held) == 0 && len(sessions.Waiting) == 0 {
+		return checkResult{}, false
+	}
+	result := checkResult{
+		name:     "held sessions",
+		passed:   true,
+		priority: "info",
+		message:  fmt.Sprintf("%d held on this machine, %d waiting for recovery", len(sessions.Held), len(sessions.Waiting)),
+		detail:   "publish one with 'ox session upload <name>'",
+	}
+	for _, name := range sessions.Held {
+		result.children = append(result.children, checkResult{name: name, passed: true, priority: "info", message: "held (session_publishing: manual)"})
+	}
+	for _, name := range sessions.Waiting {
+		result.children = append(result.children, checkResult{name: name, passed: true, priority: "info", message: "cache only; recovered when its AI coworker exits"})
+	}
+	return result, true
 }

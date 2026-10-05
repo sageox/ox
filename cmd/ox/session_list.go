@@ -423,6 +423,11 @@ func printSessionRow(t session.SessionInfo, uploaded bool, localUser string) {
 	case session.StatusCanceled:
 		statusStr = "✗ canceled"
 		statusStyle = "ghost" // dim — discarded
+	case session.StatusHeld:
+		// Kept on this machine by choice (session_publishing: manual), not
+		// stranded: distinct from "local only", which reads as a failure.
+		statusStr = "◆ held · local"
+		statusStyle = "local"
 	default:
 		statusStr = "✗ local only"
 		statusStyle = "local"
