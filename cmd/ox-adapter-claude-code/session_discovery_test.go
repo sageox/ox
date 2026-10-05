@@ -157,13 +157,20 @@ func TestReadFromOffset_PartialLineIsRetried(t *testing.T) {
 func TestFindSessionFile_ExactIDDoesNotFallBackToNewest(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	repo := "/tmp/test-repo"
+	repo := existingClaudeTestRepo(t)
 	ownDir := filepath.Join(home, ".claude", "projects", claudeProjectHash(repo))
 	if err := os.MkdirAll(ownDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(ownDir, "other.jsonl"), []byte(`{"type":"user"}`+"\n"), 0o600); err != nil {
+	// An owned, valid session with a different ID. Ownership validation would
+	// accept it, so only the exact-ID rule can refuse it: a lookup that fell back
+	// to the newest file would return it.
+	other := fmt.Sprintf("{\"type\":\"user\",\"sessionId\":\"other\",\"cwd\":%q,\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n", repo)
+	if err := os.WriteFile(filepath.Join(ownDir, "other.jsonl"), []byte(other), 0o600); err != nil {
 		t.Fatal(err)
+	}
+	if got, _, err := findSessionFile(repo, "", "", ""); err != nil || filepath.Base(got) != "other.jsonl" {
+		t.Fatalf("precondition: the unscoped lookup must accept the fixture, got %q, error %v", got, err)
 	}
 	if got, _, err := findSessionFile(repo, "", "", "missing"); err == nil {
 		t.Fatalf("different session returned %q", got)
