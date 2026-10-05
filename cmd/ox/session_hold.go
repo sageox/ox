@@ -74,3 +74,17 @@ func finalizeOrHoldOnHookStop(ctx *HookContext, state *session.RecordingState, p
 var sendHookFinalizeIPC = func(payload daemon.SessionFinalizeIPCPayload) error {
 	return daemon.NewClientForCurrentRepoWithTimeout(100 * time.Millisecond).SessionFinalize(payload)
 }
+
+// sessionHeldByName reports whether the session at sessionPath is held, in
+// that folder or in any cache copy of it for this project's Ledger. Callers
+// often hold the Ledger copy, which never carries the marker.
+func sessionHeldByName(sessionPath string) bool {
+	if session.IsHeld(sessionPath) {
+		return true
+	}
+	ledgerPath, err := resolveLedgerPath()
+	if err != nil || ledgerPath == "" {
+		return false
+	}
+	return session.IsHeldInLedger(ledgerPath, filepath.Base(sessionPath))
+}

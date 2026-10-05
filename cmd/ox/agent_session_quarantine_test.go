@@ -719,3 +719,32 @@ func TestFindOrphanedSessions_HoldsManualRecording(t *testing.T) {
 		})
 	}
 }
+
+// Failure prevented: regenerate, migrate-lfs, recover, or push-summary
+// publishes a held session; the explicit 'ox session upload' must still be
+// able to (GH #1093).
+func TestPublishPaths_RefuseAHeldSession(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "2026-01-15T10-30-ryan-OxHeLd")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	writeTestRawJSONL(t, filepath.Join(dir, ledgerFileRaw))
+	require.NoError(t, session.WriteHoldMarker(dir, session.HoldManualPublishing, "test"))
+
+	refs, err := uploadSessionLFS(t.TempDir(), dir)
+	require.Error(t, err)
+	assert.Nil(t, refs)
+	assert.Contains(t, err.Error(), "held on this machine")
+	assert.Contains(t, err.Error(), "ox session upload 2026-01-15T10-30-ryan-OxHeLd")
+
+	_, err = publishSessionLFS(t.TempDir(), dir)
+	if err != nil {
+		assert.NotContains(t, err.Error(), "held on this machine", "the explicit publish is how a hold is released")
+	}
+
+	summary := filepath.Join(t.TempDir(), "summary.json")
+	require.NoError(t, os.WriteFile(summary, []byte(`{"title":"t","summary":"s","quality_score":0.9}`), 0o644))
+	out := pushSummaryToLedger(summary, dir)
+	assert.False(t, out.Success)
+	assert.Contains(t, out.Error, "held on this machine")
+	assert.NoFileExists(t, filepath.Join(dir, "summary.json"), "nothing is written into a held session")
+	assert.DirExists(t, dir, "and nothing is removed")
+}

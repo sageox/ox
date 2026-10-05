@@ -184,8 +184,9 @@ func runAgentSessionAbortByName(inst *agentinstance.Instance, cmd *cobra.Command
 			return err
 		}
 		return killFinalizedSession(inst, cmd, projectRoot, sessionName)
-	case session.StatusPaused:
-		// paused = stopped but not uploaded; safe to discard locally
+	case session.StatusPaused, session.StatusHeld:
+		// stopped but not uploaded (held: kept on this machine by choice);
+		// discarding by name is the coworker's explicit call
 	case session.StatusCanceled:
 		// already canceled — just clean up if folder somehow remains
 	default:
@@ -256,6 +257,7 @@ func buildSessionInfo(sessionName, sessionPath string) session.SessionInfo {
 
 	// check for raw.jsonl data
 	info.HasRawData = session.RawJSONLHasData(sessionPath)
+	info.Held = session.IsHeld(sessionPath)
 
 	return info
 }
