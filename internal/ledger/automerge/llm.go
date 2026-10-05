@@ -232,6 +232,9 @@ func validateStructured(path, merged string) error {
 		if !json.Valid([]byte(merged)) {
 			return errors.New("invalid JSON")
 		}
+		// json.Valid accepts duplicate keys, and a decoder keeps only the
+		// last one, so a union holding both sides' value would drop one.
+		return rejectDuplicateJSONKeys(merged)
 	case ".toml":
 		return toml.Unmarshal([]byte(merged), &v)
 	case ".yaml", ".yml":
@@ -254,6 +257,54 @@ func validateStructured(path, merged string) error {
 func normalizeMergeLine(line string) string {
 	line = strings.TrimSpace(line)
 	return strings.TrimSpace(strings.TrimSuffix(line, ","))
+}
+
+// rejectDuplicateJSONKeys walks data token by token and errors on the first
+// object that defines a key twice. data must already be valid JSON.
+func rejectDuplicateJSONKeys(data string) error {
+	// keys is nil for an array; inValue means the object's next token is the
+	// value for a key just read, not another key.
+	type frame struct {
+		keys    map[string]bool
+		inValue bool
+	}
+	var stack []*frame
+	dec := json.NewDecoder(strings.NewReader(data))
+	for {
+		tok, err := dec.Token()
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		var top *frame
+		if len(stack) > 0 {
+			top = stack[len(stack)-1]
+		}
+		if d, ok := tok.(json.Delim); ok && (d == '}' || d == ']') {
+			stack = stack[:len(stack)-1]
+			continue
+		}
+		if top != nil && top.keys != nil && !top.inValue {
+			key := tok.(string) // an object key is always a string token
+			if top.keys[key] {
+				return fmt.Errorf("duplicate JSON key %q", key)
+			}
+			top.keys[key] = true
+			top.inValue = true
+			continue
+		}
+		if top != nil {
+			top.inValue = false
+		}
+		switch tok {
+		case json.Delim('{'):
+			stack = append(stack, &frame{keys: map[string]bool{}})
+		case json.Delim('['):
+			stack = append(stack, &frame{})
+		}
+	}
 }
 
 // buildPrompt assembles the per-file prompt. Both 'ours' and 'theirs' are

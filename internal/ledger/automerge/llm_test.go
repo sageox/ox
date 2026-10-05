@@ -282,6 +282,27 @@ func TestMergeOneWithLLM_ContentPreservation(t *testing.T) {
 			"",
 		},
 		{
+			"json union keeping both values of one key is refused",
+			"state.json",
+			"{\n<<<<<<< HEAD\n  \"version\": 2\n=======\n  \"version\": 3\n>>>>>>> br\n}\n",
+			"{\n  \"version\": 2,\n  \"version\": 3\n}\n",
+			"not valid",
+		},
+		{
+			"json duplicate key in a nested object is refused",
+			"state.json",
+			"{\"a\": {\n<<<<<<< HEAD\n\"k\": [1, {\"x\": 1}]\n=======\n\"k\": 2\n>>>>>>> br\n}}\n",
+			"{\"a\": {\n\"k\": [1, {\"x\": 1}],\n\"k\": 2\n}}\n",
+			"not valid",
+		},
+		{
+			"same key in sibling objects passes",
+			"state.json",
+			"[\n<<<<<<< HEAD\n{\"id\": 1, \"tags\": [\"a\"]}\n=======\n{\"id\": 2, \"tags\": [\"b\"]}\n>>>>>>> br\n]\n",
+			"[\n{\"id\": 1, \"tags\": [\"a\"]},\n{\"id\": 2, \"tags\": [\"b\"]}\n]\n",
+			"",
+		},
+		{
 			"json union missing its comma is refused",
 			"state.json",
 			"{\n<<<<<<< HEAD\n  \"a\": 1\n=======\n  \"b\": 2\n>>>>>>> br\n}\n",
