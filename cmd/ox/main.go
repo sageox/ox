@@ -230,11 +230,18 @@ func executeWithFrictionRecovery(args []string, attempt int) int {
 	if unknownCommand {
 		err = fmt.Errorf("%w\n\nRun '%s --help' for usage", err, cmd.CommandPath())
 	}
-	if err != nil && !preRunReached && !headlessLedgerReadRequested(args) {
-		// Cobra rejected the invocation before ox built its context. Give
-		// usage telemetry one, so the mistake is counted like any failure.
-		err = errkind.WithDetail(errkind.Usage, cobraRejection(err), err)
-		cliCtx = &cli.Context{Cmd: cmd, CommandStartTime: start, Ctx: context.Background()}
+	if err != nil && !headlessLedgerReadRequested(args) {
+		switch {
+		case !preRunReached:
+			// Cobra rejected the invocation before ox built its context. Give
+			// usage telemetry one, so the mistake is counted like any failure.
+			err = errkind.WithDetail(errkind.Usage, cobraRejection(err), err)
+			cliCtx = &cli.Context{Cmd: cmd, CommandStartTime: start, Ctx: context.Background()}
+		case cobraFlagValidation(err):
+			// Required flags and flag groups are checked after
+			// PersistentPreRunE, so the context exists; only the kind is missing.
+			err = errkind.WithDetail(errkind.Usage, cobraRejection(err), err)
+		}
 	}
 	if cliCtx != nil {
 		cliCtx.Err = err

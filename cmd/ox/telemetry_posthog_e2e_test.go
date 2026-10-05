@@ -176,6 +176,10 @@ func TestPostHog_InvocationMistakesAndWhoMadeThem(t *testing.T) {
 		{[]string{"status", "--no-such-flag"}, "status", "unknown flag"},
 		{[]string{"status", "--config"}, "status", "flag needs an argument"},
 		{[]string{"no-such-command"}, "ox", "unknown command"},
+		// Cobra checks required flags and flag groups after PersistentPreRunE,
+		// once ox has built its context.
+		{[]string{"session", "push-summary"}, "session push-summary", "required flag missing"},
+		{[]string{"session", "redact", "--all", "--session", "x"}, "session redact", "conflicting flags"},
 	}
 	for _, m := range mistakes {
 		output, code, _ := testguard.RunOx(t, e.bin, e.workDir, e.env, m.args...)

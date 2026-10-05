@@ -236,6 +236,16 @@ var cobraRejections = []struct{ prefix, detail string }{
 	{"at least one of the flags in the group ", "conflicting flags"},
 }
 
+// cobraFlagValidation reports the rejections cobra makes after
+// PersistentPreRunE: a required flag missing or a flag group violated.
+func cobraFlagValidation(err error) bool {
+	switch cobraRejection(err) {
+	case "required flag missing", "conflicting flags":
+		return true
+	}
+	return false
+}
+
 // cobraRejection names which way cobra rejected an invocation.
 func cobraRejection(err error) string {
 	msg := err.Error()

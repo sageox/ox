@@ -556,5 +556,9 @@ func TestCobraRejection_NamesTheMistakeNotWhatWasTyped(t *testing.T) {
 		got := cobraRejection(errors.New(tt.msg))
 		assert.Equal(t, tt.want, got, tt.msg)
 		assert.NotContains(t, got, "sk-secret")
+		// Only the checks cobra makes after PersistentPreRunE are reclassified
+		// once ox has its context; a command's own error never is.
+		postPreRun := tt.want == "required flag missing" || tt.want == "conflicting flags"
+		assert.Equal(t, postPreRun, cobraFlagValidation(errors.New(tt.msg)), tt.msg)
 	}
 }
