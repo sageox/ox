@@ -96,7 +96,9 @@ func validate(path, repoRoot, sessionID string, offset int64, requireInitialIden
 	// stood, like a deleted cwd: its absence is not a reason to stop checking.
 	repoRoot, err := resolveVanished(filepath.Clean(repoRoot), false)
 	if err != nil {
-		return fmt.Errorf("%w: resolve Claude source repository root: %v", ErrUncheckable, err)
+		// the cause is quoted as text on purpose: wrapping it would carry
+		// fs.ErrNotExist (or a permission error) up as if the native file were gone
+		return fmt.Errorf("%w: resolve Claude source repository root: %s", ErrUncheckable, err.Error())
 	}
 	fileID := strings.TrimSuffix(filepath.Base(path), ".jsonl")
 	if sessionID != "" && fileID != sessionID {
@@ -204,7 +206,7 @@ func judgeCwd(repoRoot, cwd string) (cwdVerdict, error) {
 		return cwdForeign, nil
 	}
 	if err != nil {
-		return cwdUnknown, fmt.Errorf("%w: cannot verify Claude source cwd: %v", ErrUncheckable, err)
+		return cwdUnknown, fmt.Errorf("%w: cannot verify Claude source cwd: %s", ErrUncheckable, err.Error())
 	}
 	if withinRepo(repoRoot, resolved) {
 		return cwdOwned, nil
