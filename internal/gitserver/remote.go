@@ -11,9 +11,11 @@ import (
 // current credential store. Per ox-eeqi, this no longer embeds the PAT into
 // the origin URL. Instead it:
 //   - strips any leftover embedded oauth2:TOKEN from origin (one-time
-//     migration for ledgers cloned by pre-eeqi ox versions), and
+//     migration for ledgers cloned by pre-eeqi ox versions),
 //   - installs/refreshes the ox credential helper in .git/config so future
-//     fetch/push operations resolve auth via the helper.
+//     fetch/push operations resolve auth via the helper, and
+//   - makes a team token's AI coworker the author of the repo's commits
+//     (stampCoworkerAuthor).
 //
 // The endpointURL parameter is retained for API compatibility with existing
 // callers (login.go, session_upload.go, import.go) but is now used only to

@@ -3,6 +3,7 @@ package gitserver
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os/exec"
 	"strings"
@@ -185,10 +186,64 @@ func DisableCommitSigning(repoPath string) (changed bool, err error) {
 	return changed, nil
 }
 
+// TeamCoworkerGetter reports the endpoint SAGEOX_TOKEN is bound to and, when
+// that token is a team token acting as an AI coworker, the coworker's name and
+// agt_ id; id is "" otherwise. Set by the auth package to avoid circular
+// imports. Nil reads as no coworker.
+var TeamCoworkerGetter func() (ep, name, id string)
+
+// coworkerEmailDomain ends the user.email stampCoworkerAuthor writes, and is
+// how it recognizes its own stamp. ".invalid" (RFC 2606) never resolves, so
+// the address belongs to no one.
+const coworkerEmailDomain = "@ai-coworker.invalid"
+
+// stampCoworkerAuthor makes the AI coworker a team token acts as the git
+// identity of the clone at repoPath. ox's Ledger writers commit through several
+// git paths, and all of them take author and committer from user.name and
+// user.email, which git reads from the clone's own config ahead of the
+// machine's global one (GIT_AUTHOR_* and GIT_COMMITTER_* still override both).
+// It stamps a clone only when its origin is on the server the token is bound
+// to. Otherwise it removes an identity it stamped earlier, such as one a team
+// token left on a person's machine, and leaves any other alone.
+func stampCoworkerAuthor(repoPath, remoteURL string) error {
+	var name, email string
+	if TeamCoworkerGetter != nil {
+		if ep, n, id := TeamCoworkerGetter(); id != "" && endpointHostsEqual(ep, endpointFromRemoteURL(remoteURL)) {
+			name, email = n, id+coworkerEmailDomain
+		}
+	}
+	// A failed read counts as unset: removal waits for the next call, and a
+	// write reports its own failure.
+	current, _ := readGitConfigLocal(repoPath, "user.email")
+
+	if email == "" {
+		if !strings.HasSuffix(current, coworkerEmailDomain) {
+			return nil
+		}
+		out, err := exec.Command("git", "-C", repoPath, "config", "--local", "--remove-section", "user").CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("git config --remove-section user: %s: %w", strings.TrimSpace(string(out)), err)
+		}
+		return nil
+	}
+
+	if currentName, _ := readGitConfigLocal(repoPath, "user.name"); current == email && currentName == name {
+		return nil
+	}
+	for _, kv := range [][2]string{{"user.name", name}, {"user.email", email}} {
+		out, err := exec.Command("git", "-C", repoPath, "config", "--local", "--replace-all", kv[0], kv[1]).CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("git config %s: %s: %w", kv[0], strings.TrimSpace(string(out)), err)
+		}
+	}
+	return nil
+}
+
 // MigrateLedgerCredentials performs the one-shot migration for a single
 // ledger: disable commit signing, strip any embedded oauth2:TOKEN from the
 // origin URL, then install the ox credential helper for the resulting bare
-// host. Idempotent — safe to invoke on every daemon startup.
+// host. It also sets who authors the clone's commits (stampCoworkerAuthor).
+// Idempotent — safe to invoke on every daemon startup.
 //
 // Returns ok=true if the migration ran (signing disabled, stripped, or
 // installed); ok=false if there was nothing to do. The error result is
@@ -214,6 +269,12 @@ func MigrateLedgerCredentials(repoPath string, helperCmd string) (changed bool, 
 	}
 	if remoteURL == "" {
 		return changed, nil
+	}
+
+	// Logged, not returned: RefreshRemoteCredentials runs this before Ledger
+	// pushes, and a push must not fail over who authored it.
+	if err := stampCoworkerAuthor(repoPath, remoteURL); err != nil {
+		slog.Warn("set AI coworker as commit author failed", "repo", repoPath, "error", err)
 	}
 
 	// Only migrate https:// remotes with the ox-managed oauth2 prefix. A

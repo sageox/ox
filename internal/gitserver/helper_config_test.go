@@ -172,3 +172,79 @@ func TestMigrateLedgerCredentials_DisablesSigningWithoutRemote(t *testing.T) {
 	assert.Equal(t, "false", got)
 	require.NoError(t, tryCommit(t, dir), "commit should succeed post-migrate")
 }
+
+// ledgerCloneOf returns a repo whose origin is the Ledger URL remoteURL, with
+// TeamCoworkerGetter reporting id (and the name "Rip") for a token bound to
+// tokenEp.
+func ledgerCloneOf(t *testing.T, remoteURL, tokenEp, id string) string {
+	t.Helper()
+	orig := TeamCoworkerGetter
+	t.Cleanup(func() { TeamCoworkerGetter = orig })
+	TeamCoworkerGetter = func() (string, string, string) { return tokenEp, "Rip", id }
+
+	dir := t.TempDir()
+	for _, args := range [][]string{{"init", "--quiet"}, {"remote", "add", "origin", remoteURL}} {
+		out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput()
+		require.NoError(t, err, "git %v: %s", args, out)
+	}
+	return dir
+}
+
+func localIdentity(t *testing.T, dir string) [2]string {
+	t.Helper()
+	var id [2]string
+	for i, key := range []string{"user.name", "user.email"} {
+		v, err := readGitConfigLocal(dir, key)
+		require.NoError(t, err)
+		id[i] = v
+	}
+	return id
+}
+
+// Failure prevented: a team token's Ledger commits carry the machine's git
+// identity, a clone on another server takes the coworker's, a renamed coworker
+// keeps its old name, or a person's clone keeps an AI coworker's identity or
+// loses its own.
+func TestMigrateLedgerCredentials_StampsCoworkerAuthor(t *testing.T) {
+	coworker := [2]string{"Rip", "agt_rip@ai-coworker.invalid"}
+	person := [2]string{"Devon", "devon@example.com"}
+	for _, tc := range []struct {
+		name        string
+		tokenEp, id string    // what TeamCoworkerGetter reports
+		before      [2]string // the clone's own user.name and user.email
+		want        [2]string
+	}{
+		{"coworker for this server", "https://sageox.ai", "agt_rip", [2]string{}, coworker},
+		{"coworker renamed", "https://sageox.ai", "agt_rip", [2]string{"Old Rip", coworker[1]}, coworker},
+		{"coworker for another server", "https://test.sageox.ai", "agt_rip", [2]string{}, [2]string{}},
+		{"no coworker removes the stamp", "https://sageox.ai", "", coworker, [2]string{}},
+		{"no coworker keeps a person's identity", "https://sageox.ai", "", person, person},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := ledgerCloneOf(t, "https://git.sageox.ai/team/ledger.git", tc.tokenEp, tc.id)
+			if tc.before != ([2]string{}) {
+				for i, key := range []string{"user.name", "user.email"} {
+					require.NoError(t, exec.Command("git", "-C", dir, "config", key, tc.before[i]).Run())
+				}
+			}
+
+			_, err := MigrateLedgerCredentials(dir, "!ox git-credential-helper")
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, localIdentity(t, dir))
+		})
+	}
+}
+
+// Failure prevented: a Ledger push fails because its author could not be
+// stamped — here because another writer holds the lock on .git/config.
+func TestMigrateLedgerCredentials_StampFailureDoesNotFail(t *testing.T) {
+	dir := ledgerCloneOf(t, "https://git.sageox.ai/team/ledger.git", "https://sageox.ai", "")
+	_, err := MigrateLedgerCredentials(dir, "!ox git-credential-helper") // nothing left to write but the stamp
+	require.NoError(t, err)
+	TeamCoworkerGetter = func() (string, string, string) { return "https://sageox.ai", "Rip", "agt_rip" }
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".git", "config.lock"), nil, 0o644))
+
+	_, err = MigrateLedgerCredentials(dir, "!ox git-credential-helper")
+	require.NoError(t, err)
+	assert.Equal(t, [2]string{}, localIdentity(t, dir), "the stamp should have failed on the held lock")
+}
