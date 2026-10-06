@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -100,19 +102,22 @@ func TestRefreshCredentials_ConcurrentCalls(t *testing.T) {
 	assert.False(t, stamp.IsZero(), "timestamp should be set after concurrent calls")
 }
 
-func newCredentialDiscoveryScheduler(t *testing.T, server *httptest.Server) *SyncScheduler {
+func newCredentialDiscoveryScheduler(t *testing.T, server *httptest.Server) (*SyncScheduler, string) {
 	t.Helper()
-	isolateCredentialsWithDir(t)
+	credDir := isolateCredentialsWithDir(t)
 	t.Setenv("SAGEOX_ENDPOINT", server.URL)
 	t.Setenv("SAGEOX_TOKEN", "oxt_test_1ljPfr")
-	return newDiscoveryTestScheduler(t)
+	return newDiscoveryTestScheduler(t), credDir
 }
 
 func TestCredentialRotation_RevocationAndRecovery(t *testing.T) {
 	for _, mode := range []string{"refresh", "discovery"} {
 		t.Run(mode, func(t *testing.T) {
-			var rejected atomic.Bool
+			var rejected, blockSave atomic.Bool
 			var calls atomic.Int32
+			expires := time.Now().Add(24 * time.Hour)
+			blockedStore := filepath.Join(t.TempDir(), "not-a-directory")
+			require.NoError(t, os.WriteFile(blockedStore, nil, 0600))
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				calls.Add(1)
 				assert.Equal(t, "Bearer oxt_rotated_1lKvCA", r.Header.Get("Authorization"))
@@ -120,14 +125,23 @@ func TestCredentialRotation_RevocationAndRecovery(t *testing.T) {
 					w.WriteHeader(http.StatusUnauthorized)
 					return
 				}
-				_ = json.NewEncoder(w).Encode(api.ReposResponse{Token: "fresh-pat", ExpiresAt: time.Now().Add(24 * time.Hour)})
+				response := api.ReposResponse{Token: "fresh-pat", ExpiresAt: expires}
+				if blockSave.Load() {
+					gitserver.TestSetConfigDirOverride(blockedStore)
+					response.Token = "replacement-pat"
+				}
+				_ = json.NewEncoder(w).Encode(response)
 			}))
 			t.Cleanup(server.Close)
-			s := newCredentialDiscoveryScheduler(t, server)
+			s, credDir := newCredentialDiscoveryScheduler(t, server)
 			require.NoError(t, gitserver.SaveCredentialsForEndpoint(server.URL, gitserver.GitCredentials{
 				Token: "old-pat", ExpiresAt: time.Now().Add(24 * time.Hour),
 				BearerTokenHash: gitserver.BearerTokenFingerprint("oxt_test_1ljPfr"),
 			}))
+			t.Setenv("SAGEOX_TOKEN", "oxt_test_1ljPfX") // invalid checksum
+			s.refreshCredentialsIfNeeded()
+			require.Zero(t, calls.Load(), "a malformed bearer must never reach the API")
+			t.Setenv("SAGEOX_TOKEN", "oxt_test_1ljPfr")
 			s.refreshCredentialsIfNeeded()
 			require.Zero(t, calls.Load())
 			t.Setenv("SAGEOX_TOKEN", "oxt_rotated_1lKvCA")
@@ -156,6 +170,24 @@ func TestCredentialRotation_RevocationAndRecovery(t *testing.T) {
 			}
 			s.refreshCredentialsIfNeeded()
 			require.EqualValues(t, 2, calls.Load(), "a matching fresh PAT must not refresh again")
+			if mode == "discovery" {
+				cachePath := filepath.Join(credDir, "sageox", "git-credentials-"+endpoint.NormalizeSlug(server.URL)+".json")
+				before, err := os.Stat(cachePath)
+				require.NoError(t, err)
+				for _, failSave := range []bool{false, true} {
+					blockSave.Store(failSave)
+					s.lastTeamDiscovery = time.Time{}
+					s.discoverTeams(context.Background())
+					gitserver.TestSetConfigDirOverride(credDir)
+					after, err := os.Stat(cachePath)
+					require.NoError(t, err)
+					require.True(t, os.SameFile(before, after), "unchanged discovery or a failed save must preserve the cache")
+				}
+				require.EqualValues(t, 4, calls.Load())
+				cached, err := gitserver.LoadCredentialsForEndpoint(server.URL)
+				require.NoError(t, err)
+				require.Equal(t, "fresh-pat", cached.Token)
+			}
 		})
 	}
 }
@@ -184,7 +216,7 @@ func TestTeamDiscovery_RefreshesPersonalBearerAndHonorsCancellation(t *testing.T
 		}
 	}))
 	t.Cleanup(server.Close)
-	s := newCredentialDiscoveryScheduler(t, server)
+	s, _ := newCredentialDiscoveryScheduler(t, server)
 	t.Setenv("SAGEOX_TOKEN", "")
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("OX_XDG_DISABLE", "")
@@ -218,7 +250,7 @@ func TestLedgerPull_AuthFailureRefreshesFreshPAT(t *testing.T) {
 		w.WriteHeader(http.StatusUnauthorized)
 	}))
 	t.Cleanup(server.Close)
-	s := newCredentialDiscoveryScheduler(t, server)
+	s, _ := newCredentialDiscoveryScheduler(t, server)
 	require.NoError(t, gitserver.SaveCredentialsForEndpoint(server.URL, gitserver.GitCredentials{
 		Token: "old-pat", ExpiresAt: time.Now().Add(24 * time.Hour),
 		BearerTokenHash: gitserver.BearerTokenFingerprint("oxt_test_1ljPfr"),

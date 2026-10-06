@@ -84,8 +84,18 @@ func TestLFSCLICancellationDuringBearerRotation(t *testing.T) {
 			oid := fmt.Sprintf("%x", sha256.Sum256(payload))
 			started, release := make(chan struct{}, 1), make(chan struct{})
 			var batches atomic.Int32
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var recovery atomic.Bool
+			var srv *httptest.Server
+			srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/object" {
+					_, _ = w.Write(payload)
+					return
+				}
 				if r.URL.Path == "/api/v1/cli/repos" {
+					if recovery.Load() {
+						_ = json.NewEncoder(w).Encode(api.ReposResponse{Token: "fresh-pat", ExpiresAt: time.Now().Add(24 * time.Hour)})
+						return
+					}
 					started <- struct{}{}
 					select {
 					case <-r.Context().Done():
@@ -93,6 +103,10 @@ func TestLFSCLICancellationDuringBearerRotation(t *testing.T) {
 					}
 				} else {
 					batches.Add(1)
+					if recovery.Load() {
+						_ = json.NewEncoder(w).Encode(lfs.BatchResponse{Objects: []lfs.BatchResponseObject{{OID: oid, Size: int64(len(payload)), Actions: &lfs.Actions{Download: &lfs.Action{Href: srv.URL + "/object"}}}}})
+						return
+					}
 				}
 				w.WriteHeader(http.StatusUnauthorized)
 			}))
@@ -163,6 +177,14 @@ func TestLFSCLICancellationDuringBearerRotation(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, before, after)
 			assert.NoFileExists(t, filepath.Join(ledger, ".sageox", "cache", "sessions", "fixture", "raw.jsonl"))
+			if operation == "fetch" {
+				recovery.Store(true)
+				cmd.SetContext(context.Background())
+				require.NoError(t, runFetch(cmd, []string{raw}))
+				content, err := os.ReadFile(filepath.Join(ledger, ".sageox", "cache", "sessions", "fixture", "raw.jsonl"))
+				require.NoError(t, err)
+				assert.Equal(t, payload, content)
+			}
 		})
 	}
 }

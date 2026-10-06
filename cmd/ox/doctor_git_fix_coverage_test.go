@@ -120,6 +120,7 @@ func TestSaveGitCredentialsFromRepos_BindsBearer(t *testing.T) {
 			hostedTestGit(t, gitRoot, "init", "--bare", ledger)
 			backend := &cgi.Handler{Path: filepath.Join(hostedTestGit(t, gitRoot, "--exec-path"), "git-http-backend"), Env: []string{"GIT_PROJECT_ROOT=" + gitRoot, "GIT_HTTP_EXPORT_ALL=1"}}
 			var calls, oldProbes, freshProbes atomic.Int32
+			var rejectPAT atomic.Bool
 			var repos api.ReposResponse
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path == "/api/v1/cli/repos" {
@@ -143,7 +144,7 @@ func TestSaveGitCredentialsFromRepos_BindsBearer(t *testing.T) {
 						freshProbes.Add(1)
 					}
 				}
-				if pat == "doctor-pat" || pat == "fresh-pat" {
+				if (pat == "doctor-pat" || pat == "fresh-pat") && !rejectPAT.Load() {
 					backend.ServeHTTP(w, r)
 					return
 				}
@@ -207,6 +208,24 @@ func TestSaveGitCredentialsFromRepos_BindsBearer(t *testing.T) {
 			assert.Zero(t, oldProbes.Load(), "never probe another bearer's still-live PAT")
 			if outcome == "repaired" {
 				assert.EqualValues(t, 1, freshProbes.Load())
+			}
+			if outcome == "rejected" {
+				cached.BearerTokenHash = gitserver.BearerTokenFingerprint(validTeamToken)
+				cached.ExpiresAt = time.Now().Add(30 * time.Minute)
+				require.NoError(t, gitserver.SaveCredentialsForEndpoint(srv.URL, *cached))
+				freshness := checkGitCredentialsFreshness(false)
+				assert.Contains(t, freshness.message, "expiring in")
+				assert.Contains(t, freshness.detail, "Rotate or re-mint")
+				rejectPAT.Store(true)
+				for _, fix := range []bool{false, true} {
+					result := checkGitPATLiveness(fix)
+					assert.False(t, result.passed)
+					assert.Contains(t, result.detail, "Rotate or re-mint")
+				}
+				result := fixRepoPathIssues(root, &config.LocalConfig{}, []repoPathIssue{{repoType: "ledger", path: filepath.Join(root, "missing"), issue: "missing"}})
+				assert.Contains(t, result.detail, "Rotate or re-mint")
+				t.Setenv("SAGEOX_TOKEN", "")
+				assert.Contains(t, fixMissingRepos(root, &config.LocalConfig{}).detail, "ox login")
 			}
 		})
 	}

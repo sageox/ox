@@ -660,3 +660,52 @@ func TestGitCredentials_RefreshKeepsIdentityWhenCacheChanges(t *testing.T) {
 	require.Equal(t, "matching-pat", creds.Token)
 	require.Equal(t, gitserver.BearerTokenFingerprint("refreshed-bearer"), creds.BearerTokenHash)
 }
+
+// Offline caches remain usable, but cannot authorize a forced refresh or hide invalid bearers.
+func TestGitCredentials_CacheAndRefreshFailures(t *testing.T) {
+	const ep = "http://127.0.0.1:9"
+	prevDir := gitserver.TestSetConfigDirOverride(t.TempDir())
+	prevFile := gitserver.TestSetForceFileStorage(true)
+	t.Cleanup(func() {
+		gitserver.TestSetConfigDirOverride(prevDir)
+		gitserver.TestSetForceFileStorage(prevFile)
+	})
+	t.Setenv("SAGEOX_ENDPOINT", ep)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("OX_XDG_DISABLE", "")
+	require.NoError(t, gitserver.SaveCredentialsForEndpoint(ep, gitserver.GitCredentials{
+		Token: "cached-pat", ExpiresAt: time.Now().Add(24 * time.Hour),
+		BearerTokenHash: gitserver.BearerTokenFingerprint("oxt_test_1ljPfr"),
+	}))
+	for _, tc := range []struct {
+		name, bearer, wantError string
+		force                   bool
+	}{
+		{"matching", "oxt_test_1ljPfr", "", false},
+		{"offline", "", "", false},
+		{"force without bearer", "", "authentication required", true},
+		{"canceled", "oxt_test_1ljPfr", "context canceled", true},
+		{"malformed", "oxt_invalid", "SAGEOX_TOKEN", true},
+		{"expired personal bearer", "", "re-authentication required", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(EnvVarToken, tc.bearer)
+			if tc.name == "expired personal bearer" {
+				require.NoError(t, SaveTokenForEndpoint(ep, &StoredToken{AccessToken: "expired", ExpiresAt: time.Now().Add(-time.Hour)}))
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tc.name == "canceled" {
+				cancel()
+			}
+			creds, err := RefreshGitCredentialsForEndpoint(ctx, ep, tc.force)
+			if tc.wantError == "" {
+				require.NoError(t, err)
+				require.Equal(t, "cached-pat", creds.Token)
+			} else {
+				require.ErrorContains(t, err, tc.wantError)
+				require.Nil(t, creds)
+			}
+		})
+	}
+}

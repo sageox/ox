@@ -712,6 +712,8 @@ func TestLFSRefreshesRejectedCredentials(t *testing.T) {
 			}))
 			defer srv.Close()
 			t.Setenv(endpoint.EnvVar, srv.URL)
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			t.Setenv("OX_XDG_DISABLE", "")
 			t.Setenv(auth.EnvVarToken, "oxt_test_1ljPfr")
 			require.NoError(t, gitserver.SaveCredentialsForEndpoint(srv.URL, gitserver.GitCredentials{
 				Token: "old-pat", ExpiresAt: time.Now().Add(24 * time.Hour),
@@ -738,6 +740,17 @@ func TestLFSRefreshesRejectedCredentials(t *testing.T) {
 				require.NoError(t, gitserver.RemoveCredentialsForEndpoint(srv.URL))
 				_, err = client.BatchUpload(nil)
 				require.ErrorContains(t, err, "no git credentials found")
+				for _, emptyCache := range []bool{false, true} {
+					if emptyCache {
+						require.NoError(t, gitserver.SaveCredentialsForEndpoint(srv.URL, gitserver.GitCredentials{}))
+					}
+					_, err = NewClientForEndpoint(context.Background(), srv.URL+"/ledger.git", srv.URL)
+					require.Error(t, err)
+					assert.Equal(t, errkind.NotLoggedIn, errkind.Of(err))
+				}
+				t.Setenv(auth.EnvVarToken, "oxt_invalid")
+				_, err = NewClientForEndpoint(context.Background(), srv.URL+"/ledger.git", srv.URL)
+				require.ErrorContains(t, err, "SAGEOX_TOKEN")
 			}
 			if outcome != "repaired" {
 				creds, loadErr := gitserver.LoadCredentialsForEndpoint(srv.URL)
@@ -748,8 +761,7 @@ func TestLFSRefreshesRejectedCredentials(t *testing.T) {
 	}
 }
 
-// Failure prevented: a canceled LFS batch waits for PAT, OAuth, or JWT refresh
-// and can persist fallback credentials after its caller has stopped the request.
+// Failure prevented: OAuth or JWT refresh ignores cancellation or saves fallback credentials.
 func TestLFSBatchCancelsCredentialRefresh(t *testing.T) {
 	for _, stage := range []string{"OAuth", "JWT"} {
 		t.Run(stage, func(t *testing.T) {
@@ -766,14 +778,17 @@ func TestLFSBatchCancelsCredentialRefresh(t *testing.T) {
 			if stage == "JWT" {
 				blockedPath = "/api/v1/cli/auth/token"
 			}
-			started, release := make(chan struct{}), make(chan struct{})
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
 			var batchCalls atomic.Int32
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path == blockedPath {
-					close(started)
+					_, _ = io.Copy(io.Discard, r.Body)
+					cancel()
 					select {
 					case <-r.Context().Done():
-					case <-release:
+					case <-time.After(time.Second):
+						t.Error("credential refresh ignored caller cancellation")
 					}
 					w.WriteHeader(http.StatusServiceUnavailable)
 					return
@@ -801,35 +816,8 @@ func TestLFSBatchCancelsCredentialRefresh(t *testing.T) {
 				ExpiresAt: time.Now().Add(-time.Hour),
 			}))
 
-			ctx, cancel := context.WithCancel(context.Background())
-			t.Cleanup(cancel)
-			done := make(chan error, 1)
-			go func() {
-				defer close(done)
-				_, err := client.BatchUploadContext(ctx, []BatchObject{{OID: "abc", Size: 3}})
-				done <- err
-			}()
-			t.Cleanup(func() {
-				cancel()
-				close(release)
-				select {
-				case <-done:
-				case <-time.After(time.Second):
-					t.Error("credential refresh did not stop during cleanup")
-				}
-			})
-			select {
-			case <-started:
-			case <-time.After(time.Second):
-				t.Fatal("credential refresh never reached the server")
-			}
-			cancel()
-			select {
-			case err := <-done:
-				require.ErrorIs(t, err, context.Canceled)
-			case <-time.After(time.Second):
-				t.Fatal("LFS credential refresh ignored caller cancellation")
-			}
+			_, err = client.BatchUploadContext(ctx, []BatchObject{{OID: "abc", Size: 3}})
+			require.ErrorIs(t, err, context.Canceled)
 			require.Zero(t, batchCalls.Load())
 			creds, err := gitserver.LoadCredentialsForEndpoint(srv.URL)
 			require.NoError(t, err)
