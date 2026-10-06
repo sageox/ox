@@ -121,9 +121,20 @@ func TestRestorePointer_KeepsLocalCopy(t *testing.T) {
 		path := filepath.Join(dir, "raw.jsonl")
 		require.NoError(t, os.WriteFile(path, content, 0o644))
 
-		err := RestorePointer(path, "", content, NewFileRef([]byte("different\n")))
+		err := RestorePointer(path, filepath.Join(dir, "cache", "raw.jsonl"), content, NewFileRef([]byte("different\n")))
 
 		require.Error(t, err)
+		onDisk, _ := os.ReadFile(path)
+		assert.Equal(t, content, onDisk)
+	})
+
+	t.Run("an empty cache path is refused and the file is untouched", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "raw.jsonl")
+		require.NoError(t, os.WriteFile(path, content, 0o644))
+
+		require.Error(t, RestorePointer(path, "", content, ref))
+
 		onDisk, _ := os.ReadFile(path)
 		assert.Equal(t, content, onDisk)
 	})

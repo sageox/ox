@@ -1,6 +1,7 @@
 package lfs
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -81,10 +82,11 @@ func ResolveRestorableRef(content []byte, name string, meta *SessionMeta, commit
 // only after upload). Should a blob nevertheless be missing from the store,
 // the push-time reconcile uploads it from the cache copy preserved here.
 func RestorePointer(path, cachePath string, content []byte, ref FileRef) error {
-	if cachePath != "" {
-		if err := preserveInCache(cachePath, content); err != nil {
-			return err
-		}
+	if cachePath == "" {
+		return fmt.Errorf("restore pointer %s: a cache path is required to keep the hydrated copy", filepath.Base(path))
+	}
+	if err := preserveInCache(cachePath, content); err != nil {
+		return err
 	}
 	if err := WritePointerFile(path, AssertUploaded(ref)); err != nil {
 		return fmt.Errorf("restore pointer %s: %w", filepath.Base(path), err)
@@ -93,7 +95,11 @@ func RestorePointer(path, cachePath string, content []byte, ref FileRef) error {
 }
 
 func preserveInCache(cachePath string, content []byte) error {
-	if existing, err := os.ReadFile(cachePath); err == nil && len(existing) > 0 {
+	existing, err := os.ReadFile(cachePath)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("read cache copy of %s: %w", filepath.Base(cachePath), err)
+	}
+	if err == nil && len(existing) > 0 {
 		// never overwrite a cache copy, and never pointerize over one that is not these bytes:
 		// the hydrated file would then have no copy anywhere but git history
 		if ComputeOID(existing) != ComputeOID(content) {
