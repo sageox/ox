@@ -1060,3 +1060,12 @@ func rollbackSoftReset(ctx context.Context, repoPath, original string, cause err
 	}
 	return cause
 }
+
+// ValidateUnpushedTip reports whether HEAD's delta against upstream passes the
+// validation the push path applies before it publishes anything (raw session
+// content where a pointer belongs, conflict markers, invalid meta.json). The
+// error names the first offending path. Exposed so `ox doctor` can prove a
+// repair unblocks pushing with the very check push uses.
+func ValidateUnpushedTip(ctx context.Context, ledgerPath, upstream string) error {
+	return validateUnpushedTip(ctx, ledgerPath, upstream)
+}

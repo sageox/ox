@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -136,10 +138,22 @@ func runSessionCommit(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("refusing to commit: %s still contains conflict markers; remove them by hand and rerun", marked)
 	}
 
-	// stage session files
-	addCmd := exec.Command("git", "-C", projectRoot, "add", sessionsDir)
-	if err := addCmd.Run(); err != nil {
+	// stage session files one by one: hydrated artifacts must never reach the commit as raw
+	// content where the Ledger expects an LFS pointer (#1174)
+	guard := newSessionStageGuard(projectRoot, sessionsDir)
+	staged, err := guard.stage(context.Background())
+	if err != nil {
 		return fmt.Errorf("failed to stage sessions: %w", err)
+	}
+	if len(staged.Restored) > 0 {
+		fmt.Printf("  %s\n", cli.StyleDim.Render(fmt.Sprintf("%d hydrated session file(s) restored to LFS pointers (local copies kept in the cache)", len(staged.Restored))))
+	}
+	if len(staged.Skipped) > 0 {
+		cli.PrintWarning(fmt.Sprintf("%d session file(s) hold raw content with no known LFS OID and were not committed, e.g. %s", len(staged.Skipped), staged.Skipped[0]))
+	}
+	if len(staged.Stage) == 0 {
+		fmt.Println(cli.StyleDim.Render("No session changes are safe to commit."))
+		return nil
 	}
 
 	// build commit message
@@ -159,8 +173,15 @@ func runSessionCommit(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// commit only the sessions dir, so the user's other staged files stay staged
-	commitCmd := exec.Command("git", "-C", projectRoot, "commit", "-m", commitMsg, "--", sessionsDir)
+	// commit only the vetted session paths, so the user's other staged files stay staged
+	// and a skipped hydrated file is not swept in by a directory pathspec
+	var pathspec bytes.Buffer
+	for _, rel := range staged.Stage {
+		pathspec.WriteString(rel)
+		pathspec.WriteByte(0)
+	}
+	commitCmd := exec.Command("git", "-C", projectRoot, "commit", "-m", commitMsg, "--pathspec-from-file=-", "--pathspec-file-nul")
+	commitCmd.Stdin = &pathspec
 	commitOutput, err := commitCmd.CombinedOutput()
 	if err != nil {
 		// check if nothing to commit

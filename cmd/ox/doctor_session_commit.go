@@ -82,6 +82,10 @@ func checkSessionCommit(fix bool) checkResult {
 	commitMsg := buildSessionCommitMessage(sessionIDs)
 	var committed bool
 	err = gitutil.WithRepoLock(context.Background(), ledgerPath, func() error {
+		// staged hydrated content goes back to its pointer, or out of the index, before the snapshot (#1174)
+		if _, guardErr := newSessionStageGuard(ledgerPath, filepath.Join(ledgerPath, "sessions")).guardIndex(context.Background()); guardErr != nil {
+			return guardErr
+		}
 		var commitErr error
 		committed, commitErr = gitutil.CommitLedgerSnapshot(context.Background(), ledgerPath, commitMsg, "sessions/")
 		return commitErr

@@ -1693,8 +1693,16 @@ func (s *SyncScheduler) reportLedgerPushWedge(ledgerPath string) {
 		Type:     IssueTypeLedgerPushWedged,
 		Severity: SeverityWarning,
 		Repo:     "ledger",
-		Summary:  fmt.Sprintf("Ledger push blocked: the server is missing LFS objects the automatic repair could not restore; work is saved locally, retrying at %s", until.Format(time.Kitchen)),
+		Summary:  ledgerPushWedgedSummary(until),
 	})
+}
+
+// ledgerPushDoctorFix repairs a Ledger whose unpushed commits hold hydrated session
+// content where LFS pointers belong (#1174), the most common cause of a wedge.
+const ledgerPushDoctorFix = "ox doctor --fix-slug=session-pointer-restore"
+
+func ledgerPushWedgedSummary(until time.Time) string {
+	return fmt.Sprintf("Ledger push blocked: LFS objects are missing and the automatic repair could not restore them; work is saved locally, retrying at %s. If sessions were hydrated into the Ledger, run `%s`", until.Format(time.Kitchen), ledgerPushDoctorFix)
 }
 
 func (s *SyncScheduler) pushMurmurCommits(ctx context.Context, ledgerPath string) {

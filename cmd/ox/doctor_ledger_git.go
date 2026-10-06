@@ -1174,6 +1174,12 @@ func fixLedgerDirtyWorkdir(ledgerPath string, fileCount int) checkResult {
 			fmt.Sprintf("git add error: %s", strings.TrimSpace(string(output))))
 	}
 
+	// `add -A` swept in any hydrated session content; swap it back to its LFS pointer or
+	// unstage it, so the commit below cannot publish raw bytes where pointers belong (#1174)
+	if _, err := newSessionStageGuard(ledgerPath, filepath.Join(ledgerPath, "sessions")).guardIndex(context.Background()); err != nil {
+		return FailedCheck("Ledger clean workdir", "session pointer guard failed", err.Error())
+	}
+
 	// The pre-add U-state check above only catches a LIVE conflict — one
 	// `git add -A` hasn't touched yet. But `git add` on a conflicted path
 	// doesn't just stage it, it resolves the U-state (git now considers it

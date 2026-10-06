@@ -90,6 +90,13 @@ func checkSessionHealth(opts doctorOptions) []checkResult {
 		results = append(results, sessionCommitResult)
 	}
 
+	// hydrated session content committed where LFS pointers belong blocks every push (#1174);
+	// repair runs before the push check so a fix here lets that push proceed
+	pointerRestoreResult := checkSessionPointerRestore(opts.shouldFix(CheckSlugSessionPointerRestore))
+	if !pointerRestoreResult.skipped && (!pointerRestoreResult.passed || pointerRestoreResult.message != "no raw session content in unpushed commits") {
+		results = append(results, pointerRestoreResult)
+	}
+
 	// add session push check (runs after commit, supports --fix)
 	// this check pushes committed session data to remote when local is ahead
 	sessionPushCheck := doctor.NewSessionPushCheck(gitRoot, opts.shouldFix(CheckSlugSessionPush))

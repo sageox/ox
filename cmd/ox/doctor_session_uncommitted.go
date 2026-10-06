@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/sageox/ox/internal/config"
@@ -76,19 +77,29 @@ func fixSessionUncommitted(ledgerPath string, count int) checkResult {
 	// ensure .gitignore is in place before any commit to prevent cache file leakage
 	gitserver.EnsureGitignoreBeforeCommit(ledgerPath)
 
-	// --sparse: ledger repos use sparse-checkout
-	if out, err := exec.Command("git", "-C", ledgerPath, "add", "--sparse", "sessions/").CombinedOutput(); err != nil {
-		return FailedCheck(name, "staging failed",
-			fmt.Sprintf("git add error: %s", strings.TrimSpace(string(out))))
-	}
-
-	if out, err := exec.Command("git", "-C", ledgerPath, "commit", "-m", "recover uncommitted sessions").CombinedOutput(); err != nil {
-		errStr := strings.TrimSpace(string(out))
-		if strings.Contains(errStr, "nothing to commit") {
-			return PassedCheck(name, "nothing to commit after staging")
+	// stage per file through the pointer guard: hydrated artifacts must not be committed as raw content (#1174)
+	ctx := context.Background()
+	var committed bool
+	err := gitutil.WithRepoLock(ctx, ledgerPath, func() error {
+		staged, err := newSessionStageGuard(ledgerPath, filepath.Join(ledgerPath, "sessions")).stage(ctx)
+		if err != nil {
+			return err
 		}
-		return FailedCheck(name, "commit failed",
-			fmt.Sprintf("git commit error: %s", errStr))
+		if len(staged.Stage) == 0 {
+			return nil
+		}
+		var commitErr error
+		committed, commitErr = gitutil.CommitLedgerSnapshot(ctx, ledgerPath, "recover uncommitted sessions", "sessions/")
+		return commitErr
+	})
+	if gitutil.IsRepoLockBusy(err) {
+		return SkippedCheck(name, "ledger busy with another ox process", "Rerun `ox doctor --fix` in a moment")
+	}
+	if err != nil {
+		return FailedCheck(name, "commit failed", fmt.Sprintf("session commit error: %s", err))
+	}
+	if !committed {
+		return PassedCheck(name, "nothing safe to commit after staging")
 	}
 
 	if err := gitutil.PushWithRetry(context.Background(), ledgerPath, gitutil.PushOpts{
