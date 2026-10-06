@@ -81,7 +81,7 @@ func AbortOrClearRebase(ctx context.Context, repoPath, reason string, logger *sl
 	// Record any parked autostash before dropping the state directory.
 	autostash := readAutostashOID(stateDir)
 
-	quitCtx, cancel := context.WithTimeout(context.Background(), abortTimeout)
+	quitCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), pullMaxTimeout)
 	defer cancel()
 	quitCmd := commandContext(quitCtx, "git", "-C", repoPath, "rebase", "--quit")
 	out, quitErr := quitCmd.CombinedOutput()
@@ -158,8 +158,8 @@ func readAutostashOID(stateDir string) string {
 // any error it returns false (treat as on-branch) so a transient git hiccup
 // doesn't over-eagerly refuse the quit path.
 func headDetached(ctx context.Context, repoPath string) bool {
-	subCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	probeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), pullMaxTimeout)
 	defer cancel()
-	cmd := commandContext(subCtx, "git", "-C", repoPath, "symbolic-ref", "-q", "HEAD")
+	cmd := commandContext(probeCtx, "git", "-C", repoPath, "symbolic-ref", "-q", "HEAD")
 	return cmd.Run() != nil
 }
