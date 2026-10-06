@@ -204,7 +204,7 @@ func localIdentity(t *testing.T, dir string) [2]string {
 // Failure prevented: a team token's Ledger commits carry the machine's git
 // identity, a clone on another server takes the coworker's, a renamed coworker
 // keeps its old name, or a person's clone keeps an AI coworker's identity or
-// loses its own.
+// loses its own identity or other user settings.
 func TestMigrateLedgerCredentials_StampsCoworkerAuthor(t *testing.T) {
 	coworker := [2]string{"Rip", "agt_rip@ai-coworker.invalid"}
 	person := [2]string{"Devon", "devon@example.com"}
@@ -218,12 +218,14 @@ func TestMigrateLedgerCredentials_StampsCoworkerAuthor(t *testing.T) {
 		{"coworker renamed", "https://sageox.ai", "agt_rip", [2]string{"Old Rip", coworker[1]}, coworker},
 		{"coworker for another server", "https://test.sageox.ai", "agt_rip", [2]string{}, [2]string{}},
 		{"no coworker removes the stamp", "https://sageox.ai", "", coworker, [2]string{}},
+		{"no coworker finishes a half-removed stamp", "https://sageox.ai", "", [2]string{"", coworker[1]}, [2]string{}},
 		{"no coworker keeps a person's identity", "https://sageox.ai", "", person, person},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := ledgerCloneOf(t, "https://git.sageox.ai/team/ledger.git", tc.tokenEp, tc.id)
-			if tc.before != ([2]string{}) {
-				for i, key := range []string{"user.name", "user.email"} {
+			require.NoError(t, exec.Command("git", "-C", dir, "config", "user.signingkey", "keep").Run())
+			for i, key := range []string{"user.name", "user.email"} {
+				if tc.before[i] != "" {
 					require.NoError(t, exec.Command("git", "-C", dir, "config", key, tc.before[i]).Run())
 				}
 			}
@@ -231,6 +233,9 @@ func TestMigrateLedgerCredentials_StampsCoworkerAuthor(t *testing.T) {
 			_, err := MigrateLedgerCredentials(dir, "!ox git-credential-helper")
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, localIdentity(t, dir))
+			signingKey, err := readGitConfigLocal(dir, "user.signingkey")
+			require.NoError(t, err)
+			assert.Equal(t, "keep", signingKey, "only user.name and user.email are ox's to change")
 		})
 	}
 }

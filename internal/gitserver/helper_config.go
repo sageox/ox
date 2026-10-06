@@ -220,9 +220,17 @@ func stampCoworkerAuthor(repoPath, remoteURL string) error {
 		if !strings.HasSuffix(current, coworkerEmailDomain) {
 			return nil
 		}
-		out, err := exec.Command("git", "-C", repoPath, "config", "--local", "--remove-section", "user").CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("git config --remove-section user: %s: %w", strings.TrimSpace(string(out)), err)
+		// user.email goes last because it marks the stamp: if removing
+		// user.name fails, the next call still finds the stamp and finishes.
+		for _, key := range []string{"user.name", "user.email"} {
+			out, err := exec.Command("git", "-C", repoPath, "config", "--local", "--unset-all", key).CombinedOutput()
+			var exitErr *exec.ExitError
+			if asErr(err, &exitErr) && exitErr.ExitCode() == 5 {
+				continue // already unset
+			}
+			if err != nil {
+				return fmt.Errorf("git config --unset-all %s: %s: %w", key, strings.TrimSpace(string(out)), err)
+			}
 		}
 		return nil
 	}
