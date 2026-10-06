@@ -94,6 +94,12 @@ func RestorePointer(path, cachePath string, content []byte, ref FileRef) error {
 	return nil
 }
 
+// PreserveInCache keeps content at cachePath (the ledger's hydration cache) without
+// overwriting a different copy already there, which fails closed.
+func PreserveInCache(cachePath string, content []byte) error {
+	return preserveInCache(cachePath, content)
+}
+
 func preserveInCache(cachePath string, content []byte) error {
 	existing, err := os.ReadFile(cachePath)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {

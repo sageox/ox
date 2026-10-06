@@ -53,7 +53,7 @@ func (g *sessionStageGuard) check(rels []string) sessionGuardOutcome {
 		restored, skipReason := g.guardOne(rel)
 		if skipReason != "" {
 			out.Skipped = append(out.Skipped, rel)
-			slog.Warn("session artifact not staged: content is not an LFS pointer",
+			slog.Warn("session artifact not staged",
 				"path", filepath.ToSlash(rel), "reason", skipReason)
 			continue
 		}
@@ -76,20 +76,21 @@ func (g *sessionStageGuard) guardOne(rel string) (restored bool, skipReason stri
 		return false, ""
 	}
 	name := strings.Join(parts[1:], "/")
-	if !lfs.IsContentArtifact(name) {
-		return false, ""
-	}
 	if info, err := os.Lstat(abs); err != nil || !info.Mode().IsRegular() {
 		return false, "" // a deletion or an oddity; nothing to restore
-	}
-	if lfs.IsPointerFile(abs) {
-		return false, ""
 	}
 
 	sessionDir := filepath.Join(g.sessionsDir, parts[0])
 	meta, metaErr := lfs.ReadSessionMeta(sessionDir)
 	if metaErr != nil {
 		meta = nil
+	}
+	// a draft directory holds only meta.json (.claude/rules/cache-only-design.md)
+	if meta.IsDraft() && name != "meta.json" {
+		return false, "session is a draft; a draft directory holds only meta.json"
+	}
+	if !lfs.IsContentArtifact(name) || lfs.IsPointerFile(abs) {
+		return false, ""
 	}
 	if meta.StoredInGit(name) {
 		return false, "" // Storage=git: raw content is correct here
