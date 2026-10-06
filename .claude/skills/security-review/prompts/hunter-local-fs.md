@@ -2,7 +2,7 @@
 
 **Perspective frame: data-flow mindset.** "Where does ox write? Are those writes scoped, intentional, and resistant to traversal / symlink attacks?"
 
-You are looking for filesystem writes that escape ox CLI's intended scope or open user data to traversal/symlink attacks. Read `security/.output/surface.md` and `security/SECURITY.md` ("Local filesystem writes").
+You are looking for filesystem writes that escape ox CLI's intended scope or open user data to traversal/symlink attacks. Read the attack-surface map and diff on your stdin and `security/SECURITY.md` ("Local filesystem writes").
 
 ## Allowed write roots (ox CLI's filesystem footprint)
 

@@ -13,7 +13,7 @@ The pipeline is a port of the [Synthesia-style 6-phase AI security review](https
 | Tier | When | How | Cost | Wallclock |
 |---|---|---|---|---|
 | **Fast** | Every PR. Runs deterministically. No AI. | `make sec-fast` | $0 | <60s |
-| **AI** | Before merging anything touching auth, daemon IPC, redaction, adapter install, or `go.mod` | `make sec` | ~$2/run (cost-capped at $2) | 5–15 min |
+| **AI** | Before merging anything touching auth, daemon IPC, redaction, adapter install, or `go.mod` | `make sec` | ~$4 per 100 KB of change (cost-capped at $8) | 5–15 min |
 
 The fast tier is what every contributor runs every commit and what CI runs on every PR. The AI tier requires `ANTHROPIC_API_KEY` (or a Claude Code subsidized session) and is opt-in. It is **not** wired into CI by default — see [Why no AI tier in CI](#why-no-ai-tier-in-ci) below.
 
@@ -23,6 +23,7 @@ The fast tier is what every contributor runs every commit and what CI runs on ev
 make sec-install   # one-time: installs OpenGrep, govulncheck, OSV-Scanner, Syft, Grype → ./bin/
 make sec-fast      # every PR — runs deterministic scanners on your diff vs origin/main
 make sec           # optional, AI tier — requires ANTHROPIC_API_KEY
+make sec-test      # changing the pipeline itself? its tests — fake claude + scanners, no cost
 ```
 
 Output lands in `security/.output/FINDINGS.md`. SARIF goes to the GitHub Security tab when run from CI.
@@ -35,11 +36,14 @@ security/
 ├── SECURITY.md          threat model — the context the AI consumes; safe to read in <15 min
 ├── VERIFICATION.md      how to prove a closed finding stays closed
 ├── config.yml           single knob source (cost cap, sensitive paths, enabled hunters)
+├── golangci-gosec.yml   gosec rule set for the deterministic tier (not the lint gate)
 ├── rules/
 │   └── ox-entry-points.yml    OpenGrep custom rules — tuned to ox's chokepoints
 ├── scripts/
 │   ├── deterministic.sh       parallel OSS scanners → SARIF
 │   ├── orchestrate.sh         6-phase driver (only used by AI tier)
+│   ├── pipeline.py            review input, packets, scanner status, coverage gate, report
+│   ├── tests/                 pipeline tests (`make sec-test`)
 │   └── install-bins.sh        scanner installer
 └── .output/             GITIGNORED — runtime artifacts only
     ├── FINDINGS.md
@@ -49,6 +53,16 @@ security/
 The AI skill itself lives at `.claude/skills/security-review/` if you have Claude Code installed; the slash command `/security-review` is equivalent to `make sec`.
 
 ## Reading `security/.output/FINDINGS.md`
+
+Read the coverage line first — the frontmatter's `coverage:` and the banner under the title. It says what the run actually reviewed:
+
+| Coverage | Meaning | Exit |
+|---|---|---|
+| `full` | Every stage ran. Zero findings is a clean result. | 0 |
+| `partial` | A stage was skipped, failed, truncated, or stopped at the cost cap. Findings are real; their absence is not, for the parts listed. | 0 (skips), 1 (a failure), 2 (cap) |
+| `none` | A required stage did not run: no hunter completed, every scanner was skipped or failed, or a `cmd/ox/`, `internal/daemon/`, `internal/session/` or `internal/auth/` change produced no entry points. Zero findings means nothing; listed findings are still real. | 3 |
+
+A `## Coverage` table at the end shows each stage: chunks reviewed, each scanner's status (`ran` / `skipped` / `failed`, with the reason), entry points mapped, hunter runs completed, findings validated, and cost.
 
 Findings are grouped by hunter section (`#hunter-cli-input`, `#hunter-secrets-redaction`, `#hunter-daemon-ipc`, `#hunter-supply-chain`, `#hunter-llm-trust`). Each finding has:
 
@@ -68,7 +82,7 @@ Maintainers with private rule sets (vendor-internal patterns, embargoed CVE dete
 
 ## Cost model
 
-The AI tier is the only tier with a marginal cost. It uses a hard `$2/run` cap (configurable in `config.yml`) and short-circuits with a `BUDGET_EXCEEDED` finding rather than continuing. A typical PR run lands at ~$1–2.
+The AI tier is the only tier with a marginal cost. Spend is what each subagent call reports in `total_cost_usd` — a call the CLI stops at its budget still counts. The cap (`cost_cap_usd` in `config.yml`, or `--cap=N`) is checked before every call and once per wave of parallel hunters, so a run can overshoot by at most one wave (and the CLI can let a single call finish the model turn that crossed its budget). When it is reached, the remaining AI calls are skipped, findings not yet validated are kept and marked `UNVALIDATED`, and the run exits 2 with PARTIAL COVERAGE. `CC_SUBSIDIZED=1` keeps the tally but stops enforcing the cap.
 
 If you're running the AI tier as a routine pre-commit check on every diff, you're holding it wrong — use `make sec-fast` for that, and `make sec` only when the diff touches one of the sensitive paths (auth, daemon, redaction, adapter install, `go.mod`).
 
@@ -76,7 +90,7 @@ If you're running the AI tier as a routine pre-commit check on every diff, you'r
 
 The CI workflow at `.github/workflows/security-review.yml` runs the fast deterministic tier on every PR but **does not** run the AI tier. This is a deliberate choice:
 
-- **Cost-DoS risk.** Any contributor who can land a PR can label one as `needs-security-review`; ~$2/run × N labels drains the budget.
+- **Cost-DoS risk.** Any contributor who can land a PR can label one as `needs-security-review`; ~$4/run × N labels drains the budget.
 - **Public finding disclosure.** SARIF uploaded to a public repo's Security tab is world-readable. A real exploitable finding becomes a 0-day announcement before it can be patched.
 - **Prompt injection via PR content.** A diff can carry adversarial strings that hijack the hunter prompts.
 - **Marginal value.** Maintainers can run `make sec` locally for free via the Claude Code subsidy.

@@ -4,7 +4,7 @@
 
 You are looking for code paths that write to Ledger storage WITHOUT going through the `RawWriter` chokepoint at `internal/session/raw_writer.go`. The chokepoint applies the gitleaks redaction — bypasses leak secrets to the Ledger.
 
-Read `security/.output/surface.md` (RawWriter chokepoint bypass attempts section) and `security/SECURITY.md` ("Secret-handling primitives"). Cross-reference the deterministic OpenGrep rule `sageox-cli.primitive-violation.raw-jsonl-bypass`.
+Read the attack-surface map and diff on your stdin (RawWriter chokepoint bypass attempts section) and `security/SECURITY.md` ("Secret-handling primitives"). Cross-reference the deterministic OpenGrep rule `sageox-cli.primitive-violation.raw-jsonl-bypass`.
 
 ## What to look for
 

@@ -1083,6 +1083,9 @@ sec-fast: ## Run only the deterministic OSS-tool tier (no AI cost)
 sec-install: ## Install all security-review tool binaries to bin/ (no root)
 	@bash security/scripts/install-bins.sh
 
+sec-test: ## Test the security-review pipeline itself (fake claude + scanners; no network, no AI cost)
+	@python3 -m unittest discover -s security/scripts/tests -p 'test_*.py'
+
 sec-install-hook: ## Install opt-in pre-commit fast tier (run with SEC_PRECOMMIT=1 git commit)
 	@mkdir -p .git/hooks
 	@cat > .git/hooks/pre-commit <<'EOF'

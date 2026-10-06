@@ -16,14 +16,27 @@
 #   bash security/scripts/orchestrate.sh --cap=10              # raise per-run cost cap (USD)
 #   bash security/scripts/orchestrate.sh --since=<ref>         # diff against alternate base
 #
+# Exit codes:
+#   0  every stage that ran completed (a scanner skipped as not installed still lands here)
+#   1  a stage failed (scanner, cartographer, hunter or dedup error): partial coverage
+#   2  the cost cap stopped the AI phases: partial coverage; re-run with --cap=<higher>
+#   3  NO COVERAGE: a required stage did not run, so zero findings means nothing
+#
 # This driver is shelled to by:
 #   - .claude/skills/security-review/SKILL.md (interactive Claude Code)
 #   - make sec (non-interactive)
 #   - .github/workflows/security-review.yml (fast tier only)
 #
+# What the AI phases read: every cartographer and hunter call gets the real change
+# — `git diff <since>...HEAD`, test files excluded, chunked under diff.chunk_bytes —
+# plus scope.md, as a packet built by pipeline.py; scanner JSON is supplementary.
+# (They used to get only the scanner JSON and a map drawn from it. With no scanner
+# installed, every hunter reviewed an empty map and the run reported "ran clean".)
+# pipeline.py's aggregate step then applies a coverage gate: FINDINGS.md says
+# "ran clean" only when every stage actually ran.
+#
 # AI subagents are spawned via the `claude` CLI (subsidized when run interactively, API-billed
-# when run from CI). The cost cap is enforced by tracking each subagent invocation's reported
-# token usage and bailing the pipeline at the budget.
+# when run from CI). The cost cap is enforced from each call's reported `total_cost_usd`.
 
 set -euo pipefail
 
@@ -32,8 +45,11 @@ OUT="$ROOT/security/.output"
 SKILL="$ROOT/.claude/skills/security-review"
 CONFIG="$ROOT/security/config.yml"
 BIN="$ROOT/bin"
+LIB="$ROOT/security/scripts/pipeline.py"
 mkdir -p "$OUT"
 export PATH="$BIN:$PATH"
+# Git pathspecs and the subagents' Read/Grep paths are all repo-relative.
+cd "$ROOT"
 
 # --- Args -------------------------------------------------------------------
 SCOPE_ARG=""
@@ -57,14 +73,42 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Read cap from config if not overridden on CLI.
-if [[ -z "$CAP_USD" ]]; then
+# config_value <key> <default> — first `key: value` line in config.yml, at any indent.
+config_value() {
+  local v=""
   if [[ -f "$CONFIG" ]]; then
-    CAP_USD=$(awk '/^cost_cap_usd:/ {print $2; exit}' "$CONFIG" 2>/dev/null || echo "2")
-  else
-    CAP_USD="2"
+    v="$(awk -v k="$1" '$1 == k":" {print $2; exit}' "$CONFIG" 2>/dev/null || true)"
   fi
+  echo "${v:-$2}"
+}
+if [[ -z "$CAP_USD" ]]; then
+  CAP_USD="$(config_value cost_cap_usd 2)"
 fi
+CHUNK_BYTES="$(config_value chunk_bytes 120000)"
+MAX_CHUNKS="$(config_value max_chunks 8)"
+
+# --- Reset per-run artifacts -------------------------------------------------
+# A run that stops early must not leave the previous run's FINDINGS.md behind:
+# a stale "ran clean" report is the failure this pipeline exists to prevent.
+# run-log.md is the cross-run history and stays. deterministic.sh resets det-*.
+rm -rf "$OUT/review"
+rm -f "$OUT"/FINDINGS.md "$OUT"/findings.sarif "$OUT"/coverage.json "$OUT"/scope.md \
+  "$OUT"/surface.md "$OUT"/surface.json "$OUT"/cartographer-*.json "$OUT"/hunter-*.jsonl \
+  "$OUT"/hunter-status.tsv "$OUT"/findings-*.jsonl "$OUT"/dedup-status "$OUT"/.validate-* \
+  "$OUT"/.cost "$OUT"/.cost-ledger "$OUT"/.cap-hit "$OUT"/.malformed.jsonl "$OUT"/.claude-raw.* \
+  "$OUT"/.sanitize.*
+
+# If anything kills the run before the aggregate step writes a report, leave a
+# report that says so rather than none (or, before the reset above, a stale one).
+PHASE="prep"
+write_crash_report() {
+  local rc=$?
+  if [[ ! -f "$OUT/FINDINGS.md" ]]; then
+    printf -- '---\ncoverage: none\n---\n\n# Findings\n\n> **NO COVERAGE** — the pipeline stopped during the %s phase (exit %s) before writing a report; nothing was reviewed to completion. See the orchestrator output and `run-log.md`.\n' \
+      "$PHASE" "$rc" > "$OUT/FINDINGS.md"
+  fi
+}
+trap write_crash_report EXIT
 
 # --- JSONL sanitizer --------------------------------------------------------
 # AI subagents sometimes return prose even when prompted for strict JSONL
@@ -125,61 +169,73 @@ PYEOF
 }
 
 # --- Cost tracker -----------------------------------------------------------
-COST_FILE="$OUT/.cost"
-echo "0.0" > "$COST_FILE"
-spend() {
-  # spend <usd>; returns nonzero if cap exceeded.
-  local amount="$1"
-  local cur new
-  cur="$(cat "$COST_FILE")"
-  new="$(awk -v a="$cur" -v b="$amount" 'BEGIN {printf "%.4f", a+b}')"
-  echo "$new" > "$COST_FILE"
-  awk -v n="$new" -v c="$CAP_USD" 'BEGIN {exit (n>c) ? 1 : 0}'
+# One line per subagent call: "<usd>\t<label>\t<model>". Appended, never
+# rewritten — parallel hunters each append once, and an O_APPEND write this small
+# is atomic (the old read-modify-write of a single total lost concurrent updates).
+COST_LEDGER="$OUT/.cost-ledger"
+CAP_FILE="$OUT/.cap-hit"
+: > "$COST_LEDGER"
+total_cost() { awk -F'\t' '{s += $1} END {printf "%.4f", s + 0}' "$COST_LEDGER"; }
+remaining_budget() {
+  awk -v cap="$CAP_USD" -v cur="$(total_cost)" 'BEGIN {r = cap - cur; printf "%.4f", (r > 0 ? r : 0)}'
+}
+# The first call to hit the cap names the phase; later calls see the file and stop.
+mark_cap_hit() { [[ -f "$CAP_FILE" ]] || echo "$1" > "$CAP_FILE"; }
+# budget_or_cap <label> — print the remaining budget, or record the cap hit and
+# return 1 when less than a cent is left.
+budget_or_cap() {
+  local r
+  r="$(remaining_budget)"
+  if [[ -f "$CAP_FILE" ]] || awk -v r="$r" 'BEGIN {exit !(r < 0.01)}'; then
+    mark_cap_hit "$1"
+    echo "cost cap (\$$CAP_USD) reached; skipped $1" >> "$OUT/run-log.md"
+    return 1
+  fi
+  echo "$r"
 }
 
-# Helper: invoke a Claude subagent with a prompt file via the `claude` CLI in
-# print (non-interactive) mode. Uses the CLI's native --max-budget-usd flag
-# instead of synthesizing per-call estimates — that's both the per-invocation
-# cap AND the run-wide cap (we pass the *remaining* budget each call so a
-# single huge call can't blow through what's left for later phases).
+# invoke_claude <model> <prompt-file> <input-file> <output-file> <label> [json-schema-path] [wave-budget]
 #
-# CC_SUBSIDIZED=1 (set in interactive Claude Code sessions) skips cost
-# accounting entirely — manual /security-review runs are effectively free.
+# Runs one subagent in print mode: the playbook is the appended system prompt and
+# <input-file> (a packet from pipeline.py) is stdin. The payload — structured_output
+# under --json-schema — lands in <output-file>; when there is none, a
+# {"verdict": "error"|"cap"|"skipped"} stub does, which pipeline.py classifies
+# instead of mistaking for output.
 #
-# Returns nonzero if the cap is hit; the caller decides whether to continue
-# with a partial pipeline or abort.
+# Cost: the CLI reports what each call spent in `total_cost_usd`, and every call's
+# cost goes into the ledger — including a call the CLI stopped at --max-budget-usd,
+# which exits 1 but still spent money. The cap is checked before each call, and
+# each call gets the remaining budget as its --max-budget-usd. A hunt wave is
+# checked once, by the parent, and every hunter in it gets the same
+# [wave-budget]: the wave can overshoot the cap by at most its own cost, and
+# whether a hunter runs never depends on which sibling finished first.
+# CC_SUBSIDIZED=1 (interactive Claude Code subsidy) records cost for the summary
+# but enforces nothing.
+#
+# Returns 1 when the cap stopped this call, 0 otherwise: a failed call reports
+# through its stub and never aborts the pipeline.
 invoke_claude() {
-  # invoke_claude <model> <prompt-file> <input-file> <output-file> <est-usd-fallback> [json-schema-path]
-  # If <json-schema-path> is provided, the CLI's --json-schema flag is set,
-  # which forces the model to emit a single JSON object matching that schema.
-  # The .result of the CLI envelope is then that JSON object, serialized as a
-  # string. The orchestrator unwraps as usual.
-  local model="$1" prompt="$2" input="$3" output="$4" est="$5"
-  local schema="${6:-}"
+  local model="$1" prompt="$2" input="$3" output="$4" label="$5" schema="${6:-}" wave_budget="${7:-}"
 
   if ! command -v claude >/dev/null 2>&1; then
-    echo "WARNING: claude CLI not installed; skipping $(basename "$prompt") (run \`brew install claude\` or see claude.ai/code)" | tee -a "$OUT/run-log.md"
-    echo "{\"verdict\":\"skipped\",\"reason\":\"claude CLI missing\"}" > "$output"
+    echo "WARNING: claude CLI not installed; skipping $label (see claude.ai/code)" | tee -a "$OUT/run-log.md"
+    echo '{"verdict":"skipped","reason":"claude CLI missing"}' > "$output"
     return 0
   fi
 
-  # Compute remaining budget for this call. CLI enforces the cap natively per
-  # invocation; we still track total spend across calls so we can stop early.
-  local remaining_budget=""
+  local budget=""
   if [[ "${CC_SUBSIDIZED:-0}" != "1" ]]; then
-    local cur; cur="$(cat "$COST_FILE")"
-    remaining_budget="$(awk -v cap="$CAP_USD" -v cur="$cur" 'BEGIN {r=cap-cur; if (r<=0) {print "0"} else {printf "%.4f", r}}')"
-    if [[ "$remaining_budget" == "0" ]] || (( $(awk -v r="$remaining_budget" 'BEGIN {print (r<0.01)}') )); then
-      echo "ERROR: cost cap (\$$CAP_USD) reached before invoking $model on $(basename "$prompt")." | tee -a "$OUT/run-log.md"
-      echo "       partial findings preserved at $OUT/findings-raw.jsonl" | tee -a "$OUT/run-log.md"
-      echo "       re-run with --cap=<higher> to continue." | tee -a "$OUT/run-log.md"
+    if [[ -n "$wave_budget" ]]; then
+      budget="$wave_budget"
+    elif ! budget="$(budget_or_cap "$label")"; then
+      echo '{"verdict":"cap","reason":"cost cap reached"}' > "$output"
       return 1
     fi
   fi
 
   # Build the command. --print = non-interactive; --append-system-prompt loads
-  # the playbook; --max-budget-usd caps THIS invocation; --output-format json
-  # gives us cost + token usage we can attribute back to the run-log.
+  # the playbook; --output-format json gives us cost + token usage we can
+  # attribute back to the run-log.
   local cli_args=(
     --print
     --model "$model"
@@ -197,63 +253,71 @@ invoke_claude() {
     # them appearing in /resume pickers or polluting session history.
     --no-session-persistence
     # --permission-mode dontAsk: subagents must not pop a permission prompt
-    # mid-run (we're piping stdout to a parser). If a tool isn't pre-allowed
-    # the model gets a permission-denied and continues — instead of stalling
-    # or wandering into a "please approve this edit" prose response.
+    # mid-run (we're piping stdout to a parser).
     --permission-mode dontAsk
+    # --tools: read-only file tools and nothing else, whatever the user's
+    # permission rules allow. Subagents read the repo to trace what the diff
+    # doesn't show; they never run commands or edit files.
+    --tools "Read,Grep,Glob"
   )
-  if [[ -n "$remaining_budget" ]]; then
-    cli_args+=(--max-budget-usd "$remaining_budget")
+  if [[ -n "$budget" ]]; then
+    cli_args+=(--max-budget-usd "$budget")
   fi
   if [[ -n "$schema" ]] && [[ -f "$schema" ]]; then
-    # --json-schema forces structured output. The CLI enforces the model
-    # produces a single object conforming to the schema; the .result field of
-    # the envelope contains that object serialized as a string.
+    # --json-schema forces structured output: the parsed object lands in the
+    # envelope's .structured_output.
     cli_args+=(--json-schema "$(cat "$schema")")
   fi
 
-  # Capture both the model output and the cost metadata. The CLI emits a JSON
-  # envelope with `result` (text) and `usage`/`cost` fields. Use mktemp +
-  # $BASHPID so parallel hunters in Phase 3 don't clobber each other's raw
-  # output — $$ is the parent shell's PID and is shared across the 5 subshell
-  # invocations spawned in the hunt loop. (Race observed: 4 of 5 hunter
-  # outputs silently lost prior to this fix.)
-  local raw
+  # mktemp + $BASHPID so parallel hunters don't clobber each other's raw output —
+  # $$ is the parent shell's PID, shared across the subshells of one hunt wave.
+  local raw rc=0 parsed cost subtype is_error denials
   raw="$(mktemp "$OUT/.claude-raw.${BASHPID:-$$}.$(basename "$prompt").XXXXXX")"
-  if claude "${cli_args[@]}" < "$input" > "$raw" 2>>"$OUT/run-log.md"; then
-    # Extract the model's actual output payload. When --json-schema is set,
-    # the CLI places the parsed object in `.structured_output` and leaves
-    # `.result` as an empty string. Prefer structured_output when present.
-    if command -v jq >/dev/null 2>&1; then
-      if [[ -n "$schema" ]]; then
-        jq -c '.structured_output // (.result | fromjson? // .result)' "$raw" > "$output"
-      else
-        jq -r '.result // .' "$raw" > "$output"
-      fi
-      # Track real cost if the CLI reports it.
-      local actual_cost
-      actual_cost="$(jq -r '.usage.cost_usd // .cost_usd // empty' "$raw" 2>/dev/null)"
-      if [[ -n "$actual_cost" ]] && [[ "${CC_SUBSIDIZED:-0}" != "1" ]]; then
-        spend "$actual_cost" || true   # spend already updates the file; budget enforced next call
-      fi
-    else
-      cp "$raw" "$output"
-      # Fall back to the synthetic estimate when jq unavailable.
-      [[ "${CC_SUBSIDIZED:-0}" != "1" ]] && spend "$est" || true
-    fi
-    rm -f "$raw"
-  else
-    local rc=$?
-    echo "WARNING: claude CLI failed (exit $rc) for $(basename "$prompt"); see run-log for stderr" | tee -a "$OUT/run-log.md"
-    echo "{\"verdict\":\"error\",\"reason\":\"claude CLI exit $rc\"}" > "$output"
-    rm -f "$raw"
-    return 0   # don't abort the whole pipeline on one subagent failure
+  claude "${cli_args[@]}" < "$input" > "$raw" 2>>"$OUT/run-log.md" || rc=$?
+  # Parse the envelope whatever the exit code: a budget stop exits 1 but still
+  # reports what it spent.
+  parsed="$(python3 "$LIB" envelope --raw "$raw" --output "$output" ${schema:+--structured})" \
+    || parsed=$'0\tenvelope-parse-crash\ttrue\t0'
+  rm -f "$raw"
+  IFS=$'\t' read -r cost subtype is_error denials <<< "$parsed"
+  printf '%s\t%s\t%s\n' "${cost:-0}" "$label" "$model" >> "$COST_LEDGER"
+  if [[ "${denials:-0}" != "0" ]]; then
+    echo "$label: $denials tool call(s) denied" >> "$OUT/run-log.md"
   fi
+  if [[ "$subtype" == "error_max_budget_usd" ]]; then
+    mark_cap_hit "$label"
+    echo "WARNING: $label stopped at the cost cap (\$$CAP_USD)" | tee -a "$OUT/run-log.md"
+    echo '{"verdict":"cap","reason":"stopped at --max-budget-usd"}' > "$output"
+    return 1
+  fi
+  if (( rc != 0 )) || [[ "$is_error" == "true" ]]; then
+    echo "WARNING: claude CLI failed (exit $rc, ${subtype:-no envelope}) for $label; see run-log" | tee -a "$OUT/run-log.md"
+  fi
+  return 0
+}
+
+# run_hunter <hunter> <chunk> <wave-budget> — one hunter on one chunk. Runs in a
+# background subshell; its status row in hunter-status.tsv is the only thing the
+# parent reads.
+run_hunter() {
+  local h="$1" n="$2" wave_budget="$3" nn
+  nn="$(printf '%02d' "$n")"
+  invoke_claude "claude-sonnet-5" "$SKILL/prompts/hunter-${h}.md" "$OUT/review/packet-hunter-c${nn}.md" \
+    "$OUT/hunter-${h}-c${nn}.jsonl" "hunt:${h}:c${nn}" "$SKILL/schemas/hunter.json" "$wave_budget" || true
+  python3 "$LIB" hunter-result --out "$OUT" --hunter "$h" --chunk "$n"
+  sanitize_jsonl "$OUT/hunter-${h}-c${nn}.jsonl" "hunter-${h}-c${nn}"
 }
 
 # --- Phase 1: PREP ----------------------------------------------------------
 echo
 echo "[1/6] prep ........................................"
+if [[ "$SCAN_FULL" == "1" ]]; then
+  MODE="full"
+elif [[ -n "$SCOPE_ARG" ]]; then
+  MODE="scope"
+else
+  MODE="diff"
+fi
 {
   echo "# Scope"
   echo
@@ -271,336 +335,162 @@ echo "[1/6] prep ........................................"
   echo "## Touched files"
   echo
   if [[ "$SCAN_FULL" == "1" ]]; then
-    echo "(full scan — see security/scripts/deterministic.sh output)"
+    echo "(full scan — every tracked file)"
   elif [[ -n "$SCOPE_ARG" ]]; then
     git ls-files "$SCOPE_ARG" | sed 's/^/- /'
   else
-    git diff --name-only "$SINCE"...HEAD | sed 's/^/- /'
+    { git diff --name-only "$SINCE"...HEAD 2>/dev/null || git diff --name-only "$SINCE" 2>/dev/null \
+        || echo "(cannot diff against $SINCE)"; } | sed 's/^/- /'
   fi
 } > "$OUT/scope.md"
 echo "       wrote $OUT/scope.md"
 
+CHUNKS=0
+if python3 "$LIB" build-input --out "$OUT/review" --mode "$MODE" --since "$SINCE" \
+    ${SCOPE_ARG:+--scope "$SCOPE_ARG"} --chunk-bytes "$CHUNK_BYTES" --max-chunks "$MAX_CHUNKS" \
+    --scope-md "$OUT/scope.md"; then
+  CHUNKS="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["chunks_kept"])' "$OUT/review/manifest.json")"
+else
+  echo "WARNING: could not build the review input; AI phases skipped" | tee -a "$OUT/run-log.md"
+fi
+
 # --- Phase 2: MAP -----------------------------------------------------------
+PHASE="map"
 echo "[2/6] map (deterministic + cartographer) .........."
 det_args=()
 [[ "$SCAN_FULL" == "1" ]] && det_args+=(--full)
 [[ "$SINCE" != "origin/main" ]] && det_args+=(--since "$SINCE")
-bash "$ROOT/security/scripts/deterministic.sh" "${det_args[@]}" > "$OUT/det-runner.log" 2>&1 || true
+bash "$ROOT/security/scripts/deterministic.sh" ${det_args[@]+"${det_args[@]}"} > "$OUT/det-runner.log" 2>&1 || true
+grep -E '^  [a-z-]+: ' "$OUT/det-runner.log" | sed 's/^/     /' || true
 echo "       deterministic: see $OUT/det-runner.log + $OUT/findings-deterministic.json"
 
-if [[ -f "$SKILL/prompts/cartographer.md" ]]; then
-  # Cartographer emits free-form markdown to stdout — no --json-schema, no tool
-  # use (tool calls fail under --permission-mode dontAsk). invoke_claude pipes
-  # stdin → claude → .result → surface.md. We pass findings-deterministic.json
-  # as stdin so the prompt can reference deterministic matches.
-  invoke_claude "claude-haiku-4-5" "$SKILL/prompts/cartographer.md" \
-    "$OUT/findings-deterministic.json" "$OUT/surface.md" "0.05" \
-    || { echo "cap hit during map phase; aborting"; exit 2; }
-
-  # Sanity-check the surface map. Failure modes we've seen:
-  #   - invoke_claude wrote a {"verdict":"error",...} stub (CLI exit nonzero)
-  #   - Haiku returned an empty/near-empty response
-  #   - Haiku returned a refusal or a single sentence without structure
-  # Any of these starve the hunters of context. Fall back to a minimal
-  # placeholder so the pipeline doesn't crash, and log a warning.
-  surface_bytes=$(wc -c < "$OUT/surface.md" | tr -d ' ')
-  surface_ok=1
-  if head -c 64 "$OUT/surface.md" | grep -q '"verdict":"error"'; then
-    surface_ok=0
-    echo "WARNING: cartographer returned an error stub (CLI failure)" | tee -a "$OUT/run-log.md"
-  elif [[ "$surface_bytes" -lt 500 ]]; then
-    surface_ok=0
-    echo "WARNING: cartographer output is trivially short ($surface_bytes bytes); using fallback" | tee -a "$OUT/run-log.md"
-  elif ! grep -qi 'entry point' "$OUT/surface.md" || ! grep -qi 'sink' "$OUT/surface.md"; then
-    surface_ok=0
-    echo "WARNING: cartographer output missing 'entry point' or 'sink' sections; using fallback" | tee -a "$OUT/run-log.md"
-  fi
-  if [[ "$surface_ok" == "0" ]]; then
-    {
-      echo "# Attack surface map"
-      echo
-      echo "> Cartographer subagent failed or returned non-trivial output; deterministic findings only."
-      echo
-      echo "See \`findings-deterministic.json\` for the raw scanner output."
-      echo "Treat every entry point as unknown-auth; hunters should look at the diff directly."
-    } > "$OUT/surface.md"
-  fi
-  echo "       wrote $OUT/surface.md ($surface_bytes bytes, ok=$surface_ok)"
-else
-  echo "       (cartographer.md not yet authored; map phase emits empty surface.md)" > "$OUT/surface.md"
-fi
+for (( n = 1; n <= CHUNKS; n++ )); do
+  nn="$(printf '%02d' "$n")"
+  python3 "$LIB" packet --role cartographer --review "$OUT/review" --chunk "$n" \
+    --scope-md "$OUT/scope.md" --det "$OUT/findings-deterministic.json" \
+    --out "$OUT/review/packet-cartographer-c${nn}.md"
+  invoke_claude "claude-haiku-4-5" "$SKILL/prompts/cartographer.md" "$OUT/review/packet-cartographer-c${nn}.md" \
+    "$OUT/cartographer-c${nn}.json" "map:cartographer:c${nn}" "$SKILL/schemas/cartographer.json" || true
+done
+python3 "$LIB" surface --out "$OUT"
+echo "       wrote $OUT/surface.md"
 
 # --- Phase 3: HUNT ----------------------------------------------------------
+# One wave per chunk: the five hunters run in parallel on it, each with an
+# explicit perspective frame to fight finding convergence. A wave finishes
+# before the next starts, so the cap is re-checked between waves.
+PHASE="hunt"
 echo "[3/6] hunt (parallel hunters) ....................."
 HUNTERS=(cli-input secrets-redaction daemon-ipc supply-chain llm-trust)
 [[ -n "$HUNTER_ARG" ]] && HUNTERS=("$HUNTER_ARG")
 
-# Per-hunter status manifest — one TSV row per hunter so the summary phase can
-# distinguish "model returned {findings:[]}" (legit empty) from "claude CLI
-# crashed" (silent failure). Pre-fix, both shapes produced identical 0-byte
-# JSONL files and the summary mis-reported failures as clean runs.
 : > "$OUT/hunter-status.tsv"
-: > "$OUT/findings-raw.jsonl"
-hunter_pids=()
-for h in "${HUNTERS[@]}"; do
-  prompt="$SKILL/prompts/hunter-${h}.md"
-  if [[ ! -f "$prompt" ]]; then
-    echo "       (skipping $h — playbook not yet authored at $prompt)"
-    echo -e "${h}\tskipped-no-prompt\t0" >> "$OUT/hunter-status.tsv"
-    continue
+for (( n = 1; n <= CHUNKS; n++ )); do
+  nn="$(printf '%02d' "$n")"
+  python3 "$LIB" packet --role hunter --review "$OUT/review" --chunk "$n" \
+    --scope-md "$OUT/scope.md" --surface-md "$OUT/surface.md" --det "$OUT/findings-deterministic.json" \
+    --out "$OUT/review/packet-hunter-c${nn}.md"
+  wave_budget=""
+  wave_capped=0
+  if [[ "${CC_SUBSIDIZED:-0}" != "1" ]] && ! wave_budget="$(budget_or_cap "hunt:c${nn}")"; then
+    wave_capped=1
   fi
-  (
-    invoke_claude "claude-sonnet-5" "$prompt" "$OUT/surface.md" "$OUT/hunter-${h}.jsonl" "0.05" \
-      "$SKILL/schemas/hunter.json"
-    # Expand the {"findings":[...]} envelope into bare JSONL lines, OR detect
-    # the {"verdict":"error",...} stub that invoke_claude wrote on CLI failure.
-    # Recording the per-hunter status here is the choke point — every later
-    # stage (sanitize, concat, summary) treats hunter output as opaque JSONL.
-    python3 - "$OUT" "$h" <<'PYEOF'
-import json, sys, os
-out_dir, hunter = sys.argv[1], sys.argv[2]
-path = os.path.join(out_dir, f"hunter-{hunter}.jsonl")
-status_path = os.path.join(out_dir, "hunter-status.tsv")
-try:
-    raw = open(path).read()
-except Exception as e:
-    open(status_path, "a").write(f"{hunter}\tio-error\t0\n")
-    sys.exit(0)
-try:
-    obj = json.loads(raw) if raw.strip() else {}
-except Exception:
-    # Model produced non-JSON (rare with --json-schema). Mark as parse-error
-    # and let sanitize_jsonl quarantine the file — it would otherwise pollute
-    # dedup with prose lines that look like findings to a careless reader.
-    open(status_path, "a").write(f"{hunter}\tparse-error\t0\n")
-    sys.exit(0)
-# invoke_claude error stub — claude CLI exited non-zero.
-if isinstance(obj, dict) and obj.get("verdict") == "error":
-    open(status_path, "a").write(f"{hunter}\tcli-error\t0\n")
-    # Drop the stub so it does not flow into dedup as a "finding".
-    open(path, "w").write("")
-    sys.exit(0)
-# Normal {"findings":[...]} envelope.
-if isinstance(obj, dict) and isinstance(obj.get("findings"), list):
-    items = obj["findings"]
-    with open(path, "w") as f:
-        for item in items:
-            f.write(json.dumps(item) + "\n")
-    open(status_path, "a").write(f"{hunter}\tok\t{len(items)}\n")
-    sys.exit(0)
-# Unknown shape — keep file as-is so sanitize_jsonl can decide, but flag.
-open(status_path, "a").write(f"{hunter}\tunknown-shape\t0\n")
-PYEOF
-    sanitize_jsonl "$OUT/hunter-${h}.jsonl" "hunter-${h}"
-  ) &
-  hunter_pids+=($!)
+  hunter_pids=()
+  for h in "${HUNTERS[@]}"; do
+    if [[ ! -f "$SKILL/prompts/hunter-${h}.md" ]]; then
+      echo "       (skipping $h — no playbook at $SKILL/prompts/hunter-${h}.md)"
+      printf '%s\t%s\tskipped-no-prompt\t0\n' "$h" "$n" >> "$OUT/hunter-status.tsv"
+      continue
+    fi
+    if (( wave_capped )); then
+      printf '%s\t%s\tcap\t0\n' "$h" "$n" >> "$OUT/hunter-status.tsv"
+      continue
+    fi
+    run_hunter "$h" "$n" "$wave_budget" &
+    hunter_pids+=($!)
+  done
+  if (( ${#hunter_pids[@]} > 0 )); then
+    wait "${hunter_pids[@]}" || true
+  fi
 done
-wait "${hunter_pids[@]}" || true
-# Concat after wait so we don't interleave appends from racing subshells.
+# Concat after every wave so appends from racing subshells never interleave.
 : > "$OUT/findings-raw.jsonl"
-for h in "${HUNTERS[@]}"; do
-  [[ -f "$OUT/hunter-${h}.jsonl" ]] && cat "$OUT/hunter-${h}.jsonl" >> "$OUT/findings-raw.jsonl"
+for f in "$OUT"/hunter-*-c*.jsonl; do
+  if [[ -f "$f" ]]; then cat "$f" >> "$OUT/findings-raw.jsonl"; fi
 done
 echo "       wrote $OUT/findings-raw.jsonl ($(wc -l < "$OUT/findings-raw.jsonl" | tr -d ' ') findings before dedup)"
 
-# Surface hunter failures up-front (run-log + stdout). The pipeline still
-# continues — partial results from healthy hunters are better than nothing —
-# but the final exit code reflects whether any hunter actually failed.
-hunter_failures=0
-while IFS=$'\t' read -r hname hstatus hcount; do
-  case "$hstatus" in
-    ok|skipped-no-prompt) ;;
-    *)
-      echo "WARNING: hunter '$hname' did not complete cleanly (status=$hstatus); see $OUT/run-log.md" | tee -a "$OUT/run-log.md"
-      hunter_failures=$((hunter_failures + 1))
-      ;;
-  esac
-done < "$OUT/hunter-status.tsv"
-
 # --- Phase 4: DEDUP ---------------------------------------------------------
+PHASE="dedup"
 echo "[4/6] dedup (root-cause merge) ...................."
-if [[ -f "$SKILL/prompts/dedup.md" ]] && [[ -s "$OUT/findings-raw.jsonl" ]]; then
-  invoke_claude "claude-sonnet-5" "$SKILL/prompts/dedup.md" \
-    "$OUT/findings-raw.jsonl" "$OUT/findings-deduped.jsonl" "0.05" \
-    "$SKILL/schemas/dedup.json" \
-    || { echo "cap hit during dedup; aborting"; exit 2; }
-  python3 -c "
-import json, sys
-try:
-    obj = json.loads(open('$OUT/findings-deduped.jsonl').read())
-except Exception:
-    sys.exit(0)
-if isinstance(obj, dict) and isinstance(obj.get('findings'), list):
-    with open('$OUT/findings-deduped.jsonl', 'w') as f:
-        for item in obj['findings']:
-            f.write(json.dumps(item) + '\n')
-"
-  sanitize_jsonl "$OUT/findings-deduped.jsonl" "dedup"
+if [[ ! -s "$OUT/findings-raw.jsonl" ]]; then
+  python3 "$LIB" dedup-result --out "$OUT" --skipped empty
+elif [[ ! -f "$SKILL/prompts/dedup.md" ]]; then
+  python3 "$LIB" dedup-result --out "$OUT" --skipped no-prompt
 else
-  cp "$OUT/findings-raw.jsonl" "$OUT/findings-deduped.jsonl"
+  invoke_claude "claude-sonnet-5" "$SKILL/prompts/dedup.md" \
+    "$OUT/findings-raw.jsonl" "$OUT/findings-deduped.jsonl" "dedup" \
+    "$SKILL/schemas/dedup.json" || true
+  python3 "$LIB" dedup-result --out "$OUT"
+  sanitize_jsonl "$OUT/findings-deduped.jsonl" "dedup"
 fi
 echo "       wrote $OUT/findings-deduped.jsonl ($(wc -l < "$OUT/findings-deduped.jsonl" | tr -d ' ') after dedup)"
 
 # --- Phase 5: VALIDATE -----------------------------------------------------
 # Per-finding loop. Sonnet for the default ~90%; Opus for the 5 hard classes.
 # Synthesia's validator is "deliberately stricter than hunters" — discards ~60% of
-# hunter findings as false positives.
+# hunter findings as false positives. A finding that cannot be validated (cap hit,
+# CLI failure) is kept and marked UNVALIDATED, never dropped.
+PHASE="validate"
 echo "[5/6] validate (Sonnet ~90% / Opus on hard classes)"
 OPUS_CLASSES="authz cryptography multi-hop-taint agent-tool-abuse exploitability-dispute"
 : > "$OUT/findings-validated.jsonl"
+vi=0
 while IFS= read -r line; do
   [[ -z "$line" ]] && continue
+  vi=$((vi + 1))
+  printf '%s\n' "$line" > "$OUT/.validate-input"
+  if [[ ! -f "$SKILL/prompts/validator.md" ]]; then
+    python3 "$LIB" validator-result --finding "$OUT/.validate-input" --unvalidated "no validator playbook" \
+      >> "$OUT/findings-validated.jsonl"
+    continue
+  fi
   cls=$(echo "$line" | jq -r '.class // ""' 2>/dev/null || echo "")
   model="claude-sonnet-5"
-  est="0.05"
   for opus_cls in $OPUS_CLASSES; do
-    [[ "$cls" == "$opus_cls" ]] && { model="claude-opus-5-5"; est="0.30"; break; }
+    [[ "$cls" == "$opus_cls" ]] && { model="claude-opus-5-5"; break; }
   done
-  if [[ -f "$SKILL/prompts/validator.md" ]]; then
-    echo "$line" > "$OUT/.validate-input"
-    invoke_claude "$model" "$SKILL/prompts/validator.md" \
-      "$OUT/.validate-input" "$OUT/.validate-output" "$est" \
-      "$SKILL/schemas/validator.json" \
-      || { echo "cap hit during validation; partial results saved"; break; }
-    sanitize_jsonl "$OUT/.validate-output" "validator"
-    cat "$OUT/.validate-output" >> "$OUT/findings-validated.jsonl"
-  else
-    echo "$line" >> "$OUT/findings-validated.jsonl"
+  if ! python3 "$LIB" packet --role validator --review "$OUT/review" --finding "$OUT/.validate-input" \
+      --out "$OUT/.validate-packet.md"; then
+    python3 "$LIB" validator-result --finding "$OUT/.validate-input" --unvalidated "could not build the validator input" \
+      >> "$OUT/findings-validated.jsonl"
+    continue
   fi
+  invoke_claude "$model" "$SKILL/prompts/validator.md" \
+    "$OUT/.validate-packet.md" "$OUT/.validate-output" "validate:$vi" \
+    "$SKILL/schemas/validator.json" || true
+  python3 "$LIB" validator-result --finding "$OUT/.validate-input" --output "$OUT/.validate-output" \
+    >> "$OUT/findings-validated.jsonl"
 done < "$OUT/findings-deduped.jsonl"
 echo "       wrote $OUT/findings-validated.jsonl"
 
 # --- Phase 6: AGGREGATE ----------------------------------------------------
-echo "[6/6] aggregate (rank + emit) ....................."
-export OUT
-python3 - <<'PYEOF'
-import json, pathlib, os, datetime
-out = pathlib.Path(os.environ.get("OUT", "security/.output"))
-src = out / "findings-validated.jsonl"
-findings = []
-malformed_count = 0
-if src.exists():
-    for line in src.read_text().splitlines():
-        if not line.strip():
-            continue
-        try:
-            f = json.loads(line)
-        except Exception:
-            # sanitize_jsonl should have already filtered these; if any survived,
-            # log them and continue — aggregator MUST NOT crash on bad input.
-            malformed_count += 1
-            with open(out / ".malformed.jsonl", "a") as bad:
-                bad.write(f"aggregate-json-decode\t{line}\n")
-            continue
-        if not isinstance(f, dict):
-            malformed_count += 1
-            with open(out / ".malformed.jsonl", "a") as bad:
-                bad.write(f"aggregate-not-dict\t{json.dumps(f)}\n")
-            continue
-        if f.get("verdict") == "false-positive":
-            continue
-        findings.append(f)
-
-sev_order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
-def _exploit(f):
-    e = f.get("exploitability", 0)
-    try:
-        return -float(e)
-    except (TypeError, ValueError):
-        return 0.0
-findings.sort(key=lambda f: (sev_order.get(f.get("severity", "info"), 9), _exploit(f)))
-counts = {s: sum(1 for f in findings if f.get("severity") == s) for s in sev_order}
-
-md = []
-md.append("---")
-md.append(f"generated: {datetime.datetime.utcnow().isoformat()}Z")
-md.append(f"counts: {counts}")
-if malformed_count:
-    md.append(f"malformed_input_lines: {malformed_count}  # see .malformed.jsonl")
-md.append("---")
-md.append("")
-md.append("# Findings")
-md.append("")
-if not findings:
-    md.append("_No confirmed findings. Pipeline ran clean._")
-else:
-    for f in findings:
-        md.append(f"## [{f.get('severity','?').upper()}] {f.get('title','(no title)')}")
-        md.append("")
-        md.append(f"- **class**: `{f.get('class','?')}`")
-        md.append(f"- **file**: `{f.get('file','?')}`")
-        md.append(f"- **verdict**: `{f.get('verdict','?')}`")
-        md.append("")
-        if f.get("attack"):
-            md.append(f"**Attack**: {f['attack']}")
-            md.append("")
-        if f.get("fix"):
-            md.append(f"**Fix**: {f['fix']}")
-            md.append("")
-
-(out / "FINDINGS.md").write_text("\n".join(md))
-
-# Minimal SARIF — one run, results from validated findings.
-sarif = {
-    "version": "2.1.0",
-    "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
-    "runs": [{
-        "tool": {"driver": {"name": "ox-security-review", "informationUri": "https://github.com/sageox/ox"}},
-        "results": [
-            {
-                "ruleId": f.get("class", "unknown"),
-                "level": {"critical": "error", "high": "error", "medium": "warning", "low": "note", "info": "note"}.get(f.get("severity"), "warning"),
-                "message": {"text": f.get("title", "")},
-                "locations": [{"physicalLocation": {"artifactLocation": {"uri": (f.get("file") or "").split(":")[0]}}}],
-            }
-            for f in findings
-        ],
-    }],
-}
-(out / "findings.sarif").write_text(json.dumps(sarif, indent=2))
-print(f"aggregate: {sum(counts.values())} findings → {out}/FINDINGS.md + findings.sarif")
-print(f"counts: {counts}")
-PYEOF
-
-# --- Append to run-log -----------------------------------------------------
-if [[ "${SCAN_FULL:-0}" == "1" ]]; then
+# Coverage gate, ranking, FINDINGS.md + SARIF, the run-log entry and the SUMMARY
+# block all come from pipeline.py; its exit code is this script's (see header).
+PHASE="aggregate"
+echo "[6/6] aggregate (coverage gate + rank + emit) ....."
+if [[ "$SCAN_FULL" == "1" ]]; then
   scope_line="full"
-elif [[ -n "${SCOPE_ARG:-}" ]]; then
+elif [[ -n "$SCOPE_ARG" ]]; then
   scope_line="narrowed:$SCOPE_ARG"
 else
   scope_line="diff vs $SINCE"
 fi
-{
-  echo
-  echo "## $(date -u +'%Y-%m-%dT%H:%M:%SZ') — head $(git rev-parse --short HEAD)"
-  echo "- scope: $scope_line"
-  echo "- cost: \$$(cat "$COST_FILE")"
-  echo "- cap: \$$CAP_USD"
-  echo "- output: $OUT/FINDINGS.md"
-} >> "$OUT/run-log.md"
+agg_rc=0
+python3 "$LIB" aggregate --out "$OUT" --cap "$CAP_USD" --subsidized "${CC_SUBSIDIZED:-0}" \
+  --hunters "${HUNTERS[*]}" --skill "$SKILL" --scope-line "$scope_line" \
+  --head "$(git rev-parse --short HEAD)" || agg_rc=$?
 
-echo
-echo "==== SUMMARY ===="
-echo "report:  $OUT/FINDINGS.md"
-echo "sarif:   $OUT/findings.sarif"
-echo "cost:    \$$(cat "$COST_FILE") (cap \$$CAP_USD)"
-echo "log:     $OUT/run-log.md"
-
-# Surface per-hunter outcomes in the summary so a future maintainer reading
-# stdout sees the same picture as run-log.md. Bookkeeping is cheap; silent
-# hunter failures previously hid for two runs before we noticed.
-if [[ -s "$OUT/hunter-status.tsv" ]]; then
-  echo "hunters:"
-  while IFS=$'\t' read -r hname hstatus hcount; do
-    printf "  %-22s status=%-18s findings=%s\n" "$hname" "$hstatus" "$hcount"
-  done < "$OUT/hunter-status.tsv"
-fi
-
-if (( ${hunter_failures:-0} > 0 )); then
-  echo
-  echo "WARNING: $hunter_failures hunter(s) failed — partial coverage. Re-run when claude CLI is healthy."
-  echo "READY: orchestrate.sh completed 6-phase security review (with hunter failures)"
-  exit 1
-fi
-
-echo "READY: orchestrate.sh completed 6-phase security review"
+level="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["level"])' "$OUT/coverage.json" 2>/dev/null || echo unknown)"
+echo "READY: orchestrate.sh completed 6-phase security review (coverage: $level)"
+exit "$agg_rc"

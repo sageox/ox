@@ -31,6 +31,12 @@
 #   Trivy was patched in both cases, but the May-2026 community position is that trust is broken
 #   for a tool that ships in CI's critical path. Aqua's commercial fork is unaffected (controlled
 #   integration lag), but it isn't OSS. Future readers tempted to "just add Trivy back": don't.
+#
+# STATUS IS EVIDENCE, NOT ASSUMPTION: each scanner's exit code and output decide
+# whether it "ran", was "skipped" (not installed), or "failed" — pipeline.py
+# det-merge does the classifying. This tier used to append `|| true` to every
+# tool and grep the log for "not installed", so a gosec invocation that exited 3
+# on a removed golangci-lint flag was still reported as "ran" with 0 findings.
 
 set -euo pipefail
 
@@ -38,10 +44,13 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 OUT="$ROOT/security/.output"
 RULES="$ROOT/security/rules"
 BIN="$ROOT/bin"
+LIB="$ROOT/security/scripts/pipeline.py"
 mkdir -p "$OUT"
 
 # Use workspace bin/ first so we get our pinned versions, not whatever's on $PATH.
 export PATH="$BIN:$PATH"
+# Touched paths are repo-relative, and so are the scanners' targets.
+cd "$ROOT"
 
 # --- Args -------------------------------------------------------------------
 SCOPE="diff"        # "diff" (default) or "full"
@@ -58,35 +67,53 @@ Usage: $0 [--full] [--since <ref>]
   --since <ref>    Diff against this ref instead of origin/main.
 
 Output:
-  $OUT/findings-deterministic.json   merged JSON (jq-friendly)
-  $OUT/findings-deterministic.sarif  merged SARIF for GitHub Security tab
+  $OUT/findings-deterministic.json   merged JSON (jq-friendly), with per-scanner status
   $OUT/det-<tool>.{json,sarif,log}   per-tool raw output (debugging)
+  $OUT/det-<tool>.exit               per-tool exit code ("missing" = not installed)
+
+Exit codes: 0 every installed scanner ran · 1 a scanner failed · 3 no scanner ran (NO COVERAGE)
 EOF
       exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 1 ;;
   esac
 done
 
+# Reset this tier's artifacts so a scanner that does not run this time cannot
+# leave the last run's output behind to be merged as if it had. det-runner.log
+# is spared: it is orchestrate.sh's capture of this very script's output.
+for f in "$OUT"/det-* "$OUT"/findings-deterministic.json; do
+  [[ "$f" == "$OUT/det-runner.log" ]] || rm -f "$f"
+done
+
 # --- Compute touched files (diff scope) ------------------------------------
 TOUCHED_FILE="$OUT/det-touched.txt"
 if [[ "$SCOPE" == "diff" ]]; then
-  git diff --name-only "$SINCE"...HEAD > "$TOUCHED_FILE" || git diff --name-only "$SINCE" > "$TOUCHED_FILE"
-  if [[ ! -s "$TOUCHED_FILE" ]]; then
-    echo "deterministic: no changes vs $SINCE — exiting cleanly with empty findings"
-    echo '{"findings":[]}' > "$OUT/findings-deterministic.json"
+  CHANGED="$(git diff --name-only "$SINCE"...HEAD 2>/dev/null || git diff --name-only "$SINCE")"
+  if [[ -z "$CHANGED" ]]; then
+    echo "deterministic: no changes vs $SINCE — nothing to scan"
+    printf '{"findings": [], "count": 0, "tools": {}, "scope": "diff", "since": "%s", "coverage": "empty"}\n' \
+      "$SINCE" > "$OUT/findings-deterministic.json"
     exit 0
   fi
+  # A deleted file is a change, but there is nothing on disk to scan; passing
+  # its path to opengrep fails the whole opengrep run.
+  git diff --name-only --diff-filter=d "$SINCE"...HEAD > "$TOUCHED_FILE" 2>/dev/null \
+    || git diff --name-only --diff-filter=d "$SINCE" > "$TOUCHED_FILE"
 else
   : > "$TOUCHED_FILE"  # full scan; tools default to whole repo
 fi
 
 # --- Parallel runners -------------------------------------------------------
-# Each tool writes to its own log + output file, then we merge.
-# Failures don't stop other tools; merge phase notes which tool was missing.
+# Each tool writes its own log + output file and records its exit code, then
+# det-merge classifies and merges. Failures don't stop other tools.
+
+# record <tool> <exit-code | missing | nofiles>
+record() { echo "$2" > "$OUT/det-$1.exit"; }
 
 run_opengrep() {
   if ! command -v opengrep >/dev/null; then
     echo "opengrep: not installed (run make sec-install)" > "$OUT/det-opengrep.log"
+    record opengrep missing
     return 0
   fi
 
@@ -103,7 +130,8 @@ run_opengrep() {
     done
   fi
 
-  local args=("${rules_args[@]}" --sarif --output "$OUT/det-opengrep.sarif")
+  local args=(${rules_args[@]+"${rules_args[@]}"} --sarif --output "$OUT/det-opengrep.sarif")
+  local rc=0
   if [[ "$SCOPE" == "diff" ]]; then
     # Pass each touched path as its own argv entry — file paths with spaces or
     # glob metacharacters break under unquoted `$(cat …)` word-splitting.
@@ -111,45 +139,72 @@ run_opengrep() {
     while IFS= read -r f; do
       [[ -n "$f" ]] && files+=("$f")
     done < "$TOUCHED_FILE"
-    opengrep "${args[@]}" "${files[@]}" > "$OUT/det-opengrep.log" 2>&1 || true
+    if (( ${#files[@]} == 0 )); then
+      record opengrep nofiles
+      return 0
+    fi
+    opengrep "${args[@]}" "${files[@]}" > "$OUT/det-opengrep.log" 2>&1 || rc=$?
   else
-    opengrep "${args[@]}" "$ROOT" > "$OUT/det-opengrep.log" 2>&1 || true
+    opengrep "${args[@]}" "$ROOT" > "$OUT/det-opengrep.log" 2>&1 || rc=$?
   fi
+  record opengrep "$rc"
 }
 
 run_govulncheck() {
   if ! command -v govulncheck >/dev/null; then
     echo "govulncheck: not installed" > "$OUT/det-govulncheck.log"
+    record govulncheck missing
     return 0
   fi
   # Reachability is the whole point — run from the repo root where go.mod lives.
-  ( cd "$ROOT" && govulncheck -json ./... > "$OUT/det-govulncheck.json" ) 2> "$OUT/det-govulncheck.log" || true
+  local rc=0
+  govulncheck -json ./... > "$OUT/det-govulncheck.json" 2> "$OUT/det-govulncheck.log" || rc=$?
+  record govulncheck "$rc"
 }
 
 run_osv_scanner() {
   if ! command -v osv-scanner >/dev/null; then
     echo "osv-scanner: not installed" > "$OUT/det-osv.log"
+    record osv-scanner missing
     return 0
   fi
-  osv-scanner --format json --recursive "$ROOT" > "$OUT/det-osv.json" 2> "$OUT/det-osv.log" || true
+  local rc=0
+  osv-scanner --format json --recursive "$ROOT" > "$OUT/det-osv.json" 2> "$OUT/det-osv.log" || rc=$?
+  record osv-scanner "$rc"
 }
 
 run_syft_grype() {
   if ! command -v syft >/dev/null || ! command -v grype >/dev/null; then
     echo "syft/grype: not installed" > "$OUT/det-grype.log"
+    record grype missing
     return 0
   fi
-  syft "$ROOT" -o cyclonedx-json="$OUT/det-sbom.cdx.json" > "$OUT/det-syft.log" 2>&1 || return 0
-  grype sbom:"$OUT/det-sbom.cdx.json" -o sarif > "$OUT/det-grype.sarif" 2> "$OUT/det-grype.log" || true
+  local rc=0
+  syft "$ROOT" -o cyclonedx-json="$OUT/det-sbom.cdx.json" > "$OUT/det-syft.log" 2>&1 || rc=$?
+  if (( rc != 0 )); then
+    record grype "syft:$rc"
+    return 0
+  fi
+  grype sbom:"$OUT/det-sbom.cdx.json" -o sarif > "$OUT/det-grype.sarif" 2> "$OUT/det-grype.log" || rc=$?
+  record grype "$rc"
 }
 
 run_gosec() {
   if ! command -v golangci-lint >/dev/null; then
     echo "golangci-lint: not installed (run make lint)" > "$OUT/det-gosec.log"
+    record gosec missing
     return 0
   fi
-  # Extract gosec findings from golangci-lint output
-  ( cd "$ROOT" && golangci-lint run --enable=gosec --out-format=json ./... > "$OUT/det-gosec.json" 2> "$OUT/det-gosec.log" ) || true
+  # golangci-lint v2 removed --out-format; JSON goes to --output.json.path. The v1
+  # flag made every run exit 3 with empty output.
+  # security/golangci-gosec.yml, not the lint config: it keeps the path and
+  # permission rules `make lint` drops as noise, and leaves out the taint
+  # analyzers that never finish on this module. det-merge keeps only issues in
+  # touched files.
+  local rc=0
+  golangci-lint run -c "$ROOT/security/golangci-gosec.yml" --allow-parallel-runners --show-stats=false \
+    --output.json.path="$OUT/det-gosec.json" ./... > "$OUT/det-gosec.log" 2>&1 || rc=$?
+  record gosec "$rc"
 }
 
 # Launch all in parallel.
@@ -161,119 +216,14 @@ run_syft_grype  & PIDS+=($!)
 run_gosec       & PIDS+=($!)
 wait "${PIDS[@]}" || true
 
-# --- Merge into a single findings JSON -------------------------------------
-# Minimal merge: enumerate each tool's output, flatten to a common shape.
-# The orchestrator's dedup phase does the heavy normalization; this is just
-# "everything in one place" so the AI map phase has a single artifact to load.
-python3 - <<'PYEOF' > "$OUT/findings-deterministic.json"
-import json, glob, os, pathlib, sys
-out_dir = pathlib.Path(os.environ.get("OUT", "security/.output"))
-findings = []
-
-def load_sarif(path, tool):
-    try:
-        d = json.loads(pathlib.Path(path).read_text())
-    except Exception:
-        return
-    for run in d.get("runs", []):
-        for r in run.get("results", []):
-            findings.append({
-                "tool": tool,
-                "ruleId": r.get("ruleId", ""),
-                "level": r.get("level", "warning"),
-                "message": (r.get("message", {}) or {}).get("text", ""),
-                "locations": [
-                    {
-                        "file": (loc.get("physicalLocation", {}).get("artifactLocation", {}) or {}).get("uri", ""),
-                        "line": (loc.get("physicalLocation", {}).get("region", {}) or {}).get("startLine", 0),
-                    }
-                    for loc in r.get("locations", [])
-                ],
-            })
-
-# Each *.sarif from the per-tool runs.
-for sarif in sorted(out_dir.glob("det-*.sarif")):
-    tool = sarif.stem.replace("det-", "").split("-")[0]
-    load_sarif(sarif, tool)
-
-# govulncheck JSON streaming — simplified ingest.
-gv = out_dir / "det-govulncheck.json"
-if gv.exists():
-    for line in gv.read_text().splitlines():
-        try:
-            obj = json.loads(line)
-        except Exception:
-            continue
-        if "finding" in obj:
-            f = obj["finding"]
-            findings.append({
-                "tool": "govulncheck",
-                "ruleId": f.get("osv", ""),
-                "level": "error",
-                "message": f.get("summary", ""),
-                "locations": [],
-                "reachable": True,  # govulncheck only reports reachable vulns
-            })
-
-# osv-scanner JSON.
-osv = out_dir / "det-osv.json"
-if osv.exists():
-    try:
-        d = json.loads(osv.read_text())
-    except Exception:
-        d = {}
-    for r in d.get("results", []):
-        for pkg in r.get("packages", []):
-            for v in pkg.get("vulnerabilities", []):
-                findings.append({
-                    "tool": "osv-scanner",
-                    "ruleId": v.get("id", ""),
-                    "level": "warning",
-                    "message": v.get("summary", ""),
-                    "locations": [{"file": r.get("source", {}).get("path", ""), "line": 0}],
-                })
-
-# gosec via golangci-lint JSON.
-gosec = out_dir / "det-gosec.json"
-if gosec.exists():
-    try:
-        d = json.loads(gosec.read_text())
-    except Exception:
-        d = {}
-    for issue in d.get("Issues", []):
-        if issue.get("FromLinter") == "gosec":
-            findings.append({
-                "tool": "gosec",
-                "ruleId": issue.get("RuleId", ""),
-                "level": "warning",
-                "message": issue.get("Text", ""),
-                "locations": [{
-                    "file": issue.get("Pos", {}).get("Filename", ""),
-                    "line": issue.get("Pos", {}).get("Line", 0),
-                }],
-            })
-
-print(json.dumps({"findings": findings, "count": len(findings)}, indent=2))
-PYEOF
-
-# --- SUMMARY block ----------------------------------------------------------
-# Single grep-friendly block at the end, per ~/.claude/rules/human-time.md
-# ("script should output a structured SUMMARY block ... so the human can scan").
-echo
-echo "[security-review] phase=deterministic status=complete scope=$SCOPE since=$SINCE"
-echo "scope: $SCOPE (since=$SINCE)"
-echo "touched_files: $(wc -l < "$TOUCHED_FILE" | tr -d ' ')"
-for tool in opengrep govulncheck osv-scanner syft grype gosec; do
-  log="$OUT/det-${tool%%-*}.log"
-  if [[ ! -f "$log" ]]; then
-    printf "  %-14s %s\n" "$tool:" "(no log)"
-  elif grep -q "not installed" "$log" 2>/dev/null; then
-    printf "  %-14s %s\n" "$tool:" "skipped (not installed)"
-  else
-    printf "  %-14s %s\n" "$tool:" "ran"
-  fi
-done
-findings_count=$(jq -r '.count' "$OUT/findings-deterministic.json" 2>/dev/null || echo "?")
-echo "merged_findings: $findings_count"
+# --- Classify, merge, summarize ---------------------------------------------
+# det-merge writes findings-deterministic.json (findings + per-scanner status for
+# the AI map phase and the coverage gate) and prints the SUMMARY block, one
+# grep-friendly line per scanner (per ~/.claude/rules/human-time.md: "script
+# should output a structured SUMMARY block ... so the human can scan").
+det_rc=0
+python3 "$LIB" det-merge --out "$OUT" --root "$ROOT" --scope "$SCOPE" --since "$SINCE" \
+  --touched "$TOUCHED_FILE" || det_rc=$?
 
 echo "READY: deterministic.sh completed parallel security scanner run"
+exit "$det_rc"

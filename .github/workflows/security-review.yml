@@ -26,6 +26,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       sensitive: ${{ steps.filter.outputs.sensitive }}
+      pipeline: ${{ steps.filter.outputs.pipeline }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
@@ -40,6 +41,24 @@ jobs:
               - 'cmd/ox/redaction.go'
               - 'go.mod'
               - 'go.sum'
+            pipeline:
+              - 'security/**'
+              - '.claude/skills/security-review/**'
+
+  # =============================================================================
+  # The pipeline's own tests: fake claude + fake scanners, no network, no cost.
+  # They prove a run reports what it reviewed — the diff reaches the hunters,
+  # an empty review says NO COVERAGE, a failed scanner says failed.
+  # =============================================================================
+  pipeline-tests:
+    needs: changes
+    if: needs.changes.outputs.pipeline == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Test the security-review pipeline
+        run: make sec-test
 
   # =============================================================================
   # Fast security job: run deterministic scanners only

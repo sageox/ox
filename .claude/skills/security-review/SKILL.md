@@ -13,7 +13,7 @@ You are orchestrating a [Synthesia-style 6-phase security review](https://www.sy
 - `/security-review --scope=<path-glob>` — narrow to a specific path.
 - `/security-review --hunter=<name>` — run only one hunter (debug). Valid names: `cli-input`, `secrets-redaction`, `daemon-ipc`, `supply-chain`, `llm-trust`.
 - `/security-review --rerun` — re-run on the same diff, dedupe against the previous run's findings.
-- `/security-review --cap=<usd>` — raise the per-run cost cap (default $2; persisted in `security/config.yml`).
+- `/security-review --cap=<usd>` — raise the per-run cost cap (default $8; persisted in `security/config.yml`).
 
 ## What you do
 
@@ -25,29 +25,34 @@ bash security/scripts/orchestrate.sh "$@"
 
 The orchestrator drives all six phases:
 
-1. **Prep** — compute scope (diff vs origin/main, language mix, touched packages), write `security/.output/scope.md`.
-2. **Map** — run `security/scripts/deterministic.sh` (parallel OSS scanners) + spawn the Cartographer subagent (Haiku) to draw the call graph from entry points (CLI commands, daemon IPC handlers) to sinks. Writes `security/.output/surface.md`.
-3. **Hunt** — spawn 5 hunter subagents in parallel (Sonnet). Each has an explicit perspective frame (`cli-input` / `secrets-redaction` / `daemon-ipc` / `supply-chain` / `llm-trust`) to fight finding convergence. Writes `security/.output/findings-raw.jsonl`.
+1. **Prep** — compute scope (diff vs origin/main), write `security/.output/scope.md`, and build the review input: the diff itself, test files excluded, split into chunks under `diff.chunk_bytes` (`security/.output/review/`).
+2. **Map** — run `security/scripts/deterministic.sh` (parallel OSS scanners; each reports `ran` / `skipped` / `failed`) + one Cartographer call (Haiku) per chunk, reading the diff, to map entry points (CLI commands, daemon IPC handlers) to sinks. Writes `security/.output/surface.md`.
+3. **Hunt** — per chunk, 5 hunter subagents in parallel (Sonnet), each reading the diff, the surface map and scope. Each has an explicit perspective frame (`cli-input` / `secrets-redaction` / `daemon-ipc` / `supply-chain` / `llm-trust`) to fight finding convergence. Writes `security/.output/findings-raw.jsonl`.
 4. **Dedup** — single Sonnet pass merges hunter findings + deterministic findings by root cause. Writes `security/.output/findings-deduped.jsonl`.
 5. **Validate** — one call per finding, **model split**: Sonnet for ~90%, Opus for the hard classes (`secrets-redaction-bypass`, `daemon-ipc-authz-bypass`, `supply-chain-tampering`). Stricter than hunters; traces real call paths; checks existing mitigations.
-6. **Aggregate** — drop false-positives, rank by severity, emit `security/.output/FINDINGS.md` (markdown) + `security/.output/findings.sarif` (machine).
+6. **Aggregate** — apply the coverage gate, drop false-positives, rank by severity, emit `security/.output/FINDINGS.md` (markdown) + `security/.output/findings.sarif` (machine).
+
+Subagents get the read-only `Read`/`Grep`/`Glob` tools and nothing else.
 
 ## After the orchestrator returns
 
-Show the user:
+Show the user, coverage first:
 
-1. The headline counts: `N critical, M high, P medium, Q low` (from FINDINGS.md frontmatter).
-2. The top 3 findings (by severity then exploitability).
-3. The path to the full report: `security/.output/FINDINGS.md`.
-4. The cost (from the orchestrator's run-log): `$X.XX, Yth-percentile vs last 30 runs`.
+1. **Coverage** — the `coverage:` line of the SUMMARY block (also `coverage:` in the FINDINGS.md frontmatter). If it says `NO COVERAGE`, lead with that and its reasons: a required stage did not run, so never call the run clean or report "0 findings" as a result — any findings it lists are still real. `PARTIAL COVERAGE` means findings are real but their absence is not, for the parts listed.
+2. The headline counts: `N critical, M high, P medium, Q low` (from FINDINGS.md frontmatter).
+3. The top 3 findings (by severity then exploitability). `UNVALIDATED` findings were never checked by the validator; say so.
+4. The path to the full report: `security/.output/FINDINGS.md`.
+5. The cost: the SUMMARY block's `cost:` line.
+
+Exit codes: `0` every stage that ran completed · `1` a stage failed · `2` the cost cap stopped the AI phases · `3` NO COVERAGE.
 
 Do not paste the full FINDINGS.md into the chat — it can be hundreds of lines. Summarize, link. Keep the summary under 120 words.
 
 ## Cost behavior
 
-- On-demand runs (this skill) via Claude Code subsidized tokens are effectively $0 marginal. The cost cap still applies as a budget signal, not a billing limit.
+- On-demand runs (this skill) via Claude Code subsidized tokens are effectively $0 marginal. The cost cap still applies as a budget signal, not a billing limit: spend is the `total_cost_usd` each subagent call reports, including calls stopped at the cap. `CC_SUBSIDIZED=1` keeps the tally but stops enforcing the cap.
 - If `ANTHROPIC_API_KEY` is unset and `CC_SUBSIDIZED` is not set, the AI tier won't run. Surface this with: "AI tier disabled (no `ANTHROPIC_API_KEY` and not running under Claude Code). Run `make sec-fast` for the deterministic-only pass."
-- If a run hits the cap mid-pipeline, the orchestrator emits a partial `FINDINGS.md` and the run-log notes which phase paused. Re-run with `--cap=5` to continue, or accept the partial report.
+- If a run hits the cap mid-pipeline, the remaining AI calls are skipped, findings not yet validated are kept and marked `UNVALIDATED`, and `FINDINGS.md` names the phase that paused (exit 2). Re-run with `--cap=<higher>`, or accept the partial report.
 
 ## Sensitive paths (auto-elevate severity, always in scope)
 
