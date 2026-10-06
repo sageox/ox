@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/lfs"
 )
 
@@ -162,7 +163,22 @@ func (g *sessionStageGuard) stage(ctx context.Context) (sessionGuardOutcome, err
 	if err != nil {
 		return sessionGuardOutcome{}, err
 	}
-	out := g.check(rels)
+	// `git add` would commit conflict markers as if resolved (#1055, #1189); leave them for a human
+	var clean, marked []string
+	for _, rel := range rels {
+		abs := filepath.Join(g.repoDir, rel)
+		// a symlink is staged as its target path, so reading through it would scan unrelated bytes
+		if info, err := os.Lstat(abs); err == nil && info.Mode().IsRegular() {
+			if has, err := gitutil.HasConflictMarkers(abs); err == nil && has {
+				slog.Warn("session file not staged", "path", filepath.ToSlash(rel), "reason", "contains unresolved conflict markers")
+				marked = append(marked, rel)
+				continue
+			}
+		}
+		clean = append(clean, rel)
+	}
+	out := g.check(clean)
+	out.Skipped = append(out.Skipped, marked...)
 	if err := g.gitPathspec(ctx, out.Stage, "add", "--sparse"); err != nil {
 		return out, fmt.Errorf("stage sessions: %w", err)
 	}
