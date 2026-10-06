@@ -40,6 +40,15 @@ Feature: Initializing a Repository for SageOx
       Then ox tells him this is not a git repository
       And ox points him to initialize git first
 
+  Rule: Init before signing in fails and says how to sign in
+
+    Scenario: Devon runs init before signing in
+      Given Devon has never signed in and is in an un-initialized git repository
+      When Devon runs `ox init`
+      Then ox tells Devon to run `ox login` first
+      And `ox init` fails, so `ox init && git add .sageox/` stops there
+      And the repository stays un-initialized
+
   Rule: The team commits the .sageox directory to share the setup
 
     Scenario: Devon commits the SageOx configuration for the team

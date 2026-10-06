@@ -23,6 +23,7 @@ import (
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/doctor"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/identity"
@@ -336,7 +337,8 @@ func runInit() error {
 			fmt.Printf("  %s\n", cli.StyleCommand.Render("git pull"))
 			fmt.Println()
 			fmt.Printf("To initialize with a new team anyway: %s\n", cli.StyleCommand.Render("ox init --force"))
-			return cli.ErrSilent
+			// usage: ox did not fail; the repository needs a git pull
+			return cli.Silent(errkind.Errorf(errkind.Usage, "already initialized on the remote"))
 		} else if stale {
 			fmt.Println()
 			cli.PrintWarning("Your branch may be behind the remote")
@@ -373,7 +375,8 @@ func runInit() error {
 				fmt.Printf("You need to login to %s first.\n", endpoint.NormalizeSlug(selectedEndpoint))
 				fmt.Println()
 				fmt.Printf("Run %s to authenticate.\n", cli.StyleCommand.Render("ox login"))
-				return nil
+				// nothing was initialized, so this must not exit 0
+				return cli.Silent(errkind.Errorf(errkind.NotLoggedIn, "ox init requires login to the selected endpoint"))
 			}
 			_ = os.Setenv(endpoint.EnvVar, selectedEndpoint) // Setenv fails only on an invalid name
 			fmt.Println()
@@ -392,7 +395,7 @@ func runInit() error {
 		fmt.Println()
 		fmt.Printf("Run %s to authenticate first.\n", cli.StyleCommand.Render("ox login"))
 		fmt.Println()
-		return cli.ErrSilent
+		return cli.Silent(errkind.Errorf(errkind.NotLoggedIn, "ox init requires authentication"))
 	}
 
 	// === TEAM SELECTION ===

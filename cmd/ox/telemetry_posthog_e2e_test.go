@@ -229,6 +229,8 @@ func TestPostHog_EverydayFailuresSayWhatWentWrong(t *testing.T) {
 		{repo, []string{"sync"}, "sync", "daemon", "daemon start disabled: OX_NO_DAEMON=1"},
 		// How AI coworkers run it: the failure is printed as JSON, not as an error.
 		{repo, []string{"sync", "--json"}, "sync", "daemon", "daemon start disabled: OX_NO_DAEMON=1"},
+		// Last: a regression that let it through would initialize repo.
+		{repo, []string{"init"}, "init", "not_logged_in", "ox init requires authentication"},
 	}
 	for _, f := range failures {
 		output, code, _ := testguard.RunOx(t, e.bin, f.dir, e.env, f.args...)
