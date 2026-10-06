@@ -326,7 +326,7 @@ func (c *RepoClient) getRepos(ctx context.Context) (*ReposResponse, error) {
 // GetGitCredentials binds the Git PAT returned by discovery to this client's bearer.
 func (c *RepoClient) GetGitCredentials(ctx context.Context) (*gitserver.GitCredentials, error) {
 	resp, err := c.getRepos(ctx)
-	if err != nil || resp == nil {
+	if err != nil {
 		return nil, err
 	}
 	if resp.Token == "" {

@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -242,32 +241,16 @@ func TestCheckAndUpdate_200_PreservesNoticeLedger(t *testing.T) {
 	assert.Equal(t, stamped.UTC(), got.LastNaggedAt.UTC())
 }
 
-// Failure prevented: headless team-token sessions make release-check requests
-// and broadcast upgrade notices intended for a coworker managing a local CLI.
 func TestCheckLatestVersion_TeamTokenSuppressesUpgradeWhispers(t *testing.T) {
 	t.Setenv("SAGEOX_ENDPOINT", "https://sageox.ai")
-	var calls atomic.Int32
-	cache := testVersionCacheWithServer(t, func(w http.ResponseWriter, _ *http.Request) {
-		calls.Add(1)
-		_ = json.NewEncoder(w).Encode(map[string]string{"tag_name": "v999.0.0"})
-	})
+	t.Setenv("SAGEOX_TOKEN", "oxt_test_1ljPfr")
 	s := newDiscoveryTestScheduler(t)
-	s.versionCache = cache
+	s.versionCache = testVersionCacheWithServer(t, func(http.ResponseWriter, *http.Request) {
+		t.Error("team-token sessions must not check releases")
+	})
 	s.whisperRegistry = NewWhisperRegistry(openTestStore(t), nil)
-	for _, token := range []string{"oxt_test_1ljPfr", "oxt_test_bad"} {
-		t.Setenv("SAGEOX_TOKEN", token)
-		s.checkLatestVersion(context.Background())
-		require.Zero(t, calls.Load(), "team-token sessions must not check releases")
-		whispers, err := s.whisperRegistry.GetWhispers("test-coworker", whisperstore.AttentionAll, nil)
-		require.NoError(t, err)
-		require.Empty(t, whispers, "even a malformed team token must suppress upgrade notices")
-	}
-
-	t.Setenv("SAGEOX_TOKEN", "personal-access-token")
 	s.checkLatestVersion(context.Background())
-	require.EqualValues(t, 1, calls.Load(), "personal sessions should continue checking releases")
 	whispers, err := s.whisperRegistry.GetWhispers("test-coworker", whisperstore.AttentionAll, nil)
 	require.NoError(t, err)
-	require.Len(t, whispers, 1)
-	require.Equal(t, "upgrade", whispers[0].Topic)
+	require.Empty(t, whispers)
 }

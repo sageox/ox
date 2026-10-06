@@ -151,9 +151,6 @@ func (s *SyncScheduler) discoverTeams(ctx context.Context) {
 		}
 		return
 	}
-	if newCreds == nil {
-		return
-	}
 	if s.issues != nil {
 		s.issues.ClearIssue(IssueTypeAuthExpiring, "")
 	}

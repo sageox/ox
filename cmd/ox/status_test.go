@@ -1363,6 +1363,7 @@ func TestRenderAuthStatus_RejectedTokenGetsFamilyAwareHint(t *testing.T) {
 			if tt.envToken == validTeamToken {
 				assert.NotContains(t, out, "ox login")
 				assert.Contains(t, out, "Rotate or re-mint")
+				assert.Contains(t, checkAuthentication().detail, "Rotate or re-mint")
 			} else {
 				assert.Contains(t, out, "ox login")
 			}

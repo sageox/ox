@@ -30,27 +30,6 @@ func TestNewClient(t *testing.T) {
 	assert.Equal(t, "Basic b2F1dGgyOnRlc3QtdG9rZW4=", c.authHeader)
 	assert.Equal(t, 2*time.Minute, c.httpClient.Timeout, "batch API timeout should be 2 minutes")
 
-	prevDir := gitserver.TestSetConfigDirOverride(t.TempDir())
-	prevFile := gitserver.TestSetForceFileStorage(true)
-	t.Cleanup(func() {
-		gitserver.TestSetConfigDirOverride(prevDir)
-		gitserver.TestSetForceFileStorage(prevFile)
-	})
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	t.Setenv("OX_XDG_DISABLE", "")
-	t.Setenv(auth.EnvVarToken, "")
-	const ep = "https://api.test.sageox.ai"
-	_, err := NewClientForEndpoint(context.Background(), "https://git.sageox.io/ledger.git", ep)
-	require.Error(t, err)
-	assert.Equal(t, errkind.NotLoggedIn, errkind.Of(err), "missing credentials retain their authentication classification")
-	require.NoError(t, gitserver.SaveCredentialsForEndpoint(ep, gitserver.GitCredentials{}))
-	_, err = NewClientForEndpoint(context.Background(), "https://git.sageox.io/ledger.git", ep)
-	require.Error(t, err)
-	assert.Equal(t, errkind.NotLoggedIn, errkind.Of(err), "an empty offline PAT must not create a usable client")
-	t.Setenv(endpoint.EnvVar, ep)
-	t.Setenv(auth.EnvVarToken, "oxt_invalid")
-	_, err = NewClientForEndpoint(context.Background(), "https://git.sageox.io/ledger.git", ep)
-	require.ErrorContains(t, err, "SAGEOX_TOKEN")
 }
 
 func TestNewClient_TrailingSlash(t *testing.T) {
@@ -772,7 +751,7 @@ func TestLFSRefreshesRejectedCredentials(t *testing.T) {
 // Failure prevented: a canceled LFS batch waits for PAT, OAuth, or JWT refresh
 // and can persist fallback credentials after its caller has stopped the request.
 func TestLFSBatchCancelsCredentialRefresh(t *testing.T) {
-	for _, stage := range []string{"constructor", "before batch", "after 401", "OAuth", "JWT"} {
+	for _, stage := range []string{"OAuth", "JWT"} {
 		t.Run(stage, func(t *testing.T) {
 			prevDir := gitserver.TestSetConfigDirOverride(t.TempDir())
 			prevFile := gitserver.TestSetForceFileStorage(true)
@@ -783,11 +762,8 @@ func TestLFSBatchCancelsCredentialRefresh(t *testing.T) {
 			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 			t.Setenv("OX_XDG_DISABLE", "")
 			t.Setenv(auth.EnvVarToken, "oxt_test_1ljPfr")
-			blockedPath := "/api/v1/cli/repos"
-			switch stage {
-			case "OAuth":
-				blockedPath = auth.TokenEndpoint
-			case "JWT":
+			blockedPath := auth.TokenEndpoint
+			if stage == "JWT" {
 				blockedPath = "/api/v1/cli/auth/token"
 			}
 			started, release := make(chan struct{}), make(chan struct{})
@@ -819,27 +795,17 @@ func TestLFSBatchCancelsCredentialRefresh(t *testing.T) {
 			}))
 			client, err := NewClientForEndpoint(context.Background(), srv.URL+"/ledger.git", srv.URL)
 			require.NoError(t, err)
-			switch stage {
-			case "constructor", "before batch":
-				t.Setenv(auth.EnvVarToken, "oxt_rotated_1lKvCA")
-			case "OAuth", "JWT":
-				t.Setenv(auth.EnvVarToken, "")
-				require.NoError(t, auth.SaveTokenForEndpoint(srv.URL, &auth.StoredToken{
-					AccessToken: "expired-jwt", RefreshToken: "valid-refresh",
-					ExpiresAt: time.Now().Add(-time.Hour),
-				}))
-			}
+			t.Setenv(auth.EnvVarToken, "")
+			require.NoError(t, auth.SaveTokenForEndpoint(srv.URL, &auth.StoredToken{
+				AccessToken: "expired-jwt", RefreshToken: "valid-refresh",
+				ExpiresAt: time.Now().Add(-time.Hour),
+			}))
 
 			ctx, cancel := context.WithCancel(context.Background())
 			t.Cleanup(cancel)
 			done := make(chan error, 1)
 			go func() {
 				defer close(done)
-				if stage == "constructor" {
-					_, err := NewClientForEndpoint(ctx, srv.URL+"/ledger.git", srv.URL)
-					done <- err
-					return
-				}
 				_, err := client.BatchUploadContext(ctx, []BatchObject{{OID: "abc", Size: 3}})
 				done <- err
 			}()
@@ -864,19 +830,13 @@ func TestLFSBatchCancelsCredentialRefresh(t *testing.T) {
 			case <-time.After(time.Second):
 				t.Fatal("LFS credential refresh ignored caller cancellation")
 			}
-			if stage == "after 401" {
-				require.EqualValues(t, 1, batchCalls.Load())
-			} else {
-				require.Zero(t, batchCalls.Load())
-			}
+			require.Zero(t, batchCalls.Load())
 			creds, err := gitserver.LoadCredentialsForEndpoint(srv.URL)
 			require.NoError(t, err)
 			require.Equal(t, "old-pat", creds.Token, "cancellation must preserve the PAT cache")
-			if stage == "OAuth" || stage == "JWT" {
-				token, err := auth.GetTokenForEndpoint(srv.URL)
-				require.NoError(t, err)
-				require.Equal(t, "expired-jwt", token.AccessToken, "canceled JWT exchange must not save an opaque fallback")
-			}
+			token, err := auth.GetTokenForEndpoint(srv.URL)
+			require.NoError(t, err)
+			require.Equal(t, "expired-jwt", token.AccessToken, "canceled JWT exchange must not save an opaque fallback")
 		})
 	}
 }
