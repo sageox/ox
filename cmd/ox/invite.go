@@ -1301,6 +1301,12 @@ func renderInviteOpAbort(w io.Writer, err error, jsonOutput bool, verb string) e
 	case errors.Is(err, api.ErrUnauthorized):
 		return errInviteNotAuthenticated(w, jsonOutput, errkind.Auth)
 	case errors.Is(err, api.ErrInviteUnsupported), errors.Is(err, api.ErrInviteNotAMember):
+		// Printed alike, but only a team out of reach is about access: an
+		// unrouted request means the server has no CLI invitations.
+		kind := errkind.Auth
+		if errors.Is(err, api.ErrInviteUnsupported) {
+			kind = errkind.Other
+		}
 		if jsonOutput {
 			if jerr := writeJSONIndent(w, map[string]string{
 				"error":    "no_access",
@@ -1309,11 +1315,11 @@ func renderInviteOpAbort(w io.Writer, err error, jsonOutput bool, verb string) e
 			}); jerr != nil {
 				return jerr
 			}
-			return silentFailure(errkind.Auth, "no_access", err)
+			return silentFailure(kind, "no_access", err)
 		}
 		fmt.Fprintf(w, "%s %s\n\n", inviteErrStyle.Render("✗"), err.Error())
 		cli.PrintActionHintTo(w, "ox teams", "List teams you belong to")
-		return silentFailure(errkind.Auth, "no_access", err)
+		return silentFailure(kind, "no_access", err)
 	case errors.Is(err, api.ErrInviteForbidden):
 		reason := api.InviteForbiddenReason(err)
 		if reason == "" {

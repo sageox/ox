@@ -151,6 +151,8 @@ func TestInvite_FailuresSayWhy(t *testing.T) {
 	}{
 		{"the server rejects the login", api.ErrUnauthorized, errkind.Auth, "unauthenticated"},
 		{"a team that is missing or not the inviter's", api.ErrInviteNotAMember, errkind.Auth, "no_access"},
+		// Printed the same as a team out of reach, but the server has no route.
+		{"a server without CLI invitations", api.ErrInviteUnsupported, errkind.Other, "no_access"},
 		{"the server refuses", &api.ForbiddenError{Reason: "admins only"}, errkind.Auth, "forbidden"},
 	} {
 		for _, jsonMode := range []bool{false, true} {
