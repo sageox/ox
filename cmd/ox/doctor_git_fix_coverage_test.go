@@ -173,6 +173,12 @@ func TestSaveGitCredentialsFromRepos_BindsBearer(t *testing.T) {
 			t.Chdir(root)
 			t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 			t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+			ledgerPath := filepath.Join(gitRoot, "ledger.git")
+			const oldURL = "https://oauth2:doctor-pat@127.0.0.1/ledger.git"
+			hostedTestGit(t, ledgerPath, "remote", "add", "origin", oldURL)
+			require.NoError(t, config.SaveLocalConfig(root, &config.LocalConfig{
+				Ledger: &config.LedgerConfig{Path: ledgerPath},
+			}))
 			boundBearer := validTeamToken
 			rotated := strings.HasPrefix(outcome, "rotation")
 			if rotated {
@@ -204,6 +210,7 @@ func TestSaveGitCredentialsFromRepos_BindsBearer(t *testing.T) {
 				stored, err := gitserver.LoadCredentialsForEndpoint(server.URL)
 				require.NoError(t, err)
 				assert.Equal(t, cached, stored)
+				assert.Equal(t, oldURL, hostedTestGit(t, ledgerPath, "remote", "get-url", "origin"))
 				return
 			}
 
@@ -216,6 +223,7 @@ func TestSaveGitCredentialsFromRepos_BindsBearer(t *testing.T) {
 				assert.True(t, checkGitPATLiveness(false).passed)
 				require.Zero(t, refreshes.Load(), "matching and offline caches need no API refresh")
 				require.EqualValues(t, 1, oldProbes.Load())
+				assert.Equal(t, oldURL, hostedTestGit(t, ledgerPath, "remote", "get-url", "origin"))
 				return
 			}
 
@@ -234,6 +242,7 @@ func TestSaveGitCredentialsFromRepos_BindsBearer(t *testing.T) {
 			} {
 				t.Run(check.name, func(t *testing.T) {
 					require.NoError(t, gitserver.SaveCredentialsForEndpoint(server.URL, *cached))
+					hostedTestGit(t, ledgerPath, "remote", "set-url", "origin", oldURL)
 					before := refreshes.Load()
 					result := check.run()
 					assert.Equal(t, outcome == "rotation repaired", result.passed && !result.warning)
@@ -245,12 +254,15 @@ func TestSaveGitCredentialsFromRepos_BindsBearer(t *testing.T) {
 						assert.Contains(t, result.detail, "Rotate or re-mint")
 						assert.Equal(t, cached, stored, "a rejected refresh must preserve the cache")
 						assert.Zero(t, freshProbes.Load())
+						assert.Equal(t, oldURL, hostedTestGit(t, ledgerPath, "remote", "get-url", "origin"))
 					} else {
 						if check.name != "liveness repair" {
 							assert.Contains(t, result.message, "refreshed, 1 repos (expires in")
 						}
 						assert.Equal(t, "fresh-pat", stored.Token)
 						assert.Equal(t, gitserver.BearerTokenFingerprint(validTeamToken), stored.BearerTokenHash)
+						assert.Equal(t, "https://127.0.0.1/ledger.git", hostedTestGit(t, ledgerPath, "remote", "get-url", "origin"))
+						assert.Contains(t, hostedTestGit(t, ledgerPath, "config", "--get", "credential.https://127.0.0.1.helper"), "git-credential-helper")
 					}
 				})
 			}

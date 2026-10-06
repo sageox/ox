@@ -65,6 +65,7 @@ func checkGitPATLiveness(fix bool) checkResult {
 			return FailedCheck(name, "credentials are unverified for the current token",
 				"auto-repair failed; "+auth.ReauthenticationRemedy(projectEndpoint))
 		}
+		refreshExistingRemotes(projectEndpoint)
 	}
 
 	if creds.IsExpired() {

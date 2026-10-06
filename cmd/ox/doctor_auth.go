@@ -151,6 +151,8 @@ func refreshGitCredentials(reason string) checkResult {
 			fmt.Sprintf("API error: %v. %s", err, auth.ReauthenticationRemedy(projectEndpoint)))
 	}
 
+	refreshExistingRemotes(projectEndpoint)
+
 	return PassedCheck("Git credentials",
 		fmt.Sprintf("refreshed, %d repos (expires in %s)", len(creds.Repos), formatCredentialExpiry(creds.ExpiresAt)))
 }
