@@ -169,6 +169,18 @@ func TestRunSessionConflictMarkers(t *testing.T) {
 	}
 }
 
+// an unreadable upstream must fail the check, never report a clean Ledger it did not look at
+func TestRunSessionConflictMarkers_UnreadableUpstreamFails(t *testing.T) {
+	ledger := newMarkedLedger(t, false)
+	ref := filepath.Join(ledger, ".git", "refs", "remotes", "origin", "main")
+	require.NoError(t, os.WriteFile(ref, []byte("0123456789012345678901234567890123456789\n"), 0o644))
+
+	result := runSessionConflictMarkers(ledger, true)
+
+	assert.False(t, result.passed, "%s", result.message)
+	assert.False(t, result.skipped, "%s", result.message)
+}
+
 func TestCheckSessionConflictMarkers_NoLedgerIsSkipped(t *testing.T) {
 	skipIntegration(t)
 	dir := t.TempDir()
@@ -186,6 +198,22 @@ func TestSessionConflictMarkersCheck_IsRegistered(t *testing.T) {
 
 	require.True(t, ok, "--fix-slug needs the check registered")
 	assert.Equal(t, FixLevelSuggested, check.FixLevel)
+}
+
+func TestResolveMarkedFile_RefusesOrphanedTail(t *testing.T) {
+	ledger := newMarkedLedger(t, false)
+	orphan := "sessions/2026-10-06T13-00-dee-OxDDDD/notes.md"
+	writeLedgerFile(t, ledger, orphan, "notes\n=======\n>>>>>>> Stashed changes\n")
+	mustRunGit(t, ledger, "add", "-A")
+	mustRunGit(t, ledger, "commit", "-m", "orphaned tail")
+
+	report, err := resolveCommittedConflictMarkers(context.Background(), ledger, true)
+
+	require.NoError(t, err)
+	require.Len(t, report.Unrepairable, 1)
+	assert.Equal(t, orphan, report.Unrepairable[0].Path)
+	assert.Contains(t, report.Unrepairable[0].Reason, "not a balanced")
+	assert.ElementsMatch(t, []string{markedUpstreamMeta, markedLocalOnly}, report.Resolved)
 }
 
 func TestResolveMarkedFile_RefusesLocalEdit(t *testing.T) {
@@ -212,6 +240,7 @@ func TestKeepUpstreamSide(t *testing.T) {
 		{"two-way", autostashConflict, "{\n\"title\":\"kept\"\n}\n", true},
 		{"diff3 base dropped", "{\n<<<<<<< Updated upstream\n\"a\":1\n||||||| base\n\"a\":0\n=======\n\"a\":2\n>>>>>>> Stashed changes\n}\n", "{\n\"a\":1\n}\n", true},
 		{"orphaned tail", "{}\n=======\n>>>>>>> Stashed changes\n", "", false},
+		{"nested start", "<<<<<<< Updated upstream\n<<<<<<< again\n=======\n>>>>>>> Stashed changes\n", "", false},
 		{"unterminated block", "<<<<<<< Updated upstream\n{}\n=======\n", "", false},
 	}
 	for _, tt := range tests {
