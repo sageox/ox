@@ -18,6 +18,7 @@ import (
 	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/lfs/pointer"
+	"github.com/sageox/ox/internal/sacred"
 )
 
 // CheckSlugSessionPointerRestore finds session artifacts that unpushed Ledger
@@ -48,6 +49,7 @@ type pointerRestoreFailure struct {
 type pointerRestoreReport struct {
 	Raw          []string                // artifacts that are raw content at HEAD
 	Restored     []string                // rewritten to a pointer in the new commit
+	Untracked    []string                // draft-directory artifacts removed from the tree (bytes kept in the cache)
 	Unrepairable []pointerRestoreFailure // raw content no pointer or manifest vouches for
 	Committed    bool
 	// Remaining is what the push validator still reports after the repair; it
@@ -97,7 +99,7 @@ func runSessionPointerRestore(ledgerPath string, fix bool, uploader *ownArtifact
 	if report.Remaining != nil {
 		return FailedCheck(pointerRestoreCheckName, "restored pointers but the push validator still refuses the tip", report.Remaining.Error())
 	}
-	return PassedCheck(pointerRestoreCheckName, fmt.Sprintf("restored LFS pointers for %d session artifact(s)", len(report.Restored)))
+	return PassedCheck(pointerRestoreCheckName, fmt.Sprintf("restored LFS pointers for %d session artifact(s), untracked %d draft artifact(s)", len(report.Restored), len(report.Untracked)))
 }
 
 var errNoUpstream = errors.New("no upstream branch")
@@ -150,6 +152,15 @@ func restoreUnpushedSessionPointers(ctx context.Context, ledgerPath string, fix 
 	err = gitutil.WithRepoLock(ctx, ledgerPath, func() error {
 		var repairable, pathspecs []string
 		for _, raw := range raws {
+			if headSessionMeta(ctx, ledgerPath, strings.Split(raw.path, "/")[1]).IsDraft() {
+				if reason := untrackDraftArtifact(ctx, ledgerPath, raw); reason != "" {
+					report.Unrepairable = append(report.Unrepairable, pointerRestoreFailure{Path: raw.path, Reason: reason})
+					continue
+				}
+				report.Untracked = append(report.Untracked, raw.path)
+				pathspecs = append(pathspecs, raw.path)
+				continue
+			}
 			reason, metaPath := restoreOne(ctx, ledgerPath, upstream, raw, uploader)
 			if reason != "" {
 				report.Unrepairable = append(report.Unrepairable, pointerRestoreFailure{Path: raw.path, Reason: reason})
@@ -161,14 +172,23 @@ func restoreUnpushedSessionPointers(ctx context.Context, ledgerPath string, fix 
 				pathspecs = append(pathspecs, metaPath)
 			}
 		}
-		if len(repairable) == 0 {
+		if len(pathspecs) == 0 {
 			return nil
 		}
 		guard := newSessionStageGuard(ledgerPath, filepath.Join(ledgerPath, "sessions"))
-		if err := guard.gitPathspec(ctx, pathspecs, "add", "--sparse"); err != nil {
+		toAdd := slices.DeleteFunc(slices.Clone(pathspecs), func(path string) bool { return slices.Contains(report.Untracked, path) })
+		if err := guard.gitPathspec(ctx, toAdd, "add", "--sparse"); err != nil {
 			return fmt.Errorf("stage restored pointers: %w", err)
 		}
 		msg := fmt.Sprintf("doctor: restore LFS pointers for %d session artifacts", len(repairable))
+		if len(report.Untracked) > 0 {
+			msg = fmt.Sprintf("doctor: restore LFS pointers / untrack draft artifacts for %d session artifacts", len(repairable)+len(report.Untracked))
+		}
+		if len(report.Untracked) > sacred.MassDeleteThreshold {
+			// a deliberate bulk removal: every untracked artifact's bytes are already in the cache,
+			// and none of them was ever pushed, so the sacred mass-delete guard has nothing to protect
+			defer allowSacredMassDelete()()
+		}
 		committed, err := gitutil.CommitLedgerSnapshot(ctx, ledgerPath, msg, pathspecs...)
 		if err != nil {
 			return fmt.Errorf("commit restored pointers: %w", err)
@@ -229,6 +249,39 @@ func restoreOne(ctx context.Context, ledgerPath, upstream string, raw rawSession
 		return "working copy differs from the committed content (uncommitted local edit); commit or discard it first", ""
 	}
 	return "", metaPath
+}
+
+// allowSacredMassDelete sets the guard's documented override for the duration of one
+// commit and returns the function that restores the previous value.
+func allowSacredMassDelete() func() {
+	previous, had := os.LookupEnv(sacred.OverrideEnv)
+	_ = os.Setenv(sacred.OverrideEnv, "1")
+	return func() {
+		if had {
+			_ = os.Setenv(sacred.OverrideEnv, previous)
+		} else {
+			_ = os.Unsetenv(sacred.OverrideEnv)
+		}
+	}
+}
+
+// untrackDraftArtifact removes an artifact a draft session directory must never track.
+// A draft holds only meta.json (.claude/rules/cache-only-design.md), so the committed bytes
+// go to the ledger cache first and only then leave the index; meta.json is untouched. The
+// working file is deleted only when it is exactly the bytes now safe in the cache.
+func untrackDraftArtifact(ctx context.Context, ledgerPath string, raw rawSessionArtifact) string {
+	cachePath := filepath.Join(ledgerPath, ".sageox", "cache", filepath.FromSlash(raw.path))
+	if err := lfs.PreserveInCache(cachePath, raw.content); err != nil {
+		return err.Error()
+	}
+	if out, err := exec.CommandContext(ctx, "git", "-C", ledgerPath, "rm", "--cached", "-q", "--sparse", "--", raw.path).CombinedOutput(); err != nil {
+		return fmt.Sprintf("cannot untrack draft artifact: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	abs := filepath.Join(ledgerPath, filepath.FromSlash(raw.path))
+	if working, err := os.ReadFile(abs); err == nil && bytes.Equal(working, raw.content) {
+		_ = os.Remove(abs)
+	}
+	return ""
 }
 
 // owns reports whether the session's author is the current coworker. The author
