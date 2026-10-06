@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 )
 
@@ -35,7 +34,7 @@ func RunGit(ctx context.Context, repoPath string, args ...string) (string, error
 	)
 	cmdArgs = append(cmdArgs, args...)
 
-	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
+	cmd := commandContext(ctx, "git", cmdArgs...)
 	// set cmd.Dir so git doesn't fail on getcwd() when the process CWD
 	// has been deleted (e.g. daemon started from a tmpdir that was cleaned)
 	if repoPath != "" {

@@ -28,7 +28,7 @@ import (
 // `notify-team` by the name alone — and "git already tracks this path" is the one
 // signal that proves a human committed it deliberately.
 func PathTracked(ctx context.Context, repoRoot, rel string) (bool, error) {
-	cmd := exec.CommandContext(ctx, "git", "ls-files", "--error-unmatch", "--", rel)
+	cmd := commandContext(ctx, "git", "ls-files", "--error-unmatch", "--", rel)
 	cmd.Dir = repoRoot
 	runErr := cmd.Run()
 	if runErr == nil {

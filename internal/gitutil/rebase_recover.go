@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -84,7 +83,7 @@ func AbortOrClearRebase(ctx context.Context, repoPath, reason string, logger *sl
 
 	quitCtx, cancel := context.WithTimeout(context.Background(), abortTimeout)
 	defer cancel()
-	quitCmd := exec.CommandContext(quitCtx, "git", "-C", repoPath, "rebase", "--quit")
+	quitCmd := commandContext(quitCtx, "git", "-C", repoPath, "rebase", "--quit")
 	out, quitErr := quitCmd.CombinedOutput()
 	if quitErr != nil {
 		// `git rebase --quit` can exit non-zero while STILL removing the state
@@ -161,6 +160,6 @@ func readAutostashOID(stateDir string) string {
 func headDetached(ctx context.Context, repoPath string) bool {
 	subCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(subCtx, "git", "-C", repoPath, "symbolic-ref", "-q", "HEAD")
+	cmd := commandContext(subCtx, "git", "-C", repoPath, "symbolic-ref", "-q", "HEAD")
 	return cmd.Run() != nil
 }

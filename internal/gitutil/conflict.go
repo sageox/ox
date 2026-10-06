@@ -380,7 +380,7 @@ func cleanGitOutput(ctx context.Context, repoPath string, args ...string) ([]byt
 func runPlumbing(ctx context.Context, repoPath string, stdin []byte, extraEnv []string, args ...string) ([]byte, error) {
 	full := []string{"-C", repoPath, "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"}
 	full = append(full, args...)
-	cmd := exec.CommandContext(ctx, "git", full...)
+	cmd := commandContext(ctx, "git", full...)
 	cmd.Dir = repoPath
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C", "LANG=C")
 	cmd.Env = append(cmd.Env, extraEnv...)
@@ -442,7 +442,7 @@ func ResolveAutostashConflicts(ctx context.Context, repoPath string, safePrefixe
 		var files [4]string
 		for stage := 1; stage <= 3; stage++ {
 			// Read raw blobs: RunGit sanitizes output and must not rewrite metadata.
-			data, err := exec.CommandContext(ctx, "git", "-C", repoPath, "show", fmt.Sprintf(":%d:%s", stage, path)).Output()
+			data, err := commandContext(ctx, "git", "-C", repoPath, "show", fmt.Sprintf(":%d:%s", stage, path)).Output()
 			if err != nil {
 				return false, fmt.Errorf("read conflict stage for %s: %w", path, err)
 			}
@@ -496,7 +496,7 @@ func ResolveAutostashConflicts(ctx context.Context, repoPath string, safePrefixe
 		merged = append(merged, '\n')
 		// Reproduce git's stash conflict before replacing it. Otherwise a human's
 		// edits outside the markers could be lost by rebuilding from index stages.
-		cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "merge-file", "-p",
+		cmd := commandContext(ctx, "git", "-C", repoPath, "merge-file", "-p",
 			"-L", "Updated upstream", "-L", "Stash base", "-L", "Stashed changes", files[2], files[1], files[3])
 		expected, mergeErr := cmd.Output()
 		var exitErr *exec.ExitError

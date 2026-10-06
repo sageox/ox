@@ -3,7 +3,6 @@ package gitutil
 import (
 	"context"
 	"fmt"
-	"os/exec"
 	"strconv"
 	"strings"
 )
@@ -302,7 +301,7 @@ func rebaseStepIsEmpty(ctx context.Context, repoPath string) bool {
 // skipping it would discard a resolution that was staged but never recorded.
 // Matters more now that this runs in a loop that can fire hundreds of times.
 func runRebaseStep(ctx context.Context, repoPath, arg string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", "-C", repoPath,
+	cmd := commandContext(ctx, "git", "-C", repoPath,
 		"-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", "rebase", arg)
 	cmd.Dir = repoPath
 	cmd.Env = append(cmd.Environ(), "GIT_EDITOR=true", "LC_ALL=C", "LANG=C")

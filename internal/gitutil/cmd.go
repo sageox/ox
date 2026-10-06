@@ -59,7 +59,16 @@ func NewNetworkCmd(ctx context.Context, args ...string) *exec.Cmd {
 		"-c", "filter.lfs.smudge=cat", "-c", "filter.lfs.clean=cat",
 		"-c", "filter.lfs.process=", "-c", "filter.lfs.required=false",
 	}, args...)
-	cmd := exec.CommandContext(ctx, "git", gitArgs...)
+	cmd := commandContext(ctx, "git", gitArgs...)
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C", "LANG=C")
+	return cmd
+}
+
+// commandContext is exec.CommandContext with process-group kill on
+// cancellation (see setProcessGroupKill). Every git exec in this package goes
+// through it so a timeout can never orphan a child git process.
+func commandContext(ctx context.Context, name string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, name, args...)
+	setProcessGroupKill(cmd)
 	return cmd
 }

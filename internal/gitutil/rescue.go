@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -226,7 +225,7 @@ func commitCount(ctx context.Context, repoPath, ref string) (int, error) {
 // rescueGit runs a git command in repoPath and returns its combined output.
 func rescueGit(ctx context.Context, repoPath string, args ...string) (string, error) {
 	full := append([]string{"-C", repoPath}, args...)
-	cmd := exec.CommandContext(ctx, "git", full...)
+	cmd := commandContext(ctx, "git", full...)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }

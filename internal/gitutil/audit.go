@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"os/exec"
 	"strings"
 	"time"
 )
@@ -62,7 +61,7 @@ func AuditAndAbort(ctx context.Context, repoPath string, op AuditableOp, reason 
 	abortCtx, cancel := context.WithTimeout(context.Background(), abortTimeout)
 	defer cancel()
 
-	abortCmd := exec.CommandContext(abortCtx, "git", "-C", repoPath, string(op), "--abort")
+	abortCmd := commandContext(abortCtx, "git", "-C", repoPath, string(op), "--abort")
 	output, abortErr := abortCmd.CombinedOutput()
 	if abortErr != nil {
 		logger.Error("git_abort_failed",
@@ -92,7 +91,7 @@ func AuditAndAbort(ctx context.Context, repoPath string, op AuditableOp, reason 
 func captureHeadSHA(ctx context.Context, repoPath string) string {
 	subCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(subCtx, "git", "-C", repoPath, "rev-parse", "HEAD")
+	cmd := commandContext(subCtx, "git", "-C", repoPath, "rev-parse", "HEAD")
 	out, err := cmd.Output()
 	if err != nil {
 		return "unknown"
@@ -106,7 +105,7 @@ func captureHeadSHA(ctx context.Context, repoPath string) string {
 func captureUnmergedFiles(ctx context.Context, repoPath string) []string {
 	subCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(subCtx, "git", "-C", repoPath, "diff", "--name-only", "--diff-filter=U")
+	cmd := commandContext(subCtx, "git", "-C", repoPath, "diff", "--name-only", "--diff-filter=U")
 	out, err := cmd.Output()
 	if err != nil {
 		return nil
@@ -125,7 +124,7 @@ func captureUnmergedFiles(ctx context.Context, repoPath string) []string {
 func captureStashCount(ctx context.Context, repoPath string) int {
 	subCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(subCtx, "git", "-C", repoPath, "stash", "list")
+	cmd := commandContext(subCtx, "git", "-C", repoPath, "stash", "list")
 	out, err := cmd.Output()
 	if err != nil {
 		return 0
