@@ -1,5 +1,7 @@
 package constants
 
+import "strings"
+
 // SageOxGitEmail is the canonical email for SageOx git identity.
 // Used in commit attribution, fallback git config, etc.
 const SageOxGitEmail = "ox@sageox.ai"
@@ -62,13 +64,24 @@ const RecordingDocsURL = "sageox.ai/rec"
 // directories), and a literal apostrophe emitted here would desync the
 // quote-pairing described above.
 //
+// The printed PATH line escapes the directory for the inside of a
+// double-quoted string (_ox_q for POSIX shells, _ox_fq for fish, which
+// leaves backticks alone): the person pastes it into a startup file that runs
+// on every new shell, so a directory named with $, a backtick or " must read
+// as text there, never run. The line goes out through printf, not echo: an
+// XSI echo (macOS /bin/sh) would turn the escaped \\ back into \. The sed
+// scripts sit inside single quotes and hold no apostrophe, so the doctor scan
+// above still pairs every quote. bash names the file a new terminal's bash
+// reads: on macOS a login shell, which reads the first existing of
+// ~/.bash_profile, ~/.bash_login, ~/.profile and not ~/.bashrc (issue #1162).
+//
 // The not-installed branch names the fully-qualified Homebrew formula and the
 // versioned release download page. Linking the README would still steer users
 // to its mutable `main`-branch `curl … | bash` route. `ox doctor` writes this
 // string into each consumer's tracked .claude/settings.json and repairs any
 // divergence, so whatever it recommends propagates into other repositories
 // and cannot be edited there. See issue #937.
-const oxNotOnPathFallback = `else _ox_p=""; _ox_home="${HOME:-}"; [ -n "${GOBIN:-}" ] && [ -x "${GOBIN:-}/ox" ] && _ox_p="${GOBIN:-}"; [ -z "$_ox_p" ] && if command -v go >/dev/null 2>&1; then _ox_gb="$(go env GOBIN 2>/dev/null)"; [ -n "$_ox_gb" ] && [ -x "$_ox_gb/ox" ] && _ox_p="$_ox_gb"; if [ -z "$_ox_p" ]; then _ox_gp="$(go env GOPATH 2>/dev/null)/bin"; [ -x "$_ox_gp/ox" ] && _ox_p="$_ox_gp"; fi; fi; [ -n "$_ox_home" ] && [ -z "$_ox_p" ] && [ -x "$_ox_home/go/bin/ox" ] && _ox_p="$_ox_home/go/bin"; [ -n "$_ox_home" ] && [ -z "$_ox_p" ] && [ -x "$_ox_home/.local/bin/ox" ] && _ox_p="$_ox_home/.local/bin"; [ -z "$_ox_p" ] && [ -x "/usr/local/bin/ox" ] && _ox_p="/usr/local/bin"; [ -z "$_ox_p" ] && [ -x "/opt/homebrew/bin/ox" ] && _ox_p="/opt/homebrew/bin"; if [ -n "$_ox_p" ]; then echo 'ox is installed at '"$_ox_p"'/ox but is not on PATH for non-interactive shells.'; _ox_sh="${SHELL:-}"; case "${_ox_sh##*/}" in zsh) echo 'AI coding tools run hooks in a non-interactive shell, which reads ~/.zshenv but not ~/.zshrc.'; echo 'Add this line to ~/.zshenv:'; echo '    export PATH="$PATH:'"$_ox_p"'"';; bash) echo 'AI coding tools inherit the environment of the terminal they were started from, not any change made after they launched.'; echo 'Add this line to ~/.bashrc:'; echo '    export PATH="$PATH:'"$_ox_p"'"'; echo 'Then restart your AI coding tool from a new terminal so it picks up the change.';; fish) echo 'AI coding tools inherit the environment of the terminal they were started from, not any change made after they launched.'; echo 'Add this line to ~/.config/fish/config.fish:'; echo '    fish_add_path -- "'"$_ox_p"'"'; echo 'Then restart your AI coding tool from a new terminal so it picks up the change.';; *) echo 'AI coding tools inherit the environment of the terminal they were started from, not any change made after they launched.'; echo 'Add this line to the startup file for your shell:'; echo '    export PATH="$PATH:'"$_ox_p"'"'; echo 'Then restart your AI coding tool from a new terminal so it picks up the change.';; esac; else echo 'ox is not installed. Install a release: brew install sageox/tap/ox, or download from https://github.com/sageox/ox/releases/latest'; fi; fi`
+const oxNotOnPathFallback = `else _ox_p=""; _ox_home="${HOME:-}"; [ -n "${GOBIN:-}" ] && [ -x "${GOBIN:-}/ox" ] && _ox_p="${GOBIN:-}"; [ -z "$_ox_p" ] && if command -v go >/dev/null 2>&1; then _ox_gb="$(go env GOBIN 2>/dev/null)"; [ -n "$_ox_gb" ] && [ -x "$_ox_gb/ox" ] && _ox_p="$_ox_gb"; if [ -z "$_ox_p" ]; then _ox_gp="$(go env GOPATH 2>/dev/null)/bin"; [ -x "$_ox_gp/ox" ] && _ox_p="$_ox_gp"; fi; fi; [ -n "$_ox_home" ] && [ -z "$_ox_p" ] && [ -x "$_ox_home/go/bin/ox" ] && _ox_p="$_ox_home/go/bin"; [ -n "$_ox_home" ] && [ -z "$_ox_p" ] && [ -x "$_ox_home/.local/bin/ox" ] && _ox_p="$_ox_home/.local/bin"; [ -z "$_ox_p" ] && [ -x "/usr/local/bin/ox" ] && _ox_p="/usr/local/bin"; [ -z "$_ox_p" ] && [ -x "/opt/homebrew/bin/ox" ] && _ox_p="/opt/homebrew/bin"; if [ -n "$_ox_p" ]; then echo 'ox is installed at '"$_ox_p"'/ox but is not on PATH for non-interactive shells.'; _ox_q="$(printf '%s' "$_ox_p" | sed 's/[\\"$` + "`" + `]/\\&/g')"; _ox_fq="$(printf '%s' "$_ox_p" | sed 's/[\\"$]/\\&/g')"; _ox_sh="${SHELL:-}"; case "${_ox_sh##*/}" in zsh) echo 'AI coding tools run hooks in a non-interactive shell, which reads ~/.zshenv but not ~/.zshrc.'; echo 'Add this line to ~/.zshenv:'; printf '%s\n' '    export PATH="$PATH:'"$_ox_q"'"';; bash) _ox_rc='~/.bashrc'; if [ "$(uname -s 2>/dev/null)" = Darwin ]; then _ox_rc='~/.bash_profile'; for _ox_f in .bash_profile .bash_login .profile; do if [ -n "$_ox_home" ] && [ -f "$_ox_home/$_ox_f" ]; then _ox_rc="~/$_ox_f"; break; fi; done; fi; echo 'AI coding tools inherit the environment of the terminal they were started from, not any change made after they launched.'; echo 'Add this line to '"$_ox_rc"':'; printf '%s\n' '    export PATH="$PATH:'"$_ox_q"'"'; echo 'Then restart your AI coding tool from a new terminal so it picks up the change.';; fish) echo 'AI coding tools inherit the environment of the terminal they were started from, not any change made after they launched.'; echo 'Add this line to ~/.config/fish/config.fish:'; printf '%s\n' '    fish_add_path -- "'"$_ox_fq"'"'; echo 'Then restart your AI coding tool from a new terminal so it picks up the change.';; *) echo 'AI coding tools inherit the environment of the terminal they were started from, not any change made after they launched.'; echo 'Add this line to the startup file for your shell:'; printf '%s\n' '    export PATH="$PATH:'"$_ox_q"'"'; echo 'Then restart your AI coding tool from a new terminal so it picks up the change.';; esac; else echo 'ox is not installed. Install a release: brew install sageox/tap/ox, or download from https://github.com/sageox/ox/releases/latest'; fi; fi`
 
 const (
 	// OxPrimeCommand is the legacy command without AGENT_ENV prefix.
@@ -100,16 +113,24 @@ const (
 
 // OxHookCommand templates for lifecycle hook installation.
 // These replace the per-event ox agent prime commands with a single generalized handler.
+// Fill them with HookCommand, never fmt.Sprintf: the off-PATH fallback they
+// end with runs printf '%s' itself, so a template holds more than one %s.
 const (
 	// OxHookCommandClaudeCode is the template for Claude Code lifecycle hooks.
-	// The %s placeholder is replaced with the native event name (e.g., SessionStart).
+	// The first %s placeholder is replaced with the native event name (e.g., SessionStart).
 	OxHookCommandClaudeCodeTemplate = "if command -v ox >/dev/null 2>&1; then AGENT_ENV=claude-code ox agent hook %s 2>&1 || true; " + oxNotOnPathFallback
 
 	// OxHookCommandCodexTemplate is the template for Codex CLI lifecycle hooks.
-	// The %s placeholder is replaced with the native event name (e.g., SessionStart).
+	// The first %s placeholder is replaced with the native event name (e.g., SessionStart).
 	OxHookCommandCodexTemplate = "if command -v ox >/dev/null 2>&1; then AGENT_ENV=codex ox agent hook %s 2>&1 || true; " + oxNotOnPathFallback
 
 	// OxHookCommandGeminiTemplate is the template for Gemini CLI lifecycle hooks.
-	// The %s placeholder is replaced with the native event name (e.g., SessionStart, BeforeAgent).
+	// The first %s placeholder is replaced with the native event name (e.g., SessionStart, BeforeAgent).
 	OxHookCommandGeminiTemplate = "if command -v ox >/dev/null 2>&1; then AGENT_ENV=gemini ox agent hook %s 2>&1 || true; " + oxNotOnPathFallback
 )
+
+// HookCommand fills an OxHookCommand*Template with the native event name.
+// Only the first %s is the event placeholder; the rest belong to the shell.
+func HookCommand(template, event string) string {
+	return strings.Replace(template, "%s", event, 1)
+}

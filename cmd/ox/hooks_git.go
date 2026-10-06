@@ -97,6 +97,17 @@ if command -v ox >/dev/null 2>&1; then
 	// target; a fix to one (e.g. the fish quoting in #937) belongs in all
 	// five.
 	//
+	// The printed PATH line escapes the directory for the inside of a
+	// double-quoted string (_ox_q for POSIX shells, _ox_fq for fish, which
+	// leaves backticks alone): the person pastes it into a startup file
+	// that runs on every new shell, so a directory named with $, a
+	// backtick or " must read as text there, never run (issue #1162). It
+	// goes out through printf, not echo: an XSI echo (macOS /bin/sh) would
+	// turn the escaped \\ back into \.
+	// bash names the file a new terminal's bash reads: on macOS that is a
+	// login shell, which reads the first existing of ~/.bash_profile,
+	// ~/.bash_login, ~/.profile and not ~/.bashrc.
+	//
 	// Uses `_ox_p`/`_ox_gp` (not `p`/`gp`): installHookSection appends this
 	// section into an existing hook file's shell scope, where plain
 	// `p`/`gp` could collide with a variable the surrounding hook already
@@ -119,29 +130,38 @@ if command -v ox >/dev/null 2>&1; then
   [ -z "$_ox_p" ] && [ -x "/opt/homebrew/bin/ox" ] && _ox_p="/opt/homebrew/bin"
   if [ -n "$_ox_p" ]; then
     echo "ox is installed at $_ox_p/ox but is not on PATH for non-interactive shells." >&2
+    _ox_q="$(printf '%s' "$_ox_p" | sed 's/[\\"$` + "`" + `]/\\&/g')"
+    _ox_fq="$(printf '%s' "$_ox_p" | sed 's/[\\"$]/\\&/g')"
     _ox_sh="${SHELL:-}"
     case "${_ox_sh##*/}" in
       zsh)
         echo "AI coding tools run hooks in a non-interactive shell, which reads ~/.zshenv but not ~/.zshrc." >&2
         echo "Add this line to ~/.zshenv:" >&2
-        echo "    export PATH=\"\$PATH:$_ox_p\"" >&2
+        printf '%s\n' "    export PATH=\"\$PATH:$_ox_q\"" >&2
         ;;
       bash)
+        _ox_rc="~/.bashrc"
+        if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+          _ox_rc="~/.bash_profile"
+          for _ox_f in .bash_profile .bash_login .profile; do
+            if [ -n "$_ox_home" ] && [ -f "$_ox_home/$_ox_f" ]; then _ox_rc="~/$_ox_f"; break; fi
+          done
+        fi
         echo "AI coding tools inherit the environment of the terminal they were started from, not any change made after they launched." >&2
-        echo "Add this line to ~/.bashrc:" >&2
-        echo "    export PATH=\"\$PATH:$_ox_p\"" >&2
+        echo "Add this line to $_ox_rc:" >&2
+        printf '%s\n' "    export PATH=\"\$PATH:$_ox_q\"" >&2
         echo "Then restart your AI coding tool from a new terminal so it picks up the change." >&2
         ;;
       fish)
         echo "AI coding tools inherit the environment of the terminal they were started from, not any change made after they launched." >&2
         echo "Add this line to ~/.config/fish/config.fish:" >&2
-        echo "    fish_add_path -- \"$_ox_p\"" >&2
+        printf '%s\n' "    fish_add_path -- \"$_ox_fq\"" >&2
         echo "Then restart your AI coding tool from a new terminal so it picks up the change." >&2
         ;;
       *)
         echo "AI coding tools inherit the environment of the terminal they were started from, not any change made after they launched." >&2
         echo "Add this line to the startup file for your shell:" >&2
-        echo "    export PATH=\"\$PATH:$_ox_p\"" >&2
+        printf '%s\n' "    export PATH=\"\$PATH:$_ox_q\"" >&2
         echo "Then restart your AI coding tool from a new terminal so it picks up the change." >&2
         ;;
     esac

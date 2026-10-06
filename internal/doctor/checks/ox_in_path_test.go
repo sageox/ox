@@ -136,6 +136,13 @@ func TestOxInPathCheck_InconclusiveProbe_NeverReportsAFalseFailure(t *testing.T)
 // restart-the-tool line, since editing the file alone does not affect an
 // already-running non-interactive invocation.
 func TestOxInPathCheck_OffPathFixText_PerShell(t *testing.T) {
+	// The bash row depends on the platform and on which startup files exist
+	// in $HOME (issue #1162); an empty HOME gives the platform default.
+	t.Setenv("HOME", t.TempDir())
+	wantBash := "~/.bashrc"
+	if runtime.GOOS == "darwin" {
+		wantBash = "~/.bash_profile"
+	}
 	tests := []struct {
 		name         string
 		kind         shellKind
@@ -144,13 +151,12 @@ func TestOxInPathCheck_OffPathFixText_PerShell(t *testing.T) {
 		wantsRestart bool
 	}{
 		{"zsh", shellZsh, "~/.zshenv", `export PATH="$PATH:/some/dir"`, false},
-		{"bash", shellBash, "~/.bashrc", `export PATH="$PATH:/some/dir"`, true},
+		{"bash", shellBash, wantBash, `export PATH="$PATH:/some/dir"`, true},
 		{"fish", shellFish, "~/.config/fish/config.fish", `fish_add_path -- "/some/dir"`, true},
 		{"unknown", shellUnknown, "your shell's startup file", `export PATH="$PATH:/some/dir"`, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			got := offPathFixText(tt.kind, "/some/dir")
 			assert.Contains(t, got, "Add this line to "+tt.wantFile+":")
 			assert.Contains(t, got, tt.wantLine)
@@ -163,6 +169,107 @@ func TestOxInPathCheck_OffPathFixText_PerShell(t *testing.T) {
 			} else {
 				assert.NotContains(t, got, nonZshRestartLine, "zsh's ~/.zshenv is always read; no restart needed")
 			}
+		})
+	}
+}
+
+// TestBashStartupFile covers issue #1162. A macOS terminal opens a login
+// bash, which reads the first of ~/.bash_profile, ~/.bash_login and
+// ~/.profile that exists and never ~/.bashrc on its own, so advising
+// ~/.bashrc there left ox off PATH for a tool restarted from a new terminal.
+// Naming the file that already exists keeps a new ~/.bash_profile from
+// shadowing an existing ~/.profile.
+func TestBashStartupFile(t *testing.T) {
+	tests := []struct {
+		name     string
+		goos     string
+		home     string
+		existing []string
+		want     string
+	}{
+		{"linux reads bashrc", "linux", "/h", []string{".bash_profile"}, "~/.bashrc"},
+		{"darwin with nothing", "darwin", "/h", nil, "~/.bash_profile"},
+		{"darwin with only profile", "darwin", "/h", []string{".profile"}, "~/.profile"},
+		{"darwin with bash_login and profile", "darwin", "/h", []string{".bash_login", ".profile"}, "~/.bash_login"},
+		{"darwin prefers bash_profile", "darwin", "/h", []string{".profile", ".bash_login", ".bash_profile"}, "~/.bash_profile"},
+		{"darwin without HOME", "darwin", "", []string{".profile"}, "~/.bash_profile"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			exists := func(path string) bool {
+				for _, name := range tt.existing {
+					if path == filepath.Join(tt.home, name) {
+						return true
+					}
+				}
+				return false
+			}
+			assert.Equal(t, tt.want, bashStartupFile(tt.goos, tt.home, exists))
+		})
+	}
+}
+
+// hostileDirs are install directories whose names a shell would expand or
+// run if pasted unescaped inside double quotes.
+var hostileDirs = []string{
+	"/opt/Go Tools/bin",
+	"/opt/it's/bin",
+	`/opt/$(touch PWNED)/bin`,
+	"/opt/`touch PWNED`/bin",
+	`/opt/a"; touch PWNED; "/bin`,
+	`/opt/back\slash\"; touch PWNED; #/bin`,
+	`/opt/$HOME/bin`,
+}
+
+// TestOffPathFixText_EscapesDirectoryForTheStartupFile sources the exact
+// line ox doctor prints under a real POSIX shell and checks that the
+// directory lands on PATH byte for byte and that nothing in its name ran.
+// The person pastes this line into a file every new shell reads, so a
+// directory named with $, a backtick or " must stay text (issue #1162).
+func TestOffPathFixText_EscapesDirectoryForTheStartupFile(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	for _, kind := range []shellKind{shellZsh, shellBash, shellUnknown} {
+		for _, dir := range hostileDirs {
+			t.Run(string(kind)+" "+dir, func(t *testing.T) {
+				line := shellRCFor(kind).line(dir)
+				work := t.TempDir()
+				rc := filepath.Join(work, "rc")
+				require.NoError(t, os.WriteFile(rc, []byte(line+"\n"), 0o644))
+
+				cmd := exec.Command("sh", "-c", `PATH=/base; . ./rc; printf '%s' "$PATH"`)
+				cmd.Dir = work
+				cmd.Env = []string{"HOME=" + work}
+				out, err := cmd.CombinedOutput()
+				require.NoError(t, err, "sourcing %q failed: %s", line, out)
+
+				assert.Equal(t, "/base:"+dir, string(out), "line %q", line)
+				assert.NoFileExists(t, filepath.Join(work, "PWNED"), "line %q ran code", line)
+			})
+		}
+	}
+}
+
+// TestOffPathFixText_FishLineEscapesDirectory runs the fish line under a
+// real fish when one is installed; otherwise it checks the escaping fish
+// needs: \, " and $ escaped, a backtick left alone (fish does not expand it).
+func TestOffPathFixText_FishLineEscapesDirectory(t *testing.T) {
+	line := shellRCFor(shellFish).line(`/opt/a"b$c` + "`d`" + `\e/bin`)
+	assert.Equal(t, `fish_add_path -- "/opt/a\"b\$c`+"`d`"+`\\e/bin"`, line)
+
+	fish, err := exec.LookPath("fish")
+	if err != nil {
+		t.Skip("fish not installed; escaping checked above")
+	}
+	for _, dir := range hostileDirs {
+		t.Run(dir, func(t *testing.T) {
+			work := t.TempDir()
+			script := "function fish_add_path; printf '%s' $argv[2]; end; " + shellRCFor(shellFish).line(dir)
+			cmd := exec.Command(fish, "--no-config", "-c", script)
+			cmd.Dir = work
+			out, err := cmd.CombinedOutput()
+			require.NoError(t, err, "%s", out)
+			assert.Equal(t, dir, string(out))
+			assert.NoFileExists(t, filepath.Join(work, "PWNED"))
 		})
 	}
 }

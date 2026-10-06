@@ -236,23 +236,64 @@ type shellRCFile struct {
 // corrected D1 table). The zsh/bash/fish rows are the shells AI coding
 // tools commonly run under; "unknown" never claims a specific file that
 // might be wrong.
+//
+// The directory is escaped for the inside of a double-quoted string before
+// it lands in the line (issue #1162): the person pastes this line into a
+// startup file that runs on every new shell, so a directory named with $,
+// ` or " must read as text there, never as code. Same escaping as
+// scripts/install.sh's dq_escape_posix / dq_escape_fish.
 func shellRCFor(kind shellKind) shellRCFile {
 	exportLine := func(dir string) string {
-		return fmt.Sprintf(`export PATH="$PATH:%s"`, dir)
+		return fmt.Sprintf(`export PATH="$PATH:%s"`, posixDQEscaper.Replace(dir))
 	}
 	switch kind {
 	case shellZsh:
 		return shellRCFile{file: "~/.zshenv", line: exportLine}
 	case shellBash:
-		return shellRCFile{file: "~/.bashrc", line: exportLine}
+		home, _ := os.UserHomeDir()
+		return shellRCFile{file: bashStartupFile(runtime.GOOS, home, fileExists), line: exportLine}
 	case shellFish:
 		return shellRCFile{
 			file: "~/.config/fish/config.fish",
-			line: func(dir string) string { return fmt.Sprintf(`fish_add_path -- "%s"`, dir) },
+			line: func(dir string) string { return fmt.Sprintf(`fish_add_path -- "%s"`, fishDQEscaper.Replace(dir)) },
 		}
 	default:
 		return shellRCFile{file: "your shell's startup file", line: exportLine}
 	}
+}
+
+// posixDQEscaper escapes text for the inside of a POSIX double-quoted
+// string, where sh, bash and zsh expand \, ", $ and `.
+var posixDQEscaper = strings.NewReplacer(`\`, `\\`, `"`, `\"`, `$`, `\$`, "`", "\\`")
+
+// fishDQEscaper escapes text for the inside of a fish double-quoted string,
+// where fish expands only \, " and $ (a backtick is literal there).
+var fishDQEscaper = strings.NewReplacer(`\`, `\\`, `"`, `\"`, `$`, `\$`)
+
+// bashStartupFile names the file the bash in a new terminal reads, which is
+// the environment an AI coding tool started from that terminal inherits
+// (issue #1162). macOS terminals open login shells, which read the first of
+// ~/.bash_profile, ~/.bash_login and ~/.profile that exists and never read
+// ~/.bashrc on their own. Naming the file that already exists matters: a new
+// ~/.bash_profile would stop bash from reading an existing ~/.profile. Linux
+// terminals open non-login shells, which read ~/.bashrc.
+func bashStartupFile(goos, home string, exists func(string) bool) string {
+	if goos != "darwin" {
+		return "~/.bashrc"
+	}
+	if home != "" {
+		for _, name := range []string{".bash_profile", ".bash_login", ".profile"} {
+			if exists(filepath.Join(home, name)) {
+				return "~/" + name
+			}
+		}
+	}
+	return "~/.bash_profile"
+}
+
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
 }
 
 // detectHookShell returns the shell binary to probe and its family,
