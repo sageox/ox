@@ -49,10 +49,18 @@ def first_json_object(text):
     return {}
 
 
+def diff_section(stdin):
+    """What a real cartographer maps: the diff between the BEGIN/END markers.
+    (The scope section lists every changed file, so matching all of stdin would
+    map every chunk. The old pipeline sent no markers: use all of stdin.)"""
+    start, end = stdin.find("<<<BEGIN DIFF"), stdin.find("<<<END DIFF")
+    return stdin[start:end] if start != -1 and end != -1 else stdin
+
+
 def respond(role, playbook, stdin, structured):
     plant = os.environ.get("FAKE_PLANT", PLANT_DEFAULT)
     if role == "cartographer":
-        sees_entry = ENTRY_FILE in stdin and os.environ.get("FAKE_NO_ENTRY_POINTS") != "1"
+        sees_entry = ENTRY_FILE in diff_section(stdin) and os.environ.get("FAKE_NO_ENTRY_POINTS") != "1"
         entry_points = (
             [{"kind": "cobra-command", "name": "ox session upload <name>", "file": ENTRY_FILE, "line": 12,
               "gate": "cobra ExactArgs(1)", "intent": "publish or discard a held session"}]

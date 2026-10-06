@@ -637,11 +637,13 @@ def cmd_surface(a) -> int:
     out = Path(a.out)
     m = load_json(out / "review" / "manifest.json") or {}
     merged = {"entry_points": [], "sinks": [], "trust_boundaries": [], "high_value_paths": [], "notes": []}
-    statuses = {}
+    statuses, entry_counts = {}, {}
     for c in m.get("chunks") or []:
         status, obj = classify_payload(out / f"cartographer-c{c['index']:02d}.json", "entry_points")
         statuses[str(c["index"])] = status
         if status == "ok":
+            # Per chunk, so the coverage gate can tell which chunk's own map is empty.
+            entry_counts[str(c["index"])] = sum(1 for e in obj.get("entry_points") or [] if isinstance(e, dict))
             for key in merged:
                 merged[key].extend(item for item in obj.get(key) or [] if item)
     merged["entry_points"] = unique(
@@ -655,7 +657,7 @@ def cmd_surface(a) -> int:
     for key in ("trust_boundaries", "high_value_paths", "notes"):
         merged[key] = unique([str(x) for x in merged[key]], key=lambda x: x)
     ok = sum(1 for s in statuses.values() if s == "ok")
-    merged["chunks"] = {"total": len(statuses), "ok": ok, "statuses": statuses}
+    merged["chunks"] = {"total": len(statuses), "ok": ok, "statuses": statuses, "entry_points": entry_counts}
     (out / "surface.json").write_text(json.dumps(merged, indent=2) + "\n")
     (out / "surface.md").write_text(render_surface(merged))
     print(
@@ -1127,6 +1129,21 @@ def compute_coverage(s: dict) -> dict:
     if gate and not surface.get("entry_points"):
         dirs = sorted({d for f in gate for d in GATE_DIRS if f.startswith(d)})
         none.append(f"the change touches {', '.join(dirs)} but the surface map lists no entry points")
+    elif gate:
+        # An entry point mapped from one chunk must not vouch for another: a chunk
+        # whose own map is empty saw nothing of the gate files it carries. A
+        # missing count reads as zero, so the check fails closed.
+        counts = (surface.get("chunks") or {}).get("entry_points") or {}
+        blind = []
+        for c in m.get("chunks") or []:
+            key = str(c["index"])
+            files = set(gate).intersection(c.get("paths") or [])
+            if files and statuses.get(key) == "ok" and not counts.get(key):
+                dirs = sorted({d for f in files for d in GATE_DIRS if f.startswith(d)})
+                blind.append(f"chunk {c['index']} ({', '.join(dirs)})")
+        if blind:
+            partial.append("cartographer listed no entry points for the gate files in " + "; ".join(blind))
+            failed_stage = True
 
     hunters = s.get("hunters") or []
     expected = kept * len(hunters)

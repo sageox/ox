@@ -288,8 +288,8 @@ class OrchestrateE2ETest(unittest.TestCase):
         self.assertIn("no hunter run completed (5× skipped-no-cli)", report)
         self.assertEqual(result.returncode, 3, self.explain(result))
 
-    def test_large_change_is_chunked_and_every_chunk_reviewed(self):
-        """A change bigger than one chunk is split, and every chunk gets every hunter."""
+    def plant_large_change(self) -> None:
+        """The planted feature plus internal/session files: several chunks at 3 KB."""
         self.repo.plant_feature()
         for i in range(3):
             body = "".join(f"// filler line {j} in file {i} to push the change past one chunk\n" for j in range(40))
@@ -297,6 +297,10 @@ class OrchestrateE2ETest(unittest.TestCase):
         self.repo.commit("filler")
         self.repo.set_config("chunk_bytes", "3000")
         self.repo.install("claude", "golangci-lint")
+
+    def test_large_change_is_chunked_and_every_chunk_reviewed(self):
+        """A change bigger than one chunk is split, and every chunk gets every hunter."""
+        self.plant_large_change()
         result = self.repo.run("orchestrate.sh")
 
         hunters = self.repo.calls("hunter")
@@ -305,6 +309,17 @@ class OrchestrateE2ETest(unittest.TestCase):
         chunks = json.loads(self.repo.output("review/manifest.json"))["chunks_kept"]
         self.assertGreaterEqual(chunks, 2, self.explain(result))
         self.assertEqual(len(hunters), 5 * chunks, "every chunk gets every hunter")
+
+    def test_entry_points_from_one_chunk_do_not_vouch_for_another(self):
+        """Only the cmd/ox chunk gets mapped; the internal/session chunks stay blind."""
+        self.plant_large_change()
+        result = self.repo.run("orchestrate.sh")
+
+        report = self.repo.output("FINDINGS.md")
+        self.assertIn("cartographer listed no entry points for the gate files in chunk", report, self.explain(result))
+        self.assertIn("(internal/session/)", report)
+        self.assertNotIn("ran clean", report)
+        self.assertEqual(result.returncode, 1, self.explain(result))
 
     def test_unresolvable_base_ref_reports_no_coverage(self):
         """A base ref that does not exist means nothing could be diffed."""

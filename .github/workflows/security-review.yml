@@ -44,6 +44,8 @@ jobs:
             pipeline:
               - 'security/**'
               - '.claude/skills/security-review/**'
+              - 'Makefile'   # the sec-test recipe
+              - '.github/workflows/security-review.yml'
 
   # =============================================================================
   # The pipeline's own tests: fake claude + fake scanners, no network, no cost.

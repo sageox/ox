@@ -247,10 +247,11 @@ def full_state() -> dict:
             "mode": "diff", "since": "origin/main", "diff_empty": False, "chunks_kept": 1, "chunks_total": 1,
             "truncated": False, "unreviewed_files": [], "uncommitted_files": 0,
             "gate_files": ["cmd/ox/session_upload_cmd.go"],
+            "chunks": [{"index": 1, "paths": ["cmd/ox/session_upload_cmd.go"]}],
         },
         "tools": {t: {"status": "ran"} for t in pipeline.SCANNERS},
         "surface": {"entry_points": [{"kind": "cobra-command", "name": "ox session upload"}],
-                    "chunks": {"total": 1, "ok": 1, "statuses": {"1": "ok"}}},
+                    "chunks": {"total": 1, "ok": 1, "statuses": {"1": "ok"}, "entry_points": {"1": 1}}},
         "hunters": ["cli-input", "daemon-ipc"],
         "hunter_rows": [("cli-input", 1, "ok", 0), ("daemon-ipc", 1, "ok", 0)],
         "dedup": "skipped-empty",
@@ -278,6 +279,32 @@ class CoverageTest(unittest.TestCase):
         def mutate(s):
             s["surface"]["entry_points"] = []
         self.check(mutate, "none", 3, "touches cmd/ox/ but the surface map lists no entry points")
+
+    def two_chunks(self, s, second_chunk_entry_points):
+        s["manifest"].update({
+            "chunks_kept": 2, "chunks_total": 2,
+            "gate_files": ["cmd/ox/session_upload_cmd.go", "internal/daemon/finalize.go"],
+            "chunks": [{"index": 1, "paths": ["cmd/ox/session_upload_cmd.go"]},
+                       {"index": 2, "paths": ["internal/daemon/finalize.go", "docs/notes.md"]}],
+        })
+        s["surface"]["chunks"] = {"total": 2, "ok": 2, "statuses": {"1": "ok", "2": "ok"},
+                                  "entry_points": {"1": 1, "2": second_chunk_entry_points}}
+        s["hunter_rows"] += [("cli-input", 2, "ok", 0), ("daemon-ipc", 2, "ok", 0)]
+
+    def test_entry_points_from_one_chunk_do_not_vouch_for_another(self):
+        # Without this, chunk 1's entry point satisfies the merged check and a
+        # chunk-2 daemon change nobody mapped reads as full coverage.
+        self.check(lambda s: self.two_chunks(s, 0), "partial", 1,
+                   "cartographer listed no entry points for the gate files in chunk 2 (internal/daemon/)")
+
+    def test_every_gate_chunk_with_its_own_entry_points_is_full(self):
+        self.check(lambda s: self.two_chunks(s, 1), "full", 0)
+
+    def test_a_missing_per_chunk_count_fails_closed(self):
+        def mutate(s):
+            self.two_chunks(s, 1)
+            del s["surface"]["chunks"]["entry_points"]["2"]
+        self.check(mutate, "partial", 1, "chunk 2 (internal/daemon/)")
 
     def test_no_entry_points_is_fine_when_no_gate_file_changed(self):
         def mutate(s):
