@@ -157,6 +157,24 @@ func TestListKBScopes_ManualSyncLiftsParks(t *testing.T) {
 	assert.Equal(t, 2, lister.count("team_a"), "manual sync must retry parked scopes")
 }
 
+// TestTeamSync_LiftsKBScopeParks exercises the real manual-sync entrypoint, so
+// it fails if TeamSync stops clearing parks. The sync result itself is
+// irrelevant here (the scheduler has no team config), only the park state is.
+func TestTeamSync_LiftsKBScopeParks(t *testing.T) {
+	t.Parallel()
+	s, _, _ := parkTestScheduler(t)
+	lister := newScriptedKBLister(map[string]error{"team_a": api.ErrUnauthorized})
+
+	s.listKBScopes(context.Background(), lister, parkTestScopes)
+	require.True(t, s.kbScopeParks.parked("team_a"))
+
+	_, _ = s.TeamSync(nil)
+
+	assert.False(t, s.kbScopeParks.parked("team_a"))
+	s.listKBScopes(context.Background(), lister, parkTestScopes)
+	assert.Equal(t, 2, lister.count("team_a"))
+}
+
 func TestListKBScopes_ParkLogging(t *testing.T) {
 	t.Parallel()
 	s, clk, buf := parkTestScheduler(t)
