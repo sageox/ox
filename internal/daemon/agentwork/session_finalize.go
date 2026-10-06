@@ -2915,10 +2915,11 @@ func recoverRawFromSessionFile(logger *slog.Logger, recPath, sessionDir, rawPath
 	if err != nil {
 		return false, fmt.Errorf("read recording state: %w", err)
 	}
-	var state session.RecordingState
-	if err := json.Unmarshal(data, &state); err != nil {
+	parsed, err := session.ParseRecordingState(recPath, data)
+	if err != nil {
 		return false, fmt.Errorf("parse recording state: %w", err)
 	}
+	state := *parsed
 	// Checked before the journal settles: a quarantined recording is kept
 	// exactly as it is, and settling would roll back or rewrite raw.jsonl.
 	if state.SourceRejected {
