@@ -101,6 +101,12 @@ func checkGitCredentials() checkResult {
 		return refreshGitCredentials("expired")
 	}
 
+	token, tokenErr := auth.GetTokenForEndpoint(projectEndpoint)
+	if tokenErr != nil || (token != nil && token.AccessToken != "" &&
+		creds.BearerTokenHash != gitserver.BearerTokenFingerprint(token.AccessToken)) {
+		return refreshGitCredentials("credentials are unverified for the current token")
+	}
+
 	// credentials are valid - show expiry info
 	return PassedCheck("Git credentials",
 		fmt.Sprintf("valid, %d repos (expires in %s)", len(creds.Repos), formatCredentialExpiry(creds.ExpiresAt)))
@@ -139,15 +145,14 @@ func refreshGitCredentials(reason string) checkResult {
 	}
 
 	// fetch credentials from API
-	if _, err := auth.RefreshGitCredentialsForEndpoint(context.Background(), projectEndpoint, true); err != nil {
+	creds, err := auth.RefreshGitCredentialsForEndpoint(context.Background(), projectEndpoint, true)
+	if err != nil {
 		return WarningCheck("Git credentials", fmt.Sprintf("%s (refresh failed)", reason),
 			fmt.Sprintf("API error: %v. %s", err, auth.ReauthenticationRemedy(projectEndpoint)))
 	}
 
-	// check new status
-	newStatus := gitserver.CheckCredentialStatusForEndpoint(projectEndpoint)
 	return PassedCheck("Git credentials",
-		fmt.Sprintf("refreshed, %d repos (expires in %s)", newStatus.RepoCount, newStatus.FormatExpiry()))
+		fmt.Sprintf("refreshed, %d repos (expires in %s)", len(creds.Repos), formatCredentialExpiry(creds.ExpiresAt)))
 }
 
 func checkAuthFilePermissions(fix bool) checkResult {

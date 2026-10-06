@@ -99,134 +99,146 @@ func TestLFSCLICancellationDuringBearerRotation(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: real Git repos and credential refresh requests")
 	}
-	for _, operation := range []string{"fetch", "hydrate", "upload", "migrate"} {
-		t.Run(operation, func(t *testing.T) {
-			payload := []byte("{\"type\":\"user\",\"content\":\"hello\",\"ts\":\"2026-03-11T10:00:00Z\",\"seq\":1}\n")
-			oid := fmt.Sprintf("%x", sha256.Sum256(payload))
-			started, release := make(chan struct{}, 1), make(chan struct{})
-			var refreshCalls, batchCalls atomic.Int32
-			var blockRefresh atomic.Bool
-			blockRefresh.Store(true)
-			var srv *httptest.Server
-			srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				switch r.URL.Path {
-				case "/api/v1/cli/repos":
-					refreshCalls.Add(1)
-					assert.Equal(t, "Bearer "+validTeamToken, r.Header.Get("Authorization"))
-					if blockRefresh.Load() {
-						started <- struct{}{}
-						select {
-						case <-r.Context().Done():
-						case <-release:
-							w.WriteHeader(http.StatusUnauthorized)
+	for _, phase := range []struct {
+		name, cachedBearer              string
+		initialBatches, recoveryBatches int32
+	}{
+		{"constructor", "previous-bearer", 0, 1},
+		{"after401", validTeamToken, 1, 3},
+	} {
+		for _, operation := range []string{"fetch", "hydrate", "upload", "migrate"} {
+			t.Run(phase.name+"/"+operation, func(t *testing.T) {
+				payload := []byte("{\"type\":\"user\",\"content\":\"hello\",\"ts\":\"2026-03-11T10:00:00Z\",\"seq\":1}\n")
+				oid := fmt.Sprintf("%x", sha256.Sum256(payload))
+				started, release := make(chan struct{}, 1), make(chan struct{})
+				var refreshCalls, batchCalls atomic.Int32
+				var blockRefresh atomic.Bool
+				blockRefresh.Store(true)
+				var srv *httptest.Server
+				srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					switch r.URL.Path {
+					case "/api/v1/cli/repos":
+						refreshCalls.Add(1)
+						assert.Equal(t, "Bearer "+validTeamToken, r.Header.Get("Authorization"))
+						if blockRefresh.Load() {
+							started <- struct{}{}
+							select {
+							case <-r.Context().Done():
+							case <-release:
+								w.WriteHeader(http.StatusUnauthorized)
+							}
+							return
 						}
-						return
+						_ = json.NewEncoder(w).Encode(api.ReposResponse{
+							Token: "fresh-pat", Username: "git-user", ServerURL: srv.URL, ExpiresAt: time.Now().Add(24 * time.Hour),
+						})
+					case "/ledger.git/info/lfs/objects/batch":
+						batchCalls.Add(1)
+						username, token, _ := r.BasicAuth()
+						assert.Equal(t, "git-user", username)
+						if token == "old-pat" {
+							w.WriteHeader(http.StatusUnauthorized)
+							return
+						}
+						assert.Equal(t, "fresh-pat", token)
+						_ = json.NewEncoder(w).Encode(lfs.BatchResponse{Objects: []lfs.BatchResponseObject{{
+							OID: oid, Size: int64(len(payload)), Actions: &lfs.Actions{Download: &lfs.Action{Href: srv.URL + "/object"}},
+						}}})
+					case "/object":
+						_, _ = w.Write(payload)
+					default:
+						t.Errorf("unexpected request %s", r.URL.Path)
+						w.WriteHeader(http.StatusNotFound)
 					}
-					_ = json.NewEncoder(w).Encode(api.ReposResponse{
-						Token: "fresh-pat", Username: "git-user", ServerURL: srv.URL, ExpiresAt: time.Now().Add(24 * time.Hour),
-					})
-				case "/ledger.git/info/lfs/objects/batch":
-					batchCalls.Add(1)
-					username, token, _ := r.BasicAuth()
-					assert.Equal(t, "git-user", username)
-					assert.Equal(t, "fresh-pat", token)
-					_ = json.NewEncoder(w).Encode(lfs.BatchResponse{Objects: []lfs.BatchResponseObject{{
-						OID: oid, Size: int64(len(payload)), Actions: &lfs.Actions{Download: &lfs.Action{Href: srv.URL + "/object"}},
-					}}})
-				case "/object":
-					_, _ = w.Write(payload)
-				default:
-					t.Errorf("unexpected request %s", r.URL.Path)
-					w.WriteHeader(http.StatusNotFound)
+				}))
+				t.Cleanup(func() { close(release); srv.Close() })
+				setupAuthRenderEnv(t, srv.URL, validTeamToken)
+				root := createInitializedProjectWithConfig(t, nil)
+				hostedTestGit(t, root, "init")
+				t.Chdir(root)
+				ledgerPath := filepath.Join(root, "ledger")
+				hostedTestGit(t, root, "init", ledgerPath)
+				hostedTestGit(t, ledgerPath, "remote", "add", "origin", srv.URL+"/ledger.git")
+				require.NoError(t, config.SaveLocalConfig(root, &config.LocalConfig{Ledger: &config.LedgerConfig{Path: ledgerPath}}))
+				sessionPath := filepath.Join(ledgerPath, "sessions", "fixture")
+				pointerPath := writeTestPointerFile(t, sessionPath, "raw.jsonl", oid, int64(len(payload)))
+				if operation == "upload" {
+					require.NoError(t, os.WriteFile(pointerPath, payload, 0o600))
 				}
-			}))
-			t.Cleanup(func() { close(release); srv.Close() })
-			setupAuthRenderEnv(t, srv.URL, validTeamToken)
-			root := createInitializedProjectWithConfig(t, nil)
-			hostedTestGit(t, root, "init")
-			t.Chdir(root)
-			ledgerPath := filepath.Join(root, "ledger")
-			hostedTestGit(t, root, "init", ledgerPath)
-			hostedTestGit(t, ledgerPath, "remote", "add", "origin", srv.URL+"/ledger.git")
-			require.NoError(t, config.SaveLocalConfig(root, &config.LocalConfig{Ledger: &config.LedgerConfig{Path: ledgerPath}}))
-			sessionPath := filepath.Join(ledgerPath, "sessions", "fixture")
-			pointerPath := writeTestPointerFile(t, sessionPath, "raw.jsonl", oid, int64(len(payload)))
-			if operation == "upload" {
-				require.NoError(t, os.WriteFile(pointerPath, payload, 0o600))
-			}
-			rawBefore, err := os.ReadFile(pointerPath)
-			require.NoError(t, err)
-			summaryPath := filepath.Join(sessionPath, "summary.md")
-			require.NoError(t, os.WriteFile(summaryPath, payload, 0o600))
-			meta := lfs.NewSessionMeta("fixture", "test", "Oxctx", "claude-code", time.Now()).Build()
-			if operation != "upload" {
-				meta.Files = map[string]lfs.FileRef{"raw.jsonl": {OID: "sha256:" + oid, Size: int64(len(payload))}}
-			}
-			require.NoError(t, lfs.WriteSessionMetaOnly(sessionPath, meta))
-			cached := gitserver.GitCredentials{
-				Token: "old-pat", Username: "git-user", ServerURL: srv.URL, ExpiresAt: time.Now().Add(24 * time.Hour),
-				BearerTokenHash: gitserver.BearerTokenFingerprint("previous-bearer"),
-			}
-			require.NoError(t, gitserver.SaveCredentialsForEndpoint(srv.URL, cached))
-			output, stdout, verify := fetchOutputFlag, fetchStdoutFlag, fetchVerifyFlag
-			fetchOutputFlag, fetchStdoutFlag, fetchVerifyFlag = "", false, true
-			t.Cleanup(func() { fetchOutputFlag, fetchStdoutFlag, fetchVerifyFlag = output, stdout, verify })
-			run := func(ctx context.Context) error {
-				cmd := &cobra.Command{}
-				cmd.SetContext(ctx)
-				cmd.SetOut(io.Discard)
-				switch operation {
-				case "fetch":
-					return runFetch(cmd, []string{pointerPath})
-				case "hydrate":
-					return sessionHydrateCmd.RunE(cmd, []string{"fixture"})
-				case "upload":
-					return sessionUploadCmd.RunE(cmd, []string{"fixture"})
-				default:
-					return migrateSessionToLFS(ctx, root, ledgerPath, sessionPath, "fixture")
-				}
-			}
-			ctx, cancel := context.WithCancel(context.Background())
-			t.Cleanup(cancel)
-			done := make(chan error, 1)
-			go func() { done <- run(ctx) }()
-			select {
-			case <-started:
-			case <-time.After(2 * time.Second):
-				t.Fatal("CLI did not request credentials for the rotated bearer")
-			}
-			cancel()
-			select {
-			case err := <-done:
-				require.ErrorIs(t, err, context.Canceled)
-			case <-time.After(time.Second):
-				t.Fatal("CLI cancellation did not stop credential refresh promptly")
-			}
-			assert.EqualValues(t, 1, refreshCalls.Load())
-			assert.Zero(t, batchCalls.Load(), "canceled refresh must not reach LFS")
-			preserved, err := gitserver.LoadCredentialsForEndpoint(srv.URL)
-			require.NoError(t, err)
-			require.NotNil(t, preserved)
-			assert.Equal(t, cached.Token, preserved.Token)
-			assert.Equal(t, cached.BearerTokenHash, preserved.BearerTokenHash)
-			rawAfter, err := os.ReadFile(pointerPath)
-			require.NoError(t, err)
-			assert.Equal(t, rawBefore, rawAfter, "canceled operation must preserve stubs and original session content")
-			summaryAfter, err := os.ReadFile(summaryPath)
-			require.NoError(t, err)
-			assert.Equal(t, payload, summaryAfter, "canceled migration must preserve original content")
-			cachePath := filepath.Join(ledgerPath, ".sageox", "cache", "sessions", "fixture", "raw.jsonl")
-			assert.NoFileExists(t, cachePath)
-			if operation == "fetch" {
-				blockRefresh.Store(false)
-				require.NoError(t, run(context.Background()), "a new invocation must refresh and fetch successfully")
-				assert.EqualValues(t, 2, refreshCalls.Load())
-				assert.EqualValues(t, 1, batchCalls.Load())
-				content, err := os.ReadFile(cachePath)
+				rawBefore, err := os.ReadFile(pointerPath)
 				require.NoError(t, err)
-				assert.Equal(t, payload, content)
-			}
-		})
+				summaryPath := filepath.Join(sessionPath, "summary.md")
+				require.NoError(t, os.WriteFile(summaryPath, payload, 0o600))
+				meta := lfs.NewSessionMeta("fixture", "test", "Oxctx", "claude-code", time.Now()).Build()
+				if operation != "upload" {
+					meta.Files = map[string]lfs.FileRef{"raw.jsonl": {OID: "sha256:" + oid, Size: int64(len(payload))}}
+				}
+				require.NoError(t, lfs.WriteSessionMetaOnly(sessionPath, meta))
+				cached := gitserver.GitCredentials{
+					Token: "old-pat", Username: "git-user", ServerURL: srv.URL, ExpiresAt: time.Now().Add(24 * time.Hour),
+					BearerTokenHash: gitserver.BearerTokenFingerprint(phase.cachedBearer),
+				}
+				require.NoError(t, gitserver.SaveCredentialsForEndpoint(srv.URL, cached))
+				output, stdout, verify := fetchOutputFlag, fetchStdoutFlag, fetchVerifyFlag
+				fetchOutputFlag, fetchStdoutFlag, fetchVerifyFlag = "", false, true
+				t.Cleanup(func() { fetchOutputFlag, fetchStdoutFlag, fetchVerifyFlag = output, stdout, verify })
+				run := func(ctx context.Context) error {
+					cmd := &cobra.Command{}
+					cmd.SetContext(ctx)
+					cmd.SetOut(io.Discard)
+					switch operation {
+					case "fetch":
+						return runFetch(cmd, []string{pointerPath})
+					case "hydrate":
+						return sessionHydrateCmd.RunE(cmd, []string{"fixture"})
+					case "upload":
+						return sessionUploadCmd.RunE(cmd, []string{"fixture"})
+					default:
+						return migrateSessionToLFS(ctx, root, ledgerPath, sessionPath, "fixture")
+					}
+				}
+				ctx, cancel := context.WithCancel(context.Background())
+				t.Cleanup(cancel)
+				done := make(chan error, 1)
+				go func() { done <- run(ctx) }()
+				select {
+				case <-started:
+				case <-time.After(2 * time.Second):
+					t.Fatal("CLI did not request credentials for the rotated bearer")
+				}
+				cancel()
+				select {
+				case err := <-done:
+					require.ErrorIs(t, err, context.Canceled)
+				case <-time.After(time.Second):
+					t.Fatal("CLI cancellation did not stop credential refresh promptly")
+				}
+				assert.EqualValues(t, 1, refreshCalls.Load())
+				assert.Equal(t, phase.initialBatches, batchCalls.Load(), "canceled refresh must not retry or start an LFS batch")
+				preserved, err := gitserver.LoadCredentialsForEndpoint(srv.URL)
+				require.NoError(t, err)
+				require.NotNil(t, preserved)
+				assert.Equal(t, cached.Token, preserved.Token)
+				assert.Equal(t, cached.BearerTokenHash, preserved.BearerTokenHash)
+				rawAfter, err := os.ReadFile(pointerPath)
+				require.NoError(t, err)
+				assert.Equal(t, rawBefore, rawAfter, "canceled operation must preserve stubs and original session content")
+				summaryAfter, err := os.ReadFile(summaryPath)
+				require.NoError(t, err)
+				assert.Equal(t, payload, summaryAfter, "canceled migration must preserve original content")
+				cachePath := filepath.Join(ledgerPath, ".sageox", "cache", "sessions", "fixture", "raw.jsonl")
+				assert.NoFileExists(t, cachePath)
+				if operation == "fetch" {
+					blockRefresh.Store(false)
+					require.NoError(t, run(context.Background()), "a new invocation must refresh and fetch successfully")
+					assert.EqualValues(t, 2, refreshCalls.Load())
+					assert.Equal(t, phase.recoveryBatches, batchCalls.Load())
+					content, err := os.ReadFile(cachePath)
+					require.NoError(t, err)
+					assert.Equal(t, payload, content)
+				}
+			})
+		}
 	}
 }
 

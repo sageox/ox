@@ -148,7 +148,7 @@ func uploadSessionLFSContext(ctx context.Context, projectRoot, sessionPath strin
 		return nil, fmt.Errorf("create LFS client: %w", err)
 	}
 
-	return lfs.UploadSessionFiles(client, sessionPath, slog.Default())
+	return lfs.UploadSessionFilesContext(ctx, client, sessionPath, slog.Default())
 }
 
 // getLFSClient creates an LFS client using project credentials.

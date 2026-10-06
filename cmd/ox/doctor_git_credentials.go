@@ -53,6 +53,19 @@ func checkGitCredentialsFreshness(fix bool) checkResult {
 		return WarningCheck(name, msg, auth.ReauthenticationRemedy(projectEndpoint))
 	}
 
+	token, tokenErr := auth.GetTokenForEndpoint(projectEndpoint)
+	if tokenErr != nil || (token != nil && token.AccessToken != "" &&
+		creds.BearerTokenHash != gitserver.BearerTokenFingerprint(token.AccessToken)) {
+		if fix {
+			return refreshGitCredentials("credentials are unverified for the current token")
+		}
+		remedy := "run `ox doctor --fix` to refresh credentials for the current token"
+		if tokenErr != nil {
+			remedy = auth.ReauthenticationRemedy(projectEndpoint)
+		}
+		return WarningCheck(name, "credentials are unverified for the current token", remedy)
+	}
+
 	remaining := time.Until(creds.ExpiresAt)
 	if remaining < time.Hour {
 		msg := fmt.Sprintf("expiring in %s", formatDurationRough(remaining))

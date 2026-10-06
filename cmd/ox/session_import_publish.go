@@ -195,7 +195,7 @@ func publishImport(ctx context.Context, env *importEnv, c *importCandidate) (ski
 	if err := prepareDraftLedgerWrite(env.ledgerPath, c.Name); err != nil {
 		return "", heldf("the Ledger is not safe to write: %v", err)
 	}
-	refs, err := lfs.UploadSessionFiles(env.lfs, staging, env.logger)
+	refs, err := lfs.UploadSessionFilesContext(ctx, env.lfs, staging, env.logger)
 	if err != nil {
 		return "", heldf("upload to LFS: %v", err)
 	}

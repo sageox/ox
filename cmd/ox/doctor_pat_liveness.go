@@ -50,6 +50,23 @@ func checkGitPATLiveness(fix bool) checkResult {
 		return SkippedCheck(name, "no credentials found", "")
 	}
 
+	token, tokenErr := auth.GetTokenForEndpoint(projectEndpoint)
+	if tokenErr != nil || (token != nil && token.AccessToken != "" &&
+		creds.BearerTokenHash != gitserver.BearerTokenFingerprint(token.AccessToken)) {
+		if !fix {
+			remedy := "run `ox doctor --fix` to refresh credentials for the current token"
+			if tokenErr != nil {
+				remedy = auth.ReauthenticationRemedy(projectEndpoint)
+			}
+			return FailedCheck(name, "credentials are unverified for the current token", remedy)
+		}
+		creds, err = auth.RefreshGitCredentialsForEndpoint(context.Background(), projectEndpoint, true)
+		if err != nil {
+			return FailedCheck(name, "credentials are unverified for the current token",
+				"auto-repair failed; "+auth.ReauthenticationRemedy(projectEndpoint))
+		}
+	}
+
 	if creds.IsExpired() {
 		return SkippedCheck(name, "credentials expired (see git-creds-freshness check)", "")
 	}

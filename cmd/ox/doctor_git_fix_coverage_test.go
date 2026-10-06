@@ -2,16 +2,22 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
+	"net/http/cgi"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -104,28 +110,155 @@ func TestHasLocalGitChanges_NotAGitRepo(t *testing.T) {
 	assert.True(t, hasLocalGitChanges(tmp))
 }
 
-// Doctor must retain the response's bearer binding so the helper can reuse its PAT.
+// Doctor must retain and verify a PAT's bearer binding, even when the old PAT
+// remains accepted by Git. Failed refreshes preserve the cache without probing it.
 func TestSaveGitCredentialsFromRepos_BindsBearer(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		t.Error("doctor's freshly saved PAT must not need another API call")
-		w.WriteHeader(http.StatusUnauthorized)
-	}))
-	t.Cleanup(server.Close)
-	ep := server.URL
-	setupAuthRenderEnv(t, ep, validTeamToken)
-	require.NoError(t, saveGitCredentialsFromRepos(nil, ep, validTeamToken))
-	require.NoError(t, saveGitCredentialsFromRepos(&api.ReposResponse{
-		Token: "doctor-pat", ExpiresAt: time.Now().Add(24 * time.Hour),
-		Repos: map[string]api.RepoInfo{"team_test": {Name: "Doctor Team", Type: "team-context", TeamID: "team_test", Slug: "doctor-team"}},
-	}, ep, validTeamToken))
-	creds, err := auth.RefreshGitCredentialsForEndpoint(context.Background(), ep, false)
-	require.NoError(t, err, "doctor's freshly saved PAT must not need another API call")
-	require.NotNil(t, creds)
-	assert.Equal(t, "doctor-pat", creds.Token)
-	assert.Equal(t, gitserver.BearerTokenFingerprint(validTeamToken), creds.BearerTokenHash)
-	repo := creds.GetRepo("team_test")
-	require.NotNil(t, repo)
-	assert.Equal(t, "doctor-team", repo.Slug)
+	if testing.Short() || runtime.GOOS == "windows" {
+		t.Skip("real Git liveness probes and CGI backend require Unix process semantics")
+	}
+	for _, outcome := range []string{"matching bearer", "rotation repaired", "rotation rejected", "offline checkout", "malformed bearer"} {
+		t.Run(outcome, func(t *testing.T) {
+			gitRoot := t.TempDir()
+			hostedTestGit(t, gitRoot, "init", "--bare", filepath.Join(gitRoot, "ledger.git"))
+			backend := &cgi.Handler{
+				Path: filepath.Join(hostedTestGit(t, gitRoot, "--exec-path"), "git-http-backend"),
+				Env:  []string{"GIT_PROJECT_ROOT=" + gitRoot, "GIT_HTTP_EXPORT_ALL=1"},
+			}
+			var refreshes, oldProbes, freshProbes atomic.Int32
+			var server *httptest.Server
+			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case auth.IntrospectEndpoint:
+					_, _ = w.Write([]byte(`{"active":true,"principal_kind":"team-service","team":{"team_id":"team_test"}}`))
+				case "/api/v1/cli/repos":
+					refreshes.Add(1)
+					assert.Equal(t, "Bearer "+validTeamToken, r.Header.Get("Authorization"))
+					if outcome == "rotation rejected" {
+						w.WriteHeader(http.StatusUnauthorized)
+						return
+					}
+					_ = json.NewEncoder(w).Encode(api.ReposResponse{
+						Token: "fresh-pat", ServerURL: server.URL, ExpiresAt: time.Now().Add(24 * time.Hour),
+						Repos: map[string]api.RepoInfo{"team_test": {Name: "Doctor Team", Type: "team-context", TeamID: "team_test", Slug: "doctor-team", URL: server.URL + "/ledger.git"}},
+					})
+				default:
+					_, pat, _ := r.BasicAuth()
+					if strings.HasSuffix(r.URL.Path, "/info/refs") {
+						if pat == "doctor-pat" {
+							oldProbes.Add(1)
+						}
+						if pat == "fresh-pat" {
+							freshProbes.Add(1)
+						}
+					}
+					if pat == "doctor-pat" || pat == "fresh-pat" {
+						backend.ServeHTTP(w, r)
+						return
+					}
+					w.Header().Set("WWW-Authenticate", `Basic realm="ledger"`)
+					w.WriteHeader(http.StatusUnauthorized)
+				}
+			}))
+			t.Cleanup(server.Close)
+			bearer := validTeamToken
+			switch outcome {
+			case "offline checkout":
+				bearer = ""
+			case "malformed bearer":
+				bearer = "oxt_truncated"
+			}
+			setupAuthRenderEnv(t, server.URL, bearer)
+			root := createInitializedProjectWithConfig(t, nil)
+			hostedTestGit(t, root, "init")
+			t.Chdir(root)
+			t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+			t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+			boundBearer := validTeamToken
+			rotated := strings.HasPrefix(outcome, "rotation")
+			if rotated {
+				boundBearer = "oxt_rotated_1lKvCA"
+			}
+			require.NoError(t, saveGitCredentialsFromRepos(nil, server.URL, boundBearer))
+			require.NoError(t, saveGitCredentialsFromRepos(&api.ReposResponse{
+				Token: "doctor-pat", ServerURL: server.URL, ExpiresAt: time.Now().Add(24 * time.Hour),
+				Repos: map[string]api.RepoInfo{"team_test": {Name: "Doctor Team", Type: "team-context", TeamID: "team_test", Slug: "doctor-team", URL: server.URL + "/ledger.git"}},
+			}, server.URL, boundBearer))
+			cached, err := gitserver.LoadCredentialsForEndpoint(server.URL)
+			require.NoError(t, err)
+			require.NotNil(t, cached)
+			require.Equal(t, gitserver.BearerTokenFingerprint(boundBearer), cached.BearerTokenHash)
+			require.Equal(t, "doctor-team", cached.GetRepo("team_test").Slug)
+			assert.True(t, checkCredentialIntegrityInDir(config.GetUserConfigDir(), true).passed)
+
+			if outcome == "malformed bearer" {
+				for _, result := range []checkResult{
+					checkGitCredentials(), checkGitCredentialsFreshness(false),
+					checkGitCredentialsFreshness(true), checkGitPATLiveness(false), checkGitPATLiveness(true),
+				} {
+					assert.False(t, result.passed && !result.warning)
+					assert.Contains(t, result.detail, "Rotate or re-mint")
+					assert.NotContains(t, result.detail, "ox login")
+				}
+				require.Zero(t, refreshes.Load())
+				require.Zero(t, oldProbes.Load(), "malformed bearers must not probe a cached PAT")
+				stored, err := gitserver.LoadCredentialsForEndpoint(server.URL)
+				require.NoError(t, err)
+				assert.Equal(t, cached, stored)
+				return
+			}
+
+			if !rotated {
+				creds, err := auth.RefreshGitCredentialsForEndpoint(context.Background(), server.URL, false)
+				require.NoError(t, err)
+				require.Equal(t, cached.Token, creds.Token)
+				assert.True(t, checkGitCredentials().passed)
+				assert.True(t, checkGitCredentialsFreshness(false).passed)
+				assert.True(t, checkGitPATLiveness(false).passed)
+				require.Zero(t, refreshes.Load(), "matching and offline caches need no API refresh")
+				require.EqualValues(t, 1, oldProbes.Load())
+				return
+			}
+
+			assert.True(t, checkAuthentication().passed, "the current bearer is valid")
+			assert.True(t, checkGitCredentialsFreshness(false).warning, "freshness alone must not validate another bearer's PAT")
+			assert.False(t, checkGitPATLiveness(false).passed, "check-only must flag the binding without probing the old PAT")
+			require.Zero(t, refreshes.Load())
+			require.Zero(t, oldProbes.Load())
+			for _, check := range []struct {
+				name string
+				run  func() checkResult
+			}{
+				{"freshness repair", func() checkResult { return checkGitCredentialsFreshness(true) }},
+				{"liveness repair", func() checkResult { return checkGitPATLiveness(true) }},
+				{"automatic credential repair", checkGitCredentials},
+			} {
+				t.Run(check.name, func(t *testing.T) {
+					require.NoError(t, gitserver.SaveCredentialsForEndpoint(server.URL, *cached))
+					before := refreshes.Load()
+					result := check.run()
+					assert.Equal(t, outcome == "rotation repaired", result.passed && !result.warning)
+					require.Equal(t, before+1, refreshes.Load(), "each repair must resolve the current bearer")
+					assert.Zero(t, oldProbes.Load(), "an old bearer's accepted PAT must never be probed")
+					stored, err := gitserver.LoadCredentialsForEndpoint(server.URL)
+					require.NoError(t, err)
+					if outcome == "rotation rejected" {
+						assert.Contains(t, result.detail, "Rotate or re-mint")
+						assert.Equal(t, cached, stored, "a rejected refresh must preserve the cache")
+						assert.Zero(t, freshProbes.Load())
+					} else {
+						if check.name != "liveness repair" {
+							assert.Contains(t, result.message, "refreshed, 1 repos (expires in")
+						}
+						assert.Equal(t, "fresh-pat", stored.Token)
+						assert.Equal(t, gitserver.BearerTokenFingerprint(validTeamToken), stored.BearerTokenHash)
+					}
+				})
+			}
+			if outcome == "rotation repaired" {
+				assert.EqualValues(t, 1, freshProbes.Load(), "liveness repair must probe the returned fresh PAT")
+			}
+		})
+	}
 }
 
 // TestValidateRepoPath exercises the repo path validator from doctor_git_repos_validate.go

@@ -1851,7 +1851,7 @@ func (h *SessionFinalizeHandler) writeMetaAndUploadLFS(payload *SessionFinalizeP
 		return nil, fmt.Errorf("create session LFS client: %w", err)
 	}
 
-	fileRefs, err := lfs.UploadSessionFiles(client, payload.SessionDir, h.logger)
+	fileRefs, err := lfs.UploadSessionFilesContext(h.rootContext(), client, payload.SessionDir, h.logger)
 	if err != nil {
 		return nil, fmt.Errorf("upload session content: %w", err)
 	}
@@ -2176,7 +2176,7 @@ func (h *SessionFinalizeHandler) processUploadOnly(payload *SessionFinalizePaylo
 		if err != nil {
 			return fmt.Errorf("upload-only: create LFS client: %w", err)
 		} else {
-			refs, err := lfs.UploadSessionFiles(client, payload.SessionDir, h.logger)
+			refs, err := lfs.UploadSessionFilesContext(h.rootContext(), client, payload.SessionDir, h.logger)
 			if err != nil {
 				return fmt.Errorf("upload-only: upload session content: %w", err)
 			} else {
