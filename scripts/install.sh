@@ -39,30 +39,6 @@ log_error() {
     echo -e "${RED}Error:${NC} $1" >&2
 }
 
-# Print PATH guidance for AI coding tool hooks, naming the shell startup
-# file that a non-interactive hook shell actually reads. No-op if the
-# binary's directory is already on PATH.
-#
-# AI coding tools run hooks in a non-interactive shell (e.g. `zsh -c
-# '...'`), which sources ~/.zshenv but never ~/.zshrc/~/.bash_profile/etc.
-# A binary that only ends up on PATH via an interactive rc file works fine
-# at the terminal but stays invisible to those hooks.
-#
-# zsh is the only shell here with a startup file a non-interactive `-c`
-# invocation always reads (~/.zshenv). bash has no such file by default —
-# non-interactive, non-login bash sources nothing unless $BASH_ENV is set,
-# and we deliberately don't tell users to set that: it's obscure and it
-# would affect every non-interactive bash invocation on the machine, not
-# just hooks. So for bash/fish/unknown we give the honest explanation
-# instead of the zsh-specific one, plus a restart reminder: the hook tool
-# inherits the environment of the terminal that launched it, so adding the
-# export to the interactive rc file and then restarting the tool from a
-# fresh terminal works, even though the file itself is never read directly
-# by the hook shell. Mirrors internal/constants/agent.go's
-# oxNotOnPathFallback, cmd/ox/hooks_git.go's
-# oxGitHookNotOnPathFallback, internal/doctor/checks/ox_in_path.go's
-# explanationFor/shellRCFor, and the Makefile's install target — keep the
-# wording identical across all five.
 # Single-quote a string for pasting into a shell: the line must land in the
 # rc file verbatim, with $PATH unexpanded.
 shell_quote() {
@@ -88,6 +64,30 @@ dq_escape_fish() {
     printf '%s' "$s"
 }
 
+# Print PATH guidance for AI coding tool hooks, naming the shell startup
+# file that a non-interactive hook shell actually reads. No-op if the
+# binary's directory is already on PATH.
+#
+# AI coding tools run hooks in a non-interactive shell (e.g. `zsh -c
+# '...'`), which sources ~/.zshenv but never ~/.zshrc/~/.bash_profile/etc.
+# A binary that only ends up on PATH via an interactive rc file works fine
+# at the terminal but stays invisible to those hooks.
+#
+# zsh is the only shell here with a startup file a non-interactive `-c`
+# invocation always reads (~/.zshenv). bash has no such file by default —
+# non-interactive, non-login bash sources nothing unless $BASH_ENV is set,
+# and we deliberately don't tell users to set that: it's obscure and it
+# would affect every non-interactive bash invocation on the machine, not
+# just hooks. So for bash/fish/unknown we give the honest explanation
+# instead of the zsh-specific one, plus a restart reminder: the hook tool
+# inherits the environment of the terminal that launched it, so adding the
+# export to the interactive rc file and then restarting the tool from a
+# fresh terminal works, even though the file itself is never read directly
+# by the hook shell. Mirrors internal/constants/agent.go's
+# oxNotOnPathFallback, cmd/ox/hooks_git.go's
+# oxGitHookNotOnPathFallback, internal/doctor/checks/ox_in_path.go's
+# explanationFor/shellRCFor, and the Makefile's install target — keep the
+# wording identical across all five.
 print_path_warning() {
     local binary_path=$1
     local install_dir
