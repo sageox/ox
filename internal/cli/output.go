@@ -35,7 +35,10 @@ var (
 	tipCommandStyle = lipgloss.NewStyle().Foreground(ColorPrimary)   // sage green for commands
 )
 
-var backtickRegex = regexp.MustCompile("`([^`]+)`")
+// backtickRegex matches a backtick-wrapped command, or an escaped backtick
+// (\`), which is literal text in a shell line such as an escaped PATH
+// export and must not open or close a command span.
+var backtickRegex = regexp.MustCompile("\\\\`|`([^`]+)`")
 
 var jsonMode bool
 var noInteractive bool
@@ -283,6 +286,9 @@ func PrintTip(tip string) {
 // FormatTipText formats tip text by highlighting backtick-wrapped commands
 func FormatTipText(tip string) string {
 	return backtickRegex.ReplaceAllStringFunc(tip, func(match string) string {
+		if match == "\\`" {
+			return match
+		}
 		// match is "`command`", so extract without backticks
 		command := match[1 : len(match)-1]
 		return tipCommandStyle.Render(command)

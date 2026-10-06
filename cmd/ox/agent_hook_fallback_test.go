@@ -257,3 +257,42 @@ func TestOffPathFallback_BashNamesTheFileANewTerminalReads(t *testing.T) {
 		}
 	}
 }
+
+// TestOffPathFallback_WithoutSedPrintsNoEmptyPathLine: if sed cannot run, the
+// fallback must leave the PATH line out rather than print
+// `export PATH="$PATH:"`, which would put the current directory on PATH, and
+// must not abort a git hook running under set -e.
+func TestOffPathFallback_WithoutSedPrintsNoEmptyPathLine(t *testing.T) {
+	for _, fb := range offPathFallbacks() {
+		t.Run(fb.name, func(t *testing.T) {
+			binDir := filepath.Join(t.TempDir(), "bin")
+			require.NoError(t, os.MkdirAll(binDir, 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(binDir, "ox"), []byte("#!/bin/sh\n"), 0o755))
+			cmd := exec.Command("/bin/sh", "-c", "set -e\n"+fb.script)
+			// an empty PATH dir: no sed, no uname, no ox
+			cmd.Env = []string{"PATH=" + t.TempDir(), "HOME=" + t.TempDir(), "GOBIN=" + binDir, "SHELL=/bin/zsh"}
+			out, err := cmd.CombinedOutput()
+			require.NoError(t, err, "fallback exited non-zero under set -e: %s", out)
+			assert.Contains(t, string(out), "is not on PATH for non-interactive shells")
+			assert.NotContains(t, string(out), `export PATH="$PATH:"`)
+		})
+	}
+}
+
+// TestHookCommand_FillsTheEventPlaceholder: the templates also carry the
+// fallback's own printf '%s', so HookCommand must fill the event slot and
+// leave the shell's %s alone.
+func TestHookCommand_FillsTheEventPlaceholder(t *testing.T) {
+	for name, tpl := range map[string]string{
+		"claude": constants.OxHookCommandClaudeCodeTemplate,
+		"codex":  constants.OxHookCommandCodexTemplate,
+		"gemini": constants.OxHookCommandGeminiTemplate,
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := constants.HookCommand(tpl, "SessionStart")
+			assert.Contains(t, got, "ox agent hook SessionStart 2>&1")
+			assert.Contains(t, got, "printf '%s'", "the fallback's own printf must survive")
+			assert.NotContains(t, got, "ox agent hook %s")
+		})
+	}
+}

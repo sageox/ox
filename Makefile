@@ -17,6 +17,9 @@ GOPATH := $(shell go env GOPATH)
 # where the binary actually landed, not always GOPATH/bin.
 GOBIN := $(shell go env GOBIN)
 INSTALL_BIN := $(if $(strip $(GOBIN)),$(GOBIN),$(GOPATH)/bin)
+# sq: $(1) with each ' written as '\'' so it can sit inside single quotes in
+# a recipe and reach the shell as plain text, never as code.
+sq = $(subst ','\'',$(1))
 LDFLAGS := -ldflags "-X github.com/sageox/ox/internal/version.Version=$(VERSION) -X github.com/sageox/ox/internal/version.BuildDate=$(BUILD_TIME) -X github.com/sageox/ox/internal/version.GitCommit=$(GIT_COMMIT)"
 ADAPTER_LDFLAGS := -ldflags "-s -w"
 
@@ -105,7 +108,7 @@ install: install-ox install-adapters ## Install ox and adapters to $GOPATH/bin
 	@echo "  Releases self-update via \`ox upgrade\` and keep ox and its 10 adapter"
 	@echo "  binaries together on PATH."
 	@echo "─────────────────────────────────────────────────────────────────────"
-	@ox_bin='$(subst ','\'',$(INSTALL_BIN))'; \
+	@ox_bin='$(call sq,$(INSTALL_BIN))'; \
 	case ":$$PATH:" in \
 		*":$$ox_bin:"*) ;; \
 		*) \
@@ -127,16 +130,17 @@ install: install-ox install-adapters ## Install ox and adapters to $GOPATH/bin
 			[ -n "$$restart_line" ] && echo "$$restart_line"; \
 			echo ""; \
 			;; \
-	esac
-	@printf 'Next: run `%s/%s doctor` to confirm your AI coworker can actually see this install.\n' '$(subst ','\'',$(INSTALL_BIN))' '$(BINARY_NAME)'
+	esac; \
+	ox_cmd="'$$(printf '%s' "$$ox_bin/$(BINARY_NAME)" | sed "s/'/'\\\\''/g")'"; \
+	printf 'Next: run `%s doctor` to confirm your AI coworker can actually see this install.\n' "$$ox_cmd"
 
 install-ox: ## Install ox to $GOPATH/bin
-	@echo "Installing $(BINARY_NAME) to $(GOPATH)/bin..."
+	@echo 'Installing $(BINARY_NAME) to $(call sq,$(GOPATH))/bin...'
 	$(GO) install $(LDFLAGS) ./cmd/ox
-	@echo "Installed $(BINARY_NAME) to $(GOPATH)/bin/$(BINARY_NAME)"
+	@echo 'Installed $(BINARY_NAME) to $(call sq,$(GOPATH))/bin/$(BINARY_NAME)'
 
 install-adapters: ## Install bundled adapters to $GOPATH/bin
-	@echo "Installing adapters to $(GOPATH)/bin..."
+	@echo 'Installing adapters to $(call sq,$(GOPATH))/bin...'
 	@for adapter in $(ADAPTERS); do \
 		$(GO) install $(ADAPTER_LDFLAGS) ./cmd/$$adapter; \
 		echo "  Installed $$adapter"; \
