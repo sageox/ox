@@ -858,6 +858,13 @@ func IsSQLiteDamage(err error) bool {
 	return isSQLiteCode(err, sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB)
 }
 
+// IsSQLiteBusy reports whether err is SQLITE_BUSY or SQLITE_LOCKED: another
+// connection holds the lock right now. It says nothing about the database's
+// health, so callers retry rather than discard (see IsSQLiteDamage).
+func IsSQLiteBusy(err error) bool {
+	return isSQLiteCode(err, sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+}
+
 // isSQLiteCode reports whether err is a SQLite error whose primary result code
 // is one of want. Extended codes carry the primary in the low byte
 // (SQLITE_BUSY_SNAPSHOT is SQLITE_BUSY | 2<<8), so the comparison masks it off
