@@ -99,8 +99,11 @@ func RescueThenAbort(ctx context.Context, repoPath, reason string, logger *slog.
 
 	// Step 1: is anything actually at risk?
 	stranded, err := StrandedCommitCount(ctx, repoPath)
-	if err != nil {
+	if errors.Is(err, context.DeadlineExceeded) {
 		return "", fmt.Errorf("counting stranded commits: %w: %w", ErrStrandedCountUnknown, err)
+	}
+	if err != nil {
+		return "", fmt.Errorf("counting stranded commits: %w", err)
 	}
 	if stranded == 0 {
 		return "", ErrNoStrandedCommits
@@ -205,6 +208,10 @@ func StrandedCommitCount(ctx context.Context, repoPath string) (int, error) {
 	defer cancel()
 	out, err := rescueGit(ctx, repoPath, "rev-list", "--count", "HEAD", "--not", "--branches", "--remotes")
 	if err != nil {
+		// surface our own deadline: the killed child only reports "signal: terminated"
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return 0, fmt.Errorf("git rev-list: %w: %w (%s)", ctxErr, err, out)
+		}
 		return 0, fmt.Errorf("git rev-list: %w (%s)", err, out)
 	}
 	n, err := strconv.Atoi(strings.TrimSpace(out))

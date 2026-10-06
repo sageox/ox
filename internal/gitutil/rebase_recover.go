@@ -158,6 +158,8 @@ func readAutostashOID(stateDir string) string {
 // any error it returns false (treat as on-branch) so a transient git hiccup
 // doesn't over-eagerly refuse the quit path.
 func headDetached(ctx context.Context, repoPath string) bool {
-	cmd := commandContext(ctx, "git", "-C", repoPath, "symbolic-ref", "-q", "HEAD")
+	probeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), pullMaxTimeout)
+	defer cancel()
+	cmd := commandContext(probeCtx, "git", "-C", repoPath, "symbolic-ref", "-q", "HEAD")
 	return cmd.Run() != nil
 }
