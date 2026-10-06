@@ -93,8 +93,9 @@ func reviewSaveDraft(cmd *cobra.Command, file string) (string, error) {
 	if gitRoot == "" || !config.PlanSave(gitRoot) {
 		return "", fmt.Errorf("review --file needs a ledger with plan capture enabled (run `ox init`)")
 	}
+	in, authored := splitAuthoredHTML(in)
 	result := plan.Enrich(context.Background(), in, gitRoot)
-	if savePlanArtifacts(gitRoot, in, result, nil, "", withCompanions(gatherCompanions(cmd, in))) == "" {
+	if saveEnrichedPlan(gitRoot, in, result, authored, withCompanions(gatherCompanions(cmd, in))) == "" {
 		return "", fmt.Errorf("could not save draft to the ledger")
 	}
 	return plan.Slugify(planTopic(in)), nil
