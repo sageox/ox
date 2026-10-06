@@ -15,16 +15,21 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
+	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/errkind"
+	"github.com/sageox/ox/internal/gitserver"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestNewClient(t *testing.T) {
-	c := NewClient("https://git.sageox.io/sageox/ledger.git", "oauth2", "test-token")
+	c := NewClient("https://git.sageox.io/sageox/ledger.git", "", "test-token")
 	assert.Equal(t, "https://git.sageox.io/sageox/ledger.git/info/lfs/objects/batch", c.batchURL)
-	assert.Contains(t, c.authHeader, "Basic ")
+	assert.Equal(t, "Basic b2F1dGgyOnRlc3QtdG9rZW4=", c.authHeader)
 	assert.Equal(t, 2*time.Minute, c.httpClient.Timeout, "batch API timeout should be 2 minutes")
+
 }
 
 func TestNewClient_TrailingSlash(t *testing.T) {
@@ -635,4 +640,191 @@ func TestReadLFS_StreamingFailureBoundaries(t *testing.T) {
 		require.Error(t, err)
 		require.NotContains(t, err.Error(), action.Href)
 	})
+}
+
+// TestBatch_HTTPFailureKind files a rejected batch request for usage
+// telemetry.
+// Failure prevented: an LFS upload or download refused for its credentials
+// counted as an unexplained failure instead of an auth one.
+func TestBatch_HTTPFailureKind(t *testing.T) {
+	tests := []struct {
+		status int
+		kind   errkind.Kind
+	}{
+		{http.StatusUnauthorized, errkind.Auth},
+		{http.StatusForbidden, errkind.Auth},
+		{http.StatusInternalServerError, errkind.Other},
+	}
+	for _, tt := range tests {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(tt.status)
+			_, _ = w.Write([]byte("refused for user@example.com"))
+		}))
+		c := &Client{batchURL: server.URL, httpClient: server.Client(), authHeader: "Basic dGVzdDp0b2tlbg=="}
+		_, err := c.BatchDownload([]BatchObject{{OID: "abc", Size: 10}})
+		server.Close()
+		require.Error(t, err)
+		assert.Equal(t, tt.kind, errkind.Of(err), "HTTP %d", tt.status)
+		assert.Equal(t, fmt.Sprintf("LFS batch API HTTP %d", tt.status), errkind.DetailOf(err))
+		assert.Contains(t, err.Error(), "refused for user@example.com", "the message a person sees is unchanged")
+	}
+}
+
+// A revoked PAT triggers one forced refresh; a revoked bearer returns the operator's remedy.
+func TestLFSRefreshesRejectedCredentials(t *testing.T) {
+	for _, outcome := range []string{"repaired", "bearer rejected", "empty PAT"} {
+		t.Run(outcome, func(t *testing.T) {
+			prevDir := gitserver.TestSetConfigDirOverride(t.TempDir())
+			prevFile := gitserver.TestSetForceFileStorage(true)
+			t.Cleanup(func() {
+				gitserver.TestSetConfigDirOverride(prevDir)
+				gitserver.TestSetForceFileStorage(prevFile)
+			})
+			var refreshCalls, batchCalls atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/api/v1/cli/repos" {
+					refreshCalls.Add(1)
+					assert.Equal(t, "Bearer oxt_test_1ljPfr", r.Header.Get("Authorization"))
+					if outcome == "bearer rejected" {
+						w.WriteHeader(http.StatusUnauthorized)
+						return
+					}
+					if outcome == "empty PAT" {
+						io.WriteString(w, `{}`)
+						return
+					}
+					json.NewEncoder(w).Encode(api.ReposResponse{Token: "fresh-pat", ExpiresAt: time.Now().Add(24 * time.Hour)})
+					return
+				}
+				batchCalls.Add(1)
+				username, token, _ := r.BasicAuth()
+				assert.Equal(t, "oauth2", username)
+				if token == "old-pat" {
+					w.WriteHeader(http.StatusUnauthorized)
+					return
+				}
+				assert.Equal(t, "fresh-pat", token)
+				var request batchRequest
+				require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+				assert.Equal(t, "upload", request.Operation, "retry retains the request body")
+				assert.Equal(t, []BatchObject{{OID: "abc", Size: 3}}, request.Objects)
+				io.WriteString(w, `{"objects":[]}`)
+			}))
+			defer srv.Close()
+			t.Setenv(endpoint.EnvVar, srv.URL)
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			t.Setenv("OX_XDG_DISABLE", "")
+			t.Setenv(auth.EnvVarToken, "oxt_test_1ljPfr")
+			require.NoError(t, gitserver.SaveCredentialsForEndpoint(srv.URL, gitserver.GitCredentials{
+				Token: "old-pat", ExpiresAt: time.Now().Add(24 * time.Hour),
+				BearerTokenHash: gitserver.BearerTokenFingerprint("oxt_test_1ljPfr"),
+			}))
+			client, err := NewClientForEndpoint(context.Background(), srv.URL+"/ledger.git", srv.URL)
+			require.NoError(t, err)
+			_, err = client.BatchUpload([]BatchObject{{OID: "abc", Size: 3}})
+			assert.EqualValues(t, 1, refreshCalls.Load())
+			switch outcome {
+			case "bearer rejected":
+				require.ErrorIs(t, err, api.ErrUnauthorized)
+				assert.Contains(t, err.Error(), "rotate or re-mint")
+				assert.NotContains(t, err.Error(), "ox login")
+				assert.EqualValues(t, 1, batchCalls.Load())
+			case "empty PAT":
+				require.ErrorContains(t, err, "empty token")
+				assert.EqualValues(t, 1, batchCalls.Load(), "an invalid PAT must never be retried")
+			case "repaired":
+				require.NoError(t, err)
+				assert.EqualValues(t, 2, batchCalls.Load())
+				// A reused client must also handle logout without dereferencing a missing cache.
+				t.Setenv(auth.EnvVarToken, "")
+				require.NoError(t, gitserver.RemoveCredentialsForEndpoint(srv.URL))
+				_, err = client.BatchUpload(nil)
+				require.ErrorContains(t, err, "no git credentials found")
+				for _, emptyCache := range []bool{false, true} {
+					if emptyCache {
+						require.NoError(t, gitserver.SaveCredentialsForEndpoint(srv.URL, gitserver.GitCredentials{}))
+					}
+					_, err = NewClientForEndpoint(context.Background(), srv.URL+"/ledger.git", srv.URL)
+					require.Error(t, err)
+					assert.Equal(t, errkind.NotLoggedIn, errkind.Of(err))
+				}
+				t.Setenv(auth.EnvVarToken, "oxt_invalid")
+				_, err = NewClientForEndpoint(context.Background(), srv.URL+"/ledger.git", srv.URL)
+				require.ErrorContains(t, err, "SAGEOX_TOKEN")
+			}
+			if outcome != "repaired" {
+				creds, loadErr := gitserver.LoadCredentialsForEndpoint(srv.URL)
+				require.NoError(t, loadErr)
+				assert.Equal(t, "old-pat", creds.Token, "failed refresh must preserve cached credentials")
+			}
+		})
+	}
+}
+
+// Failure prevented: OAuth or JWT refresh ignores cancellation or saves fallback credentials.
+func TestLFSBatchCancelsCredentialRefresh(t *testing.T) {
+	for _, stage := range []string{"OAuth", "JWT"} {
+		t.Run(stage, func(t *testing.T) {
+			prevDir := gitserver.TestSetConfigDirOverride(t.TempDir())
+			prevFile := gitserver.TestSetForceFileStorage(true)
+			t.Cleanup(func() {
+				gitserver.TestSetConfigDirOverride(prevDir)
+				gitserver.TestSetForceFileStorage(prevFile)
+			})
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			t.Setenv("OX_XDG_DISABLE", "")
+			t.Setenv(auth.EnvVarToken, "oxt_test_1ljPfr")
+			blockedPath := auth.TokenEndpoint
+			if stage == "JWT" {
+				blockedPath = "/api/v1/cli/auth/token"
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			var batchCalls atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == blockedPath {
+					_, _ = io.Copy(io.Discard, r.Body)
+					cancel()
+					select {
+					case <-r.Context().Done():
+					case <-time.After(time.Second):
+						t.Error("credential refresh ignored caller cancellation")
+					}
+					w.WriteHeader(http.StatusServiceUnavailable)
+					return
+				}
+				if r.URL.Path == auth.TokenEndpoint {
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"access_token": "refreshed-opaque", "expires_in": 3600,
+					})
+					return
+				}
+				batchCalls.Add(1)
+				w.WriteHeader(http.StatusUnauthorized)
+			}))
+			t.Cleanup(srv.Close)
+			t.Setenv(endpoint.EnvVar, srv.URL)
+			require.NoError(t, gitserver.SaveCredentialsForEndpoint(srv.URL, gitserver.GitCredentials{
+				Token: "old-pat", ExpiresAt: time.Now().Add(24 * time.Hour),
+				BearerTokenHash: gitserver.BearerTokenFingerprint("oxt_test_1ljPfr"),
+			}))
+			client, err := NewClientForEndpoint(context.Background(), srv.URL+"/ledger.git", srv.URL)
+			require.NoError(t, err)
+			t.Setenv(auth.EnvVarToken, "")
+			require.NoError(t, auth.SaveTokenForEndpoint(srv.URL, &auth.StoredToken{
+				AccessToken: "expired-jwt", RefreshToken: "valid-refresh",
+				ExpiresAt: time.Now().Add(-time.Hour),
+			}))
+
+			_, err = client.BatchUploadContext(ctx, []BatchObject{{OID: "abc", Size: 3}})
+			require.ErrorIs(t, err, context.Canceled)
+			require.Zero(t, batchCalls.Load())
+			creds, err := gitserver.LoadCredentialsForEndpoint(srv.URL)
+			require.NoError(t, err)
+			require.Equal(t, "old-pat", creds.Token, "cancellation must preserve the PAT cache")
+			token, err := auth.GetTokenForEndpoint(srv.URL)
+			require.NoError(t, err)
+			require.Equal(t, "expired-jwt", token.AccessToken, "canceled JWT exchange must not save an opaque fallback")
+		})
+	}
 }

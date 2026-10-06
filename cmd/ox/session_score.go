@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/sageox/ox/internal/errkind"
+
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/session"
 	"github.com/spf13/cobra"
@@ -40,7 +42,7 @@ func init() {
 func runSessionScore(cmd *cobra.Command, _ []string) error {
 	agentID := os.Getenv("SAGEOX_AGENT_ID")
 	if agentID == "" {
-		return fmt.Errorf("SAGEOX_AGENT_ID not set -- run 'ox agent prime' first")
+		return errkind.Errorf(errkind.Other, "SAGEOX_AGENT_ID not set -- run 'ox agent prime' first")
 	}
 
 	if !cmd.Flags().Changed("score") {

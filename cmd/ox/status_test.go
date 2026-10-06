@@ -1044,6 +1044,9 @@ func TestRenderAuthStatus_MalformedEnvTokenIsReported(t *testing.T) {
 
 	out := renderAuthStatus("/tmp/auth.json")
 
+	assert.NotContains(t, out, "ox login")
+	assert.Contains(t, out, "Rotate or re-mint")
+
 	if !strings.Contains(out, auth.EnvVarToken) {
 		t.Errorf("output must name %s so the operator knows which credential was refused, got:\n%s", auth.EnvVarToken, out)
 	}
@@ -1357,8 +1360,12 @@ func TestRenderAuthStatus_RejectedTokenGetsFamilyAwareHint(t *testing.T) {
 			if strings.Contains(out, tt.denyPhrase) {
 				t.Errorf("must not get the other family's hint (%q), got:\n%s", tt.denyPhrase, out)
 			}
-			if !strings.Contains(out, "ox login") {
-				t.Errorf("expected the hint to mention `ox login`, got:\n%s", out)
+			if tt.envToken == validTeamToken {
+				assert.NotContains(t, out, "ox login")
+				assert.Contains(t, out, "Rotate or re-mint")
+				assert.Contains(t, checkAuthentication().detail, "Rotate or re-mint")
+			} else {
+				assert.Contains(t, out, "ox login")
 			}
 			// The verdict line, asserted in both directions: a mutation
 			// flipping it passed this test before.
@@ -1594,6 +1601,11 @@ func TestDoctorAuth_MalformedEnvTokenIsNotReportedAsNotLoggedIn(t *testing.T) {
 			if !strings.Contains(res.detail, tt.wantPhrase) {
 				t.Errorf("expected family-aware remedy containing %q, got %q", tt.wantPhrase, res.detail)
 			}
+			if tt.envToken == malformedTeamToken {
+				assert.NotContains(t, res.detail, "ox login")
+				assert.Contains(t, res.detail, "Rotate or re-mint")
+			}
+
 			if res.passed {
 				t.Errorf("a refused credential must not pass the check: %+v", res)
 			}

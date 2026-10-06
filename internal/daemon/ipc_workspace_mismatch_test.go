@@ -89,8 +89,9 @@ func startRecordingServer(t *testing.T) (*Server, *recordingHandler) {
 	})
 
 	require.Eventually(t, func() bool {
-		_, err := os.Stat(SocketPath())
-		return err == nil
+		server.mu.Lock()
+		defer server.mu.Unlock()
+		return server.listener != nil
 	}, 2*time.Second, 10*time.Millisecond, "server should bind its socket")
 	return server, handler
 }

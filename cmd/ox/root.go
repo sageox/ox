@@ -29,6 +29,10 @@ var (
 	// CLI context for dependency injection
 	cliCtx *cli.Context
 
+	// preRunReached is set once cobra accepts an invocation and runs
+	// PersistentPreRunE. An error before it is cobra rejecting what was typed.
+	preRunReached bool
+
 	// profiling state
 	profileEnabled bool
 	profileFile    *os.File
@@ -40,6 +44,7 @@ var rootCmd = &cobra.Command{
 	Short: "Shared team context that makes agentic engineering multiplayer",
 	Long:  `Shared team context between your AI and human coworkers. Sessions, ledgers, and team knowledge that make agentic engineering multiplayer.`,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		preRunReached = true
 		if isHeadlessLedgerRead(cmd) {
 			// Hosted reads never consult local preferences. Sync rejects this
 			// flag in RunE using its own receipt; the other protocols refuse it here.

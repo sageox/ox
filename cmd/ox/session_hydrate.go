@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/sageox/ox/internal/auth"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/spf13/cobra"
 )
@@ -38,7 +41,7 @@ Example:
 		}
 
 		sessionsDir := filepath.Join(ledgerPath, "sessions")
-		return hydrateFromLedger(projectRoot, sessionsDir, args[0], false)
+		return hydrateFromLedgerContext(cmd.Context(), projectRoot, sessionsDir, args[0], false)
 	},
 }
 
@@ -78,6 +81,13 @@ func resolveSessionInDir(dir, name string) (string, error) {
 // atomic temp+rename writes, preserving pointer files in the git working tree.
 // When quiet is true, progress messages are suppressed (for JSON output contexts).
 func hydrateFromLedger(projectRoot, sessionsDir, nameArg string, quiet bool) error {
+	return hydrateFromLedgerContext(context.Background(), projectRoot, sessionsDir, nameArg, quiet)
+}
+
+func hydrateFromLedgerContext(ctx context.Context, projectRoot, sessionsDir, nameArg string, quiet bool) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	sessionName, err := resolveSessionInDir(sessionsDir, nameArg)
 	if err != nil {
 		return err
@@ -175,13 +185,13 @@ func hydrateFromLedger(projectRoot, sessionsDir, nameArg string, quiet bool) err
 	slog.Info("hydrate: batch request", "objects", len(batchObjects))
 
 	// get LFS client
-	client, err := getLFSClient(projectRoot)
+	client, err := getLFSClientContext(ctx, projectRoot)
 	if err != nil {
 		return hydrateHint(err)
 	}
 
 	// request download URLs
-	resp, err := client.BatchDownload(batchObjects)
+	resp, err := client.BatchDownloadContext(ctx, batchObjects)
 	if err != nil {
 		return hydrateHint(err)
 	}
@@ -280,7 +290,7 @@ func hydrateHint(err error) error {
 	case strings.Contains(msg, "no git credentials found") ||
 		strings.Contains(msg, "no auth token") ||
 		strings.Contains(msg, "empty token"):
-		return fmt.Errorf("%w\n\nFix: run 'ox login' to refresh credentials", err)
+		return fmt.Errorf("%w\n\nFix: %s", err, auth.ReauthenticationRemedy(endpoint.GetForProject(findGitRoot())))
 
 	case strings.Contains(msg, "ledger not ready") ||
 		strings.Contains(msg, "no repo_id"):
@@ -293,7 +303,7 @@ func hydrateHint(err error) error {
 		return fmt.Errorf("%w\n\nFix: check your network connection and try again", err)
 
 	case strings.Contains(msg, "HTTP 401") || strings.Contains(msg, "HTTP 403"):
-		return fmt.Errorf("%w\n\nFix: run 'ox login' — your credentials may have expired", err)
+		return fmt.Errorf("%w\n\nFix: %s", err, auth.ReauthenticationRemedy(endpoint.GetForProject(findGitRoot())))
 
 	case strings.Contains(msg, "HTTP 404"):
 		return fmt.Errorf("%w\n\nFix: the ledger may not exist yet — run 'ox sync' or 'ox doctor --fix'", err)

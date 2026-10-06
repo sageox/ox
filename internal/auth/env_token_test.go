@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/gitserver"
 )
 
 // Note: these tests use t.Setenv which is incompatible with t.Parallel
@@ -587,8 +588,19 @@ func TestTeamCoworker_NeverAsksAboutAPersonalCredential(t *testing.T) {
 		assert.Nil(t, c)
 		GetUserID(srv.URL)
 		GetUsername(srv.URL)
+		_, _, id := gitserver.TeamCoworkerGetter()
+		assert.Empty(t, id)
 	}
 	assert.Zero(t, calls.Load())
+}
+
+// Failure prevented: a team token's Ledger clones keep the machine's git
+// identity because gitserver never learns which coworker the token acts as.
+func TestTeamCoworkerGetter(t *testing.T) {
+	ep := serveTeamToken(t, `{"id":"agt_rip","display_name":"Rip"}`)
+
+	gotEp, name, id := gitserver.TeamCoworkerGetter()
+	assert.Equal(t, [3]string{ep, "Rip", "agt_rip"}, [3]string{gotEp, name, id})
 }
 
 // Failure prevented: a coworker with no ASCII name, or none, gets an empty

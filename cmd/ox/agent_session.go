@@ -18,6 +18,7 @@ import (
 	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/api"
+	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
@@ -1370,8 +1371,8 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 				errMsg := uploadErr.Error()
 				if pipeline.IsAuthRelatedError(errMsg) {
 					fmt.Fprintf(os.Stderr, "warning: session upload failed — credentials expired or revoked\n")
-					fmt.Fprintf(os.Stderr, "  session saved locally, run: ox login && ox doctor\n")
-					result.UploadWarning = "Session saved locally. Credentials expired — run 'ox login' then 'ox doctor' to retry upload."
+					result.UploadWarning = "Session saved locally. " + auth.ReauthenticationRemedy(endpoint.GetForProject(projectRoot)) + " Then run 'ox doctor' to retry upload."
+					fmt.Fprintf(os.Stderr, "  %s\n", result.UploadWarning)
 				} else {
 					fmt.Fprintf(os.Stderr, "warning: LFS upload failed (session saved locally): %v\n", uploadErr)
 					fmt.Fprintf(os.Stderr, "  troubleshoot: ox status, ox doctor, ox daemon logs\n")

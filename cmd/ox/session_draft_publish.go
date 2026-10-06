@@ -143,22 +143,26 @@ func resolveDraftLedgerPath(projectRoot, sessionPath string) string {
 	}
 	// The project's CONFIGURED ledger, read from its local config rather than
 	// from the process CWD — the hook may run from anywhere in the worktree.
-	configured := ""
-	if localCfg, err := config.LoadLocalConfig(projectRoot); err == nil &&
-		localCfg != nil && localCfg.Ledger != nil {
-		configured = localCfg.Ledger.Path
-	}
-	if configured == "" {
-		if ctx, err := config.LoadProjectContext(projectRoot); err == nil && ctx != nil {
-			configured = ctx.DefaultLedgerPath()
-		}
-	}
+	configured := configuredLedgerPath(projectRoot)
 	if configured == "" || filepath.Clean(configured) != filepath.Clean(derived) {
 		slog.Debug("draft: derived path is not this project's ledger",
 			"derived", derived, "configured", configured)
 		return ""
 	}
 	return derived
+}
+
+// configuredLedgerPath is the project's configured Ledger: its local config's
+// path, else the project's default. It never consults the process CWD.
+func configuredLedgerPath(projectRoot string) string {
+	if localCfg, err := config.LoadLocalConfig(projectRoot); err == nil &&
+		localCfg != nil && localCfg.Ledger != nil && localCfg.Ledger.Path != "" {
+		return localCfg.Ledger.Path
+	}
+	if ctx, err := config.LoadProjectContext(projectRoot); err == nil && ctx != nil {
+		return ctx.DefaultLedgerPath()
+	}
+	return ""
 }
 
 // publishDraftPlaceholder writes the draft meta.json into the ledger and

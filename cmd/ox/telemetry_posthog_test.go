@@ -21,6 +21,7 @@ import (
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/conversation/read"
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/updatenotice"
@@ -526,4 +527,76 @@ func TestCapturePostHogCommand_APanicDoesNotEscape(t *testing.T) {
 
 	// The notice is due and its writer is nil, so printing it panics.
 	assert.NotPanics(t, func() { capturePostHogCommand(0, nil) })
+}
+
+// TestCobraRejection_NamesTheMistakeNotWhatWasTyped covers every rejection
+// cobra and pflag make before ox runs a command.
+//
+// Failure prevented: a flag value, path, or misspelled secret a person typed
+// reaching PostHog through error_detail; or a rejection filed under the
+// catch-all, hiding which mistake people make.
+func TestCobraRejection_NamesTheMistakeNotWhatWasTyped(t *testing.T) {
+	tests := []struct {
+		msg  string
+		want string
+	}{
+		{`unknown command "sk-secret" for "ox"`, "unknown command"},
+		{"unknown flag: --token=sk-secret", "unknown flag"},
+		{"unknown shorthand flag: 'x' in -xsk-secret", "unknown flag"},
+		{"flag needs an argument: --config", "flag needs an argument"},
+		{"bad flag syntax: ---sk-secret", "unknown flag"},
+		{`invalid argument "sk-secret" for "--limit" flag: strconv.ParseInt: parsing "sk-secret": invalid syntax`, "invalid argument"},
+		{`required flag(s) "file" not set`, "required flag missing"},
+		{"accepts 1 arg(s), received 2", "wrong number of arguments"},
+		{"requires at least 1 arg(s), only received 0", "wrong number of arguments"},
+		{"if any flags in the group [a b] are set none of the others can be; [a b] were all set", "conflicting flags"},
+		{"at least one of the flags in the group [a b] is required", "conflicting flags"},
+		{"something new from cobra: sk-secret", "rejected invocation"},
+	}
+	for _, tt := range tests {
+		got := cobraRejection(errors.New(tt.msg))
+		assert.Equal(t, tt.want, got, tt.msg)
+		assert.NotContains(t, got, "sk-secret")
+		// Only the checks cobra makes after PersistentPreRunE are reclassified
+		// once ox has its context; a command's own error never is.
+		postPreRun := tt.want == "required flag missing" || tt.want == "conflicting flags"
+		assert.Equal(t, postPreRun, cobraFlagValidation(errors.New(tt.msg)), tt.msg)
+	}
+}
+
+// TestConversationErrorKind_EveryCodeFiled covers every code the
+// conversation read commands can fail with.
+//
+// Failure prevented: a conversation failure reaching PostHog as
+// error_kind=other with the Go type name as its detail, or a code that exits
+// 2 (the invocation was wrong) counted as an ox failure.
+func TestConversationErrorKind_EveryCodeFiled(t *testing.T) {
+	want := map[string]errkind.Kind{
+		read.ErrCodeInvalidID:              errkind.Usage,
+		read.ErrCodeInvalidSelector:        errkind.Usage,
+		read.ErrCodeShareLinkUnresolvable:  errkind.Usage,
+		read.ErrCodeShareLinkNotDiscussion: errkind.Usage,
+		read.ErrCodeNotAuthenticated:       errkind.NotLoggedIn,
+		read.ErrCodeNoTeamAccess:           errkind.Auth,
+		read.ErrCodeAccessUnverified:       errkind.Network,
+		read.ErrCodeNoTeamContext:          errkind.NotInitialized,
+		read.ErrCodeNotIndexed:             errkind.Other,
+		read.ErrCodeNoDistillation:         errkind.Other,
+		read.ErrCodeTranscriptNotAvailable: errkind.Other,
+		read.ErrCodeTopicNotFound:          errkind.Other,
+		read.ErrCodeReadError:              errkind.Other,
+	}
+	for code, kind := range want {
+		err := conversationExitError(&read.Error{Code: code, Message: "conversation cnv_secret not found"})
+		assert.Equal(t, kind, errkind.Of(err), code)
+		assert.Equal(t, code, errkind.DetailOf(err), "the detail is the code, never the message")
+		var exit *commandExitError
+		require.True(t, errors.As(err, &exit), "main still honors the exit code for %s", code)
+		assert.Equal(t, exit.ExitCode == 2, kind == errkind.Usage, "%s: exit 2 if and only if usage", code)
+	}
+
+	// Flag failures the command layer catches itself go out as usage too.
+	err := conversationUsageExit(io.Discard, "json", conversationUsageErrorCode, "--since: bad value")
+	assert.Equal(t, errkind.Usage, errkind.Of(err))
+	assert.Equal(t, conversationUsageErrorCode, errkind.DetailOf(err))
 }

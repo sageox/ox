@@ -1,6 +1,7 @@
 package lfs
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -38,6 +39,15 @@ var ContentFiles = pipeline.LedgerContentFiles
 // ARE uploaded on a nil-error return, so callers wrap it in AssertUploadedManifest
 // at the WritePointerFiles boundary — the one audited place upload is asserted.
 func UploadSessionFiles(client *Client, sessionPath string, logger *slog.Logger) (map[string]FileRef, error) {
+	return UploadSessionFilesContext(context.Background(), client, sessionPath, logger)
+}
+
+// UploadSessionFilesContext honors the caller's cancellation during batch setup
+// and any Git credential refresh caused by a rejected PAT.
+func UploadSessionFilesContext(ctx context.Context, client *Client, sessionPath string, logger *slog.Logger) (map[string]FileRef, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -90,7 +100,7 @@ func UploadSessionFiles(client *Client, sessionPath string, logger *slog.Logger)
 	logger.Info("uploading session to LFS", "path", sessionPath, "files", len(batchObjects))
 
 	// request upload URLs from LFS batch API
-	resp, err := client.BatchUpload(batchObjects)
+	resp, err := client.BatchUploadContext(ctx, batchObjects)
 	if err != nil {
 		logger.Info("LFS batch API failed", "error", err, "path", sessionPath, "files", len(batchObjects))
 		return nil, fmt.Errorf("LFS batch upload: %w", err)

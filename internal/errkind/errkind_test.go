@@ -39,3 +39,15 @@ func TestOf(t *testing.T) {
 		})
 	}
 }
+
+// TestHTTPStatus files a failed HTTP response: only a server rejecting the
+// credentials is auth.
+// Failure prevented: a 401/403 counted as an unexplained failure, or a 5xx
+// blamed on the person's login.
+func TestHTTPStatus(t *testing.T) {
+	for code, want := range map[int]Kind{401: Auth, 403: Auth, 404: Other, 429: Other, 500: Other, 502: Other} {
+		t.Run(fmt.Sprint(code), func(t *testing.T) {
+			assert.Equal(t, want, HTTPStatus(code))
+		})
+	}
+}

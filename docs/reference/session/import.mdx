@@ -1,0 +1,66 @@
+---
+title: "ox session import"
+description: "CLI reference for ox session import"
+sidebar_position: 87
+---
+
+## ox session import
+
+Upload past Claude Code and Codex sessions from this repo to the Ledger
+
+### Synopsis
+
+Upload the Claude Code and Codex sessions you ran in this repo before SageOx,
+or with recording off, to the team's Ledger.
+
+The import shows a preview first: which sessions are ready, and which are
+skipped and why. Nothing is uploaded until you confirm. Each session is
+summarized on this computer by your own claude or codex CLI, in an isolated
+mode with no tools, and then uploaded once. A session the summarizer judges
+not worth sharing stays on this computer, as it would had ox recorded it.
+Running the import again uploads nothing twice: sessions already imported,
+and sessions ox recorded live, are recognized and skipped.
+
+This is not 'ox agent <id> session import', which adds a planning
+conversation to the current recording.
+
+```
+ox session import [flags]
+```
+
+### Examples
+
+```
+  ox session import                    # preview, then confirm
+  ox session import --dry-run --json   # preview only, machine-readable
+  ox session import --agent codex --since 30d
+  ox session import --session 3f9a1c2b --yes
+```
+
+### Options
+
+```
+      --agent string        only sessions from this tool: claude or codex
+      --dry-run             preview only; never upload
+  -h, --help                help for import
+      --session strings     import exactly these sessions, by native session ID or a unique prefix of 8+ characters
+      --since string        only sessions active within this window (7d, 48h) or since a date (2026-09-01)
+      --summarizer string   summarize with this CLI instead of each session's own: claude or codex
+```
+
+### Options inherited from parent commands
+
+```
+  -c, --config string    user config file (overrides OX_USER_CONFIG)
+      --json             output in JSON format (default: false)
+      --no-input         disable prompts and terminal UI; provide required input with arguments or flags
+      --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
+      --profile          generate CPU profile and execution trace for performance analysis (default: false)
+  -q, --quiet            suppress non-error output (default: false)
+  -v, --verbose          enable verbose output (default: false)
+      --yes              answer yes to confirmation prompts without reading stdin (overrides a piped answer)
+```
+
+### SEE ALSO
+
+* [ox session](/session)	 - Manage AI coworker sessions

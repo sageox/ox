@@ -1692,10 +1692,7 @@ daemon health, and a tree view of all SageOx directory locations.`,
 
 			// ensure git credentials are valid (auto-refresh if needed)
 			// this is fast (local check) unless credentials need refresh
-			_, _ = gitserver.EnsureValidCredentialsForEndpoint(currentEndpoint, func() (*gitserver.GitCredentials, error) {
-				client := api.NewRepoClientWithEndpoint(currentEndpoint).WithAuthToken(token.AccessToken)
-				return fetchGitCredentials(client)
-			})
+			_, _ = auth.RefreshGitCredentialsForEndpoint(cmd.Context(), currentEndpoint, false)
 		}
 
 		// get config paths
@@ -1850,11 +1847,18 @@ daemon health, and a tree view of all SageOx directory locations.`,
 // problem is a VPN/proxy/DNS fault is wrong advice, not just wrong tone.
 func statusExitError(authenticated, projectInitialized bool, authErr error) error {
 	unreachable := !authenticated && errors.Is(authErr, auth.ErrEndpointUnreachable)
+	ep := endpoint.GetForProject(findGitRoot())
 	switch {
 	case unreachable && !projectInitialized:
 		return errkind.Errorf(errkind.NotInitialized, "could not verify authentication (endpoint unreachable) and project not initialized — check connectivity and run `ox init`")
 	case unreachable:
 		return errkind.Errorf(errkind.Network, "could not verify authentication — endpoint unreachable, check connectivity")
+	case !authenticated && auth.EnvTokenIsTeamFamily(ep):
+		message := "not authenticated — " + auth.ReauthenticationRemedy(ep)
+		if !projectInitialized {
+			message += " Then run `ox init`."
+		}
+		return errkind.Errorf(errkind.NotLoggedIn, "%s", message)
 	case !authenticated && !projectInitialized:
 		return errkind.Errorf(errkind.NotLoggedIn, "not authenticated and project not initialized — run `ox login` and `ox init`")
 	case !authenticated:
@@ -1878,10 +1882,14 @@ func renderStatusHumanOutput(cwd, gitRoot string, projectInitialized bool,
 	case authHintUnreachable:
 		fmt.Printf("  %s %s\n", statusWarningStyle.Render("⚠ could not reach the endpoint:"), statusMutedStyle.Render("auth state is unverified, not invalid"))
 	case authHintRefreshFailed:
-		fmt.Printf("  %s %s\n", statusWarningStyle.Render("⚠ token refresh failed:"), statusMutedStyle.Render("run `ox login` to re-authenticate"))
+		fmt.Printf("  %s %s\n", statusWarningStyle.Render("⚠ token refresh failed:"), statusMutedStyle.Render(auth.ReauthenticationRemedy(endpoint.GetForProject(gitRoot))))
 	case authHintLogin:
 		// use contextual action hint matching help's visual style
-		cli.PrintActionHint("ox login", "Authenticate with "+cli.Wordmark(), 1)
+		if ep := endpoint.GetForProject(gitRoot); auth.EnvTokenIsTeamFamily(ep) {
+			fmt.Printf("  %s\n", statusMutedStyle.Render(auth.ReauthenticationRemedy(ep)))
+		} else {
+			cli.PrintActionHint("ox login", "Authenticate with "+cli.Wordmark(), 1)
+		}
 	}
 
 	configDirSemantic := "error"
@@ -1989,15 +1997,27 @@ func buildStatusJSON(authenticated bool, authErr error, token *auth.StoredToken,
 		output.Auth.ExpiresAt = &token.ExpiresAt
 
 		// PAT liveness for JSON output
-		creds, credErr := gitserver.LoadCredentialsForEndpoint(endpointSlug)
-		if credErr == nil && creds != nil && creds.Token != "" && !creds.IsExpired() {
+		projectEndpoint := endpoint.GetForProject(gitRoot)
+		creds, credErr := gitserver.LoadCredentialsForEndpoint(projectEndpoint)
+		if credErr == nil && creds != nil && creds.BearerTokenHash != gitserver.BearerTokenFingerprint(token.AccessToken) {
+			valid := false
+			output.Auth.GitPATValid = &valid
+			output.Auth.GitPATReason = "Git credentials are unverified for the current token; refresh required"
+		} else if credErr == nil && creds != nil && creds.Token != "" && !creds.IsExpired() {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			liveness := gitserver.ValidatePATLiveness(ctx, creds)
 			cancel()
+			if !liveness.Valid && !liveness.Skipped {
+				if refreshed, refreshErr := auth.RefreshGitCredentialsForEndpoint(context.Background(), projectEndpoint, true); refreshErr == nil {
+					ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+					liveness = gitserver.ValidatePATLiveness(ctx, refreshed)
+					cancel()
+				}
+			}
 			if !liveness.Skipped {
 				output.Auth.GitPATValid = &liveness.Valid
 				if !liveness.Valid {
-					output.Auth.GitPATReason = liveness.Reason
+					output.Auth.GitPATReason = liveness.Reason + " — " + auth.ReauthenticationRemedy(projectEndpoint)
 				}
 			}
 		}
@@ -2300,11 +2320,9 @@ func renderAuthStatus(authFile string) string {
 			// nowhere. Point at the CI secret store instead, which is where a
 			// team token is actually rotated.
 			if strings.HasPrefix(epToken.AccessToken, auth.TeamTokenPrefix) {
-				b.WriteString(statusMutedStyle.Render("  this looks like a team token — check it has not been revoked or rotated"))
+				b.WriteString(statusMutedStyle.Render("  this looks like a team token — it may have been revoked or rotated"))
 				b.WriteString("\n")
-				b.WriteString(statusMutedStyle.Render("  in your CI secret store; `ox login` mints personal oxp_ tokens and"))
-				b.WriteString("\n")
-				b.WriteString(statusMutedStyle.Render("  cannot replace it"))
+				b.WriteString(statusMutedStyle.Render("  " + auth.ReauthenticationRemedy(ep)))
 			} else {
 				b.WriteString(statusMutedStyle.Render("  the value in SAGEOX_TOKEN is not a credential this endpoint accepts;"))
 				b.WriteString("\n")
@@ -2357,12 +2375,21 @@ func renderAuthStatus(authFile string) string {
 			creds, credErr := gitserver.LoadCredentialsForEndpoint(ep)
 			if credErr != nil || creds == nil || creds.Token == "" {
 				b.WriteString(statusMutedStyle.Render("no git credentials"))
+			} else if creds.BearerTokenHash != gitserver.BearerTokenFingerprint(epToken.AccessToken) {
+				b.WriteString(statusWarningStyle.Render("? refresh required: credentials are unverified for the current token"))
 			} else if creds.IsExpired() {
 				b.WriteString(statusErrorStyle.Render("✗ expired"))
 			} else {
 				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 				liveness := gitserver.ValidatePATLiveness(ctx, creds)
 				cancel()
+				if !liveness.Valid && !liveness.Skipped {
+					if refreshed, refreshErr := auth.RefreshGitCredentialsForEndpoint(context.Background(), ep, true); refreshErr == nil {
+						ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+						liveness = gitserver.ValidatePATLiveness(ctx, refreshed)
+						cancel()
+					}
+				}
 				switch {
 				case liveness.Valid:
 					b.WriteString(statusSuccessStyle.Render("✓ valid"))
@@ -2370,7 +2397,7 @@ func renderAuthStatus(authFile string) string {
 					b.WriteString(statusMutedStyle.Render("? " + liveness.Reason))
 				default:
 					b.WriteString(statusErrorStyle.Render("✗ " + liveness.Reason))
-					b.WriteString(statusMutedStyle.Render(" — run `ox login`"))
+					b.WriteString(statusMutedStyle.Render(" — " + auth.ReauthenticationRemedy(ep)))
 				}
 			}
 			b.WriteString("\n")
@@ -2523,7 +2550,7 @@ func renderMalformedEnvToken(envEP string, shadowsDiskLogin bool, authFile strin
 	if auth.EnvTokenIsTeamFamily(envEP) {
 		b.WriteString(statusMutedStyle.Render("  this looks like a team token — re-copy it from your CI secret store;"))
 		b.WriteString("\n")
-		b.WriteString(statusMutedStyle.Render("  `ox login` mints personal oxp_ tokens and cannot replace it"))
+		b.WriteString(statusMutedStyle.Render("  " + auth.ReauthenticationRemedy(envEP)))
 	} else {
 		b.WriteString(statusMutedStyle.Render("  re-copy the value into SAGEOX_TOKEN, or unset it to fall back to"))
 		b.WriteString("\n")

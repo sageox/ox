@@ -57,6 +57,15 @@ func WithDetail(kind Kind, detail string, err error) error {
 	return &kindError{kind: kind, detail: detail, err: err}
 }
 
+// HTTPStatus files a failed HTTP response: a server rejecting the
+// credentials (401, 403) is Auth, any other status Other.
+func HTTPStatus(code int) Kind {
+	if code == 401 || code == 403 {
+		return Auth
+	}
+	return Other
+}
+
 // Of returns the kind errors.As finds in err's chain, or "" when no error in
 // the chain has one.
 func Of(err error) Kind {

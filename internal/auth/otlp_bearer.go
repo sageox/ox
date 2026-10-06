@@ -19,10 +19,14 @@ import (
 // the new token from disk.
 //
 // Env-sourced tokens (SAGEOX_TOKEN) have no expiry the client can check —
-// their ExpiresAt is a synthetic TTL — so they are returned as-is and the
+// their ExpiresAt is a synthetic TTL — so personal tokens are returned as-is and the
 // server's 401 is the source of truth; the exporter's round tripper is what
-// stops re-sending one the server has already rejected.
+// stops re-sending one the server has already rejected. Team tokens never
+// export; yielding an empty bearer preserves local performance tracing.
 func ExportBearerForEndpoint(ep string) string {
+	if EnvTokenIsTeamFamily(ep) {
+		return ""
+	}
 	tok, err := GetTokenForEndpoint(ep)
 	return exportBearerNoting(ep, tok, err)
 }

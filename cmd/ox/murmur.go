@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sageox/ox/internal/errkind"
+
 	"github.com/google/uuid"
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
@@ -167,7 +169,7 @@ func runMurmur(cmd *cobra.Command, args []string) error {
 	if agentID != "" {
 		lastMurmur := ledger.MostRecentMurmurTime(targetDir, agentID)
 		if !lastMurmur.IsZero() && time.Since(lastMurmur) < murmurRateInterval {
-			return fmt.Errorf("rate limited: max 1 murmur per %s per agent (last: %s ago)",
+			return errkind.Errorf(errkind.Other, "rate limited: max 1 murmur per %s per agent (last: %s ago)",
 				murmurRateInterval, time.Since(lastMurmur).Truncate(time.Millisecond))
 		}
 	}
@@ -254,17 +256,17 @@ func resolveMurmurTarget(projectRoot, scope string) (string, error) {
 	case "ledger":
 		path := getLedgerPath()
 		if path == "" {
-			return "", fmt.Errorf("no ledger found — run 'ox doctor --fix' or wait for daemon to clone")
+			return "", errkind.Errorf(errkind.NotInitialized, "no ledger found — run 'ox doctor --fix' or wait for daemon to clone")
 		}
 		if _, err := os.Stat(path); os.IsNotExist(err) {
-			return "", fmt.Errorf("ledger not found at %s — run 'ox doctor --fix'", path)
+			return "", errkind.Errorf(errkind.NotInitialized, "ledger not found at %s — run 'ox doctor --fix'", path)
 		}
 		return path, nil
 
 	case "team":
 		tc := config.FindRepoTeamContext(projectRoot)
 		if tc == nil {
-			return "", fmt.Errorf("no team context configured — run 'ox init' first")
+			return "", errkind.Errorf(errkind.NotInitialized, "no team context configured — run 'ox init' first")
 		}
 		return tc.Path, nil
 

@@ -4,11 +4,30 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/updatenotice"
 	"github.com/sageox/ox/internal/version"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// Failure prevented: team-token commands show upgrade notices or consume the human notification budget.
+func TestUpdateNotice_TeamTokenIsSilentWithoutConsumingLedger(t *testing.T) {
+	useTestCacheDir(t)
+	atTerminal(t)
+	t.Setenv("SAGEOX_ENDPOINT", "https://sageox.ai")
+	t.Setenv(auth.EnvVarToken, validTeamToken)
+	writeTestVersionCache(t, &versionCacheData{LatestVersion: "v99.0.0", CheckedAt: time.Now()})
+	_, due := updateNoticeDue(time.Now())
+	assert.False(t, due)
+	_, due = calmUpdateNoticeDue(time.Now())
+	assert.False(t, due)
+	assert.True(t, checkForUpdates().skipped)
+	assert.True(t, readVersionCache().LastNaggedAt.IsZero())
+	t.Setenv(auth.EnvVarToken, validPersonalToken)
+	_, due = calmUpdateNoticeDue(time.Now())
+	assert.True(t, due)
+}
 
 // atTerminal puts a human at stderr and clears machine-output mode, so a test
 // exercises the cadence rather than the audience gate. Neither is true under

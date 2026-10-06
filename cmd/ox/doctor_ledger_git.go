@@ -376,9 +376,9 @@ func unbornLedgerFailure(ledgerPath, branch string, fix bool) checkResult {
 			fmt.Sprintf("%d uncommitted file(s) have never synced, but we could NOT verify whether the "+
 				"remote has history.\n       Do not seed this ledger until the remote is reachable — "+
 				"seeding one that already has history creates a divergent root commit.\n       "+
-				"Check connectivity and credentials (`ox doctor`, `ox login`), then re-run.\n       "+
+				"Check connectivity and credentials (`ox doctor`). %s Then re-run.\n       "+
 				"ls-remote: %s",
-				untracked, gitutil.SanitizeOutput(strings.TrimSpace(string(lsOut))))))
+				untracked, auth.ReauthenticationRemedy(endpoint.GetForProject(findGitRoot())), gitutil.SanitizeOutput(strings.TrimSpace(string(lsOut))))))
 	}
 
 	if strings.TrimSpace(string(lsOut)) != "" {
@@ -1432,7 +1432,7 @@ func checkLedgerURLAPIMatch(fix bool) checkResult {
 				"Remote URL was updated but connectivity check timed out after 5s")
 		}
 		return WarningCheck(checkName, "URL updated but verification failed",
-			"Remote URL was updated but could not verify connectivity. If you haven't logged in, run `ox login`.")
+			"Remote URL was updated but could not verify connectivity. "+auth.ReauthenticationRemedy(projectEndpoint))
 	}
 	return PassedCheck(checkName, "URL updated, helper installed, and verified")
 }

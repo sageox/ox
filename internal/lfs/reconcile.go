@@ -96,7 +96,7 @@ func reconcileLocked(ctx context.Context, ledgerPath, endpointURL string, logger
 	err := gitutil.WithRepoLock(ctx, ledgerPath, func() error {
 		var err error
 		result, err = run(ctx, ledgerPath, logger, func() (*Client, error) {
-			return NewClientFromLedger(ledgerPath, endpointURL)
+			return NewClientFromLedgerContext(ctx, ledgerPath, endpointURL)
 		})
 		return err
 	})

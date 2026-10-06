@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1099,34 +1100,7 @@ func runInit() error {
 // fetchGitCredentials fetches git credentials from GET /api/v1/cli/repos (team context repos only).
 // Returns the credentials without saving them. Ledger URLs come from a separate API.
 func fetchGitCredentials(client *api.RepoClient) (*gitserver.GitCredentials, error) {
-	reposResp, err := client.GetRepos()
-	if err != nil {
-		return nil, fmt.Errorf("fetch repos: %w", err)
-	}
-	if reposResp == nil {
-		return nil, nil // no repos available yet (async provisioning)
-	}
-
-	// build credentials from response
-	creds := &gitserver.GitCredentials{
-		Token:     reposResp.Token,
-		ServerURL: reposResp.ServerURL,
-		Username:  reposResp.Username,
-		ExpiresAt: reposResp.ExpiresAt,
-		Repos:     make(map[string]gitserver.RepoEntry),
-	}
-
-	// copy repos from response
-	for _, repo := range reposResp.Repos {
-		creds.AddRepo(gitserver.RepoEntry{
-			Name:   repo.Name,
-			Type:   repo.Type,
-			URL:    repo.URL,
-			TeamID: repo.StableID(),
-		})
-	}
-
-	return creds, nil
+	return client.GetGitCredentials(context.Background())
 }
 
 // fetchAndSaveGitCredentials fetches git credentials from GET /api/v1/cli/repos

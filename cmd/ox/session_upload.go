@@ -19,6 +19,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sageox/ox/internal/errkind"
+
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
@@ -132,35 +134,46 @@ func checkUploadAccess(projectRoot string) error {
 // No OAuth needed — LFS upload uses the Git PAT (HTTP Basic auth).
 // Access control is enforced at push time by the PAT, not by a pre-check.
 func uploadSessionLFS(projectRoot, sessionPath string) (map[string]lfs.FileRef, error) {
+	return uploadSessionLFSContext(context.Background(), projectRoot, sessionPath)
+}
+
+func uploadSessionLFSContext(ctx context.Context, projectRoot, sessionPath string) (map[string]lfs.FileRef, error) {
 	// Every caller (upload, regenerate, migrate, retry) ends here, so this is the
 	// one place that keeps a quarantined recording's content out of the Ledger.
 	if recording, readErr := session.ReadRecordingStateFile(sessionPath); readErr == nil && recording != nil && recording.SourceRejected {
 		return nil, fmt.Errorf("session %s is held back for ownership review and was not uploaded; run 'ox agent %s session recover --release-quarantine' to re-check it", filepath.Base(sessionPath), recording.AgentID)
 	}
-	client, err := getLFSClient(projectRoot)
+	client, err := getLFSClientContext(ctx, projectRoot)
 	if err != nil {
 		return nil, fmt.Errorf("create LFS client: %w", err)
 	}
 
-	return lfs.UploadSessionFiles(client, sessionPath, slog.Default())
+	return lfs.UploadSessionFilesContext(ctx, client, sessionPath, slog.Default())
 }
 
 // getLFSClient creates an LFS client using project credentials.
-// Derives the LFS batch URL from the ledger's local git remote, avoiding any
-// dependency on the OAuth API token. Only the Git PAT is needed for LFS auth.
+// Uses the ledger's Git remote and refreshes credentials when the bearer
+// rotates or the server rejects the PAT.
 func getLFSClient(projectRoot string) (*lfs.Client, error) {
-	ep := endpoint.GetForProject(projectRoot)
+	return getLFSClientContext(context.Background(), projectRoot)
+}
 
-	// load git credentials (PAT) for LFS HTTP Basic auth
-	creds, err := gitserver.LoadCredentialsForEndpoint(ep)
+func getLFSClientContext(ctx context.Context, projectRoot string) (*lfs.Client, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	ep := endpoint.GetForProject(projectRoot)
+	creds, err := auth.RefreshGitCredentialsForEndpoint(ctx, ep, false)
 	if err != nil {
 		return nil, fmt.Errorf("load credentials: %w", err)
 	}
 	if creds == nil {
-		return nil, fmt.Errorf("no git credentials found (run 'ox login' first)")
+		return nil, errkind.Errorf(errkind.NotLoggedIn, "no git credentials found. %s", auth.ReauthenticationRemedy(ep))
 	}
 	if creds.Token == "" {
-		return nil, fmt.Errorf("git credentials have empty token")
+		return nil, errkind.Errorf(errkind.NotLoggedIn, "git credentials have empty token")
 	}
 
 	// derive LFS repo URL from the ledger's local git remote (no API call needed)
@@ -177,7 +190,7 @@ func getLFSClient(projectRoot string) (*lfs.Client, error) {
 		return nil, fmt.Errorf("ledger has no remote URL configured")
 	}
 
-	return lfs.NewClient(repoURL, creds.Username, creds.Token), nil
+	return lfs.NewClientForEndpoint(ctx, repoURL, ep)
 }
 
 // ensureSessionsGitignore delegates to lfs.EnsureSessionsGitignore.
@@ -437,12 +450,12 @@ func backfillGitArtifactInMeta(sessionDir, filename string, size int64) bool {
 func resolveLedgerPath() (string, error) {
 	path := getLedgerPath()
 	if path == "" {
-		return "", fmt.Errorf("no ledger path found (run 'ox doctor --fix' or wait for daemon to clone)")
+		return "", errkind.Errorf(errkind.NotInitialized, "no ledger path found (run 'ox doctor --fix' or wait for daemon to clone)")
 	}
 
 	// verify ledger exists on disk
 	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return "", fmt.Errorf("ledger not found at %s (run 'ox doctor --fix')", path)
+		return "", errkind.Errorf(errkind.NotInitialized, "ledger not found at %s (run 'ox doctor --fix')", path)
 	}
 
 	return path, nil

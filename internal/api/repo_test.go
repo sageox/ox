@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/errkind"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -641,4 +643,33 @@ func TestMergeRepo_NetworkError(t *testing.T) {
 	assert.Nil(t, resp)
 	assert.Nil(t, redirect)
 	assert.Contains(t, err.Error(), "network error")
+}
+
+// TestRegisterRepo_HTTPFailureKind files a rejected registration for usage
+// telemetry, without the URL or response body.
+// Failure prevented: `ox init` refused for its credentials counted as an
+// unexplained failure instead of an auth one.
+func TestRegisterRepo_HTTPFailureKind(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		status int
+		body   string
+		kind   errkind.Kind
+	}{
+		{http.StatusUnauthorized, "", errkind.Auth},
+		{http.StatusForbidden, `{"error":"not a member"}`, errkind.Auth},
+		{http.StatusInternalServerError, `{"error":"boom"}`, errkind.Other},
+	}
+	for _, tt := range tests {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(tt.status)
+			_, _ = w.Write([]byte(tt.body))
+		}))
+		client := &RepoClient{baseURL: server.URL, httpClient: &http.Client{Timeout: 10 * time.Second}, version: "test-version"}
+		_, err := client.RegisterRepo(&RepoInitRequest{RepoID: "repo_test123", Type: "git", InitAt: "2025-01-01T00:00:00Z"})
+		server.Close()
+		require.Error(t, err)
+		assert.Equal(t, tt.kind, errkind.Of(err), "HTTP %d", tt.status)
+		assert.Equal(t, fmt.Sprintf("register repo HTTP %d", tt.status), errkind.DetailOf(err))
+	}
 }

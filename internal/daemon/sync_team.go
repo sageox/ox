@@ -102,7 +102,7 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 
 	// discover new teams independently of token refresh — ensures new teams
 	// are found even when the credential token is still fresh
-	s.discoverTeams()
+	s.discoverTeams(ctx)
 
 	if s.config.ProjectRoot == "" {
 		if progress != nil {
@@ -248,6 +248,7 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 		s.workspaceRegistry.SetSyncInProgress(r.ws.ID, false)
 
 		if r.err != nil {
+			s.refreshAfterAuthFailure(r.err)
 			s.workspaceRegistry.SetWorkspaceError(r.ws.ID, r.err.Error())
 			// See teamFailureTakesBackoff for why this is a two-input
 			// decision and not an error-shape test.

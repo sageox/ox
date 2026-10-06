@@ -13,6 +13,12 @@ import (
 // (sageox-9naj9). Failure prevented: every batch from a stale daemon 401ing.
 func TestExportBearer(t *testing.T) {
 	const ep = "https://api.test.sageox.ai"
+	t.Setenv("SAGEOX_ENDPOINT", ep)
+	t.Setenv(EnvVarToken, "oxt_test_1ljPfr")
+	assert.Empty(t, ExportBearerForEndpoint(ep), "team tokens must never leave the machine as telemetry credentials")
+	t.Setenv(EnvVarToken, "oxp_test_4bDZfN")
+	assert.Equal(t, "oxp_test_4bDZfN", ExportBearerForEndpoint(ep), "personal tokens retain telemetry export")
+	t.Setenv(EnvVarToken, "")
 	fresh := &StoredToken{AccessToken: "tok-fresh", RefreshToken: "r", ExpiresAt: time.Now().Add(time.Hour)}
 	stale := &StoredToken{AccessToken: "tok-stale", RefreshToken: "r", ExpiresAt: time.Now().Add(-time.Minute)}
 

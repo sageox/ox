@@ -7,6 +7,7 @@ import (
 
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/conversation/read"
+	"github.com/sageox/ox/internal/errkind"
 	"github.com/spf13/cobra"
 )
 
@@ -179,12 +180,33 @@ func conversationExitCode(e *read.Error) int {
 	}
 }
 
+// conversationErrorKind files a typed read error for usage telemetry. Its
+// code, a name the read package defines, is the error detail. An error that
+// exits 2 is the invocation's fault, so it is usage by construction.
+func conversationErrorKind(e *read.Error) errkind.Kind {
+	if conversationExitCode(e) == 2 {
+		return errkind.Usage
+	}
+	switch e.Code {
+	case read.ErrCodeNotAuthenticated:
+		return errkind.NotLoggedIn
+	case read.ErrCodeNoTeamAccess:
+		return errkind.Auth
+	case read.ErrCodeAccessUnverified:
+		return errkind.Network
+	case read.ErrCodeNoTeamContext:
+		return errkind.NotInitialized
+	default:
+		return errkind.Other
+	}
+}
+
 // conversationExitError returns the exit status matching a typed read error.
 func conversationExitError(e *read.Error) error {
-	return &commandExitError{
+	return errkind.WithDetail(conversationErrorKind(e), e.Code, &commandExitError{
 		ExitCode: conversationExitCode(e),
 		Message:  e.Message,
-	}
+	})
 }
 
 // finishConversationEnvelope writes a reader-produced envelope and returns
@@ -204,10 +226,10 @@ func finishConversationEnvelope(w io.Writer, format string, env *read.Envelope, 
 func conversationUsageExit(w io.Writer, format, code, msg string) error {
 	e := &read.Error{Code: code, Message: msg}
 	writeConversationEnvelope(w, format, read.ErrorEnvelope(e), nil)
-	return &commandExitError{
+	return errkind.WithDetail(errkind.Usage, code, &commandExitError{
 		ExitCode: 2,
 		Message:  e.Message,
-	}
+	})
 }
 
 // conversationUsageErrorCode is the envelope code for malformed flag values

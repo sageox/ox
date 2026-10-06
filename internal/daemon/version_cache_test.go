@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	whisperstore "github.com/sageox/ox/internal/whisper/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -238,4 +239,18 @@ func TestCheckAndUpdate_200_PreservesNoticeLedger(t *testing.T) {
 	assert.Equal(t, "v0.16.1", got.LatestVersion, "poll must still record the new version")
 	assert.Equal(t, "0.16", got.LastNaggedLine, "poll must not erase the notice ledger")
 	assert.Equal(t, stamped.UTC(), got.LastNaggedAt.UTC())
+}
+
+func TestCheckLatestVersion_TeamTokenSuppressesUpgradeWhispers(t *testing.T) {
+	t.Setenv("SAGEOX_ENDPOINT", "https://sageox.ai")
+	t.Setenv("SAGEOX_TOKEN", "oxt_test_1ljPfr")
+	s := newDiscoveryTestScheduler(t)
+	s.versionCache = testVersionCacheWithServer(t, func(http.ResponseWriter, *http.Request) {
+		t.Error("team-token sessions must not check releases")
+	})
+	s.whisperRegistry = NewWhisperRegistry(openTestStore(t), nil)
+	s.checkLatestVersion(context.Background())
+	whispers, err := s.whisperRegistry.GetWhispers("test-coworker", whisperstore.AttentionAll, nil)
+	require.NoError(t, err)
+	require.Empty(t, whispers)
 }

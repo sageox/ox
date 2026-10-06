@@ -1846,12 +1846,12 @@ func (h *SessionFinalizeHandler) writeMetaAndUploadLFS(payload *SessionFinalizeP
 	}
 
 	ep := endpoint.GetForProject(h.projectRoot)
-	client, err := lfs.NewClientFromLedger(payload.LedgerPath, ep)
+	client, err := lfs.NewClientFromLedgerContext(h.rootContext(), payload.LedgerPath, ep)
 	if err != nil {
 		return nil, fmt.Errorf("create session LFS client: %w", err)
 	}
 
-	fileRefs, err := lfs.UploadSessionFiles(client, payload.SessionDir, h.logger)
+	fileRefs, err := lfs.UploadSessionFilesContext(h.rootContext(), client, payload.SessionDir, h.logger)
 	if err != nil {
 		return nil, fmt.Errorf("upload session content: %w", err)
 	}
@@ -2138,7 +2138,7 @@ func (h *SessionFinalizeHandler) processUploadOnly(payload *SessionFinalizePaylo
 	// pre-receive hook rejects the entire push for all sessions until fixed.
 	if !h.skipLFS && h.projectRoot != "" {
 		ep := endpoint.GetForProject(h.projectRoot)
-		if client, err := lfs.NewClientFromLedger(payload.LedgerPath, ep); err == nil {
+		if client, err := lfs.NewClientFromLedgerContext(h.rootContext(), payload.LedgerPath, ep); err == nil {
 			missing := lfs.FindPointerStubsWithMissingBlobs(client, payload.SessionDir, h.logger)
 			var ordinaryMissing []string
 			for _, name := range missing {
@@ -2172,11 +2172,11 @@ func (h *SessionFinalizeHandler) processUploadOnly(payload *SessionFinalizePaylo
 	var fileRefs map[string]lfs.FileRef
 	if !h.skipLFS && h.projectRoot != "" {
 		ep := endpoint.GetForProject(h.projectRoot)
-		client, err := lfs.NewClientFromLedger(payload.LedgerPath, ep)
+		client, err := lfs.NewClientFromLedgerContext(h.rootContext(), payload.LedgerPath, ep)
 		if err != nil {
 			return fmt.Errorf("upload-only: create LFS client: %w", err)
 		} else {
-			refs, err := lfs.UploadSessionFiles(client, payload.SessionDir, h.logger)
+			refs, err := lfs.UploadSessionFilesContext(h.rootContext(), client, payload.SessionDir, h.logger)
 			if err != nil {
 				return fmt.Errorf("upload-only: upload session content: %w", err)
 			} else {

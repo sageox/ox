@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/sageox/ox/internal/auth"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/updatenotice"
 	"github.com/sageox/ox/internal/version"
 )
@@ -15,6 +17,9 @@ import (
 // notice actually reaches someone — a notice we decided not to show must not
 // consume the day's budget.
 func updateNoticeDue(now time.Time) (line string, due bool) {
+	if auth.EnvTokenIsTeamFamily(endpoint.GetForProject(findGitRoot())) {
+		return "", false
+	}
 	line = updatenotice.Line(version.Version)
 	return line, updatenotice.ShouldNotify(readVersionCache(), line, now)
 }

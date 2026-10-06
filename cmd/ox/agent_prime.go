@@ -501,7 +501,9 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 			msg := fmt.Sprintf("Not logged in. Run 'ox login' to authenticate with %s.", endpointSlug)
 			switch {
 			case errors.Is(authErr, auth.ErrEnvTokenMalformed):
-				msg = fmt.Sprintf("SAGEOX_TOKEN is set but its value failed a local format check, so it was refused for %s. Re-copy the token (a truncated paste is the usual cause), or unset SAGEOX_TOKEN to use a stored login.", endpointSlug)
+				msg = fmt.Sprintf("SAGEOX_TOKEN was refused for %s. %s", endpointSlug, malformedEnvTokenRemedy(projectEndpoint))
+			case auth.EnvTokenIsTeamFamily(projectEndpoint):
+				msg = "Authentication failed. " + auth.ReauthenticationRemedy(projectEndpoint)
 			case authErr != nil:
 				msg = fmt.Sprintf("Authentication expired. Run 'ox login' to authenticate with %s.", endpointSlug)
 			}

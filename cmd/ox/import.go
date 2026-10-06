@@ -140,6 +140,10 @@ type importResult struct {
 
 // runImport uploads a document to the team context's LFS store and commits its pointer files.
 func runImport(cmd *cobra.Command, args []string) error {
+	ctx := cmd.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	jsonOutput, _ := cmd.Flags().GetBool("json")
 
 	// dispatch: --status flag takes priority
@@ -270,14 +274,14 @@ func runImport(cmd *cobra.Command, args []string) error {
 	}
 
 	// upload content to LFS
-	lfsClient, err := getTeamContextLFSClient(ep, tc)
+	lfsClient, err := getTeamContextLFSClient(ctx, ep, tc)
 	if err != nil {
 		return fmt.Errorf("create LFS client: %w", err)
 	}
 
 	slog.Info("uploading doc to LFS", "doc", dirSlug, "files", len(batchObjects))
 
-	resp, err := lfsClient.BatchUpload(batchObjects)
+	resp, err := lfsClient.BatchUploadContext(ctx, batchObjects)
 	if err != nil {
 		return fmt.Errorf("LFS batch upload: %w", err)
 	}
@@ -617,22 +621,12 @@ func resolveTeamContextByEndpoint(query, ep string) *config.TeamContext {
 
 // getTeamContextLFSClient creates an LFS client for the team context repo.
 // Fallback chain: cloud API → cached marker → git remote URL.
-func getTeamContextLFSClient(ep string, tc *config.TeamContext) (*lfs.Client, error) {
-	creds, err := gitserver.LoadCredentialsForEndpoint(ep)
-	if err != nil {
-		return nil, fmt.Errorf("load credentials: %w", err)
-	}
-	if creds == nil {
-		return nil, fmt.Errorf("no git credentials found (run 'ox login' first)")
-	}
-	if creds.Token == "" {
-		return nil, fmt.Errorf("git credentials have empty token")
-	}
+func getTeamContextLFSClient(ctx context.Context, ep string, tc *config.TeamContext) (*lfs.Client, error) {
 
 	repoURL := GetTeamURLWithFallback("", tc.TeamID, ep)
 	if repoURL == "" {
 		// last resort: read from local git remote
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
 		out, gitErr := gitutil.RunGit(ctx, tc.Path, "remote", "get-url", "origin")
 		if gitErr != nil || strings.TrimSpace(out) == "" {
@@ -641,7 +635,7 @@ func getTeamContextLFSClient(ep string, tc *config.TeamContext) (*lfs.Client, er
 		repoURL = strings.TrimSpace(out)
 	}
 
-	return lfs.NewClient(repoURL, creds.Username, creds.Token), nil
+	return lfs.NewClientForEndpoint(ctx, repoURL, ep)
 }
 
 // commitAndPushDocImport stages, commits, and pushes imported document files.

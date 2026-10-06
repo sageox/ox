@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sageox/ox/internal/errkind"
+
 	tea "charm.land/bubbletea/v2"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
@@ -651,20 +653,20 @@ func syncPathExists(path string) bool {
 func autoStartDaemon() error {
 	// OX_NO_DAEMON=1 prevents daemon start (integration tests)
 	if os.Getenv("OX_NO_DAEMON") == "1" {
-		return fmt.Errorf("daemon start disabled: OX_NO_DAEMON=1")
+		return errkind.Errorf(errkind.Daemon, "daemon start disabled: OX_NO_DAEMON=1")
 	}
 
 	// get the path to the current executable
 	exe, err := selfexec.Path()
 	if err != nil {
-		return fmt.Errorf("get executable path: %w", err)
+		return errkind.Errorf(errkind.Daemon, "get executable path: %w", err)
 	}
 
 	// start daemon process in background
 	cmd := exec.Command(exe, "daemon", "start")
 	proc.Detach(cmd)
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start daemon: %w", err)
+		return errkind.Errorf(errkind.Daemon, "start daemon: %w", err)
 	}
 
 	// detach - don't wait for the process

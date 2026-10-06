@@ -211,6 +211,15 @@ func EnvTokenIsTeamFamily(ep string) bool {
 	return strings.HasPrefix(envTokenBoundValue(ep), TeamTokenPrefix)
 }
 
+// ReauthenticationRemedy names the recovery for the selected credential.
+// A personal login cannot replace a team token supplied by a CI secret store.
+func ReauthenticationRemedy(ep string) string {
+	if EnvTokenIsTeamFamily(ep) {
+		return "Rotate or re-mint the team token, then update SAGEOX_TOKEN in your CI secret store."
+	}
+	return "Run 'ox login' to re-authenticate."
+}
+
 // Coworker is the AI coworker a team token acts as, as introspection names it.
 type Coworker struct {
 	ID          string `json:"id"`           // agt_…

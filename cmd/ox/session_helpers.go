@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/sageox/ox/internal/errkind"
+
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/identity"
@@ -19,7 +21,7 @@ import (
 func requireProjectRoot() (string, error) {
 	root := config.FindProjectRoot()
 	if root == "" {
-		return "", fmt.Errorf("not in a SageOx project (no .sageox directory found)\nRun this command from a git project directory where SageOx has been initialized")
+		return "", errkind.Errorf(errkind.NotInitialized, "not in a SageOx project (no .sageox directory found)\nRun this command from a git project directory where SageOx has been initialized")
 	}
 	return root, nil
 }

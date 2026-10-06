@@ -256,12 +256,16 @@ func DeriveSlug(name string) string {
 // For ledger URLs, use GetLedgerStatus() which is project-scoped.
 // Requires authentication. Returns PAT, repo URLs, and token expiration.
 func (c *RepoClient) GetRepos() (*ReposResponse, error) {
+	return c.getRepos(context.Background())
+}
+
+func (c *RepoClient) getRepos(ctx context.Context) (*ReposResponse, error) {
 	reqURL := strings.TrimSuffix(c.baseURL, "/") + reposPath
 
 	logger.LogHTTPRequest("GET", reqURL)
 	start := time.Now()
 
-	httpReq, err := useragent.NewRequest(context.Background(), "GET", reqURL, nil)
+	httpReq, err := useragent.NewRequest(ctx, "GET", reqURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -296,6 +300,9 @@ func (c *RepoClient) GetRepos() (*ReposResponse, error) {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		errMsg := strings.TrimSpace(string(bodyBytes))
 		if resp.StatusCode == http.StatusUnauthorized {
+			if strings.HasPrefix(c.authToken, "oxt_") {
+				return nil, &teamTokenUnauthorizedError{}
+			}
 			return nil, ErrUnauthorized
 		}
 		if errMsg == "" {
@@ -314,6 +321,35 @@ func (c *RepoClient) GetRepos() (*ReposResponse, error) {
 	}
 
 	return &reposResp, nil
+}
+
+// GetGitCredentials binds the Git PAT returned by discovery to this client's bearer.
+func (c *RepoClient) GetGitCredentials(ctx context.Context) (*gitserver.GitCredentials, error) {
+	resp, err := c.getRepos(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if resp.Token == "" {
+		return nil, fmt.Errorf("git credential discovery returned an empty token")
+	}
+	creds := &gitserver.GitCredentials{
+		BearerTokenHash: gitserver.BearerTokenFingerprint(c.authToken),
+		Token:           resp.Token,
+		ServerURL:       resp.ServerURL,
+		Username:        resp.Username,
+		ExpiresAt:       resp.ExpiresAt,
+		Repos:           make(map[string]gitserver.RepoEntry),
+	}
+	for _, repo := range resp.Repos {
+		creds.AddRepo(gitserver.RepoEntry{
+			Name:   repo.Name,
+			Type:   repo.Type,
+			URL:    repo.URL,
+			TeamID: repo.StableID(),
+			Slug:   repo.Slug,
+		})
+	}
+	return creds, nil
 }
 
 // GetTeamInfo calls GET /api/v1/teams/{id} to fetch team information

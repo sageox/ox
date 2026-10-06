@@ -193,11 +193,11 @@ func fixRepoPathIssues(gitRoot string, localCfg *config.LocalConfig, issues []re
 	// check if authenticated for this endpoint - can't clone without auth
 	authenticated, _ := auth.IsAuthenticatedForEndpoint(projectEndpoint)
 	if !authenticated {
-		fmt.Println("  You are not logged in. Run 'ox login' first to clone repos from cloud.")
+		fmt.Println("  Not authenticated. " + auth.ReauthenticationRemedy(projectEndpoint))
 		fmt.Println()
 		return WarningCheck("git repo paths",
 			fmt.Sprintf("%d repo(s) with issues", len(issues)),
-			"Run `ox login` first, then `ox doctor --fix` to clone repos")
+			auth.ReauthenticationRemedy(projectEndpoint)+" Then run `ox doctor --fix` to clone repos.")
 	}
 
 	// refresh git credentials before attempting fixes using project endpoint
@@ -346,7 +346,7 @@ func fixMissingRepos(gitRoot string, localCfg *config.LocalConfig) checkResult {
 	}
 	if token == nil || token.AccessToken == "" {
 		return FailedCheck("git repo paths", "not authenticated",
-			"Run `ox login` first")
+			auth.ReauthenticationRemedy(projectEndpoint))
 	}
 
 	client := api.NewRepoClientWithEndpoint(projectEndpoint).WithAuthToken(token.AccessToken)
@@ -361,7 +361,7 @@ func fixMissingRepos(gitRoot string, localCfg *config.LocalConfig) checkResult {
 		return result
 	}
 	if repos != nil {
-		if err := saveGitCredentialsFromRepos(repos, projectEndpoint); err != nil {
+		if err := saveGitCredentialsFromRepos(repos, projectEndpoint, token.AccessToken); err != nil {
 			slog.Warn("failed to save git credentials", "error", err)
 		}
 	}
@@ -728,7 +728,7 @@ func fetchLedgerURLWithError(currentEndpoint string) (string, error) {
 		return "", fmt.Errorf("get auth token for %s: %w", projectEndpoint, err)
 	}
 	if token == nil || token.AccessToken == "" {
-		return "", errkind.Errorf(errkind.NotLoggedIn, "not authenticated to %s - run 'ox login' first", projectEndpoint)
+		return "", errkind.Errorf(errkind.NotLoggedIn, "not authenticated to %s — %s", projectEndpoint, auth.ReauthenticationRemedy(projectEndpoint))
 	}
 
 	// use ledger-status API (project-scoped) to get ledger URL
@@ -761,7 +761,7 @@ func fetchTeamContextURLWithError(teamID string, currentEndpoint string) (string
 		return "", fmt.Errorf("get auth token for %s: %w", currentEndpoint, err)
 	}
 	if token == nil || token.AccessToken == "" {
-		return "", errkind.Errorf(errkind.NotLoggedIn, "not authenticated to %s - run 'ox login' first", currentEndpoint)
+		return "", errkind.Errorf(errkind.NotLoggedIn, "not authenticated to %s — %s", currentEndpoint, auth.ReauthenticationRemedy(currentEndpoint))
 	}
 
 	client := api.NewRepoClientWithEndpoint(currentEndpoint).WithAuthToken(token.AccessToken)
@@ -782,17 +782,18 @@ func fetchTeamContextURLWithError(teamID string, currentEndpoint string) (string
 // saveGitCredentialsFromRepos builds and saves git credentials from an already-fetched
 // ReposResponse. This avoids a duplicate /api/v1/cli/repos call when the response is
 // already available (e.g., from fixMissingRepos).
-func saveGitCredentialsFromRepos(repos *api.ReposResponse, projectEndpoint string) error {
+func saveGitCredentialsFromRepos(repos *api.ReposResponse, projectEndpoint, bearerToken string) error {
 	if repos == nil {
 		return nil
 	}
 
 	creds := &gitserver.GitCredentials{
-		Token:     repos.Token,
-		ServerURL: repos.ServerURL,
-		Username:  repos.Username,
-		ExpiresAt: repos.ExpiresAt,
-		Repos:     make(map[string]gitserver.RepoEntry),
+		BearerTokenHash: gitserver.BearerTokenFingerprint(bearerToken),
+		Token:           repos.Token,
+		ServerURL:       repos.ServerURL,
+		Username:        repos.Username,
+		ExpiresAt:       repos.ExpiresAt,
+		Repos:           make(map[string]gitserver.RepoEntry),
 	}
 
 	for _, repo := range repos.Repos {
@@ -801,6 +802,7 @@ func saveGitCredentialsFromRepos(repos *api.ReposResponse, projectEndpoint strin
 			Type:   repo.Type,
 			URL:    repo.URL,
 			TeamID: repo.StableID(),
+			Slug:   repo.Slug,
 		})
 	}
 

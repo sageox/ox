@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -22,6 +23,8 @@ import (
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/gitserver"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/ledger"
 )
@@ -159,4 +162,42 @@ func TestSessionMeta_TeamCoworker(t *testing.T) {
 	ep := endpoint.GetForProject(projectRoot)
 	meta := sessionMetaBase("s", identity.AttributionDisplayName(ep, ""), "OxAiCw", "claude-code", time.Now(), projectRoot, state.SessionID).Build()
 	assert.Equal(t, "agt_rip", meta.UserID)
+}
+
+// Failure prevented: a coworker's Ledger commits are authored by its machine's
+// git identity, or a person's by the AI coworker a team token once stamped on
+// the same clone.
+func TestLedgerCommitAuthor_TeamToken(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	serveTeamCoworker(t, ripCoworker)
+	// The machine's own identity: git's choice when the clone has none.
+	global := filepath.Join(t.TempDir(), "gitconfig")
+	require.NoError(t, os.WriteFile(global, []byte("[user]\n\tname = Devon\n\temail = devon@example.com\n"), 0o600))
+	t.Setenv("GIT_CONFIG_GLOBAL", global)
+	for _, k := range []string{"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"} {
+		t.Setenv(k, "") // restores testenv's value afterwards
+		require.NoError(t, os.Unsetenv(k))
+	}
+	ledgerPath := t.TempDir()
+	mustRunGit(t, ledgerPath, "init", "--initial-branch=main")
+	mustRunGit(t, ledgerPath, "remote", "add", "origin", os.Getenv("SAGEOX_ENDPOINT")+"/team/ledger.git")
+
+	// commitAuthor refreshes the clone as the daemon does before every pull,
+	// commits the way Ledger writers do, and returns the commit's author.
+	commitAuthor := func(file string) string {
+		require.NoError(t, gitserver.RefreshRemoteCredentials(ledgerPath, endpoint.Get()))
+		require.NoError(t, os.WriteFile(filepath.Join(ledgerPath, file), []byte(file), 0o644))
+		mustRunGit(t, ledgerPath, "add", file)
+		committed, err := gitutil.CommitLedgerSnapshot(context.Background(), ledgerPath, "add "+file, file)
+		require.NoError(t, err)
+		require.True(t, committed)
+		author, err := runIsolatedGit(t, ledgerPath, "log", "-1", "--format=%an <%ae>")
+		require.NoError(t, err)
+		return author
+	}
+
+	assert.Equal(t, "Rip <agt_rip@ai-coworker.invalid>", commitAuthor("by-rip.md"))
+
+	t.Setenv("SAGEOX_TOKEN", "") // the same machine, now signed in with ox login
+	assert.Equal(t, "Devon <devon@example.com>", commitAuthor("by-devon.md"))
 }

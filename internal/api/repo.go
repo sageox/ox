@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sageox/ox/internal/errkind"
+
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/logger"
@@ -319,10 +321,11 @@ func (c *RepoClient) RegisterRepo(req *RepoInitRequest) (*RepoInitResponse, erro
 	// handle non-2xx responses
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		errMsg := strings.TrimSpace(string(bodyBytes))
+		kind, detail := errkind.HTTPStatus(resp.StatusCode), fmt.Sprintf("register repo HTTP %d", resp.StatusCode)
 		if errMsg == "" {
-			return nil, fmt.Errorf("HTTP %d from %s", resp.StatusCode, reqURL)
+			return nil, errkind.WithDetail(kind, detail, fmt.Errorf("HTTP %d from %s", resp.StatusCode, reqURL))
 		}
-		return nil, fmt.Errorf("HTTP %d from %s: %s", resp.StatusCode, reqURL, errMsg)
+		return nil, errkind.WithDetail(kind, detail, fmt.Errorf("HTTP %d from %s: %s", resp.StatusCode, reqURL, errMsg))
 	}
 
 	// log the raw response for debugging
