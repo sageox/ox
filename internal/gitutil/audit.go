@@ -8,10 +8,6 @@ import (
 	"time"
 )
 
-// abortTimeout is the timeout for git --abort operations. Matches the
-// 10s timeout used at existing abort call sites (internal/daemon/sync_managed.go).
-const abortTimeout = 10 * time.Second
-
 // AuditableOp is a git operation whose --abort behavior is audited.
 type AuditableOp string
 
@@ -57,8 +53,9 @@ func AuditAndAbort(ctx context.Context, repoPath string, op AuditableOp, reason 
 		"stash_count", stashCount,
 	)
 
-	// run abort in a fresh, bounded context — parent ctx may be canceled.
-	abortCtx, cancel := context.WithTimeout(context.Background(), abortTimeout)
+	// the abort is local and a killed abort leaves the repo mid-rebase, so it
+	// outlives the caller's deadline and is bounded only against a true hang
+	abortCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), pullMaxTimeout)
 	defer cancel()
 
 	abortCmd := commandContext(abortCtx, "git", "-C", repoPath, string(op), "--abort")
