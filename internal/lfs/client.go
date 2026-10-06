@@ -388,10 +388,10 @@ func NewClientForEndpoint(repoURL, endpointURL string) (*Client, error) {
 		return nil, fmt.Errorf("load credentials: %w", err)
 	}
 	if creds == nil {
-		return nil, fmt.Errorf("no git credentials found. %s", auth.ReauthenticationRemedy(endpointURL))
+		return nil, errkind.Errorf(errkind.NotLoggedIn, "no git credentials found. %s", auth.ReauthenticationRemedy(endpointURL))
 	}
 	if creds.Token == "" {
-		return nil, fmt.Errorf("git credentials have empty token")
+		return nil, errkind.Errorf(errkind.NotLoggedIn, "git credentials have empty token")
 	}
 
 	c := NewClient(repoURL, creds.Username, creds.Token)

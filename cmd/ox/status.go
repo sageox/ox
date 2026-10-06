@@ -2007,8 +2007,8 @@ func buildStatusJSON(authenticated bool, authErr error, token *auth.StoredToken,
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			liveness := gitserver.ValidatePATLiveness(ctx, creds)
 			cancel()
-			if !liveness.Valid && !liveness.Skipped && attemptPATAutoRepair(projectEndpoint) {
-				if refreshed, loadErr := gitserver.LoadCredentialsForEndpoint(projectEndpoint); loadErr == nil {
+			if !liveness.Valid && !liveness.Skipped {
+				if refreshed, refreshErr := auth.RefreshGitCredentialsForEndpoint(context.Background(), projectEndpoint, true); refreshErr == nil {
 					ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 					liveness = gitserver.ValidatePATLiveness(ctx, refreshed)
 					cancel()
@@ -2383,8 +2383,8 @@ func renderAuthStatus(authFile string) string {
 				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 				liveness := gitserver.ValidatePATLiveness(ctx, creds)
 				cancel()
-				if !liveness.Valid && !liveness.Skipped && attemptPATAutoRepair(ep) {
-					if refreshed, loadErr := gitserver.LoadCredentialsForEndpoint(ep); loadErr == nil {
+				if !liveness.Valid && !liveness.Skipped {
+					if refreshed, refreshErr := auth.RefreshGitCredentialsForEndpoint(context.Background(), ep, true); refreshErr == nil {
 						ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 						liveness = gitserver.ValidatePATLiveness(ctx, refreshed)
 						cancel()

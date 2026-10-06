@@ -152,6 +152,16 @@ func uploadSessionLFS(projectRoot, sessionPath string) (map[string]lfs.FileRef, 
 // rotates or the server rejects the PAT.
 func getLFSClient(projectRoot string) (*lfs.Client, error) {
 	ep := endpoint.GetForProject(projectRoot)
+	creds, err := auth.RefreshGitCredentialsForEndpoint(context.Background(), ep, false)
+	if err != nil {
+		return nil, fmt.Errorf("load credentials: %w", err)
+	}
+	if creds == nil {
+		return nil, errkind.Errorf(errkind.NotLoggedIn, "no git credentials found. %s", auth.ReauthenticationRemedy(ep))
+	}
+	if creds.Token == "" {
+		return nil, errkind.Errorf(errkind.NotLoggedIn, "git credentials have empty token")
+	}
 
 	// derive LFS repo URL from the ledger's local git remote (no API call needed)
 	ledgerPath, err := resolveLedgerPath()
