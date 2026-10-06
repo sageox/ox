@@ -34,6 +34,7 @@ jobs:
         with:
           filters: |
             sensitive:
+              - 'security/rules/**'   # so an edited rule is parsed by the real scanner
               - 'internal/auth/**'
               - 'internal/session/**'
               - 'internal/daemon/**'
