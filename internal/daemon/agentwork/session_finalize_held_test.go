@@ -150,6 +150,38 @@ func TestRecovery_HoldFailureKeepsTheRecordingMarker(t *testing.T) {
 	}
 }
 
+// Failure prevented: recovery cannot read the recorded mode, treats the session
+// as auto, and removes .recording.json, the only record of a manual choice.
+// The callers keep the marker on any error (TestRecovery_HoldFailure...).
+func TestHoldIfRecordedManual_UnknownModeKeepsTheMarker(t *testing.T) {
+	cases := []struct {
+		name    string
+		marker  string // .recording.json content; empty means absent
+		wantErr bool
+		held    bool
+	}{
+		{"manual", `{"agent_id":"OxHeLd","publishing_mode":"manual"}`, false, true},
+		{"auto", `{"agent_id":"OxHeLd","publishing_mode":"auto"}`, false, false},
+		{"unreadable marker", `{not json`, true, false},
+		{"marker gone", "", true, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if tc.marker != "" {
+				require.NoError(t, os.WriteFile(filepath.Join(dir, recordingMarker), []byte(tc.marker), 0o644))
+			}
+			err := holdIfRecordedManual(dir)
+			if tc.wantErr {
+				require.ErrorContains(t, err, "read recorded publishing mode")
+			} else {
+				require.NoError(t, err)
+			}
+			assert.Equal(t, tc.held, session.IsHeld(dir))
+		})
+	}
+}
+
 // Failure prevented: a hold placed after the scan, or an item queued by IPC
 // (which never passes the scan), reaches the LLM, LFS, or the discard.
 func TestFinalizeEntryPoints_DropHeldItem(t *testing.T) {

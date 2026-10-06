@@ -985,6 +985,9 @@ func cleanupStaleEmptyRecordings(projectRoot string) {
 		if state.SessionPath == "" {
 			continue
 		}
+		if IsHeld(state.SessionPath) {
+			continue // a held session is the coworker's to remove, by name
+		}
 		// A native log can hold the session even when the watcher never wrote
 		// an entry. Claude hook discovery can fail with an unverifiable cwd,
 		// leaving SessionFile empty despite a real native conversation.

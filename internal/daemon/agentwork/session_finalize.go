@@ -3556,12 +3556,19 @@ var writeHoldMarker = session.WriteHoldMarker
 
 // holdIfRecordedManual holds a recovered session whose recording was started
 // under session_publishing: manual. Call it before .recording.json is removed,
-// and keep the marker if it returns an error: after the marker goes, the hold
-// is the only record of the coworker's choice, and the daemon cannot see the
-// CLI's environment to re-derive it.
+// and keep the marker if it returns an error, including when the recorded mode
+// cannot be read: after the marker goes, the hold is the only record of the
+// coworker's choice, and the daemon cannot see the CLI's environment to
+// re-derive it.
 func holdIfRecordedManual(sessionDir string) error {
 	state, err := session.ReadRecordingStateFile(sessionDir)
-	if err != nil || !state.RecordedManualPublishing() {
+	if err != nil {
+		return fmt.Errorf("read recorded publishing mode: %w", err)
+	}
+	if state == nil {
+		return fmt.Errorf("read recorded publishing mode: no recording state in %s", filepath.Base(sessionDir))
+	}
+	if !state.RecordedManualPublishing() {
 		return nil
 	}
 	if err := writeHoldMarker(sessionDir, session.HoldManualPublishing, "daemon_recovery"); err != nil {
