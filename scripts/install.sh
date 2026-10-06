@@ -64,6 +64,30 @@ dq_escape_fish() {
     printf '%s' "$s"
 }
 
+# Name the startup file the bash in a new terminal reads, which is the
+# environment an AI coding tool started from that terminal inherits
+# (issue #1162). macOS terminals open login shells, which read the first of
+# ~/.bash_profile, ~/.bash_login and ~/.profile that exists and never read
+# ~/.bashrc on their own. Naming the one that already exists matters: a new
+# ~/.bash_profile would stop bash from reading an existing ~/.profile. Linux
+# terminals open non-login shells, which read ~/.bashrc.
+# The name is display text with an unexpanded tilde.
+# shellcheck disable=SC2088
+bash_startup_file() {
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+        local f
+        for f in .bash_profile .bash_login .profile; do
+            if [[ -n "${HOME:-}" && -f "$HOME/$f" ]]; then
+                printf '~/%s' "$f"
+                return 0
+            fi
+        done
+        printf '~/.bash_profile'
+        return 0
+    fi
+    printf '~/.bashrc'
+}
+
 # Print PATH guidance for AI coding tool hooks, naming the shell startup
 # file that a non-interactive hook shell actually reads. No-op if the
 # binary's directory is already on PATH.
@@ -114,9 +138,9 @@ print_path_warning() {
             one_liner="printf '%s\\n' $(shell_quote "$path_line") >> ~/.zshenv"
             ;;
         bash)
-            rc_file="~/.bashrc"
+            rc_file=$(bash_startup_file)
             path_line="export PATH=\"\$PATH:$posix_dir\""
-            one_liner="printf '%s\\n' $(shell_quote "$path_line") >> ~/.bashrc"
+            one_liner="printf '%s\\n' $(shell_quote "$path_line") >> $rc_file"
             restart_line="Then restart your AI coding tool from a new terminal so it picks up the change."
             explanation="AI coding tools inherit the environment of the terminal they were started from, not any change made after they launched."
             ;;
