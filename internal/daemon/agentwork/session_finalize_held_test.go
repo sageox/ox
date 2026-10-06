@@ -2,6 +2,7 @@ package agentwork
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -99,6 +100,52 @@ func TestDetect_RecoveredManualRecordingIsHeld(t *testing.T) {
 				assert.False(t, session.IsHeld(f.cacheDir))
 				assert.Len(t, items, 1, "an auto-mode recovery is finalized as before")
 			}
+		})
+	}
+}
+
+// Failure prevented: recovery removes .recording.json although the hold could
+// not be written, so a later scan finds an unheld session and publishes it.
+func TestRecovery_HoldFailureKeepsTheRecordingMarker(t *testing.T) {
+	stale := time.Now().Add(-25 * time.Hour)
+	entryPoints := []struct {
+		name      string
+		recording map[string]any
+		detect    func(t *testing.T, h *SessionFinalizeHandler, ledgerPath string) []*WorkItem
+	}{
+		{
+			name:      "stale recording scan",
+			recording: map[string]any{"agent_id": "OxHeLd", "started_at": stale.Format(time.RFC3339), "publishing_mode": "manual"},
+			detect: func(t *testing.T, h *SessionFinalizeHandler, ledgerPath string) []*WorkItem {
+				return detectCacheOnly(t, h, ledgerPath)
+			},
+		},
+		{
+			name: "orphaned recording of an exited agent",
+			recording: map[string]any{"agent_id": "OxHeLd", "started_at": stale.Format(time.RFC3339),
+				"stopped_at": stale.Add(time.Hour).Format(time.RFC3339), "publishing_mode": "manual"},
+			detect: func(_ *testing.T, h *SessionFinalizeHandler, ledgerPath string) []*WorkItem {
+				return h.DetectOrphanedForAgent(ledgerPath, "OxHeLd", 0)
+			},
+		},
+	}
+	for _, ep := range entryPoints {
+		t.Run(ep.name, func(t *testing.T) {
+			f := newHeldFixture(t)
+			f.transcript(t)
+			rec, err := json.Marshal(ep.recording)
+			require.NoError(t, err)
+			recPath := filepath.Join(f.cacheDir, recordingMarker)
+			require.NoError(t, os.WriteFile(recPath, rec, 0o644))
+			orig := writeHoldMarker
+			writeHoldMarker = func(string, session.HoldReason, string) error { return errors.New("disk full") }
+			t.Cleanup(func() { writeHoldMarker = orig })
+
+			items := ep.detect(t, NewSessionFinalizeHandlerForTest(slog.New(slog.DiscardHandler)), f.ledgerPath)
+
+			assert.FileExists(t, recPath, "until a hold lands, the marker is the only record of the manual choice")
+			assert.False(t, session.IsHeld(f.cacheDir))
+			assert.Empty(t, items, "a session that could not be held is not finalized")
 		})
 	}
 }

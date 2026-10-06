@@ -1217,10 +1217,13 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	summarizerOff := summarizerMode == config.AgentSummarizerOff
 
 	// A held session gets its hold before anything the daemon reacts to, and
-	// no summary prompt: push-summary publishes (GH #1093).
+	// no summary prompt: push-summary publishes (GH #1093). If the hold cannot
+	// be recorded, the stop fails and the recording state is kept.
 	held := stopHoldsSession(projectRoot, state)
 	if held {
-		holdStoppedSession(result, filepath.Dir(result.RawPath), "session_stop")
+		if err := holdStoppedSession(result, filepath.Dir(result.RawPath), "session_stop"); err != nil {
+			return nil, err
+		}
 	}
 
 	// Compress raw.jsonl into the ledger cache (.sageox/cache/summary-input/)

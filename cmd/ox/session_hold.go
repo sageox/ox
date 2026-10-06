@@ -28,15 +28,20 @@ func stopHoldsSession(projectRoot string, state *session.RecordingState) bool {
 		state.RecordedManualPublishing()
 }
 
+// writeSessionHold records a hold. A variable so tests can make it fail.
+var writeSessionHold = session.WriteHoldMarker
+
 // holdStoppedSession records the hold on the session's cache folder. Call it
 // before anything the daemon reacts to (.needs-summary) is written and before
 // .recording.json is cleared, so no window exists where the folder looks like
-// unfinished work with no hold.
-func holdStoppedSession(result *agentSessionResult, cacheDir, source string) {
-	result.Held = true
-	if err := session.WriteHoldMarker(cacheDir, session.HoldManualPublishing, source); err != nil {
-		slog.Warn("could not record session hold", "dir", cacheDir, "source", source, "error", err)
+// unfinished work with no hold. On error the caller must keep .recording.json:
+// without it or the hold, the folder looks like an orphan the daemon publishes.
+func holdStoppedSession(result *agentSessionResult, cacheDir, source string) error {
+	if err := writeSessionHold(cacheDir, session.HoldManualPublishing, source); err != nil {
+		return fmt.Errorf("hold session on this machine: %w", err)
 	}
+	result.Held = true
+	return nil
 }
 
 // heldSessionWarning is the stop message for a held session.
@@ -48,20 +53,21 @@ func heldSessionWarning(sessionName string) string {
 // SessionEnd hook to the daemon (fire-and-forget IPC), or holds it when the
 // coworker publishes manually. A held session gets its hold and no IPC: the
 // finalize request bypasses the daemon's scan and would summarize and upload
-// it (GH #1093). Call it before the recording state is cleared.
-func finalizeOrHoldOnHookStop(ctx *HookContext, state *session.RecordingState, phase string) {
+// it (GH #1093). Call it before the recording state is cleared, and keep the
+// state when it returns an error: the hold could not be recorded.
+func finalizeOrHoldOnHookStop(ctx *HookContext, state *session.RecordingState, phase string) error {
 	if state.SessionPath == "" {
-		return
+		return nil
 	}
 	if stopHoldsSession(ctx.ProjectRoot, state) {
-		if err := session.WriteHoldMarker(state.SessionPath, session.HoldManualPublishing, "hook_"+phase); err != nil {
-			slog.Warn("hook: could not record session hold", "phase", phase, "error", err)
+		if err := writeSessionHold(state.SessionPath, session.HoldManualPublishing, "hook_"+phase); err != nil {
+			return fmt.Errorf("hold session on this machine: %w", err)
 		}
-		return
+		return nil
 	}
 	ledgerPath := deriveLedgerPath(state.SessionPath)
 	if ledgerPath == "" {
-		return
+		return nil
 	}
 	if ipcErr := sendHookFinalizeIPC(daemon.SessionFinalizeIPCPayload{
 		SessionName: filepath.Base(state.SessionPath),
@@ -71,6 +77,7 @@ func finalizeOrHoldOnHookStop(ctx *HookContext, state *session.RecordingState, p
 	}); ipcErr != nil {
 		slog.Debug("hook: finalize IPC failed", "phase", phase, "error", ipcErr)
 	}
+	return nil
 }
 
 // sendHookFinalizeIPC is the daemon finalize request a hook sends. A variable

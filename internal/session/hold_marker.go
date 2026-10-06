@@ -58,8 +58,12 @@ func WriteHoldMarker(dir string, reason HoldReason, source string) error {
 	if inSharedSessionsTree(dir) {
 		return fmt.Errorf("hold session %s: %w", dir, ErrHoldInSharedTree)
 	}
-	if IsHeld(dir) {
+	// Skip only a marker confirmed present. IsHeld fails closed, so it would
+	// report a marker it could not check as already written.
+	if _, err := os.Lstat(filepath.Join(dir, HeldMarkerFile)); err == nil {
 		return nil
+	} else if !errors.Is(err, fs.ErrNotExist) && !errors.Is(err, syscall.ENOTDIR) {
+		return fmt.Errorf("hold session %s: check marker: %w", dir, err)
 	}
 	if info, err := os.Stat(dir); err != nil {
 		return fmt.Errorf("hold session %s: %w", dir, err)

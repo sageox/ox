@@ -298,11 +298,14 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 	}
 
 	// A held session gets its hold before anything the daemon reacts to, and
-	// no summary prompt: push-summary publishes (GH #1093).
+	// no summary prompt: push-summary publishes (GH #1093). If the hold cannot
+	// be recorded, the stop fails and the recording state is kept.
 	sessionCacheDir := filepath.Dir(result.RawPath)
 	held := stopHoldsSession(projectRoot, state)
 	if held {
-		holdStoppedSession(result, sessionCacheDir, "session_stop")
+		if err := holdStoppedSession(result, sessionCacheDir, "session_stop"); err != nil {
+			return nil, err
+		}
 	} else {
 		result.SummaryPrompt = session.BuildSummaryPrompt(sessionEntries, result.RawPath, result.LedgerSessionDir)
 		_ = session.WriteNeedsSummaryMarker(sessionCacheDir, result.RawPath, result.LedgerSessionDir)

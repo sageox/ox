@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -241,5 +242,47 @@ func TestHookStop_HoldsManualSessionAndSendsNoFinalize(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// Failure prevented: a hold that cannot be recorded at /clear or SessionEnd
+// still clears the recording, so the folder looks like an orphan the daemon
+// summarizes and publishes (GH #1093).
+func TestHookStop_HoldFailureKeepsTheRecording(t *testing.T) {
+	for _, phase := range []string{"session end", "clear"} {
+		t.Run(phase, func(t *testing.T) {
+			projectRoot, repoID := setupTestProject(t)
+			t.Setenv("OX_USER_CONFIG", filepath.Join(t.TempDir(), "absent.yaml"))
+			t.Setenv("OX_SESSION_PUBLISHING", "manual")
+			agentID := "OxHoldFail"
+			createActiveRecording(t, projectRoot, repoID, agentID)
+			state, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+			require.NoError(t, err)
+
+			sent := 0
+			origIPC := sendHookFinalizeIPC
+			sendHookFinalizeIPC = func(daemon.SessionFinalizeIPCPayload) error { sent++; return nil }
+			t.Cleanup(func() { sendHookFinalizeIPC = origIPC })
+			origHold := writeSessionHold
+			writeSessionHold = func(string, session.HoldReason, string) error { return errors.New("disk full") }
+			t.Cleanup(func() { writeSessionHold = origHold })
+
+			ctx := &HookContext{AgentType: "claude-code", ProjectRoot: projectRoot, Marker: &SessionMarker{AgentID: agentID}}
+			if phase == "clear" {
+				ctx.Phase = phaseStart
+				stopSessionForClear(ctx, agentID)
+				assert.Nil(t, ctx.ClearNotice, "no notice may claim the session was finalized")
+			} else {
+				ctx.Phase = phaseEnd
+				require.ErrorContains(t, handleEnd(ctx), "disk full", "SessionEnd must report a hold it could not record")
+			}
+
+			kept, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+			require.NoError(t, err)
+			require.NotNil(t, kept, "the recording must survive for recovery")
+			assert.NotNil(t, kept.StoppedAt, "capture has ended")
+			assert.False(t, session.IsHeld(state.SessionPath))
+			assert.Zero(t, sent, "a session meant to be held is never handed to the daemon")
+		})
 	}
 }

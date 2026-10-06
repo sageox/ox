@@ -630,8 +630,11 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 					if err != nil {
 						return err
 					}
-					// The recording's mode outlives .recording.json only as a hold.
-					holdIfRecordedManual(h.logger, sessionDir)
+					// The recording's mode outlives .recording.json only as a hold;
+					// without one, keep the marker and retry on a later pass.
+					if err := holdIfRecordedManual(sessionDir); err != nil {
+						return err
+					}
 					// A queued watcher must observe the cleared marker before it
 					// acquires this lock and tries to resume the old cursor.
 					return os.Remove(recPath)
@@ -1041,8 +1044,11 @@ func (h *SessionFinalizeHandler) DetectOrphanedForAgent(ledgerPath, agentID stri
 					if err != nil {
 						return err
 					}
-					// The recording's mode outlives .recording.json only as a hold.
-					holdIfRecordedManual(h.logger, sessionDir)
+					// The recording's mode outlives .recording.json only as a hold;
+					// without one, keep the marker and retry on a later pass.
+					if err := holdIfRecordedManual(sessionDir); err != nil {
+						return err
+					}
 					return os.Remove(recPath)
 				})
 				if recoverErr != nil {
@@ -3539,18 +3545,23 @@ func (h *SessionFinalizeHandler) mergeFileRefs(
 	return merged
 }
 
+// writeHoldMarker records a hold. A variable so tests can make it fail.
+var writeHoldMarker = session.WriteHoldMarker
+
 // holdIfRecordedManual holds a recovered session whose recording was started
-// under session_publishing: manual. Call it before .recording.json is removed:
-// after that, the hold is the only record of the coworker's choice, and the
-// daemon cannot see the CLI's environment to re-derive it.
-func holdIfRecordedManual(logger *slog.Logger, sessionDir string) {
+// under session_publishing: manual. Call it before .recording.json is removed,
+// and keep the marker if it returns an error: after the marker goes, the hold
+// is the only record of the coworker's choice, and the daemon cannot see the
+// CLI's environment to re-derive it.
+func holdIfRecordedManual(sessionDir string) error {
 	state, err := session.ReadRecordingStateFile(sessionDir)
 	if err != nil || !state.RecordedManualPublishing() {
-		return
+		return nil
 	}
-	if err := session.WriteHoldMarker(sessionDir, session.HoldManualPublishing, "daemon_recovery"); err != nil {
-		logger.Warn("could not hold recovered manual-mode session", "session", filepath.Base(sessionDir), "err", err)
+	if err := writeHoldMarker(sessionDir, session.HoldManualPublishing, "daemon_recovery"); err != nil {
+		return fmt.Errorf("hold recovered manual-mode session: %w", err)
 	}
+	return nil
 }
 
 // sessionHeldLocally reports whether a work item's session is held on this

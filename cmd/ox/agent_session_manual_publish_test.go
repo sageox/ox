@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -43,6 +44,9 @@ type agentSessionFixture struct {
 	appendMessage func(t *testing.T, sourcePath, role, content string)
 
 	stopDuringCapture bool
+
+	// holdFails makes recording the hold fail at stop.
+	holdFails bool
 }
 
 // blockingStopCodexAdapter holds the watcher's final native read in flight while
@@ -99,6 +103,13 @@ func TestManualPublishingSessionCapture_Matrix(t *testing.T) {
 			createSessionSource: writeCodexSessionFile,
 			appendMessage:       appendCodexMessage,
 			stopDuringCapture:   true,
+		},
+		{
+			name:                "codex_hold_fails",
+			agentType:           "codex",
+			createSessionSource: writeCodexSessionFile,
+			appendMessage:       appendCodexMessage,
+			holdFails:           true,
 		},
 	}
 
@@ -286,6 +297,20 @@ func runManualPublishingSessionCaptureTest(t *testing.T, fixture agentSessionFix
 			"watcher must observe explicit stop without IPC")
 		require.NoFileExists(t, filepath.Join(state.SessionPath, ".recording.json"))
 		require.Zero(t, manager.DetectAndRestart(ledgerPath), "stopped recording must not restart")
+	} else if fixture.holdFails {
+		// Failure prevented: a stop that cannot record the hold clears the
+		// recording anyway, leaving a folder the daemon reclaims and publishes.
+		orig := writeSessionHold
+		writeSessionHold = func(string, session.HoldReason, string) error { return errors.New("disk full") }
+		t.Cleanup(func() { writeSessionHold = orig })
+		stopErr := runAgentSessionStop(inst)
+		require.ErrorContains(t, stopErr, "hold session on this machine")
+		require.ErrorContains(t, stopErr, "recording state preserved")
+		kept, loadErr := session.LoadRecordingStateForAgent(projectRoot, inst.AgentID)
+		require.NoError(t, loadErr)
+		require.NotNil(t, kept, "the recording must survive a hold that could not be recorded")
+		require.False(t, session.IsHeld(state.SessionPath))
+		return
 	} else {
 		require.NoError(t, runAgentSessionStop(inst))
 	}

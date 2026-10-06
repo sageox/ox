@@ -353,8 +353,15 @@ func stopSessionForClear(ctx *HookContext, agentID string) {
 	// gone; hand it the native session ids and the stop time on a footer
 	_ = stampRecordingCarrierAtStop(state, now)
 
-	// fire-and-forget IPC to daemon to finalize the stopped session, or hold it
-	finalizeOrHoldOnHookStop(ctx, state, "clear")
+	// fire-and-forget IPC to daemon to finalize the stopped session, or hold it.
+	// A hold that could not be recorded keeps .recording.json: StoppedAt ends
+	// capture, and daemon recovery re-holds a recording started in manual mode.
+	// Cleared, the folder would look like an orphan the daemon publishes.
+	if holdErr := finalizeOrHoldOnHookStop(ctx, state, "clear"); holdErr != nil {
+		ctx.ClearNotice = nil // the previous session was not finalized
+		slog.Warn("hook: clear kept the recording, its hold could not be recorded", "agent_id", agentID, "error", holdErr)
+		return
+	}
 
 	// clear recording state so prime starts a fresh session
 	if clearErr := session.ClearRecordingStateForAgent(ctx.ProjectRoot, agentID); clearErr != nil {
@@ -422,7 +429,11 @@ func handleEnd(ctx *HookContext) error {
 	// dispatch delegated finalization via daemon IPC. Best-effort: if the
 	// daemon is unreachable, the daemon's anti-entropy sweep will still
 	// pick up the StoppedAt-marked recording within the 24h stale window.
-	finalizeOrHoldOnHookStop(ctx, state, "end")
+	// A hold that could not be recorded keeps .recording.json for recovery
+	// (see stopSessionForClear) and fails the hook so the coworker hears of it.
+	if holdErr := finalizeOrHoldOnHookStop(ctx, state, "end"); holdErr != nil {
+		return fmt.Errorf("session end: %w", holdErr)
+	}
 
 	if clearErr := session.ClearRecordingStateForAgent(ctx.ProjectRoot, agentID); clearErr != nil {
 		slog.Debug("hook: end could not remove recording state", "agent_id", agentID, "error", clearErr)

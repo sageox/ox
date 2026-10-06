@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -107,6 +108,19 @@ func TestHoldMarker_FailuresAreReported(t *testing.T) {
 		}
 		require.ErrorContains(t, WriteHoldMarker(dir, HoldManualPublishing, "test"), "write hold marker")
 		assert.False(t, IsHeld(dir))
+	})
+	t.Run("marker that cannot be checked", func(t *testing.T) {
+		dir := t.TempDir()
+		require.NoError(t, os.Chmod(dir, 0o600))
+		t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+		// A folder without search permission hides whether a marker exists.
+		// Root and Windows ignore that: prove it before relying on it.
+		if _, err := os.Lstat(filepath.Join(dir, HeldMarkerFile)); errors.Is(err, fs.ErrNotExist) {
+			t.Skip("folder is still searchable (root or Windows); cannot hide the marker")
+		}
+		require.ErrorContains(t, WriteHoldMarker(dir, HoldManualPublishing, "test"), "check marker",
+			"a hold that cannot be confirmed must not be reported as written")
+		assert.True(t, IsHeld(dir), "readers still fail closed")
 	})
 	t.Run("missing or corrupt marker", func(t *testing.T) {
 		dir := t.TempDir()
