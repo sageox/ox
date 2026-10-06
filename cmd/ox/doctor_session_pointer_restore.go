@@ -331,38 +331,50 @@ func ledgerUpstream(ctx context.Context, ledgerPath string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-// rawSessionArtifactsAhead lists content artifacts that HEAD changes relative to
-// upstream and holds as raw content, using the tree delta the push validator reads.
-func rawSessionArtifactsAhead(ctx context.Context, ledgerPath, upstream string) ([]rawSessionArtifact, error) {
+// sessionBlobsAhead calls visit for every regular file under sessions/ that HEAD adds or
+// changes relative to upstream, with its blob content: the tree delta the push validator reads.
+func sessionBlobsAhead(ctx context.Context, ledgerPath, upstream string, visit func(path string, blob []byte) error) error {
 	raw, err := exec.CommandContext(ctx, "git", "-C", ledgerPath, "diff-tree", "-r", "-z", "--no-renames", "--raw", upstream, "HEAD", "--", "sessions/").Output()
 	if err != nil {
-		return nil, fmt.Errorf("diff unpushed tree: %w", err)
+		return fmt.Errorf("diff unpushed tree: %w", err)
 	}
 	tokens := strings.Split(string(raw), "\x00")
-	var found []rawSessionArtifact
 	for i := 0; i+1 < len(tokens); i += 2 {
 		fields := strings.Fields(strings.TrimPrefix(tokens[i], ":"))
 		path := tokens[i+1]
-		parts := strings.Split(path, "/")
 		if len(fields) < 5 || strings.HasPrefix(fields[4], "D") || fields[1] != "100644" && fields[1] != "100755" {
-			continue
-		}
-		if len(parts) < 3 || parts[0] != "sessions" || !lfs.IsContentArtifact(strings.Join(parts[2:], "/")) {
 			continue
 		}
 		blob, err := exec.CommandContext(ctx, "git", "-C", ledgerPath, "cat-file", "blob", fields[3]).Output()
 		if err != nil {
-			return nil, fmt.Errorf("read unpushed blob %s: %w", path, err)
+			return fmt.Errorf("read unpushed blob %s: %w", path, err)
+		}
+		if err := visit(path, blob); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// rawSessionArtifactsAhead lists content artifacts that HEAD changes relative to
+// upstream and holds as raw content.
+func rawSessionArtifactsAhead(ctx context.Context, ledgerPath, upstream string) ([]rawSessionArtifact, error) {
+	var found []rawSessionArtifact
+	err := sessionBlobsAhead(ctx, ledgerPath, upstream, func(path string, blob []byte) error {
+		parts := strings.Split(path, "/")
+		if len(parts) < 3 || parts[0] != "sessions" || !lfs.IsContentArtifact(strings.Join(parts[2:], "/")) {
+			return nil
 		}
 		if _, _, perr := pointer.Parse(string(blob)); perr == nil {
-			continue
+			return nil
 		}
 		if meta := headSessionMeta(ctx, ledgerPath, parts[1]); meta.StoredInGit(strings.Join(parts[2:], "/")) {
-			continue // Storage=git: raw content is the correct state
+			return nil // Storage=git: raw content is the correct state
 		}
 		found = append(found, rawSessionArtifact{path: path, content: blob})
-	}
-	return found, nil
+		return nil
+	})
+	return found, err
 }
 
 // headSessionMeta reads the session manifest from HEAD, not the working tree, so

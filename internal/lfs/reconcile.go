@@ -753,10 +753,10 @@ func validateUnpushedTip(ctx context.Context, ledgerPath, upstream string) error
 		if err != nil {
 			return fmt.Errorf("inspect unpushed Ledger blob %s: %w", path, err)
 		}
+		if gitutil.HasConflictMarkersBytes(blob) {
+			return fmt.Errorf("%s contains an unresolved conflict; run `ox doctor --fix-slug=session-conflict-markers`", path)
+		}
 		if sessionContentStorageGit(ctx, ledgerPath, path) {
-			if gitutil.HasConflictMarkersBytes(blob) {
-				return fmt.Errorf("%s contains an unresolved conflict", path)
-			}
 			continue
 		}
 		if err := gitutil.ValidateLedgerBlob(path, blob); err != nil {

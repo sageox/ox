@@ -23,10 +23,6 @@ const (
 	// longBacklogAhead is the unpushed-commit count at which the scaled budget
 	// (base + 30s) is worth detaching from the cycle deadline for.
 	longBacklogAhead = 30
-
-	// abortRecoveryTimeout bounds the abort ladder that runs after a pull
-	// timeout; the pull context is already expired by then.
-	abortRecoveryTimeout = 30 * time.Second
 )
 
 // PullBudget returns how long a pull may run when the clone is `ahead`
@@ -99,10 +95,8 @@ func RecoverPullTimeoutInRebase(parent context.Context, path, repoName string, a
 	if !IsRebaseInProgress(path) {
 		return false, nil
 	}
-	// the pull context is expired; recovery needs its own budget
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), abortRecoveryTimeout)
-	defer cancel()
-	rescueRef, abortErr := RescueIfNeededThenAbort(ctx, path, "pull timed out during rebase", logger)
+	// the pull context is expired; the rescue ladder detaches from it
+	rescueRef, abortErr := RescueIfNeededThenAbort(parent, path, "pull timed out during rebase", logger)
 	if abortErr != nil {
 		logger.Error("pull timed out during rebase; abort failed",
 			"op", "pull_timeout_abort_failed", "repo", repoName, "ahead", ahead,

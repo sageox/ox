@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -303,11 +304,64 @@ func ReadRecordingStateFile(sessionDir string) (*RecordingState, error) {
 		}
 		return nil, fmt.Errorf("read recording state file=%s: %w", statePath, err)
 	}
-	var state RecordingState
-	if err := json.Unmarshal(data, &state); err != nil {
+	state, err := ParseRecordingState(statePath, data)
+	if err != nil {
 		return nil, fmt.Errorf("parse recording state file=%s: %w", statePath, err)
 	}
-	return &state, nil
+	return state, nil
+}
+
+// recordingRepairLockTimeout bounds how long a reader waits to self-repair a
+// marker; repair is best effort, so a busy writer just means the next read retries.
+const recordingRepairLockTimeout = 250 * time.Millisecond
+
+// decodeRecordingState decodes the first complete JSON object in data and
+// reports whether non-whitespace bytes follow it. Older ox versions overwrote
+// the marker in place, leaving the tail of a longer document after a shorter one.
+func decodeRecordingState(data []byte) (state *RecordingState, hasTrailing bool, err error) {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	state = &RecordingState{}
+	if err := dec.Decode(state); err != nil {
+		return nil, false, err
+	}
+	return state, len(bytes.TrimSpace(data[dec.InputOffset():])) > 0, nil
+}
+
+// ParseRecordingState parses the contents of the .recording.json at path.
+// Trailing bytes after the first complete object are ignored, and the file is
+// rewritten atomically so the next read is clean. Repair never fails the read.
+func ParseRecordingState(path string, data []byte) (*RecordingState, error) {
+	state, hasTrailing, err := decodeRecordingState(data)
+	if err != nil {
+		return nil, err
+	}
+	if hasTrailing {
+		repairRecordingState(path)
+	}
+	return state, nil
+}
+
+// repairRecordingState rewrites a marker that carries a stale tail. It re-reads
+// under the state lock so a concurrent writer's newer state is never replaced.
+func repairRecordingState(path string) {
+	err := fileutil.WithFileLockTimeout(context.Background(), path, recordingRepairLockTimeout, func() error {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		state, hasTrailing, err := decodeRecordingState(data)
+		if err != nil || !hasTrailing {
+			return err
+		}
+		if err := fileutil.AtomicWriteJSON(path, state, 0600); err != nil {
+			return err
+		}
+		slog.Info("repaired recording state with trailing bytes", "path", path)
+		return nil
+	})
+	if err != nil {
+		slog.Debug("could not repair recording state", "path", path, "err", err)
+	}
 }
 
 // recordingStatePath returns the path to .recording.json for the given session folder.
@@ -340,16 +394,11 @@ func SaveRecordingState(projectRoot string, state *RecordingState) error {
 		return fmt.Errorf("create session dir=%s: %w", state.SessionPath, err)
 	}
 
-	data, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal recording state: %w", err)
-	}
-
 	// TODO(server-side): move to server-side for MVP+1; client should not write to ledger directly.
 	statePath := recordingStatePath(state.SessionPath)
 	// Publish a complete snapshot on a new inode. Concurrent in-place writes
 	// can otherwise leave the tail of a longer JSON object after a shorter one.
-	if err := fileutil.AtomicWriteBytes(statePath, data, 0600); err != nil {
+	if err := fileutil.AtomicWriteJSON(statePath, state, 0600); err != nil {
 		return fmt.Errorf("write recording state file=%s: %w", statePath, err)
 	}
 
@@ -381,15 +430,15 @@ func LoadRecordingState(projectRoot string) (*RecordingState, error) {
 				continue // no .recording.json in this session folder
 			}
 
-			var state RecordingState
-			if err := json.Unmarshal(data, &state); err != nil {
+			state, err := ParseRecordingState(recordingPath, data)
+			if err != nil {
 				continue // invalid JSON, skip
 			}
 			if state.SourceRejected {
 				continue // held for review, not recording
 			}
 
-			return &state, nil
+			return state, nil
 		}
 	}
 
@@ -445,8 +494,8 @@ func walkRecordingStates(projectRoot string, strict bool, visit func(*RecordingS
 				continue
 			}
 
-			var state RecordingState
-			if unmarshalErr := json.Unmarshal(data, &state); unmarshalErr != nil {
+			state, unmarshalErr := ParseRecordingState(recordingPath, data)
+			if unmarshalErr != nil {
 				if strict {
 					return fmt.Errorf("parse recording state %s: %w", recordingPath, unmarshalErr)
 				}
@@ -454,7 +503,7 @@ func walkRecordingStates(projectRoot string, strict bool, visit func(*RecordingS
 			}
 
 			seen[canonicalKey] = struct{}{}
-			if !visit(&state) {
+			if !visit(state) {
 				return nil
 			}
 		}
@@ -1144,8 +1193,8 @@ func CleanupOrphanedStubsInDir(cacheSessionsDir string) GhostCleanupResult {
 		// identity and recovery data. Only reap when the marker is ABSENT, or
 		// present-parseable-and-PID-dead.
 		if data, readErr := os.ReadFile(recordingStatePath(sessionPath)); readErr == nil {
-			var state RecordingState
-			if json.Unmarshal(data, &state) != nil || state.IsAgentAlive() || state.SourceRejected {
+			state, parseErr := ParseRecordingState(recordingStatePath(sessionPath), data)
+			if parseErr != nil || state.IsAgentAlive() || state.SourceRejected {
 				continue // unreadable-as-JSON, still alive, or held for ownership review → keep
 			}
 			if state.AdapterName != "" && (state.SessionFile != "" || state.WatchMode == "tail") {
@@ -1193,14 +1242,14 @@ func loadRecordingStatesFromDir(sessionsDir string) ([]*RecordingState, error) {
 		if readErr != nil {
 			continue
 		}
-		var state RecordingState
-		if jsonErr := json.Unmarshal(data, &state); jsonErr != nil {
+		state, jsonErr := ParseRecordingState(recordingPath, data)
+		if jsonErr != nil {
 			continue
 		}
 		if state.SessionPath == "" {
 			state.SessionPath = filepath.Join(sessionsDir, entry.Name())
 		}
-		states = append(states, &state)
+		states = append(states, state)
 	}
 	return states, nil
 }
@@ -1550,17 +1599,14 @@ func MutateRecordingStateFile(path string, update func(*RecordingState) error) e
 		if err != nil {
 			return err
 		}
-		var state RecordingState
-		if err = json.Unmarshal(data, &state); err != nil {
-			return err
-		}
-		if err = update(&state); err != nil {
-			return err
-		}
-		data, err = json.Marshal(state)
+		// already under the state lock: decode leniently, and the write below drops any stale tail
+		state, _, err := decodeRecordingState(data)
 		if err != nil {
 			return err
 		}
-		return fileutil.AtomicWriteBytes(path, data, 0600)
+		if err = update(state); err != nil {
+			return err
+		}
+		return fileutil.AtomicWriteJSON(path, state, 0600)
 	})
 }
