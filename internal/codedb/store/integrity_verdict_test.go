@@ -236,3 +236,38 @@ func TestOpenSQLite_InconclusiveCheckDoesNotDeleteTheIndex(t *testing.T) {
 		t.Errorf("the index was deleted over a check that never ran: %v", statErr)
 	}
 }
+
+// IsSQLiteBusy lets the daemon tell "a worktree index holds the write lock" from
+// a real failure, so it is pinned against a real SQLITE_BUSY.
+func TestIsSQLiteBusy(t *testing.T) {
+	root := t.TempDir()
+	holdExclusiveLock(t, root)
+
+	db, err := sql.Open("sqlite", filepath.Join(root, MetadataDBFile)+"?_pragma=busy_timeout(1)")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+
+	var probe string
+	busyErr := db.QueryRow("PRAGMA quick_check").Scan(&probe)
+
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"busy", busyErr, true},
+		{"wrapped busy", fmt.Errorf("upsert repo: %w", busyErr), true},
+		{"plain error", errors.New("database is locked"), false},
+		{"canceled context", context.Canceled, false},
+		{"nil", nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsSQLiteBusy(tt.err); got != tt.want {
+				t.Errorf("IsSQLiteBusy(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}

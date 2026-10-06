@@ -12,6 +12,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/storage/filesystem/dotgit"
+	"github.com/go-git/go-git/v6/storage/filesystem/mmap"
+
 	"github.com/sageox/ox/internal/codedb"
 	"github.com/sageox/ox/internal/codedb/index"
 	"github.com/sageox/ox/internal/codedb/store"
@@ -56,6 +60,9 @@ type CodeDBManager struct {
 	ledgerDataDir  string // cached ledger index dir; resolved once on first use
 	// ledgerTestHook is called at the start of BuildLedgerIndex; nil in production.
 	ledgerTestHook func()
+	// ledgerIndexRepoFn replaces db.IndexLocalRepo in tests so a build can be made
+	// to fail the way a mid-walk repack does; nil in production.
+	ledgerIndexRepoFn func(ctx context.Context, db *codedb.DB, repoPath string, opts index.IndexOptions) error
 
 	// lastIndexedHead caches the HEAD ref + commit hash after successful doIndex.
 	// Used by CheckFreshness to skip the expensive doIndex pipeline when nothing changed.
@@ -234,15 +241,28 @@ func (m *CodeDBManager) resolveLedgerDataDir() string {
 // This is independent of the worktree index — the ledger index provides committed content search
 // even when no worktree is active.
 // Non-blocking: if a ledger index build is already in progress, returns immediately.
-func (m *CodeDBManager) BuildLedgerIndex(ctx context.Context, ledgerPath string) {
+//
+// The returned error classifies the outcome for the scheduler:
+//   - nil: built, or nothing to do (no ledger, alternates, build already running).
+//   - ErrLedgerBuildYielded: a worktree index owns the codedb right now; no work was done.
+//   - ErrLedgerRepoChanged: the ledger's git objects (or the codedb lock) changed
+//     under the walk; the fingerprint is stale, not wrong, so a retry is expected to succeed.
+//   - any other error: a real failure; callers keep the cooldown.
+func (m *CodeDBManager) BuildLedgerIndex(ctx context.Context, ledgerPath string) error {
 	if ledgerPath == "" {
-		return
+		return nil
 	}
 
 	m.mu.Lock()
 	if m.ledgerIndexing {
 		m.mu.Unlock()
-		return
+		return nil
+	}
+	// a worktree index writes the same sqlite files; starting now would lose the
+	// write lock (SQLITE_BUSY) after minutes of walking, so yield up front.
+	if m.indexing {
+		m.mu.Unlock()
+		return ErrLedgerBuildYielded
 	}
 	m.ledgerIndexing = true
 	m.mu.Unlock()
@@ -263,17 +283,17 @@ func (m *CodeDBManager) BuildLedgerIndex(ctx context.Context, ledgerPath string)
 	ledgerDir := m.resolveLedgerDataDir()
 	if ledgerDir == "" {
 		m.logger.Debug("codedb ledger: no ledger index dir available")
-		return
+		return nil
 	}
 
 	if _, err := os.Stat(ledgerPath); os.IsNotExist(err) {
 		m.logger.Debug("codedb ledger: ledger path gone", "path", ledgerPath)
-		return
+		return nil
 	}
 
+	start := time.Now()
 	if err := os.MkdirAll(ledgerDir, 0o755); err != nil {
-		m.logger.Warn("codedb ledger: create dir failed", "error", err)
-		return
+		return m.ledgerBuildFailed(start, fmt.Errorf("create ledger index dir: %w", err))
 	}
 
 	// one-time cleanup: remove legacy "baseline" sibling dir (renamed to "ledger")
@@ -289,13 +309,11 @@ func (m *CodeDBManager) BuildLedgerIndex(ctx context.Context, ledgerPath string)
 	indexCtx, cancel := context.WithTimeout(ctx, maxIndexDuration)
 	defer cancel()
 
-	start := time.Now()
 	m.logger.Info("codedb ledger index build started", "ledger", ledgerPath, "dir", ledgerDir)
 
 	db, err := codedb.Open(ledgerDir)
 	if err != nil {
-		m.logger.Warn("codedb ledger: open failed", "error", err)
-		return
+		return m.ledgerBuildFailed(start, fmt.Errorf("open ledger codedb: %w", err))
 	}
 	defer db.Close()
 
@@ -313,21 +331,27 @@ func (m *CodeDBManager) BuildLedgerIndex(ctx context.Context, ledgerPath string)
 
 	opts := index.IndexOptions{}
 
-	if err := db.IndexLocalRepo(indexCtx, ledgerPath, opts); err != nil {
+	indexRepo := func(ctx context.Context, db *codedb.DB, repoPath string, opts index.IndexOptions) error {
+		return db.IndexLocalRepo(ctx, repoPath, opts)
+	}
+	if m.ledgerIndexRepoFn != nil {
+		indexRepo = m.ledgerIndexRepoFn
+	}
+
+	if err := indexRepo(indexCtx, db, ledgerPath, opts); err != nil {
 		if errors.Is(err, index.ErrAlternatesUnsupported) {
 			m.logger.Info("codedb ledger: skipped (alternates configured)", "path", ledgerPath)
-			return
+			return nil
 		}
-		m.logger.Warn("codedb ledger: index failed", "error", err)
 		discardIfCorrupt(err)
-		return
+		return m.ledgerBuildFailed(start, fmt.Errorf("index ledger repo: %w", err))
 	}
 
 	if _, err := db.ParseSymbols(indexCtx, nil); err != nil {
 		m.logger.Warn("codedb ledger: parse symbols failed", "error", err)
 		// non-fatal: committed content is already indexed
 		if discardIfCorrupt(err) {
-			return
+			return m.ledgerBuildFailed(start, fmt.Errorf("ledger index discarded as corrupt: %w", err))
 		}
 	}
 
@@ -335,7 +359,7 @@ func (m *CodeDBManager) BuildLedgerIndex(ctx context.Context, ledgerPath string)
 		m.logger.Warn("codedb ledger: parse comments failed", "error", err)
 		// non-fatal
 		if discardIfCorrupt(err) {
-			return
+			return m.ledgerBuildFailed(start, fmt.Errorf("ledger index discarded as corrupt: %w", err))
 		}
 	}
 
@@ -343,7 +367,7 @@ func (m *CodeDBManager) BuildLedgerIndex(ctx context.Context, ledgerPath string)
 	if _, err := db.BackfillSymbolEdges(indexCtx, nil); err != nil {
 		m.logger.Warn("codedb ledger: edge backfill failed", "error", err)
 		if discardIfCorrupt(err) {
-			return
+			return m.ledgerBuildFailed(start, fmt.Errorf("ledger index discarded as corrupt: %w", err))
 		}
 	}
 
@@ -353,6 +377,36 @@ func (m *CodeDBManager) BuildLedgerIndex(ctx context.Context, ledgerPath string)
 	m.mu.Unlock()
 
 	m.logger.Info("codedb ledger index build complete", "duration", time.Since(start).Round(time.Millisecond), "commits", cached.Commits, "symbols", cached.Symbols)
+	return nil
+}
+
+// ledgerBuildFailed logs the failure next to the "complete" line, with how long
+// the doomed build ran, and classifies it for the scheduler.
+func (m *CodeDBManager) ledgerBuildFailed(start time.Time, err error) error {
+	if isLedgerRepoChanged(err) {
+		err = fmt.Errorf("%w: %w", ErrLedgerRepoChanged, err)
+	}
+	m.logger.Warn("codedb ledger index build failed", "elapsed", time.Since(start).Round(time.Millisecond), "reason", err.Error(), "retryable", errors.Is(err, ErrLedgerRepoChanged))
+	return err
+}
+
+// ErrLedgerBuildYielded means a worktree code index was running, so the ledger
+// build did not start. Nothing was attempted and no cooldown applies.
+var ErrLedgerBuildYielded = errors.New("ledger index build yielded to worktree index")
+
+// ErrLedgerRepoChanged means the ledger's objects, or the codedb's sqlite lock,
+// changed under a running build (pull/rebase/repack replaced pack files, or a
+// worktree index took the write lock). The failure says nothing about the ledger
+// itself, so the scheduler retries soon instead of charging the full cooldown.
+var ErrLedgerRepoChanged = errors.New("ledger repository changed during index build")
+
+// isLedgerRepoChanged reports whether err is the signature of a concurrent
+// repack/rebase or codedb lock contention rather than a real indexing failure.
+func isLedgerRepoChanged(err error) bool {
+	return errors.Is(err, plumbing.ErrObjectNotFound) ||
+		errors.Is(err, mmap.ErrObjectNotFound) ||
+		errors.Is(err, dotgit.ErrPackfileNotFound) ||
+		store.IsSQLiteBusy(err)
 }
 
 // maxIndexDuration caps how long a single indexing run may take before being

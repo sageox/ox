@@ -33,6 +33,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -239,6 +240,11 @@ type SyncScheduler struct {
 	// and must not re-run more often than LedgerIndexMinInterval.
 	ledgerBuildRunning  bool
 	lastLedgerBuildDone time.Time
+	// retry state for builds that failed because the repository changed under
+	// them (pull/repack). Retries skip the cooldown but are delayed and capped per
+	// hour so a persistently racing ledger cannot become a storm.
+	ledgerRetryNotBefore time.Time
+	ledgerRetryTimes     []time.Time
 
 	// settings fetcher for CLI feature flag polling
 	settingsFetcher *SettingsFetcher
@@ -2087,10 +2093,23 @@ func (s *SyncScheduler) triggerLedgerIndexRebuild(ctx context.Context) {
 		s.logger.Info("codedb ledger index rebuild coalesced", "reason", "build_in_progress", "new_fingerprint", fingerprint)
 		return
 	}
+	if wait := time.Until(s.ledgerRetryNotBefore); wait > 0 {
+		s.mu.Unlock()
+		s.logger.Info("codedb ledger index rebuild deferred", "reason", "retry_delay", "retry_after", wait.Round(time.Second), "new_fingerprint", fingerprint)
+		return
+	}
 	minInterval := s.config.LedgerIndexMinInterval
 	if sinceDone := time.Since(s.lastLedgerBuildDone); !s.lastLedgerBuildDone.IsZero() && sinceDone < minInterval {
 		s.mu.Unlock()
 		s.logger.Info("codedb ledger index rebuild deferred", "reason", "cooldown", "retry_after", (minInterval - sinceDone).Round(time.Second), "new_fingerprint", fingerprint)
+		return
+	}
+	// yield to the pull: a pull/rebase or gc swap on the ledger replaces pack files,
+	// which is what kills a long walk. Pulls are the daemon's primary job, so the
+	// build waits (no cooldown charged) and the next tick re-checks.
+	if reason := s.ledgerMutationInFlight(); reason != "" {
+		s.mu.Unlock()
+		s.logger.Info("codedb ledger index rebuild deferred", "reason", reason, "new_fingerprint", fingerprint)
 		return
 	}
 	s.ledgerBuildRunning = true
@@ -2098,15 +2117,63 @@ func (s *SyncScheduler) triggerLedgerIndexRebuild(ctx context.Context) {
 
 	s.logger.Info("codedb ledger index rebuild triggered", "old_fingerprint", oldFingerprint, "new_fingerprint", fingerprint)
 	go func(fp, ledgerPath string) {
-		s.codedb.BuildLedgerIndex(ctx, ledgerPath)
-		// advance fingerprint and cooldown clock together; a failed build still
-		// starts the cooldown so errors cannot turn into a retry storm
-		s.mu.Lock()
-		s.lastLedgerSha = fp
-		s.lastLedgerBuildDone = time.Now()
-		s.ledgerBuildRunning = false
-		s.mu.Unlock()
+		err := s.codedb.BuildLedgerIndex(ctx, ledgerPath)
+		s.finishLedgerBuild(fp, err)
 	}(fingerprint, ledger.Path)
+}
+
+// ledgerMutationInFlight reports why the ledger's objects may be replaced right
+// now ("pull_in_progress", "gc_in_progress", "ledger_busy"), or "" when idle.
+// Caller must hold s.mu. The ledgerMu probe is released immediately: it only
+// detects a pull/push/gc swap that is mid-flight, it does not serialize the build.
+func (s *SyncScheduler) ledgerMutationInFlight() string {
+	if s.pullInProgress {
+		return "pull_in_progress"
+	}
+	if atomic.LoadInt32(&s.gcInProgress) != 0 {
+		return "gc_in_progress"
+	}
+	if !s.ledgerMu.TryLock() {
+		return "ledger_busy"
+	}
+	s.ledgerMu.Unlock()
+	return ""
+}
+
+// finishLedgerBuild records a build outcome. Success and real failures advance the
+// fingerprint and start the cooldown together (a failed build still starts it so
+// errors cannot turn into a retry storm). A build that yielded, or that failed
+// because the repository changed under it, leaves both untouched so the next
+// eligible tick retries against the latest HEAD; repository-changed retries are
+// delayed and capped per hour, after which the full cooldown applies.
+func (s *SyncScheduler) finishLedgerBuild(fingerprint string, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ledgerBuildRunning = false
+
+	now := time.Now()
+	switch {
+	case errors.Is(err, ErrLedgerBuildYielded):
+		s.logger.Info("codedb ledger index rebuild deferred", "reason", "worktree_index_running", "new_fingerprint", fingerprint)
+		return
+	case errors.Is(err, ErrLedgerRepoChanged):
+		recent := make([]time.Time, 0, len(s.ledgerRetryTimes)+1)
+		for _, at := range s.ledgerRetryTimes {
+			if now.Sub(at) < time.Hour {
+				recent = append(recent, at)
+			}
+		}
+		if len(recent) < s.config.LedgerIndexMaxRetriesPerHour {
+			s.ledgerRetryTimes = append(recent, now)
+			s.ledgerRetryNotBefore = now.Add(s.config.LedgerIndexRetryDelay)
+			s.logger.Info("codedb ledger index rebuild will retry", "reason", "repository_changed", "retry_after", s.config.LedgerIndexRetryDelay, "attempts_last_hour", len(s.ledgerRetryTimes))
+			return
+		}
+		s.ledgerRetryTimes = recent
+		s.logger.Warn("codedb ledger index retry budget exhausted", "attempts_last_hour", len(recent), "cooldown", s.config.LedgerIndexMinInterval)
+	}
+	s.lastLedgerSha = fingerprint
+	s.lastLedgerBuildDone = now
 }
 
 // contentSourceFingerprint returns the HEAD sha of the ledger, the only content

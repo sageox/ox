@@ -15,10 +15,12 @@ import (
 
 // --- A. BuildLedgerIndex lifecycle ---
 
-// TestBuildLedgerIndex_IndependentFromWorktreeIndex verifies that ledger index and worktree
-// indexing are independent lifecycles — one must never block the other.
-// Failure prevented: ledger index builds stalling behind slow worktree indexes.
-func TestBuildLedgerIndex_IndependentFromWorktreeIndex(t *testing.T) {
+// TestBuildLedgerIndex_YieldsToWorktreeIndex verifies the ledger build does not start
+// while a worktree index owns the codedb, reports that it yielded, and leaves its own
+// flag clear so the next attempt can run once the worktree index finishes.
+// Failure prevented: the ledger build losing the sqlite write lock (SQLITE_BUSY) to a
+// worktree index after minutes of walking, or a yield wedging the ledger flag.
+func TestBuildLedgerIndex_YieldsToWorktreeIndex(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -29,37 +31,21 @@ func TestBuildLedgerIndex_IndependentFromWorktreeIndex(t *testing.T) {
 	mgr.indexing = true
 	mgr.mu.Unlock()
 
-	ledgerEntered := make(chan struct{}, 1)
-	release := make(chan struct{})
-	mgr.ledgerTestHook = func() {
-		select {
-		case ledgerEntered <- struct{}{}:
-		default:
-		}
-		<-release
-	}
+	hookCalled := false
+	mgr.ledgerTestHook = func() { hookCalled = true }
 
-	ctx := context.Background()
-	go mgr.BuildLedgerIndex(ctx, dir) // dir as ledger path (doesn't matter — hook blocks before index)
+	err := mgr.BuildLedgerIndex(context.Background(), dir)
+	require.ErrorIs(t, err, ErrLedgerBuildYielded)
+	assert.False(t, hookCalled, "a yielded build must not start")
 
-	// ledger index should start despite worktree indexing being active
-	select {
-	case <-ledgerEntered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("BuildLedgerIndex did not start — it was blocked by worktree indexing flag")
-	}
-
-	// verify both flags are set independently
 	mgr.mu.Lock()
-	worktreeFlag := mgr.indexing
-	ledgerFlag := mgr.ledgerIndexing
+	assert.True(t, mgr.indexing, "worktree indexing flag must remain set")
+	assert.False(t, mgr.ledgerIndexing, "a yielded build must not hold the ledger flag")
+	mgr.indexing = false
 	mgr.mu.Unlock()
 
-	assert.True(t, worktreeFlag, "worktree indexing flag must remain set")
-	assert.True(t, ledgerFlag, "ledger indexing flag must be set")
-
-	close(release)
-	waitForLedgerIndexingDone(t, mgr)
+	require.NoError(t, mgr.BuildLedgerIndex(context.Background(), dir))
+	assert.True(t, hookCalled, "build runs once the worktree index is done")
 }
 
 // TestBuildLedgerIndex_Debounce_OnlySingleConcurrent verifies concurrent ledger index
