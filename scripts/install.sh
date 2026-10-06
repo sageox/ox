@@ -39,6 +39,55 @@ log_error() {
     echo -e "${RED}Error:${NC} $1" >&2
 }
 
+# Single-quote a string for pasting into a shell: the line must land in the
+# rc file verbatim, with $PATH unexpanded.
+shell_quote() {
+    local q="'\\''"
+    printf "'%s'" "${1//\'/$q}"
+}
+
+# Escape a path for the inside of a double-quoted string in the startup file,
+# so a directory named with $, ` or " is read as text, never run. POSIX
+# shells expand all three plus backslash; fish expands only $, " and \.
+dq_escape_posix() {
+    local s=${1//\\/\\\\}
+    s=${s//\"/\\\"}
+    s=${s//\$/\\\$}
+    s=${s//\`/\\\`}
+    printf '%s' "$s"
+}
+
+dq_escape_fish() {
+    local s=${1//\\/\\\\}
+    s=${s//\"/\\\"}
+    s=${s//\$/\\\$}
+    printf '%s' "$s"
+}
+
+# Name the startup file the bash in a new terminal reads, which is the
+# environment an AI coding tool started from that terminal inherits
+# (issue #1162). macOS terminals open login shells, which read the first of
+# ~/.bash_profile, ~/.bash_login and ~/.profile that exists and never read
+# ~/.bashrc on their own. Naming the one that already exists matters: a new
+# ~/.bash_profile would stop bash from reading an existing ~/.profile. Linux
+# terminals open non-login shells, which read ~/.bashrc.
+# The name is display text with an unexpanded tilde.
+# shellcheck disable=SC2088
+bash_startup_file() {
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+        local f
+        for f in .bash_profile .bash_login .profile; do
+            if [[ -n "${HOME:-}" && -f "$HOME/$f" ]]; then
+                printf '~/%s' "$f"
+                return 0
+            fi
+        done
+        printf '~/.bash_profile'
+        return 0
+    fi
+    printf '~/.bashrc'
+}
+
 # Print PATH guidance for AI coding tool hooks, naming the shell startup
 # file that a non-interactive hook shell actually reads. No-op if the
 # binary's directory is already on PATH.
@@ -72,33 +121,42 @@ print_path_warning() {
         return 0
     fi
 
-    local shell_name rc_file path_line restart_line explanation
+    local shell_name rc_file path_line restart_line explanation one_liner posix_dir fish_dir
+    posix_dir=$(dq_escape_posix "$install_dir")
+    fish_dir=$(dq_escape_fish "$install_dir")
     shell_name=$(basename "${SHELL:-}")
     restart_line=""
-    # rc_file is display text only (never sourced or written to by this
-    # script), so the tilde is intentionally left unexpanded.
+    one_liner=""
+    # rc_file is never sourced or written to by this script: it is display
+    # text, and for bash also the target the printed one-liner names, so the
+    # tilde is intentionally left unexpanded (bash_startup_file only ever
+    # returns a fixed ~/.name). The one-liner starts with a newline so the
+    # line never glues onto an existing file's unterminated last line.
     # shellcheck disable=SC2088
     case "$shell_name" in
         zsh)
             rc_file="~/.zshenv"
-            path_line="export PATH=\"\$PATH:$install_dir\""
+            path_line="export PATH=\"\$PATH:$posix_dir\""
             explanation="AI coding tools run hooks in a non-interactive shell, which reads ~/.zshenv but not ~/.zshrc."
+            one_liner="printf '\\n%s\\n' $(shell_quote "$path_line") >> ~/.zshenv"
             ;;
         bash)
-            rc_file="~/.bashrc"
-            path_line="export PATH=\"\$PATH:$install_dir\""
+            rc_file=$(bash_startup_file)
+            path_line="export PATH=\"\$PATH:$posix_dir\""
+            one_liner="printf '\\n%s\\n' $(shell_quote "$path_line") >> $rc_file"
             restart_line="Then restart your AI coding tool from a new terminal so it picks up the change."
             explanation="AI coding tools inherit the environment of the terminal they were started from, not any change made after they launched."
             ;;
         fish)
             rc_file="~/.config/fish/config.fish"
-            path_line="fish_add_path -- \"$install_dir\""
+            path_line="fish_add_path -- \"$fish_dir\""
+            one_liner="mkdir -p ~/.config/fish && printf '\\n%s\\n' $(shell_quote "$path_line") >> ~/.config/fish/config.fish"
             restart_line="Then restart your AI coding tool from a new terminal so it picks up the change."
             explanation="AI coding tools inherit the environment of the terminal they were started from, not any change made after they launched."
             ;;
         *)
             rc_file="the startup file for your shell"
-            path_line="export PATH=\"\$PATH:$install_dir\""
+            path_line="export PATH=\"\$PATH:$posix_dir\""
             restart_line="Then restart your AI coding tool from a new terminal so it picks up the change."
             explanation="AI coding tools inherit the environment of the terminal they were started from, not any change made after they launched."
             ;;
@@ -109,6 +167,10 @@ print_path_warning() {
     echo "$explanation"
     echo "Add this line to $rc_file:"
     echo "    $path_line"
+    if [[ -n "$one_liner" ]]; then
+        echo "Or paste this into your terminal to add it for you:"
+        echo "    $one_liner"
+    fi
     if [[ -n "$restart_line" ]]; then
         echo "$restart_line"
     fi
@@ -153,12 +215,15 @@ resign_for_macos() {
         return 0
     fi
 
-    log_info "Re-signing binary for macOS..."
+    # A release ships ox plus a dozen adapter binaries; announce the step
+    # once and stay quiet per binary unless one fails.
+    if [[ -z "${RESIGN_ANNOUNCED:-}" ]]; then
+        log_info "Re-signing binaries for this Mac..."
+        RESIGN_ANNOUNCED=1
+    fi
     codesign --remove-signature "$binary_path" 2>/dev/null || true
-    if codesign --force --sign - "$binary_path"; then
-        log_success "Binary re-signed for this machine"
-    else
-        log_warning "Failed to re-sign binary (non-fatal)"
+    if ! codesign --force --sign - "$binary_path" 2>/dev/null; then
+        log_warning "Failed to re-sign $(basename "$binary_path") (non-fatal)"
     fi
 }
 

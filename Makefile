@@ -17,6 +17,9 @@ GOPATH := $(shell go env GOPATH)
 # where the binary actually landed, not always GOPATH/bin.
 GOBIN := $(shell go env GOBIN)
 INSTALL_BIN := $(if $(strip $(GOBIN)),$(GOBIN),$(GOPATH)/bin)
+# sq: $(1) with each ' written as '\'' so it can sit inside single quotes in
+# a recipe and reach the shell as plain text, never as code.
+sq = $(subst ','\'',$(1))
 LDFLAGS := -ldflags "-X github.com/sageox/ox/internal/version.Version=$(VERSION) -X github.com/sageox/ox/internal/version.BuildDate=$(BUILD_TIME) -X github.com/sageox/ox/internal/version.GitCommit=$(GIT_COMMIT)"
 ADAPTER_LDFLAGS := -ldflags "-s -w"
 
@@ -105,35 +108,39 @@ install: install-ox install-adapters ## Install ox and adapters to $GOPATH/bin
 	@echo "  Releases self-update via \`ox upgrade\` and keep ox and its 10 adapter"
 	@echo "  binaries together on PATH."
 	@echo "─────────────────────────────────────────────────────────────────────"
-	@case ":$$PATH:" in \
-		*":$(INSTALL_BIN):"*) ;; \
+	@ox_bin='$(call sq,$(INSTALL_BIN))'; \
+	case ":$$PATH:" in \
+		*":$$ox_bin:"*) ;; \
 		*) \
+			ox_q=$$(printf '%s' "$$ox_bin" | sed 's/[\\"$$`]/\\&/g'); \
+			ox_fq=$$(printf '%s' "$$ox_bin" | sed 's/[\\"$$]/\\&/g'); \
 			shell_name=$$(basename "$${SHELL:-}"); \
 			restart_line=""; \
 			case "$$shell_name" in \
-				zsh) rc_file="~/.zshenv"; path_line="export PATH=\"\$$PATH:$(INSTALL_BIN)\""; explanation="AI coding tools run hooks in a non-interactive shell, which reads ~/.zshenv but not ~/.zshrc." ;; \
-				bash) rc_file="~/.bashrc"; path_line="export PATH=\"\$$PATH:$(INSTALL_BIN)\""; restart_line="Then restart your AI coding tool from a new terminal so it picks up the change."; explanation="AI coding tools inherit the environment of the terminal they were started from, not any change made after they launched." ;; \
-				fish) rc_file="~/.config/fish/config.fish"; path_line="fish_add_path -- \"$(INSTALL_BIN)\""; restart_line="Then restart your AI coding tool from a new terminal so it picks up the change."; explanation="AI coding tools inherit the environment of the terminal they were started from, not any change made after they launched." ;; \
-				*) rc_file="the startup file for your shell"; path_line="export PATH=\"\$$PATH:$(INSTALL_BIN)\""; restart_line="Then restart your AI coding tool from a new terminal so it picks up the change."; explanation="AI coding tools inherit the environment of the terminal they were started from, not any change made after they launched." ;; \
+				zsh) rc_file="~/.zshenv"; path_line="export PATH=\"\$$PATH:$$ox_q\""; explanation="AI coding tools run hooks in a non-interactive shell, which reads ~/.zshenv but not ~/.zshrc." ;; \
+				bash) rc_file="~/.bashrc"; if [ "$$(uname -s 2>/dev/null)" = Darwin ]; then rc_file="~/.bash_profile"; for f in .bash_profile .bash_login .profile; do if [ -f "$$HOME/$$f" ]; then rc_file="~/$$f"; break; fi; done; fi; path_line="export PATH=\"\$$PATH:$$ox_q\""; restart_line="Then restart your AI coding tool from a new terminal so it picks up the change."; explanation="AI coding tools inherit the environment of the terminal they were started from, not any change made after they launched." ;; \
+				fish) rc_file="~/.config/fish/config.fish"; path_line="fish_add_path -- \"$$ox_fq\""; restart_line="Then restart your AI coding tool from a new terminal so it picks up the change."; explanation="AI coding tools inherit the environment of the terminal they were started from, not any change made after they launched." ;; \
+				*) rc_file="the startup file for your shell"; path_line="export PATH=\"\$$PATH:$$ox_q\""; restart_line="Then restart your AI coding tool from a new terminal so it picks up the change."; explanation="AI coding tools inherit the environment of the terminal they were started from, not any change made after they launched." ;; \
 			esac; \
 			echo ""; \
-			echo "ox is installed at $(INSTALL_BIN)/$(BINARY_NAME) but is not on PATH for non-interactive shells."; \
+			echo "ox is installed at $$ox_bin/$(BINARY_NAME) but is not on PATH for non-interactive shells."; \
 			echo "$$explanation"; \
 			echo "Add this line to $$rc_file:"; \
-			echo "    $$path_line"; \
+			printf '%s\n' "    $$path_line"; \
 			[ -n "$$restart_line" ] && echo "$$restart_line"; \
 			echo ""; \
 			;; \
-	esac
-	@echo "Next: run \`$(INSTALL_BIN)/$(BINARY_NAME) doctor\` to confirm your AI coworker can actually see this install."
+	esac; \
+	ox_cmd="'$$(printf '%s' "$$ox_bin/$(BINARY_NAME)" | sed "s/'/'\\\\''/g")'"; \
+	printf 'Next: run `%s doctor` to confirm your AI coworker can actually see this install.\n' "$$ox_cmd"
 
 install-ox: ## Install ox to $GOPATH/bin
-	@echo "Installing $(BINARY_NAME) to $(GOPATH)/bin..."
+	@echo 'Installing $(BINARY_NAME) to $(call sq,$(GOPATH))/bin...'
 	$(GO) install $(LDFLAGS) ./cmd/ox
-	@echo "Installed $(BINARY_NAME) to $(GOPATH)/bin/$(BINARY_NAME)"
+	@echo 'Installed $(BINARY_NAME) to $(call sq,$(GOPATH))/bin/$(BINARY_NAME)'
 
 install-adapters: ## Install bundled adapters to $GOPATH/bin
-	@echo "Installing adapters to $(GOPATH)/bin..."
+	@echo 'Installing adapters to $(call sq,$(GOPATH))/bin...'
 	@for adapter in $(ADAPTERS); do \
 		$(GO) install $(ADAPTER_LDFLAGS) ./cmd/$$adapter; \
 		echo "  Installed $$adapter"; \

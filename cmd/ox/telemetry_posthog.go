@@ -138,8 +138,6 @@ func setFlagNames(cmd *cobra.Command) []string {
 // (errkind.Errorf); the rest are classified from the standard library's
 // errors and the exit code.
 func postHogErrorKind(err error, exitCode int) string {
-	var netErr net.Error
-	var opErr *net.OpError
 	switch {
 	case exitCode == 0:
 		return ""
@@ -147,19 +145,34 @@ func postHogErrorKind(err error, exitCode int) string {
 		return string(errkind.Interrupted)
 	case errkind.Of(err) != "":
 		return string(errkind.Of(err))
-	// The daemon's socket is the only unix socket ox dials, so this is the
-	// daemon down or not answering. Checked before net.Error, which an
-	// OpError also satisfies.
-	case errors.As(err, &opErr) && opErr.Net == "unix":
-		return string(errkind.Daemon)
-	case errors.Is(err, context.DeadlineExceeded):
-		return string(errkind.Timeout)
-	case errors.As(err, &netErr):
-		return string(errkind.Network)
+	case stdlibErrorKind(err) != "":
+		return string(stdlibErrorKind(err))
 	case exitCode == 2:
 		return string(errkind.Usage)
 	default:
 		return string(errkind.Other)
+	}
+}
+
+// stdlibErrorKind files an error by the standard library errors in its chain:
+// the daemon's socket, a deadline, the network. It returns "" when none
+// applies. ox sync files each failed stage with it too, so a stage and the
+// whole command can never classify the same error differently.
+func stdlibErrorKind(err error) errkind.Kind {
+	var netErr net.Error
+	var opErr *net.OpError
+	switch {
+	// The daemon's socket is the only unix socket ox dials, so this is the
+	// daemon down or not answering. Checked before net.Error, which an
+	// OpError also satisfies.
+	case errors.As(err, &opErr) && opErr.Net == "unix":
+		return errkind.Daemon
+	case errors.Is(err, context.DeadlineExceeded):
+		return errkind.Timeout
+	case errors.As(err, &netErr):
+		return errkind.Network
+	default:
+		return ""
 	}
 }
 

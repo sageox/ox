@@ -2972,9 +2972,15 @@ func recoverRawFromSessionFile(logger *slog.Logger, recPath, sessionDir, rawPath
 	if err != nil {
 		return false, fmt.Errorf("read recording state: %w", err)
 	}
-	var state session.RecordingState
-	if err := json.Unmarshal(data, &state); err != nil {
+	parsed, err := session.ParseRecordingState(recPath, data)
+	if err != nil {
 		return false, fmt.Errorf("parse recording state: %w", err)
+	}
+	state := *parsed
+	// parsing may have rewritten a stale tail; the concurrent-change check at the
+	// end of recovery must compare against the repaired bytes, not the damaged ones.
+	if data, err = os.ReadFile(recPath); err != nil {
+		return false, fmt.Errorf("read recording state: %w", err)
 	}
 	// Checked before the journal settles: a quarantined recording is kept
 	// exactly as it is, and settling would roll back or rewrite raw.jsonl.

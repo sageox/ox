@@ -35,7 +35,10 @@ var (
 	tipCommandStyle = lipgloss.NewStyle().Foreground(ColorPrimary)   // sage green for commands
 )
 
-var backtickRegex = regexp.MustCompile("`([^`]+)`")
+// backtickRegex matches a backtick-wrapped command, or an escaped backtick
+// (\`), which is literal text in a shell line such as an escaped PATH
+// export and must not open or close a command span.
+var backtickRegex = regexp.MustCompile("\\\\`|`([^`]+)`")
 
 var jsonMode bool
 var noInteractive bool
@@ -283,6 +286,9 @@ func PrintTip(tip string) {
 // FormatTipText formats tip text by highlighting backtick-wrapped commands
 func FormatTipText(tip string) string {
 	return backtickRegex.ReplaceAllStringFunc(tip, func(match string) string {
+		if match == "\\`" {
+			return match
+		}
 		// match is "`command`", so extract without backticks
 		command := match[1 : len(match)-1]
 		return tipCommandStyle.Render(command)
@@ -383,6 +389,24 @@ func (e SilentError) Error() string { return "" }
 
 // ErrSilent is a sentinel error indicating output was already printed.
 var ErrSilent = SilentError{}
+
+// Silent marks a failure whose output was already displayed, like ErrSilent,
+// and keeps err in the chain so errors.Is and errors.As (and usage telemetry)
+// still see what failed. Its message is empty, exactly like ErrSilent's, so
+// nothing that prints or parses error text behaves differently. Use it, not
+// errors.Join(ErrSilent, err), whose message is err's. Silent(nil) is ErrSilent.
+func Silent(err error) error {
+	if err == nil {
+		return ErrSilent
+	}
+	return silentCause{err: err}
+}
+
+type silentCause struct{ err error }
+
+func (silentCause) Error() string { return "" }
+
+func (s silentCause) Unwrap() []error { return []error{ErrSilent, s.err} }
 
 // IsSilent checks if an error is a silent error (already displayed).
 func IsSilent(err error) bool {

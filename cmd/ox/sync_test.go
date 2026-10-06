@@ -2,11 +2,16 @@ package main
 
 import (
 	"errors"
+	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/sageox/ox/internal/daemon"
+	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/version"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestResolveTeamSyncResult covers the status-derivation logic for a targeted
@@ -281,4 +286,82 @@ func TestSyncResultWithError(t *testing.T) {
 	if result.Error == "" {
 		t.Error("expected error message to be set")
 	}
+}
+
+// TestLegacyDaemonErrorMsg_FiledAsDaemon covers every variant of the old-daemon
+// error. Failure prevented: a daemon too old to report per-team results
+// counted as an unexplained failure instead of a daemon problem a restart fixes.
+func TestLegacyDaemonErrorMsg_FiledAsDaemon(t *testing.T) {
+	for _, v := range []string{"", "0.0.1-older", version.Version + "+somebuilddate"} {
+		err := legacyDaemonErrorMsg(v)
+		assert.Equal(t, errkind.Daemon, errkind.Of(err), "version %q", v)
+		assert.Equal(t, "daemon did not report per-team results", errkind.DetailOf(err), "version %q", v)
+	}
+}
+
+// TestTeamSyncError_EveryStatusFiled covers every status a --team sync can end
+// in, including the ones an IPC test cannot produce.
+// Failure prevented: a mistyped --team counted as an ox failure, or the
+// selector a person typed, or the daemon's error text, reaching PostHog.
+func TestTeamSyncError_EveryStatusFiled(t *testing.T) {
+	const secret = "sk-secret-selector"
+	daemonDown := daemon.NewClientWithSocket(filepath.Join(t.TempDir(), "d.sock")).Ping()
+	require.Error(t, daemonDown)
+
+	tests := []struct {
+		name    string
+		results []daemon.TeamSyncResult
+		syncErr error
+		kind    errkind.Kind // "" with detail "": success
+		detail  string
+	}{
+		{"synced", []daemon.TeamSyncResult{{TeamID: secret, Status: "synced"}}, nil, "", ""},
+		{"already up to date", []daemon.TeamSyncResult{{TeamID: secret, Status: "skipped"}}, nil, "", ""},
+		{"cloning", []daemon.TeamSyncResult{{TeamID: secret, Status: "cloning"}}, nil, errkind.Other, "team context not ready: cloning"},
+		{"not found", []daemon.TeamSyncResult{{TeamID: "other", Status: "synced"}}, nil, errkind.Usage, "team not found"},
+		{"ambiguous", []daemon.TeamSyncResult{{TeamID: "a", TeamName: secret}, {TeamID: "b", TeamName: secret}}, nil, errkind.Usage, "team selector ambiguous"},
+		{"legacy daemon", nil, nil, errkind.Daemon, "daemon did not report per-team results"},
+		{"daemon down", nil, fmt.Errorf("team sync: %w", daemonDown), "", ""}, // keeps the IPC error; the stage files it
+		{"daemon-reported failure", []daemon.TeamSyncResult{{TeamID: secret, Status: "error", Error: "pull failed in /Users/x/" + secret}}, nil, "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tc := resolveTeamSyncResult(secret, tt.results, tt.syncErr)
+			err := teamSyncError(secret, tc, tt.results, tt.syncErr)
+			if tc.Status == "synced" || tc.Status == "skipped" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Equal(t, tt.kind, errkind.Of(err))
+			assert.Equal(t, tt.detail, errkind.DetailOf(err))
+			assert.NotContains(t, errkind.DetailOf(err), secret)
+			if tt.syncErr != nil {
+				assert.ErrorIs(t, err, daemonDown, "the IPC error's type survives for the stage to read")
+				assert.Equal(t, tc.Error, err.Error(), "same message as before")
+			}
+		})
+	}
+}
+
+// TestNotReadyStatuses_OnlyStatusesOxDefines checks the team-context detail.
+// Failure prevented: a team's name, or an arbitrary status string the daemon
+// sent, reaching PostHog.
+func TestNotReadyStatuses_OnlyStatusesOxDefines(t *testing.T) {
+	got := notReadyStatuses([]daemon.TeamSyncResult{
+		{TeamName: "Secret Team", Status: "error"},
+		{TeamName: "Other", Status: "cloning"},
+		{TeamName: "Third", Status: "error"},
+		{TeamName: "Fine", Status: "synced"},
+		{TeamName: "Up to date", Status: "skipped"},
+		{TeamName: "Odd", Status: "/Users/x/whatever"},
+	})
+	assert.Equal(t, "cloning,error,unknown", got)
+}
+
+// TestConvergenceDetail_OnlyStatusesOxDefines checks the convergence detail.
+func TestConvergenceDetail_OnlyStatusesOxDefines(t *testing.T) {
+	assert.Equal(t, "team context convergence pending", convergenceDetail("pending"))
+	assert.Equal(t, "team context convergence failed", convergenceDetail("failed"))
+	assert.Equal(t, "team context convergence unknown", convergenceDetail("/Users/x/whatever"))
 }

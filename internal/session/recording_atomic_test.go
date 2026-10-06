@@ -63,7 +63,7 @@ func TestRecordingStatePublishIsolatedFromOpenFile(t *testing.T) {
 func TestRecordingStateParseErrorNamesFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, recordingFile)
-	require.NoError(t, os.WriteFile(path, []byte(`{"agent_id":"test"}}`), 0600))
+	require.NoError(t, os.WriteFile(path, []byte(`{"agent_id":`), 0600))
 	_, err := ReadRecordingStateFile(dir)
 	require.ErrorContains(t, err, path)
 }

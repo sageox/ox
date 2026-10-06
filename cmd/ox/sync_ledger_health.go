@@ -64,8 +64,26 @@ type ledgerSyncFacts struct {
 // because a pull that landed leaves nothing behind the tracking ref.
 func classifyLedgerSync(f ledgerSyncFacts) []string {
 	var reasons []string
+	for _, b := range ledgerSyncBlockers(f) {
+		reasons = append(reasons, b.reason)
+	}
+	return reasons
+}
+
+// ledgerSyncBlocker is one reason the ledger is not synced: the text a person
+// reads, and a code usage telemetry sends in its place. The text can carry a
+// daemon issue's summary, lock file names, or counts; the code is a name ox
+// defines.
+type ledgerSyncBlocker struct {
+	code   string
+	reason string
+}
+
+// ledgerSyncBlockers is classifyLedgerSync with each reason's code.
+func ledgerSyncBlockers(f ledgerSyncFacts) []ledgerSyncBlocker {
+	var blockers []ledgerSyncBlocker
 	if f.InspectErr != nil {
-		reasons = append(reasons, fmt.Sprintf("could not verify ledger state: %v", f.InspectErr))
+		blockers = append(blockers, ledgerSyncBlocker{"inspect_failed", fmt.Sprintf("could not verify ledger state: %v", f.InspectErr)})
 	}
 	seen := map[string]bool{}
 	for _, issue := range f.Issues {
@@ -78,19 +96,49 @@ func classifyLedgerSync(f ledgerSyncFacts) []string {
 		}
 		if !seen[summary] {
 			seen[summary] = true
-			reasons = append(reasons, summary)
+			blockers = append(blockers, ledgerSyncBlocker{issue.Type, summary})
 		}
 	}
 	if f.RebaseInProgress {
-		reasons = append(reasons, "wedged rebase in progress")
+		blockers = append(blockers, ledgerSyncBlocker{"rebase_in_progress", "wedged rebase in progress"})
 	}
 	if len(f.StaleLocks) > 0 {
-		reasons = append(reasons, "stale git lock: "+strings.Join(f.StaleLocks, ", "))
+		blockers = append(blockers, ledgerSyncBlocker{"stale_lock", "stale git lock: " + strings.Join(f.StaleLocks, ", ")})
 	}
 	if f.UpstreamKnown && f.Behind > 0 {
-		reasons = append(reasons, fmt.Sprintf("ahead %d / behind %d", f.Ahead, f.Behind))
+		blockers = append(blockers, ledgerSyncBlocker{"behind", fmt.Sprintf("ahead %d / behind %d", f.Ahead, f.Behind)})
 	}
-	return reasons
+	return blockers
+}
+
+// ledgerSyncCodeOrder ranks blocker codes cause before symptom, so the one
+// code telemetry reports names what to fix: a wedged rebase, not the backoff
+// or the commits behind that it causes.
+var ledgerSyncCodeOrder = []string{
+	"inspect_failed",
+	daemon.IssueTypeRepoIntegrity,
+	daemon.IssueTypeMergeConflict,
+	daemon.IssueTypeSessionConflictWedge,
+	daemon.IssueTypeRebaseStuck,
+	"rebase_in_progress",
+	daemon.IssueTypeGitLock,
+	"stale_lock",
+	daemon.IssueTypeDiverged,
+	daemon.IssueTypeSyncBackoff,
+	"behind",
+}
+
+// primaryLedgerSyncCode returns the code of the blocker that comes first in
+// ledgerSyncCodeOrder.
+func primaryLedgerSyncCode(blockers []ledgerSyncBlocker) string {
+	for _, code := range ledgerSyncCodeOrder {
+		for _, b := range blockers {
+			if b.code == code {
+				return code
+			}
+		}
+	}
+	return "unknown"
 }
 
 // ledgerNotSyncedError renders the reasons into the one line the text output

@@ -378,6 +378,19 @@ func TestFormatTipText_HighlightsCommands(t *testing.T) {
 	assert.Contains(t, result, "ox login")
 }
 
+// TestFormatTipText_KeepsEscapedBackticks: an escaped backtick is literal text
+// in a shell line. ox doctor's PATH advice escapes a backtick in the install
+// directory, and highlighting the span between two of them dropped both,
+// which printed a line for a directory that does not exist.
+func TestFormatTipText_KeepsEscapedBackticks(t *testing.T) {
+	line := "export PATH=\"$PATH:/opt/\\`touch PWNED\\`/bin\""
+	assert.Equal(t, line, FormatTipText(line))
+
+	mixed := FormatTipText("Run `ox doctor` after adding " + line)
+	assert.Contains(t, mixed, line)
+	assert.NotContains(t, mixed, "`ox doctor`")
+}
+
 func TestFormatTipText_NoBackticks(t *testing.T) {
 	result := FormatTipText("No commands here")
 	assert.Equal(t, "No commands here", result)

@@ -97,6 +97,8 @@ func TestPostHogErrorKind(t *testing.T) {
 		{"usage", errors.New("usage error"), 2, "usage"},
 		{"kind ox attached", fmt.Errorf("doctor: %w", errkind.Errorf(errkind.ChecksFailed, "some checks failed")), 1, "checks_failed"},
 		{"anything else", errors.New("/Users/someone/secret-project: boom"), 1, "other"},
+		{"--json failure keeps its cause", cli.Silent(fmt.Errorf("daemon sync: %w", daemonDown)), 1, "daemon"},
+		{"--json failure with no kind", cli.Silent(errors.New("boom")), 1, "other"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -232,6 +234,7 @@ func TestPostHogErrorDetail(t *testing.T) {
 		{"OS error in a join", errors.Join(errors.New("sk-live-TOKEN rejected"), missingFile), "syscall.Errno: no such file or directory"},
 		{"wrapped plain message", fmt.Errorf("sync: %w", errors.New("sk-live-TOKEN rejected")), ""},
 		{"join of plain messages", errors.Join(errors.New("sk-live-TOKEN"), errors.New("b")), ""},
+		{"--json failure with no kind names the wrapper, not the cause", cli.Silent(errors.New("sk-live-TOKEN rejected")), "cli.silentCause"},
 		{"nil", nil, ""},
 	}
 	for _, tt := range tests {

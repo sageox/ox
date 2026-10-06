@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"time"
 
@@ -179,15 +180,55 @@ func init() {
 // immediately, so it is returned unmodified rather than collected; every
 // other error is appended to problems and swallowed here, so the remaining
 // transport steps still run.
-func collectTransportProblem(err error, problems *[]string) error {
+func collectTransportProblem(stage string, err error, problems *[]error) error {
 	if err == nil {
 		return nil
 	}
 	if errors.Is(err, tea.ErrInterrupted) {
 		return err
 	}
-	*problems = append(*problems, err.Error())
+	*problems = append(*problems, stageError(stage, err))
 	return nil
+}
+
+// stageError files a failed sync stage for usage telemetry, unless an error in
+// its chain already carries a kind (a more specific one, such as the Ledger
+// blocker or a mistyped --team): the standard library's reading of the chain
+// (daemon, timeout, network), else other, with the stage as the detail. The
+// message is unchanged. Stages are collected in pipeline order and
+// errkind.Of takes the first kind it finds, so the stage that failed first
+// is reported, not a later stage that failed because of it.
+func stageError(stage string, err error) error {
+	if errkind.Of(err) != "" {
+		return err
+	}
+	kind := stdlibErrorKind(err)
+	if kind == "" {
+		kind = errkind.Other
+	}
+	return errkind.WithDetail(kind, stage, err)
+}
+
+// joinSyncProblems joins errors on one line, "; " between them, as sync has
+// always printed them, while keeping each reachable by errors.Is and
+// errors.As.
+func joinSyncProblems(errs []error) error {
+	args := make([]any, len(errs))
+	for i, err := range errs {
+		args[i] = err
+	}
+	return fmt.Errorf(strings.TrimSuffix(strings.Repeat("%w; ", len(errs)), "; "), args...)
+}
+
+// convergenceDetail names a failed convergence by its status: pending
+// (retried later) or failed. Any other value is reported as unknown.
+func convergenceDetail(status string) string {
+	switch status {
+	case string(teamconverge.PendingRetry), string(teamconverge.PendingFailed):
+		return "team context convergence " + status
+	default:
+		return "team context convergence unknown"
+	}
 }
 
 func runSync(cmd *cobra.Command, args []string) error {
@@ -222,39 +263,41 @@ func runSync(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(cmd.Context(), 90*time.Second)
 	defer cancel()
 
-	var transportProblems []string
+	var transportProblems []error
 
 	if teamID != "" {
-		if err := collectTransportProblem(syncTeamForSync(ctx, teamID, jsonOutput, &result), &transportProblems); err != nil {
+		if err := collectTransportProblem("team context sync failed", syncTeamForSync(ctx, teamID, jsonOutput, &result), &transportProblems); err != nil {
 			return err
 		}
 	} else if allTeams {
-		if err := collectTransportProblem(syncAllTeamsForSync(ctx, jsonOutput, &result), &transportProblems); err != nil {
+		if err := collectTransportProblem("team context sync failed", syncAllTeamsForSync(ctx, jsonOutput, &result), &transportProblems); err != nil {
 			return err
 		}
 	} else {
 		// The default promise is the whole current-repository path: Ledger and
 		// Team Context transport, followed by local convergence.
-		if err := collectTransportProblem(syncLedgerForSync(ctx, jsonOutput, &result), &transportProblems); err != nil {
+		if err := collectTransportProblem("ledger sync failed", syncLedgerForSync(ctx, jsonOutput, &result), &transportProblems); err != nil {
 			return err
 		}
-		if err := collectTransportProblem(syncAllTeamsForSync(ctx, jsonOutput, &result), &transportProblems); err != nil {
+		if err := collectTransportProblem("team context sync failed", syncAllTeamsForSync(ctx, jsonOutput, &result), &transportProblems); err != nil {
 			return err
 		}
 	}
 
 	var transportErr error
+	var problems []string
 	if len(transportProblems) > 0 {
+		transportErr = joinSyncProblems(transportProblems)
 		result.Transport.Status = "failed"
-		result.Transport.Error = strings.Join(transportProblems, "; ")
-		transportErr = errors.New(result.Transport.Error)
+		result.Transport.Error = transportErr.Error()
+		problems = append(problems, result.Transport.Error)
 	} else {
 		result.Transport.Status = "synced"
 	}
 
 	convergenceErr := convergeRepositorySync(ctx, teamID, &result)
-	problems := append([]string(nil), transportProblems...)
 	if convergenceErr != nil {
+		convergenceErr = stageError(convergenceDetail(result.Convergence.Status), convergenceErr)
 		problems = append(problems, convergenceErr.Error())
 	}
 	result.Success = len(problems) == 0
@@ -278,7 +321,7 @@ func finishSync(cmd *cobra.Command, result SyncResult, jsonOutput bool, operatio
 	if jsonOutput {
 		cli.PrintJSON(result)
 		if operationErr != nil {
-			return cli.ErrSilent
+			return cli.Silent(operationErr) // printed as JSON; the cause stays for telemetry
 		}
 		return nil
 	}
@@ -387,10 +430,22 @@ func syncViaDaemon(_ context.Context, jsonOutput bool, result *SyncResult) error
 // daemon status and the ledger on disk actually show, and returns an error
 // whenever that is anything other than "synced".
 func recordLedgerSyncVerdict(result *SyncResult, status *daemon.StatusData, statusErr error) error {
-	if reasons := classifyLedgerSync(gatherLedgerSyncFacts(status, statusErr)); len(reasons) > 0 {
+	facts := gatherLedgerSyncFacts(status, statusErr)
+	if blockers := ledgerSyncBlockers(facts); len(blockers) > 0 {
+		reasons := make([]string, len(blockers))
+		for i, b := range blockers {
+			reasons[i] = b.reason
+		}
 		msg := ledgerNotSyncedError(reasons)
 		result.Transport.Ledger = &SyncLedgerResult{Status: ledgerSyncStatusNotSynced, Error: msg}
-		return fmt.Errorf("ledger not synced: %s", msg)
+		// Telemetry gets the blocker's code, never its text. Not being able to
+		// look is filed by why: a daemon that went away after the sync is daemon.
+		code := primaryLedgerSyncCode(blockers)
+		kind := errkind.Other
+		if k := stdlibErrorKind(facts.InspectErr); code == "inspect_failed" && k != "" {
+			kind = k
+		}
+		return errkind.WithDetail(kind, "ledger not synced: "+code, fmt.Errorf("ledger not synced: %s", msg))
 	}
 	result.Transport.Ledger = &SyncLedgerResult{Status: "synced"}
 	return nil
@@ -437,16 +492,30 @@ func syncTeamContext(_ context.Context, teamID string, jsonOutput bool, result *
 	//     surface it with a restart hint instead of implying the team synced.
 	// A whole-op error caused by some *other* team never reaches here as the
 	// requested team's status, so it can't fail this targeted request.
+	return teamSyncError(teamID, tcResult, results, syncErr)
+}
+
+// teamSyncError turns the requested team's result into the command's error,
+// filed for usage telemetry by its status. The selector a person typed and the
+// daemon's error text stay in the message only, never the detail.
+func teamSyncError(teamID string, tcResult TeamContextSyncResult, results []daemon.TeamSyncResult, syncErr error) error {
 	switch tcResult.Status {
-	case "synced":
-		return nil
-	case "skipped":
+	case "synced", "skipped":
 		return nil
 	case "cloning":
-		return fmt.Errorf("team %s clone in progress (not yet available)", teamID)
-	default: // error, not_found, ambiguous, unknown
-		return errors.New(tcResult.Error)
+		return errkind.WithDetail(errkind.Other, "team context not ready: cloning",
+			fmt.Errorf("team %s clone in progress (not yet available)", teamID))
+	case "not_found":
+		return errkind.WithDetail(errkind.Usage, "team not found", errors.New(tcResult.Error))
+	case "ambiguous":
+		return errkind.WithDetail(errkind.Usage, "team selector ambiguous", errors.New(tcResult.Error))
+	case "unknown":
+		return errkind.WithDetail(errkind.Daemon, "daemon did not report per-team results", errors.New(tcResult.Error))
 	}
+	if len(results) == 0 && syncErr != nil {
+		return syncErr // the request never reached a result: keep why (its message is tcResult.Error)
+	}
+	return errors.New(tcResult.Error) // the daemon's own error text; the stage files it
 }
 
 // resolveTeamSyncResult derives the reported result for a targeted --team sync
@@ -548,17 +617,20 @@ func legacyDaemonError() error {
 // may carry a "+builddate" suffix, which is stripped before comparison.
 func legacyDaemonErrorMsg(daemonVersion string) error {
 	const base = "daemon did not report per-team results"
-	if daemonVersion == "" {
-		return fmt.Errorf("%s; restart the daemon and retry (ox daemon restart)", base)
-	}
 	daemonSemver, _, _ := strings.Cut(daemonVersion, "+")
-	if daemonSemver != version.Version {
-		return fmt.Errorf("%s: the daemon is running an older version (%s) than this CLI (%s). "+
+	var err error
+	switch {
+	case daemonVersion == "":
+		err = fmt.Errorf("%s; restart the daemon and retry (ox daemon restart)", base)
+	case daemonSemver != version.Version:
+		err = fmt.Errorf("%s: the daemon is running an older version (%s) than this CLI (%s). "+
 			"The daemon restarts itself on its next heartbeat — re-run shortly, or run 'ox daemon restart'",
 			base, daemonSemver, version.Version)
+	default:
+		// versions match but still no per-team data — unexpected; surface for diagnosis.
+		err = fmt.Errorf("%s (daemon version %s); restart the daemon and retry (ox daemon restart)", base, daemonSemver)
 	}
-	// versions match but still no per-team data — unexpected; surface for diagnosis.
-	return fmt.Errorf("%s (daemon version %s); restart the daemon and retry (ox daemon restart)", base, daemonSemver)
+	return errkind.WithDetail(errkind.Daemon, base, err)
 }
 
 // syncAllTeamContexts syncs all team contexts via daemon.
@@ -615,10 +687,33 @@ func syncAllTeamContexts(_ context.Context, jsonOutput bool, result *SyncResult)
 	// — otherwise downstream commands could proceed against missing/stale context.
 	if notReady := notReadyTeams(results); len(notReady) > 0 {
 		msg := fmt.Sprintf("team context(s) not ready: %s", strings.Join(notReady, ", "))
-		return errors.New(msg)
+		return errkind.WithDetail(errkind.Other, "team context not ready: "+notReadyStatuses(results), errors.New(msg))
 	}
 
 	return nil
+}
+
+// notReadyStatuses lists the distinct statuses of the team contexts that did
+// not end up usable, sorted, for usage telemetry: team names never leave the
+// machine, and a status the daemon sent that ox does not define is unknown.
+func notReadyStatuses(results []daemon.TeamSyncResult) string {
+	seen := map[string]bool{}
+	for _, r := range results {
+		switch r.Status {
+		case "synced", "skipped":
+			continue
+		case "cloning", "error":
+			seen[r.Status] = true
+		default:
+			seen["unknown"] = true
+		}
+	}
+	statuses := make([]string, 0, len(seen))
+	for s := range seen {
+		statuses = append(statuses, s)
+	}
+	sort.Strings(statuses)
+	return strings.Join(statuses, ",")
 }
 
 // notReadyTeams returns "<name> (<status>)" labels for every team context that
