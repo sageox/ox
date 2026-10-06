@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -138,7 +140,7 @@ func main() {
 	}
 
 	args := applyCatalogTokenRewrites(os.Args[1:], loadFlagAliases(defaultCatalogJSON))
-	exitCode := executeWithFrictionRecovery(args, 0)
+	exitCode := executeWithSignalContext(args)
 	// Flush the result before deciding success, while stderr can still report
 	// a failed destination. Preserve an existing command failure's exit code.
 	os.Stdout.Close()
@@ -172,6 +174,22 @@ func main() {
 	os.Exit(exitCode)
 }
 
+// executeWithSignalContext runs the CLI under a context that cancels on
+// SIGINT/SIGTERM. Subprocesses run in their own process group (see
+// internal/gitutil), so a terminal Ctrl-C no longer reaches them directly;
+// they die only when this context is canceled.
+func executeWithSignalContext(args []string) int {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	go func() {
+		// restore default handling once canceled so a second Ctrl-C kills
+		// ox immediately if cleanup stalls
+		<-ctx.Done()
+		stop()
+	}()
+	return executeWithFrictionRecovery(ctx, args, 0)
+}
+
 // commandExitError carries the exit status for a command that has already
 // handled its output, bypassing friction recovery and duplicate error output.
 type commandExitError struct {
@@ -186,7 +204,7 @@ func (e *commandExitError) Error() string {
 // executeWithFrictionRecovery runs the command with friction recovery support.
 // If the command fails and we can auto-correct with high confidence, we retry
 // with the corrected args. Returns the exit code.
-func executeWithFrictionRecovery(args []string, attempt int) int {
+func executeWithFrictionRecovery(ctx context.Context, args []string, attempt int) int {
 	// CRITICAL: Reset Cobra state before re-execution to prevent flag pollution
 	// from the previous attempt. Without this, flags may carry over incorrectly.
 	rootCmd.ResetFlags()
@@ -224,7 +242,7 @@ func executeWithFrictionRecovery(args []string, attempt int) int {
 		}
 	}
 	if err == nil {
-		cmd, err = rootCmd.ExecuteC()
+		cmd, err = rootCmd.ExecuteContextC(ctx)
 	}
 	unknownCommand := err != nil && strings.HasPrefix(err.Error(), `unknown command "`)
 	if unknownCommand {
@@ -259,7 +277,7 @@ func executeWithFrictionRecovery(args []string, attempt int) int {
 	if errors.As(err, &commandExit) {
 		return commandExit.ExitCode
 	}
-	if errors.Is(err, tea.ErrInterrupted) {
+	if errors.Is(err, tea.ErrInterrupted) || ctx.Err() != nil {
 		fmt.Fprintln(os.Stderr, "Interrupted.")
 		return 130
 	}
@@ -310,7 +328,7 @@ func executeWithFrictionRecovery(args []string, attempt int) int {
 
 	// auto-execute if high confidence and within retry limit
 	if result.AutoExecute && attempt < maxFrictionRetries {
-		return executeWithFrictionRecovery(result.CorrectedArgs, attempt+1)
+		return executeWithFrictionRecovery(ctx, result.CorrectedArgs, attempt+1)
 	}
 
 	// no auto-execute - show the original error
