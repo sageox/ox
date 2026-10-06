@@ -20,6 +20,14 @@ const rescueBranchPrefix = "rescue-wedge-"
 // caller should use the ordinary recovery path.
 var ErrNoStrandedCommits = fmt.Errorf("no stranded commits: nothing to rescue")
 
+// ErrStrandedCountUnknown reports that the stranded-commit count could not be
+// computed (typically timed out under host load). The count is informational
+// for the automated path, which aborts anyway.
+var ErrStrandedCountUnknown = errors.New("stranded commit count unknown")
+
+// strandedCountTimeout bounds the count so a slow rev-list cannot starve the abort.
+const strandedCountTimeout = 5 * time.Second
+
 // RescueIfNeededThenAbort safely clears an in-progress rebase, first anchoring
 // any commits reachable only from HEAD on a verified rescue branch. A normal
 // branch-attached rebase has nothing stranded, so ErrNoStrandedCommits is the
@@ -30,8 +38,17 @@ var ErrNoStrandedCommits = fmt.Errorf("no stranded commits: nothing to rescue")
 // unsafe --quit escalation; the non-empty rescue ref and error let callers
 // report both facts without weakening detached-HEAD protection.
 func RescueIfNeededThenAbort(ctx context.Context, repoPath, reason string, logger *slog.Logger) (string, error) {
+	// every step is local git work whose only failure mode worth bounding is a
+	// hang; a caller's short deadline killing it mid-abort is what wedges repos
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), pullMaxTimeout)
+	defer cancel()
+
 	rescueRef, err := RescueThenAbort(ctx, repoPath, reason, logger)
-	if !errors.Is(err, ErrNoStrandedCommits) {
+	if errors.Is(err, ErrStrandedCountUnknown) {
+		// the count only decides whether to rescue; never let it block the abort
+		slog.WarnContext(ctx, "stranded count unavailable; aborting without rescue",
+			"op", "rescue_stranded_unknown", "repo", repoPath, "stranded", "unknown", "error", err)
+	} else if !errors.Is(err, ErrNoStrandedCommits) {
 		return rescueRef, err
 	}
 	return "", AbortOrClearRebase(ctx, repoPath, reason, logger)
@@ -83,7 +100,7 @@ func RescueThenAbort(ctx context.Context, repoPath, reason string, logger *slog.
 	// Step 1: is anything actually at risk?
 	stranded, err := StrandedCommitCount(ctx, repoPath)
 	if err != nil {
-		return "", fmt.Errorf("counting stranded commits: %w", err)
+		return "", fmt.Errorf("counting stranded commits: %w: %w", ErrStrandedCountUnknown, err)
 	}
 	if stranded == 0 {
 		return "", ErrNoStrandedCommits
@@ -184,6 +201,8 @@ func CreateRescueBranch(ctx context.Context, repoPath, reason string, logger *sl
 // commits kept landing on a detached HEAD while every ref that anyone reads
 // stayed behind. A non-zero value here means data exists in exactly one place.
 func StrandedCommitCount(ctx context.Context, repoPath string) (int, error) {
+	ctx, cancel := context.WithTimeout(ctx, strandedCountTimeout)
+	defer cancel()
 	out, err := rescueGit(ctx, repoPath, "rev-list", "--count", "HEAD", "--not", "--branches", "--remotes")
 	if err != nil {
 		return 0, fmt.Errorf("git rev-list: %w (%s)", err, out)
