@@ -61,11 +61,7 @@ func checkSessionPointerRestore(fix bool) checkResult {
 		return SkippedCheck(pointerRestoreCheckName, "no ledger found", "")
 	}
 	// a Ledger that is not a git repo has no upstream, which the body reports as a skip
-	projectEndpoint := endpoint.GetForProject(findGitRoot())
-	return runSessionPointerRestore(ledgerPath, fix, &ownArtifactUploader{
-		username: identity.AttributionDisplayName(projectEndpoint, config.GetDisplayName()),
-		client:   func() (*lfs.Client, error) { return lfs.NewClientFromLedger(ledgerPath, projectEndpoint) },
-	})
+	return runSessionPointerRestore(ledgerPath, fix, newOwnArtifactUploader(ledgerPath))
 }
 
 // runSessionPointerRestore is the check body for one resolved Ledger.
@@ -105,6 +101,16 @@ func runSessionPointerRestore(ledgerPath string, fix bool, uploader *ownArtifact
 }
 
 var errNoUpstream = errors.New("no upstream branch")
+
+// newOwnArtifactUploader identifies the current coworker the way recording stamps
+// meta.json, and uploads through the Ledger's own LFS credentials.
+func newOwnArtifactUploader(ledgerPath string) *ownArtifactUploader {
+	projectEndpoint := endpoint.GetForProject(findGitRoot())
+	return &ownArtifactUploader{
+		username: identity.AttributionDisplayName(projectEndpoint, config.GetDisplayName()),
+		client:   func() (*lfs.Client, error) { return lfs.NewClientFromLedger(ledgerPath, projectEndpoint) },
+	}
+}
 
 // ownArtifactUploader lets the repair upload artifacts that were never uploaded.
 type ownArtifactUploader struct {
