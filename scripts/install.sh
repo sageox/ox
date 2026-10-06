@@ -127,27 +127,30 @@ print_path_warning() {
     shell_name=$(basename "${SHELL:-}")
     restart_line=""
     one_liner=""
-    # rc_file is display text only (never sourced or written to by this
-    # script), so the tilde is intentionally left unexpanded.
+    # rc_file is never sourced or written to by this script: it is display
+    # text, and for bash also the target the printed one-liner names, so the
+    # tilde is intentionally left unexpanded (bash_startup_file only ever
+    # returns a fixed ~/.name). The one-liner starts with a newline so the
+    # line never glues onto an existing file's unterminated last line.
     # shellcheck disable=SC2088
     case "$shell_name" in
         zsh)
             rc_file="~/.zshenv"
             path_line="export PATH=\"\$PATH:$posix_dir\""
             explanation="AI coding tools run hooks in a non-interactive shell, which reads ~/.zshenv but not ~/.zshrc."
-            one_liner="printf '%s\\n' $(shell_quote "$path_line") >> ~/.zshenv"
+            one_liner="printf '\\n%s\\n' $(shell_quote "$path_line") >> ~/.zshenv"
             ;;
         bash)
             rc_file=$(bash_startup_file)
             path_line="export PATH=\"\$PATH:$posix_dir\""
-            one_liner="printf '%s\\n' $(shell_quote "$path_line") >> $rc_file"
+            one_liner="printf '\\n%s\\n' $(shell_quote "$path_line") >> $rc_file"
             restart_line="Then restart your AI coding tool from a new terminal so it picks up the change."
             explanation="AI coding tools inherit the environment of the terminal they were started from, not any change made after they launched."
             ;;
         fish)
             rc_file="~/.config/fish/config.fish"
             path_line="fish_add_path -- \"$fish_dir\""
-            one_liner="mkdir -p ~/.config/fish && printf '%s\\n' $(shell_quote "$path_line") >> ~/.config/fish/config.fish"
+            one_liner="mkdir -p ~/.config/fish && printf '\\n%s\\n' $(shell_quote "$path_line") >> ~/.config/fish/config.fish"
             restart_line="Then restart your AI coding tool from a new terminal so it picks up the change."
             explanation="AI coding tools inherit the environment of the terminal they were started from, not any change made after they launched."
             ;;
