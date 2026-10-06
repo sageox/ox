@@ -47,6 +47,20 @@ func TestRecoverPullTimeoutInRebase(t *testing.T) {
 	assert.NoError(t, abortErr)
 }
 
+func TestCommitsAhead(t *testing.T) {
+	f := newLedgerFixture(t)
+	assert.Equal(t, 0, CommitsAhead(context.Background(), f.local), "in sync with upstream")
+
+	f.write(f.local, "a.txt", "a")
+	f.commitAll(f.local, "one")
+	f.write(f.local, "b.txt", "b")
+	f.commitAll(f.local, "two")
+	assert.Equal(t, 2, CommitsAhead(context.Background(), f.local))
+
+	// no upstream or not a repo reads as 0 so the default budget applies
+	assert.Equal(t, 0, CommitsAhead(context.Background(), t.TempDir()))
+}
+
 func TestPullTimedOut(t *testing.T) {
 	t.Parallel()
 	expired, cancel := context.WithTimeout(context.Background(), time.Nanosecond)

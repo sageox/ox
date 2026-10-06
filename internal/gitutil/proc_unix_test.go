@@ -37,6 +37,17 @@ func waitForPidFile(t *testing.T, path string) int {
 	return 0
 }
 
+// Cancel must be safe when there is nothing left to kill: the process never
+// started, or its whole group already exited.
+func TestSetProcessGroupKillCancelWithNothingToKill(t *testing.T) {
+	notStarted := commandContext(context.Background(), "true")
+	require.ErrorIs(t, notStarted.Cancel(), os.ErrProcessDone)
+
+	finished := commandContext(context.Background(), "true")
+	require.NoError(t, finished.Run())
+	require.ErrorIs(t, finished.Cancel(), os.ErrProcessDone)
+}
+
 // A git command that spawns a child (git pull -> git rebase) must not leave
 // that child running once the context expires: the orphan holds
 // .git/index.lock and wedges every later sync cycle.
