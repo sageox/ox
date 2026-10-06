@@ -60,6 +60,11 @@ func checkSessionPointerRestore(fix bool) checkResult {
 		return SkippedCheck(pointerRestoreCheckName, "ledger not a git repo", "")
 	}
 
+	return runSessionPointerRestore(ledgerPath, fix)
+}
+
+// runSessionPointerRestore is the check body for one resolved Ledger.
+func runSessionPointerRestore(ledgerPath string, fix bool) checkResult {
 	report, err := restoreUnpushedSessionPointers(context.Background(), ledgerPath, fix)
 	switch {
 	case errors.Is(err, errNoUpstream):
