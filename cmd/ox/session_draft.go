@@ -233,7 +233,7 @@ func commitDraftLocally(ledgerPath, sessionName string) error {
 // draftLockWait bounds how long a draft write waits for the ledger's repo lock.
 // A hook must not hang the agent's turn behind a long daemon pull; giving up is
 // safe because the next draft refresh retries.
-const draftLockWait = 15 * time.Second
+var draftLockWait = 15 * time.Second
 
 // withDraftLedgerLock runs a draft's git write sequence under the same
 // cross-process lock the daemon's pull-rebase holds, so the two can never meet

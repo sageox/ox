@@ -87,6 +87,49 @@ func TestPullManagedRepo_PersistentForeignLockSkipsWithoutTouchingRepo(t *testin
 	assert.Equal(t, "v1\n", readF(t, clone))
 }
 
+// An abandoned index.lock (older than the abandonment age) is swept before the
+// pull, so a crashed git cannot block sync forever.
+func TestPullManagedRepo_SweepsAbandonedIndexLock(t *testing.T) {
+	clone := behindClone(t)
+	lock := filepath.Join(clone, ".git", "index.lock")
+	require.NoError(t, os.WriteFile(lock, nil, 0o644))
+	old := time.Now().Add(-48 * time.Hour)
+	require.NoError(t, os.Chtimes(lock, old, old))
+
+	res := pullOnce(context.Background(), clone)
+
+	assert.False(t, res.Skipped, "skip=%q", res.SkipReason)
+	assert.NoError(t, res.Err)
+	assert.NoFileExists(t, lock)
+	assert.Equal(t, "v2\n", readF(t, clone))
+}
+
+// A foreign git that grabs index.lock mid-pull and keeps it yields a busy skip,
+// not a conflict-ladder abort, and the lock is left for its owner.
+func TestPullManagedRepo_IndexLockMidPullPersistsSkipsBusy(t *testing.T) {
+	clone := behindClone(t)
+	require.NoError(t, os.WriteFile(filepath.Join(clone, "local.md"), []byte("l\n"), 0o644))
+	out, err := runGitOut(t, clone, "add", "local.md")
+	require.NoError(t, err, out)
+	out, err = runGitOut(t, clone, "commit", "-m", "local")
+	require.NoError(t, err, out)
+	agePastFetchHead(t, clone)
+
+	hook := "#!/bin/sh\ntouch \"$PWD/.git/index.lock\"\n" +
+		"echo \"fatal: Unable to create '$PWD/.git/index.lock': File exists.\" >&2\nexit 1\n"
+	require.NoError(t, os.WriteFile(filepath.Join(clone, ".git", "hooks", "pre-rebase"), []byte(hook), 0o755))
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+
+	res := pullOnce(ctx, clone)
+
+	assert.True(t, res.Skipped)
+	assert.Equal(t, skipReasonLockFilesPresent, res.SkipReason)
+	assert.NoError(t, res.Err)
+	assert.FileExists(t, filepath.Join(clone, ".git", "index.lock"))
+	assert.NoDirExists(t, filepath.Join(clone, ".git", "rebase-merge"))
+}
+
 // git reports "Unable to create '...index.lock': File exists" when a foreign git
 // grabs the lock after our pre-flight. The pull must retry once, not treat it
 // as a conflict and climb to `rebase --abort`.
