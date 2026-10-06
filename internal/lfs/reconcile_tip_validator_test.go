@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -40,6 +41,12 @@ func catFileCalls(t *testing.T, logPath string) int {
 // A long unpushed history of plain-git data files must not cost one cat-file
 // per blob: only session artifacts at the tip need inspection.
 func TestValidateUnpushedTip_LongHistoryOfDataFilesIsCheap(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("sh git shim is not portable to Windows")
+	}
+	if testing.Short() {
+		t.Skip("short: creates 300 commits")
+	}
 	ledger, _ := initLedgerWithRemote(t)
 
 	const commits = 300
