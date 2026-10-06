@@ -229,6 +229,8 @@ func TestPostHog_EverydayFailuresSayWhatWentWrong(t *testing.T) {
 		{repo, []string{"sync"}, "sync", "daemon", "daemon start disabled: OX_NO_DAEMON=1"},
 		// How AI coworkers run it: the failure is printed as JSON, not as an error.
 		{repo, []string{"sync", "--json"}, "sync", "daemon", "daemon start disabled: OX_NO_DAEMON=1"},
+		{e.workDir, []string{"team", "invite", "a@example.com"}, "team invite", "not_logged_in", "unauthenticated"},
+		{repo, []string{"session", "import"}, "session import", "not_initialized", "not_initialized"},
 		// Last: a regression that let it through would initialize repo.
 		{repo, []string{"init"}, "init", "not_logged_in", "ox init requires authentication"},
 	}

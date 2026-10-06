@@ -18,6 +18,7 @@ import (
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/prime"
 	"github.com/spf13/cobra"
 )
@@ -218,6 +219,7 @@ type bulletinFailure struct {
 	Hints     [][2]string // command, description
 	Details   map[string]string
 	Duplicate *bulletinJSONDuplicate
+	cause     error // what went wrong, when it isn't classified above
 }
 
 func runBulletinPost(cmd *cobra.Command, args []string) error {
@@ -533,9 +535,9 @@ func bulletinCommaInt(n int) string {
 	return b.String()
 }
 
-// renderBulletinFailure writes one refusal in the requested mode and returns
-// cli.ErrSilent: the report is already on screen, so main must exit 1 without
-// printing a second, redundant error line.
+// renderBulletinFailure writes one refusal in the requested mode and returns a
+// silent failure: the report is already on screen, so main must exit 1
+// without printing a second, redundant error line.
 func renderBulletinFailure(w io.Writer, jsonOutput bool, f bulletinFailure) error {
 	if jsonOutput {
 		if jerr := writeJSONIndent(w, bulletinJSONFailure{
@@ -548,7 +550,7 @@ func renderBulletinFailure(w io.Writer, jsonOutput bool, f bulletinFailure) erro
 		}); jerr != nil {
 			return jerr
 		}
-		return cli.ErrSilent
+		return silentFailure(f.kind(), f.Code, f.cause)
 	}
 	fmt.Fprintf(w, "%s %s\n", bulletinErrStyle.Render("✗"), cli.SanitizeTerminalText(f.Headline))
 	if len(f.Explain) > 0 {
@@ -563,7 +565,25 @@ func renderBulletinFailure(w io.Writer, jsonOutput bool, f bulletinFailure) erro
 			cli.PrintActionHintTo(w, h[0], h[1])
 		}
 	}
-	return cli.ErrSilent
+	return silentFailure(f.kind(), f.Code, f.cause)
+}
+
+// kind files a failed post for usage telemetry. An unclassified failure takes
+// its cause's kind, so an offline machine still reads as the network.
+func (f bulletinFailure) kind() errkind.Kind {
+	switch f.Code {
+	case bulletinCodeValidation, bulletinCodeDuplicate, bulletinCodeTooLarge, bulletinCodeNoTeam:
+		return errkind.Usage
+	case bulletinCodeNotAMember, bulletinCodeUnauthenticated, bulletinCodeTeamToken, bulletinCodeForbidden:
+		return errkind.Auth
+	case bulletinCodeVersionUnsupported:
+		return errkind.VersionUnsupported
+	case bulletinCodeError:
+		if k := stdlibErrorKind(f.cause); k != "" {
+			return k
+		}
+	}
+	return errkind.Other // not enabled, unsupported server, Team Context unavailable, hash mismatch
 }
 
 // bulletinNoTeamFailure is the refusal when neither the repo nor --team names
@@ -786,6 +806,7 @@ func bulletinFailureFor(err error, teamRef string, attempts int) bulletinFailure
 		Headline: err.Error(),
 		Explain:  []string{"No receipt was returned. Nothing on this machine changed."},
 		Guidance: "Publishing failed before a receipt was returned: " + err.Error() + ". Nothing on this machine changed. Rerun the same command; an identical retry is safe because identical content is one post per board.",
+		cause:    err,
 	}
 }
 

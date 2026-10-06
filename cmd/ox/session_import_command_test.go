@@ -13,6 +13,7 @@ import (
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/session/nativeimport"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
@@ -129,10 +130,12 @@ func TestImportCommandRefusesBeforeReadingSessions(t *testing.T) {
 				tt.setup(t, p)
 			}
 			root, out := importCommand(append([]string{"--json"}, tt.args...)...)
-			require.ErrorIs(t, root.Execute(), cli.ErrSilent)
+			err := root.Execute()
+			require.ErrorIs(t, err, cli.ErrSilent)
 			got := decodeRefusal(t, out)
 			assert.Equal(t, "refused", got["status"])
 			assert.Equal(t, tt.want, got["error"], got["message"])
+			assert.Equal(t, tt.want, errkind.DetailOf(err), "usage telemetry learns the same code")
 		})
 	}
 }

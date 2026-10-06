@@ -176,6 +176,18 @@ func stdlibErrorKind(err error) errkind.Kind {
 	}
 }
 
+// silentFailure is what a command returns after printing its own account of
+// a failure: silent, so main adds nothing, and carrying kind and detail for
+// usage telemetry. detail must be a name ox defines, such as the code its
+// --json output prints, never text from the failure. cause stays reachable
+// through errors.Is and errors.As; nil means there is none.
+func silentFailure(kind errkind.Kind, detail string, cause error) error {
+	if cause == nil {
+		cause = errors.New(detail)
+	}
+	return cli.Silent(errkind.WithDetail(kind, detail, cause))
+}
+
 // postHogMaxDetail bounds error_detail, so a long detail cannot push the
 // event past the 4 KiB limit at which CapturePostHog drops it.
 const postHogMaxDetail = 200

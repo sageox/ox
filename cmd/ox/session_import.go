@@ -22,6 +22,7 @@ import (
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/daemon/agentwork"
+	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/identity"
@@ -141,6 +142,22 @@ type importFailure struct {
 }
 
 func (f importFailure) Error() string { return f.Code + ": " + f.Message }
+
+// kind files a refusal for usage telemetry.
+func (f importFailure) kind() errkind.Kind {
+	switch f.Code {
+	case importErrNotInitialized, importErrNoLedger:
+		return errkind.NotInitialized
+	case importErrNotLoggedIn:
+		return errkind.NotLoggedIn
+	case importErrReadOnly:
+		return errkind.Auth
+	case importErrBadFlag, importErrRecordingDisabled, importErrRedactionRules, importErrInProgress:
+		return errkind.Usage
+	default: // destination unverified, Ledger wedged or unreadable, native store unreadable
+		return errkind.Other
+	}
+}
 
 const (
 	importAgentGuidance = "This is a preview; nothing was uploaded. Show the coworker the destination, " +
@@ -467,7 +484,14 @@ func runLockedImport(ctx context.Context, out io.Writer, opts importOptions, env
 	var pending []*importCandidate // committed, not yet pushed
 	var pushErr error
 	sinceFlush := 0
-	failed := false
+	// sessionFailure is the first session that failed, filed for usage telemetry
+	// under its stage and its cause's kind.
+	var sessionFailure error
+	fail := func(stage string, err error) {
+		if sessionFailure == nil {
+			sessionFailure = stageError(stage, err)
+		}
+	}
 	flush := func() {
 		sinceFlush = 0
 		if len(pending) == 0 {
@@ -495,7 +519,7 @@ func runLockedImport(ctx context.Context, out io.Writer, opts importOptions, env
 				interrupted = true
 				fmt.Fprintln(progress, "Interrupted: publishing the sessions already done. Press Ctrl-C again to quit now.")
 			}
-			failed = true
+			fail("import interrupted", ctx.Err())
 			c.Outcome, c.Detail, c.Retry = "failed", "not started: the import was interrupted", importRetryCommand(opts, c)
 			continue
 		}
@@ -508,11 +532,12 @@ func runLockedImport(ctx context.Context, out io.Writer, opts importOptions, env
 		skip, err := publishImport(ctx, env, c)
 		switch {
 		case err != nil:
-			failed = true
 			c.Outcome, c.Detail = "failed", strings.TrimPrefix(err.Error(), errImportHeld.Error()+": ")
 			if ctx.Err() != nil {
 				c.Detail = "interrupted"
+				err = ctx.Err() // heldf flattens the cause; the interrupt is the reason
 			}
+			fail("session publish failed", err)
 			c.Retry = importRetryCommand(opts, c)
 		case skip != "":
 			c.Outcome, c.Detail = "skipped", skip
@@ -532,14 +557,14 @@ func runLockedImport(ctx context.Context, out io.Writer, opts importOptions, env
 		flush()
 	}
 	for _, c := range pending { // the last push failed
-		failed = true
+		fail("session push failed", pushErr)
 		c.Outcome, c.Detail = "committed", "committed locally but not pushed ("+pushErr.Error()+"); the next import pushes it first"
 	}
 	if err := renderImportResult(out, opts, dest, cands, ignored); err != nil {
 		return err
 	}
-	if failed {
-		return cli.ErrSilent
+	if sessionFailure != nil {
+		return cli.Silent(sessionFailure)
 	}
 	return nil
 }
@@ -841,13 +866,13 @@ func ledgerLabel(dest importDestination) string {
 func renderImportFailure(w io.Writer, jsonOut bool, f importFailure) error {
 	if jsonOut {
 		_ = cli.PrintJSONTo(w, map[string]any{"status": "refused", "error": f.Code, "message": f.Message, "guidance": f.Guidance})
-		return cli.ErrSilent
+		return silentFailure(f.kind(), f.Code, f)
 	}
 	cli.PrintErrorTo(os.Stderr, f.Message)
 	if f.Guidance != "" {
 		cli.PrintHintTo(os.Stderr, f.Guidance)
 	}
-	return cli.ErrSilent
+	return silentFailure(f.kind(), f.Code, f)
 }
 
 // Session model shown in the preview for each summarizer.

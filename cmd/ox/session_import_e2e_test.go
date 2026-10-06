@@ -20,6 +20,7 @@ import (
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon/agentwork"
+	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/lfs"
@@ -1037,6 +1038,8 @@ func TestImportE2E_SummaryThatRepeatsASecretIsHeld(t *testing.T) {
 
 			r := f.run(t, importOptions{yes: true, jsonOut: true})
 			assert.ErrorIs(t, r.err, cli.ErrSilent)
+			assert.Equal(t, errkind.Other, errkind.Of(r.err))
+			assert.Equal(t, "session publish failed", errkind.DetailOf(r.err))
 			held := r.session(t, e2eCodexA)
 			assert.Equal(t, "failed", held.Outcome)
 			assert.Contains(t, held.Detail, "possible secret remains in "+tc.wantFile)
@@ -1086,6 +1089,7 @@ func TestImportE2E_FailedPushIsCarriedByTheNextOne(t *testing.T) {
 		f.add(t, pastSession{agent: nativeimport.AgentCodex, id: e2eCodexB, start: start.Add(2 * time.Hour), prompt: tokenPrompt, reply: "The deploy bot."})
 		held := f.run(t, importOptions{yes: true, jsonOut: true})
 		assert.ErrorIs(t, held.err, cli.ErrSilent)
+		assert.Equal(t, "session push failed", errkind.DetailOf(held.err))
 		s := held.session(t, e2eCodexB)
 		assert.Equal(t, "committed", s.Outcome)
 		assert.Contains(t, s.Detail, "not pushed")

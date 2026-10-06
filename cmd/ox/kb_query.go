@@ -232,7 +232,7 @@ func handleKBSearchError(w io.Writer, err error, jsonOutput bool) error {
 		}
 		fmt.Fprintln(os.Stderr, msg)
 		cli.PrintHint("Bubbles are still readable — run 'ox kb list' and read from a bubble's local mount path.")
-		return cli.ErrSilent
+		return silentFailure(errkind.Other, "unavailable", err)
 	}
 	if errors.Is(err, api.ErrUnauthorized) {
 		return errkind.Errorf(errkind.Auth, "not authenticated — run 'ox login'")

@@ -11,6 +11,7 @@ import (
 
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/decision"
+	"github.com/sageox/ox/internal/errkind"
 )
 
 // newDecisionTestRepo creates a temp git repo with a small DR corpus and
@@ -188,6 +189,9 @@ func TestDecisionEnrichCmd_DegradedResultExitsNonZero(t *testing.T) {
 	out, err := runDecisionEnrichResult(t, "topic", "deployment strategy")
 	if !cli.IsSilent(err) {
 		t.Fatalf("degraded retrieval must return a silent non-zero error, got %v", err)
+	}
+	if kind, detail := errkind.Of(err), errkind.DetailOf(err); kind != errkind.Other || detail != "degraded" {
+		t.Errorf("usage telemetry must learn why it failed, got %q / %q", kind, detail)
 	}
 	var res decision.Result
 	if err := json.Unmarshal([]byte(out), &res); err != nil {

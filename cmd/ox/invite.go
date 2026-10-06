@@ -17,6 +17,7 @@ import (
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/ui"
 	"github.com/spf13/cobra"
 )
@@ -121,6 +122,32 @@ func (r inviteResult) hasFailure() bool {
 		}
 	}
 	return false
+}
+
+// failureKind files an address that failed for usage telemetry.
+func (s inviteStatus) failureKind() errkind.Kind {
+	switch s {
+	case statusNotPermitted, statusNotAMember:
+		return errkind.Auth
+	case statusPersonalTeam, statusInvalidEmail:
+		return errkind.Usage
+	default:
+		return errkind.Other
+	}
+}
+
+// reportedFailure is the failed status usage telemetry reports for the batch:
+// an ox or server error before a refusal, a refusal before a mistake in the
+// request. "" when nothing failed.
+func (r inviteResult) reportedFailure() inviteStatus {
+	rank := map[errkind.Kind]int{errkind.Other: 0, errkind.Auth: 1, errkind.Usage: 2}
+	var worst inviteStatus
+	for _, o := range r.Outcomes {
+		if o.Status.isFailure() && (worst == "" || rank[o.Status.failureKind()] < rank[worst.failureKind()]) {
+			worst = o.Status
+		}
+	}
+	return worst
 }
 
 var inviteCmd = &cobra.Command{
@@ -229,7 +256,7 @@ func runInvite(cmd *cobra.Command, args []string) error {
 
 	token, err := auth.EnsureValidTokenForEndpoint(ep, 300)
 	if err != nil || token == nil || token.AccessToken == "" {
-		return errInviteNotAuthenticated(out, jsonOutput)
+		return errInviteNotAuthenticated(out, jsonOutput, errkind.NotLoggedIn)
 	}
 
 	client := api.NewRepoClientWithEndpoint(ep).WithAuthToken(token.AccessToken)
@@ -288,9 +315,10 @@ func runInvite(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if res.hasFailure() {
-		// Output is already rendered; ErrSilent yields exit 1 without main
-		// printing a second, redundant error line.
-		return cli.ErrSilent
+		// Output is already rendered; a silent failure yields exit 1 without
+		// main printing a second, redundant error line.
+		failed := res.reportedFailure()
+		return silentFailure(failed.failureKind(), string(failed), nil)
 	}
 	return nil
 }
@@ -880,17 +908,31 @@ func renderInviteAbort(w io.Writer, err error, jsonOutput bool) error {
 				return jerr
 			}
 			// Nobody was invited — this must not read as success.
-			return cli.ErrSilent
+			return silentFailure(errkind.Other, "unsupported", err)
 		}
 		fmt.Fprintf(w, "%s %s\n\n", inviteWarnStyle.Render("⚠"), api.ErrInviteUnsupported.Error())
 		cli.PrintActionHintTo(w, "ox team open", "Invite from the dashboard")
-		return cli.ErrSilent
+		return silentFailure(errkind.Other, "unsupported", err)
 	case errors.Is(err, api.ErrPersonalTeam):
 		return renderPersonalTeamRefusal(w, jsonOutput)
 	case errors.Is(err, api.ErrUnauthorized):
-		return errInviteNotAuthenticated(w, jsonOutput)
+		return errInviteNotAuthenticated(w, jsonOutput, errkind.Auth)
 	}
 	return err
+}
+
+// inviteAbortKind files a whole-command invite failure for usage telemetry.
+func inviteAbortKind(err error) errkind.Kind {
+	switch {
+	case errors.Is(err, api.ErrPersonalTeam):
+		return errkind.Usage
+	case errors.Is(err, api.ErrUnauthorized):
+		return errkind.Auth
+	case errors.Is(err, api.ErrVersionUnsupported):
+		return errkind.VersionUnsupported
+	default: // api.ErrInviteUnsupported
+		return errkind.Other
+	}
 }
 
 // renderInvitePartialAbort preserves the record of any invitations that were
@@ -933,7 +975,7 @@ func renderInvitePartialAbort(w io.Writer, res inviteResult, err error, jsonOutp
 	}); jerr != nil {
 		return jerr
 	}
-	return cli.ErrSilent
+	return silentFailure(inviteAbortKind(err), code, err)
 }
 
 func inviteAbortJSONDetails(err error) (code, message, guidance string, ok bool) {
@@ -966,16 +1008,19 @@ func renderPersonalTeamRefusal(w io.Writer, jsonOutput bool) error {
 		}); jerr != nil {
 			return jerr
 		}
-		return cli.ErrSilent
+		return silentFailure(errkind.Usage, string(statusPersonalTeam), api.ErrPersonalTeam)
 	}
 	fmt.Fprintf(w, "%s %s\n\n", inviteErrStyle.Render("✗"), "That's a private team — it can't take invitations.")
 	fmt.Fprintf(w, "  %s\n", cli.StyleDim.Render("Private per-user teams are single-member by design, so no"))
 	fmt.Fprintf(w, "  %s\n\n", cli.StyleDim.Render("address and no role will work."))
 	cli.PrintActionHintTo(w, "ox teams", "Pick a shared team instead")
-	return cli.ErrSilent
+	return silentFailure(errkind.Usage, string(statusPersonalTeam), api.ErrPersonalTeam)
 }
 
-func errInviteNotAuthenticated(w io.Writer, jsonOutput bool) error {
+// errInviteNotAuthenticated explains a missing or rejected login. kind says
+// which: NotLoggedIn when this machine has no login, Auth when the server
+// rejected it.
+func errInviteNotAuthenticated(w io.Writer, jsonOutput bool, kind errkind.Kind) error {
 	if jsonOutput {
 		if jerr := writeJSONIndent(w, map[string]string{
 			"error":    "unauthenticated",
@@ -984,11 +1029,11 @@ func errInviteNotAuthenticated(w io.Writer, jsonOutput bool) error {
 		}); jerr != nil {
 			return jerr
 		}
-		return cli.ErrSilent
+		return silentFailure(kind, "unauthenticated", nil)
 	}
 	fmt.Fprintf(w, "%s %s\n\n", inviteErrStyle.Render("✗"), "Not authenticated.")
 	cli.PrintActionHintTo(w, "ox login", "Sign in to SageOx")
-	return cli.ErrSilent
+	return silentFailure(kind, "unauthenticated", nil)
 }
 
 func errInviteNoTeam(w io.Writer, jsonOutput bool) error {
@@ -1000,13 +1045,13 @@ func errInviteNoTeam(w io.Writer, jsonOutput bool) error {
 		}); jerr != nil {
 			return jerr
 		}
-		return cli.ErrSilent
+		return silentFailure(errkind.Usage, "no_team", nil)
 	}
 	fmt.Fprintf(w, "%s %s\n\n", inviteErrStyle.Render("✗"), "No team to invite to.")
 	fmt.Fprintf(w, "  %s\n\n", cli.StyleDim.Render("This directory isn't linked to a team, and --team wasn't given."))
 	cli.PrintActionHintTo(w, "ox teams", "List teams you belong to")
 	cli.PrintActionHintTo(w, "ox team invite <email> --team <slug>", "Name the team explicitly")
-	return cli.ErrSilent
+	return silentFailure(errkind.Usage, "no_team", nil)
 }
 
 // inviteLister is the seam for --list / --cancel, mirroring inviteSender.
@@ -1254,7 +1299,7 @@ func runInviteCancel(ctx context.Context, out io.Writer, l inviteLister, target 
 func renderInviteOpAbort(w io.Writer, err error, jsonOutput bool, verb string) error {
 	switch {
 	case errors.Is(err, api.ErrUnauthorized):
-		return errInviteNotAuthenticated(w, jsonOutput)
+		return errInviteNotAuthenticated(w, jsonOutput, errkind.Auth)
 	case errors.Is(err, api.ErrInviteUnsupported), errors.Is(err, api.ErrInviteNotAMember):
 		if jsonOutput {
 			if jerr := writeJSONIndent(w, map[string]string{
@@ -1264,11 +1309,11 @@ func renderInviteOpAbort(w io.Writer, err error, jsonOutput bool, verb string) e
 			}); jerr != nil {
 				return jerr
 			}
-			return cli.ErrSilent
+			return silentFailure(errkind.Auth, "no_access", err)
 		}
 		fmt.Fprintf(w, "%s %s\n\n", inviteErrStyle.Render("✗"), err.Error())
 		cli.PrintActionHintTo(w, "ox teams", "List teams you belong to")
-		return cli.ErrSilent
+		return silentFailure(errkind.Auth, "no_access", err)
 	case errors.Is(err, api.ErrInviteForbidden):
 		reason := api.InviteForbiddenReason(err)
 		if reason == "" {
@@ -1283,11 +1328,11 @@ func renderInviteOpAbort(w io.Writer, err error, jsonOutput bool, verb string) e
 			}); jerr != nil {
 				return jerr
 			}
-			return cli.ErrSilent
+			return silentFailure(errkind.Auth, "forbidden", err)
 		}
 		fmt.Fprintf(w, "%s %s\n\n", inviteErrStyle.Render("✗"), reason)
 		fmt.Fprintf(w, "  %s\n", cli.StyleDim.Render("Ask a team owner or admin if you need this done."))
-		return cli.ErrSilent
+		return silentFailure(errkind.Auth, "forbidden", err)
 	}
 	return err
 }

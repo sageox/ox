@@ -484,7 +484,7 @@ func runInit() error {
 		cli.PrintError("git repository has no commits")
 		fmt.Fprintln(os.Stderr)
 		fmt.Fprintln(os.Stderr, cli.StyleDim.Render(fmt.Sprintf("%s requires at least one commit for repository fingerprinting.", cli.StyleCommand.Render("ox init"))))
-		return cli.ErrSilent
+		return silentFailure(errkind.Other, "git repository has no commits", err)
 	}
 
 	// offline-safe: remote hashes are optional; registration works for local-only repos
