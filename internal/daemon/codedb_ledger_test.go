@@ -237,16 +237,17 @@ func TestBuildLedgerIndex_ConcurrentWithCheckFreshness(t *testing.T) {
 
 	ctx := context.Background()
 
-	// launch both concurrently
+	// the ledger build must be running first: a worktree index that is already
+	// running makes the ledger build yield (see TestBuildLedgerIndex_YieldsToWorktreeIndex)
 	go mgr.BuildLedgerIndex(ctx, dir)
-	mgr.CheckFreshness(ctx)
-
-	// both should enter their hooks (neither blocks the other)
 	select {
 	case <-ledgerEntered:
 	case <-time.After(5 * time.Second):
-		t.Fatal("BuildLedgerIndex did not start — may be deadlocked with CheckFreshness")
+		t.Fatal("BuildLedgerIndex did not start")
 	}
+
+	// a worktree index starting mid-build must not deadlock with it
+	mgr.CheckFreshness(ctx)
 	select {
 	case <-worktreeEntered:
 	case <-time.After(5 * time.Second):
