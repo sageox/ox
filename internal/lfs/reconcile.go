@@ -730,8 +730,12 @@ func scanPushRange(ctx context.Context, ledgerPath string, logger *slog.Logger) 
 // squash commit would perform, but against HEAD before any upload, removal, or
 // reset. This closes the old failure mode where a corrupt unpushed blob was
 // discovered only after pointer replacement had already changed local state.
+//
+// Only the sessions/ tree is inspected. Everything else in a Ledger (data/**,
+// murmurs, plans) is plain git content with no pointer contract, and reading
+// each of those blobs cost one subprocess per file on a long unpushed history.
 func validateUnpushedTip(ctx context.Context, ledgerPath, upstream string) error {
-	raw, err := gitPlumbing(ctx, ledgerPath, nil, "diff-tree", "-r", "-z", "--no-renames", "--raw", upstream, "HEAD")
+	raw, err := gitPlumbing(ctx, ledgerPath, nil, "diff-tree", "-r", "-z", "--no-renames", "--raw", upstream, "HEAD", "--", "sessions")
 	if err != nil {
 		return fmt.Errorf("diff unpushed tree: %w", err)
 	}

@@ -403,11 +403,21 @@ var ErrLedgerRepoChanged = errors.New("ledger repository changed during index bu
 
 // isLedgerRepoChanged reports whether err is the signature of a concurrent
 // repack/rebase or codedb lock contention rather than a real indexing failure.
+//
+// go-git's tree differ flattens errors with %s ("from: packfile not found"),
+// which drops the sentinel from the chain, so errors.Is alone misses that
+// shape. Matching the sentinels' messages covers wrapped and flattened errors.
 func isLedgerRepoChanged(err error) bool {
-	return errors.Is(err, plumbing.ErrObjectNotFound) ||
-		errors.Is(err, mmap.ErrObjectNotFound) ||
-		errors.Is(err, dotgit.ErrPackfileNotFound) ||
-		store.IsSQLiteBusy(err)
+	if err == nil {
+		return false
+	}
+	text := err.Error()
+	for _, sentinel := range []error{plumbing.ErrObjectNotFound, mmap.ErrObjectNotFound, dotgit.ErrPackfileNotFound} {
+		if strings.Contains(text, sentinel.Error()) {
+			return true
+		}
+	}
+	return store.IsSQLiteBusy(err)
 }
 
 // maxIndexDuration caps how long a single indexing run may take before being
