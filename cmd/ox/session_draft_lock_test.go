@@ -53,6 +53,35 @@ func TestCommitDraftLocally_WaitsForRepoLock(t *testing.T) {
 	assert.Contains(t, runGit(t, f.ledgerPath, "log", "-1", "--format=%s"), "session-draft: "+session)
 }
 
+// Purge and discard are draft writers too: started while a peer holds the repo
+// lock, each must wait for the release and then remove the draft.
+func TestDraftRemoval_WaitsForRepoLock(t *testing.T) {
+	removals := map[string]func(f *draftLedgerFixture, session string) error{
+		"purge": func(f *draftLedgerFixture, session string) error {
+			return purgeDraftSessionDir(f.ledgerPath, session)
+		},
+		"discard": func(f *draftLedgerFixture, session string) error {
+			_, err := deleteDraftFromLedger(f.ledgerPath, session)
+			return err
+		},
+	}
+	for name, remove := range removals {
+		t.Run(name, func(t *testing.T) {
+			session := "2026-01-01T00-00-testuser-OxRm" + name
+			f := newDraftLedgerFixture(t)
+			f.publish(t, session, 1)
+
+			released := holdLedgerLikeAPull(t, f.ledgerPath, 400*time.Millisecond)
+			err := remove(f, session)
+			doneAt := time.Now()
+
+			require.NoError(t, err)
+			assert.False(t, doneAt.Before(<-released), "removal must wait for the lock holder")
+			assert.NoDirExists(t, draftLedgerSessionDir(f.ledgerPath, session))
+		})
+	}
+}
+
 // A failing `git rm` inside the locked purge/discard sequence surfaces as an
 // error and releases the lock (a following lock acquisition must not hang).
 func TestDraftRemoval_GitRmFailureSurfacesAndReleasesLock(t *testing.T) {
