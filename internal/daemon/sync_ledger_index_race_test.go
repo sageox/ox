@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/sageox/ox/internal/codedb"
 	"github.com/sageox/ox/internal/codedb/index"
+	"github.com/sageox/ox/internal/codedb/store"
 )
 
 // useLedgerDataDir gives the manager a ledger index dir so a build gets past
@@ -232,6 +234,51 @@ func TestLedgerIndexRebuild_YieldsToWorktreeIndex(t *testing.T) {
 	s.triggerLedgerIndexRebuild(ctx)
 	waitLedgerBuildIdle(t, s)
 	assert.Equal(t, int32(1), builds.Load())
+}
+
+// TestBuildLedgerIndex_SetupFailuresAreReported covers failures before the walk:
+// they must surface as real (non-retryable) errors, not silent returns.
+// Failure prevented: a build that cannot even open its index looking like success,
+// so the scheduler advances the fingerprint over an index that was never built.
+func TestBuildLedgerIndex_SetupFailuresAreReported(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		setup func(t *testing.T, indexDir string)
+	}{
+		{
+			// a regular file where the index directory must go: MkdirAll fails
+			name: "index dir path is a file",
+			setup: func(t *testing.T, dir string) {
+				require.NoError(t, os.MkdirAll(filepath.Dir(dir), 0o755))
+				require.NoError(t, os.WriteFile(dir, []byte("x"), 0o600))
+			},
+		},
+		{
+			// a directory where the sqlite file is expected: codedb.Open fails
+			name: "metadata db path is a directory",
+			setup: func(t *testing.T, dir string) {
+				require.NoError(t, os.MkdirAll(filepath.Join(dir, store.MetadataDBFile), 0o755))
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			s, ledgerDir, _ := newLedgerStormScheduler(t)
+			indexDir := filepath.Join(t.TempDir(), "ledger")
+			s.codedb.ledgerDataDir = indexDir
+			tt.setup(t, indexDir)
+
+			err := s.codedb.BuildLedgerIndex(context.Background(), ledgerDir)
+			require.Error(t, err)
+			assert.False(t, errors.Is(err, ErrLedgerRepoChanged))
+		})
+	}
 }
 
 // TestBuildLedgerIndex_ClassifiesOutcome pins the contract the scheduler relies on.

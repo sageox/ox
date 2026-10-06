@@ -347,27 +347,23 @@ func (m *CodeDBManager) BuildLedgerIndex(ctx context.Context, ledgerPath string)
 		return m.ledgerBuildFailed(start, fmt.Errorf("index ledger repo: %w", err))
 	}
 
-	if _, err := db.ParseSymbols(indexCtx, nil); err != nil {
-		m.logger.Warn("codedb ledger: parse symbols failed", "error", err)
-		// non-fatal: committed content is already indexed
-		if discardIfCorrupt(err) {
-			return m.ledgerBuildFailed(start, fmt.Errorf("ledger index discarded as corrupt: %w", err))
-		}
+	// later stages are non-fatal for the content already indexed, except when
+	// they prove the index damaged and it has to be discarded for a rebuild.
+	stages := []struct {
+		name string
+		run  func() error
+	}{
+		{"parse symbols", func() error { _, err := db.ParseSymbols(indexCtx, nil); return err }},
+		{"parse comments", func() error { _, err := db.ParseComments(indexCtx, nil); return err }},
+		// ADR-019 edge backfill (idempotent)
+		{"edge backfill", func() error { _, err := db.BackfillSymbolEdges(indexCtx, nil); return err }},
 	}
-
-	if _, err := db.ParseComments(indexCtx, nil); err != nil {
-		m.logger.Warn("codedb ledger: parse comments failed", "error", err)
-		// non-fatal
-		if discardIfCorrupt(err) {
-			return m.ledgerBuildFailed(start, fmt.Errorf("ledger index discarded as corrupt: %w", err))
-		}
-	}
-
-	// ADR-019 edge backfill for ledger codedb (non-fatal, idempotent).
-	if _, err := db.BackfillSymbolEdges(indexCtx, nil); err != nil {
-		m.logger.Warn("codedb ledger: edge backfill failed", "error", err)
-		if discardIfCorrupt(err) {
-			return m.ledgerBuildFailed(start, fmt.Errorf("ledger index discarded as corrupt: %w", err))
+	for _, stage := range stages {
+		if err := stage.run(); err != nil {
+			m.logger.Warn("codedb ledger: stage failed", "stage", stage.name, "error", err)
+			if discardIfCorrupt(err) {
+				return m.ledgerBuildFailed(start, fmt.Errorf("ledger index discarded as corrupt in %s: %w", stage.name, err))
+			}
 		}
 	}
 
