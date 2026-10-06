@@ -1,10 +1,13 @@
 package session
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/paths"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -81,6 +84,89 @@ func TestWriteHoldMarker_Refusals(t *testing.T) {
 
 	require.Error(t, WriteHoldMarker(filepath.Join(ledger, "nope"), HoldManualPublishing, "test"),
 		"a hold on a folder that does not exist would hide nothing")
+}
+
+// Failure prevented: a hold that silently fails to land, a corrupt marker read
+// as valid, or a release that silently fails leaves the coworker believing a
+// session is kept (or released) when it is not.
+func TestHoldMarker_FailuresAreReported(t *testing.T) {
+	t.Run("hold on a file, not a folder", func(t *testing.T) {
+		file := filepath.Join(t.TempDir(), "raw.jsonl")
+		require.NoError(t, os.WriteFile(file, nil, 0o644))
+		require.ErrorContains(t, WriteHoldMarker(file, HoldManualPublishing, "test"), "not a directory")
+	})
+	t.Run("folder that cannot be written", func(t *testing.T) {
+		dir := t.TempDir()
+		require.NoError(t, os.Chmod(dir, 0o500))
+		t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+		// chmod does not stop root and is a no-op on Windows: prove the folder
+		// is read-only before relying on it.
+		if probe, err := os.CreateTemp(dir, "probe-*"); err == nil {
+			_ = probe.Close()
+			t.Skip("folder is still writable (root or Windows); cannot inject a write failure")
+		}
+		require.ErrorContains(t, WriteHoldMarker(dir, HoldManualPublishing, "test"), "write hold marker")
+		assert.False(t, IsHeld(dir))
+	})
+	t.Run("missing or corrupt marker", func(t *testing.T) {
+		dir := t.TempDir()
+		_, err := ReadHoldMarker(dir)
+		require.ErrorIs(t, err, fs.ErrNotExist)
+		require.NoError(t, os.WriteFile(filepath.Join(dir, HeldMarkerFile), []byte("{not json"), 0o644))
+		_, err = ReadHoldMarker(dir)
+		require.ErrorContains(t, err, "parse hold marker")
+	})
+	t.Run("release that cannot remove the marker", func(t *testing.T) {
+		dir := t.TempDir()
+		marker := filepath.Join(dir, HeldMarkerFile)
+		require.NoError(t, os.Mkdir(marker, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(marker, "stray"), nil, 0o644))
+		require.ErrorContains(t, ClearHoldMarker(dir), "release hold")
+		assert.True(t, IsHeld(dir), "a hold that could not be released still holds")
+	})
+}
+
+// Failure prevented: crash recovery publishes a recording the coworker started
+// in manual mode, or holds one started in auto mode.
+func TestHoldRecordedManual_HoldsOnlyManualRecordings(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, HoldRecordedManual(&RecordingState{SessionPath: dir, PublishingMode: config.SessionPublishingAuto}, "doctor"))
+	assert.False(t, IsHeld(dir), "an auto-mode recording is published as before")
+	require.NoError(t, HoldRecordedManual(nil, "doctor"))
+	require.NoError(t, HoldRecordedManual(&RecordingState{PublishingMode: config.SessionPublishingManual}, "doctor"),
+		"a recording with no folder has nothing to hold")
+
+	require.NoError(t, HoldRecordedManual(&RecordingState{SessionPath: dir, PublishingMode: config.SessionPublishingManual}, "doctor"))
+	hold, err := ReadHoldMarker(dir)
+	require.NoError(t, err)
+	assert.Equal(t, HoldManualPublishing, hold.Reason)
+	assert.Equal(t, "doctor", hold.Source)
+}
+
+// Failure prevented: a held copy in the XDG cache is missed, so an automatic
+// path publishes the session from the Ledger cache; or a hold is looked up in
+// the Ledger's shared tree, where anyone with push access could plant one.
+func TestHeldSessionDirs_EveryCacheButNotTheSharedTree(t *testing.T) {
+	t.Setenv("OX_XDG_DISABLE", "")
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	const repoID = "repo_heldtest"
+	ledger := filepath.Join(t.TempDir(), repoID)
+	xdgSessions := filepath.Join(paths.SessionCacheDir(repoID), "sessions")
+
+	dirs := HeldSessionDirs(ledger)
+	require.GreaterOrEqual(t, len(dirs), 2)
+	assert.Equal(t, filepath.Join(ledger, ".sageox", "cache", "sessions"), dirs[0])
+	assert.Contains(t, dirs, xdgSessions)
+	assert.NotContains(t, dirs, filepath.Join(ledger, "sessions"), "the shared tree never holds a session")
+	assert.Equal(t, []string{filepath.Join(".sageox", "cache", "sessions")}, HeldSessionDirs(""),
+		"without a Ledger path there is no repo ID, so only the Ledger cache is checked")
+
+	const name = "2026-10-05T10-00-devon-OxDeVn"
+	xdgCopy := filepath.Join(xdgSessions, name)
+	require.NoError(t, os.MkdirAll(xdgCopy, 0o755))
+	assert.False(t, IsHeldInLedger(ledger, name))
+	require.NoError(t, WriteHoldMarker(xdgCopy, HoldManualPublishing, "test"))
+	assert.True(t, IsHeldInLedger(ledger, name), "a hold on the XDG copy holds the session")
 }
 
 func TestHeldAnywhere_MatchesByName(t *testing.T) {

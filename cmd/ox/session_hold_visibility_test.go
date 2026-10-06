@@ -5,10 +5,47 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// Failure prevented: an AI coworker running agent doctor is told nothing about
+// sessions the coworker keeps on this machine, or is nudged to publish them
+// without being asked (GH #1095).
+func TestBuildAgentDoctorOutput_ReportsHeldSessionsWithoutPublishing(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git operations")
+	}
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	projectRoot, ledgerPath := t.TempDir(), t.TempDir()
+	runGit(t, projectRoot, "init")
+	runGit(t, ledgerPath, "init")
+	require.NoError(t, os.MkdirAll(filepath.Join(projectRoot, ".sageox"), 0o755))
+	require.NoError(t, config.SaveLocalConfig(projectRoot, &config.LocalConfig{Ledger: &config.LedgerConfig{Path: ledgerPath}}))
+	t.Chdir(projectRoot)
+
+	cache := filepath.Join(ledgerPath, ".sageox", "cache", "sessions")
+	mk := func(name string) string {
+		dir := filepath.Join(cache, name)
+		require.NoError(t, os.MkdirAll(dir, 0o755))
+		writeTestRawJSONLWithEntries(t, filepath.Join(dir, ledgerFileRaw), 2)
+		return dir
+	}
+	const held, waiting = "2026-10-05T09-00-a-OxHeld", "2026-10-05T09-01-a-OxWait"
+	require.NoError(t, session.WriteHoldMarker(mk(held), session.HoldManualPublishing, "test"))
+	mk(waiting)
+
+	out := buildAgentDoctorOutput("OxTest", projectRoot)
+
+	assert.Equal(t, []string{held}, out.HeldSessions)
+	assert.Equal(t, []string{waiting}, out.CacheOnlySessions)
+	assert.Contains(t, out.NextSteps,
+		"Held on this machine: "+held+". Publish only if the coworker asks: 'ox session upload "+held+"'")
+	assert.True(t, session.IsHeld(filepath.Join(cache, held)), "reporting a hold never releases it")
+	assert.NoDirExists(t, filepath.Join(ledgerPath, "sessions"), "agent doctor never publishes")
+}
 
 // Failure prevented: doctor and status report nothing to do while sessions sit
 // unpublished in the cache (GH #1095, #1077), or list one twice, or list a
