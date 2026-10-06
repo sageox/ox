@@ -277,7 +277,7 @@ func executeWithFrictionRecovery(ctx context.Context, args []string, attempt int
 	if errors.As(err, &commandExit) {
 		return commandExit.ExitCode
 	}
-	if errors.Is(err, tea.ErrInterrupted) || (errors.Is(err, context.Canceled) && ctx.Err() != nil) {
+	if errors.Is(err, tea.ErrInterrupted) || ctx.Err() != nil {
 		fmt.Fprintln(os.Stderr, "Interrupted.")
 		return 130
 	}
