@@ -233,3 +233,46 @@ func TestRecordLedgerSyncVerdict(t *testing.T) {
 		})
 	}
 }
+
+// TestLedgerSyncBlockers_CodeNamesTheCause checks the code usage telemetry
+// sends for a Ledger that did not sync.
+// Failure prevented: a symptom (backoff, commits behind) reported instead of
+// its cause (a wedged rebase), or a daemon issue's summary, a lock file name,
+// or a count reaching PostHog.
+func TestLedgerSyncBlockers_CodeNamesTheCause(t *testing.T) {
+	t.Parallel()
+	backoff := daemon.DaemonIssue{Type: daemon.IssueTypeSyncBackoff, Repo: "ledger", Summary: "suspended at /Users/x/secret"}
+	tests := []struct {
+		name  string
+		facts ledgerSyncFacts
+		want  string
+	}{
+		{"backoff alone", ledgerSyncFacts{Issues: []daemon.DaemonIssue{backoff}}, daemon.IssueTypeSyncBackoff},
+		{"behind alone", ledgerSyncFacts{UpstreamKnown: true, Behind: 4}, "behind"},
+		{"the observed incident: the wedged rebase, not its symptoms", ledgerSyncFacts{
+			Issues: []daemon.DaemonIssue{backoff}, RebaseInProgress: true, StaleLocks: []string{"next-index-4242.lock"},
+			UpstreamKnown: true, Ahead: 19, Behind: 3561,
+		}, "rebase_in_progress"},
+		{"could not look outranks everything", ledgerSyncFacts{
+			InspectErr: errors.New("daemon status: refused"), Issues: []daemon.DaemonIssue{backoff},
+		}, "inspect_failed"},
+		{"diverged before backoff", ledgerSyncFacts{Issues: []daemon.DaemonIssue{
+			backoff, {Type: daemon.IssueTypeDiverged, Repo: "ledger", Summary: "diverged"},
+		}}, daemon.IssueTypeDiverged},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			blockers := ledgerSyncBlockers(tt.facts)
+			got := primaryLedgerSyncCode(blockers)
+			require.Equal(t, tt.want, got)
+			require.Contains(t, ledgerSyncCodeOrder, got, "every code has a rank")
+			require.Len(t, blockers, len(classifyLedgerSync(tt.facts)), "one code per reason a person reads")
+		})
+	}
+	require.Equal(t, "unknown", primaryLedgerSyncCode(nil))
+	// A blocking issue type added without a rank would be reported as unknown.
+	for issueType := range blockingLedgerIssueTypes {
+		require.Contains(t, ledgerSyncCodeOrder, issueType, "rank %s in ledgerSyncCodeOrder", issueType)
+	}
+}

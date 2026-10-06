@@ -31,6 +31,20 @@ func TestIsSilent(t *testing.T) {
 	}
 }
 
+// TestSilent keeps a printed failure silent while its cause stays readable.
+// Failure prevented: a --json command's failure reaching usage telemetry as
+// cli.SilentError, or a silent failure gaining a message that friction then
+// parses as a typo.
+func TestSilent(t *testing.T) {
+	cause := errors.New("daemon sync: dial unix: connection refused")
+	err := Silent(cause)
+	assert.True(t, IsSilent(err))
+	assert.ErrorIs(t, err, ErrSilent)
+	assert.ErrorIs(t, err, cause)
+	assert.Empty(t, err.Error(), "same as ErrSilent: nothing to print or parse")
+	assert.Equal(t, ErrSilent, Silent(nil))
+}
+
 func TestSilentError_Error(t *testing.T) {
 	assert.Equal(t, "", SilentError{}.Error())
 }

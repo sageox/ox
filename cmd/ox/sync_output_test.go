@@ -103,7 +103,10 @@ func TestFinishSync_PreservesOperationAndWriterErrors(t *testing.T) {
 	})
 	require.Contains(t, output, `"success": true`)
 	output = captureStdoutForPlanCLI(t, func() {
-		require.ErrorIs(t, finishSync(cmd, SyncResult{Success: false}, true, operationErr), cli.ErrSilent)
+		err := finishSync(cmd, SyncResult{Success: false}, true, operationErr)
+		require.ErrorIs(t, err, cli.ErrSilent)
+		require.ErrorIs(t, err, operationErr, "--json must keep the cause for usage telemetry")
+		require.Empty(t, err.Error(), "--json already printed the failure")
 	})
 	require.Contains(t, output, `"success": false`)
 }
@@ -179,21 +182,25 @@ func TestRunSync_ReportsStartupAndAggregatedFailures(t *testing.T) {
 
 	t.Run("transport and convergence", func(t *testing.T) {
 		cmd, output := newSyncRuntimeTestCommand(t)
+		ledgerErr, teamErr, convergeErr := errors.New("ledger broke"), errors.New("team broke"), errors.New("projection broke")
 		stubSyncRuntime(t,
 			func(bool) error { return nil },
-			func(context.Context, bool, *SyncResult) error { return errors.New("ledger broke") },
+			func(context.Context, bool, *SyncResult) error { return ledgerErr },
 			nil,
-			func(context.Context, bool, *SyncResult) error { return errors.New("team broke") },
+			func(context.Context, bool, *SyncResult) error { return teamErr },
 			func(_ context.Context, _ string, result *SyncResult) error {
 				result.Convergence.Status = "failed"
 				result.Convergence.Detail = "projection broke"
-				return errors.New("projection broke")
+				return convergeErr
 			},
 		)
 		err := runSync(cmd, nil)
-		require.ErrorContains(t, err, "ledger broke")
-		require.ErrorContains(t, err, "team broke")
-		require.ErrorContains(t, err, "projection broke")
+		// The message a person reads is exactly what sync always printed, and
+		// every stage's error is still reachable for usage telemetry.
+		require.EqualError(t, err, "ledger broke; team broke\nprojection broke")
+		require.ErrorIs(t, err, ledgerErr)
+		require.ErrorIs(t, err, teamErr)
+		require.ErrorIs(t, err, convergeErr)
 		require.Contains(t, output.String(), "Transport: failed")
 		require.Contains(t, output.String(), "ledger broke; team broke")
 		require.Contains(t, output.String(), "projection broke")

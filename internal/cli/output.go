@@ -384,6 +384,24 @@ func (e SilentError) Error() string { return "" }
 // ErrSilent is a sentinel error indicating output was already printed.
 var ErrSilent = SilentError{}
 
+// Silent marks a failure whose output was already displayed, like ErrSilent,
+// and keeps err in the chain so errors.Is and errors.As (and usage telemetry)
+// still see what failed. Its message is empty, exactly like ErrSilent's, so
+// nothing that prints or parses error text behaves differently. Use it, not
+// errors.Join(ErrSilent, err), whose message is err's. Silent(nil) is ErrSilent.
+func Silent(err error) error {
+	if err == nil {
+		return ErrSilent
+	}
+	return silentCause{err: err}
+}
+
+type silentCause struct{ err error }
+
+func (silentCause) Error() string { return "" }
+
+func (s silentCause) Unwrap() []error { return []error{ErrSilent, s.err} }
+
 // IsSilent checks if an error is a silent error (already displayed).
 func IsSilent(err error) bool {
 	var silentErr SilentError

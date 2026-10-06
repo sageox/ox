@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -226,6 +227,8 @@ func TestPostHog_EverydayFailuresSayWhatWentWrong(t *testing.T) {
 		{repo, []string{"session", "score", "0.5"}, "session score", "other", "SAGEOX_AGENT_ID not set -- run 'ox agent prime' first"},
 		{repo, []string{"agent", "OxAbcd", "session", "start"}, "agent session start", "other", "instance not found: %s"},
 		{repo, []string{"sync"}, "sync", "daemon", "daemon start disabled: OX_NO_DAEMON=1"},
+		// How AI coworkers run it: the failure is printed as JSON, not as an error.
+		{repo, []string{"sync", "--json"}, "sync", "daemon", "daemon start disabled: OX_NO_DAEMON=1"},
 	}
 	for _, f := range failures {
 		output, code, _ := testguard.RunOx(t, e.bin, f.dir, e.env, f.args...)
@@ -234,5 +237,9 @@ func TestPostHog_EverydayFailuresSayWhatWentWrong(t *testing.T) {
 		assert.Equal(t, f.command, props["command"], "%v", f.args)
 		assert.Equal(t, f.kind, props["error_kind"], "%v", f.args)
 		assert.Equal(t, f.detail, props["error_detail"], "%v", f.args)
+		if slices.Contains(f.args, "--json") {
+			assert.Contains(t, output, `"success": false`, "the failure is reported as JSON")
+			assert.NotContains(t, output, "Error:", "and not printed a second time as an error")
+		}
 	}
 }
