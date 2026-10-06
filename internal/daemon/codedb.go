@@ -364,6 +364,11 @@ func (m *CodeDBManager) BuildLedgerIndex(ctx context.Context, ledgerPath string)
 			if discardIfCorrupt(err) {
 				return m.ledgerBuildFailed(start, fmt.Errorf("ledger index discarded as corrupt in %s: %w", stage.name, err))
 			}
+			// lock contention is "try again", not "symbols are optional": without this
+			// the scheduler would record the fingerprint over a half-parsed index
+			if store.IsSQLiteBusy(err) {
+				return m.ledgerBuildFailed(start, fmt.Errorf("%s: %w", stage.name, err))
+			}
 		}
 	}
 
