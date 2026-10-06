@@ -75,6 +75,28 @@ func TestRestoreUnpushedSessionPointers_UntracksDraftArtifacts(t *testing.T) {
 	assert.Empty(t, mustGitStatus(t, ledger, "sessions/"+draftName), "no stray files are left in the draft directory")
 }
 
+// TestRestoreUnpushedSessionPointers_DraftCacheConflictFailsClosed covers a cache that already holds
+// different bytes for a draft artifact. Untracking it would leave the committed bytes with no copy
+// outside git history, so it stays tracked and is reported while the others are untracked.
+func TestRestoreUnpushedSessionPointers_DraftCacheConflictFailsClosed(t *testing.T) {
+	ledger := newWedgedLedger(t, false)
+	commitDraftArtifacts(t, ledger, draftName)
+	cache := filepath.Join(ledger, ".sageox", "cache", "sessions", draftName, "raw.jsonl")
+	require.NoError(t, os.MkdirAll(filepath.Dir(cache), 0o755))
+	require.NoError(t, os.WriteFile(cache, []byte("a different recording\n"), 0o600))
+
+	report, err := restoreUnpushedSessionPointers(context.Background(), ledger, true, nil)
+
+	require.NoError(t, err)
+	require.Len(t, report.Unrepairable, 1)
+	assert.Equal(t, "sessions/"+draftName+"/raw.jsonl", report.Unrepairable[0].Path)
+	assert.Contains(t, report.Unrepairable[0].Reason, "differs")
+	assert.Len(t, report.Untracked, 2)
+	assert.Equal(t, draftArtifacts["raw.jsonl"], ledgerFile(t, ledger, "HEAD:sessions/"+draftName+"/raw.jsonl"))
+	kept, _ := os.ReadFile(cache)
+	assert.Equal(t, "a different recording\n", string(kept))
+}
+
 // TestRestoreUnpushedSessionPointers_BulkUntrackPassesSacredGuard covers a repair that removes more
 // files than the sacred mass-delete guard allows in one commit. The bytes are in the cache, so the
 // repair must go through, and it must not leave the override set for the rest of the process.
