@@ -140,6 +140,12 @@ func everRegisteredFromRecording(recPath string) bool {
 }
 
 func runAgentSessionAbortByName(inst *agentinstance.Instance, cmd *cobra.Command, nameArg string) error {
+	// ".." resolves to the Ledger root, which reads as a finalized session, so
+	// the kill would `git rm -r --force .` and push it to the team.
+	if err := session.ValidateDraftSessionName(nameArg); err != nil {
+		return err
+	}
+
 	projectRoot, err := findProjectRoot()
 	if err != nil {
 		return fmt.Errorf("could not find project root: %w", err)

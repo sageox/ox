@@ -613,58 +613,32 @@ func (r *Redactor) RedactStringWithDetails(input string) (output string, results
 	return output, results
 }
 
-// RedactEntry redacts secrets from an Entry's content.
+// RedactEntry redacts secrets from an Entry's Content, ToolInput and ToolOutput.
 // Returns true if any secrets were found and redacted.
 func (r *Redactor) RedactEntry(entry *Entry) (redacted bool) {
 	if entry == nil {
 		return false
 	}
-
-	output, found := r.RedactString(entry.Content)
-	if len(found) > 0 {
-		entry.Content = output
-		return true
+	for _, field := range []*string{&entry.Content, &entry.ToolInput, &entry.ToolOutput} {
+		if *field == "" {
+			continue
+		}
+		if output, found := r.RedactString(*field); len(found) > 0 {
+			*field = output
+			redacted = true
+		}
 	}
-
-	return false
+	return redacted
 }
 
 // RedactEntries redacts all entries in a slice.
 // Returns the count of entries that contained secrets (in any field).
 func (r *Redactor) RedactEntries(entries []Entry) (count int) {
 	for i := range entries {
-		hadSecrets := false
-
-		// redact Content
-		output, found := r.RedactString(entries[i].Content)
-		if len(found) > 0 {
-			entries[i].Content = output
-			hadSecrets = true
-		}
-
-		// redact ToolInput if present
-		if entries[i].ToolInput != "" {
-			inputOut, inputFound := r.RedactString(entries[i].ToolInput)
-			if len(inputFound) > 0 {
-				entries[i].ToolInput = inputOut
-				hadSecrets = true
-			}
-		}
-
-		// redact ToolOutput if present
-		if entries[i].ToolOutput != "" {
-			outputOut, outputFound := r.RedactString(entries[i].ToolOutput)
-			if len(outputFound) > 0 {
-				entries[i].ToolOutput = outputOut
-				hadSecrets = true
-			}
-		}
-
-		if hadSecrets {
+		if r.RedactEntry(&entries[i]) {
 			count++
 		}
 	}
-
 	return count
 }
 

@@ -41,6 +41,11 @@ func runAgentSessionDelete(inst *agentinstance.Instance, cmd *cobra.Command, arg
 	}
 
 	sessionName := args[0]
+	// ".." would name the Ledger root, so the delete would become
+	// `git rm -r --force .` and push it to the team.
+	if err := session.ValidateDraftSessionName(sessionName); err != nil {
+		return err
+	}
 
 	projectRoot, err := findProjectRoot()
 	if err != nil {

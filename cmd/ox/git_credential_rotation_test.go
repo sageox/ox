@@ -189,6 +189,43 @@ func TestLFSCLICancellationDuringBearerRotation(t *testing.T) {
 	}
 }
 
+// Failure prevented: `ox fetch` on a stub inside a third-party clone sends the
+// SageOx Git PAT to that clone's origin, and a 401 from it mints a fresh one.
+func TestFetchNeverSendsGitPATToAForeignOrigin(t *testing.T) {
+	if testing.Short() {
+		t.Skip("real Git repos")
+	}
+	var minted, leaked atomic.Int32
+	sageox := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(api.ReposResponse{Token: fmt.Sprintf("fresh-pat-%d", minted.Add(1)), ExpiresAt: time.Now().Add(24 * time.Hour)})
+	}))
+	t.Cleanup(sageox.Close)
+	foreign := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, _, ok := r.BasicAuth(); ok {
+			leaked.Add(1)
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	t.Cleanup(foreign.Close)
+	setupAuthRenderEnv(t, sageox.URL, validTeamToken)
+	require.NoError(t, gitserver.SaveCredentialsForEndpoint(sageox.URL, gitserver.GitCredentials{Token: "cached-pat", ExpiresAt: time.Now().Add(24 * time.Hour), BearerTokenHash: gitserver.BearerTokenFingerprint(validTeamToken)}))
+	root := createInitializedProjectWithConfig(t, nil)
+	t.Chdir(root)
+	clone := filepath.Join(root, "third-party")
+	hostedTestGit(t, root, "init", clone)
+	// Hosts are compared by name, not port, so the foreign origin needs its own name.
+	hostedTestGit(t, clone, "remote", "add", "origin", strings.Replace(foreign.URL, "127.0.0.1", "localhost", 1)+"/attacker/repo.git")
+	stub := writeTestPointerFile(t, filepath.Join(clone, "assets"), "model.bin", validFetchOID, 3)
+
+	cmd := &cobra.Command{}
+	cmd.SetOut(io.Discard)
+	err := runFetch(cmd, []string{stub})
+
+	assert.Zero(t, leaked.Load(), "the SageOx Git PAT must never reach another host")
+	assert.Zero(t, minted.Load(), "no PAT may be minted for another host")
+	assert.ErrorContains(t, err, "localhost, which is not its git server")
+}
+
 // Failure prevented: status accepts a foreign PAT or fails to refresh a rejected one.
 func TestStatusRepairsRejectedPATs(t *testing.T) {
 	if testing.Short() || runtime.GOOS == "windows" {

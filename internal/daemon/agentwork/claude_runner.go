@@ -138,16 +138,25 @@ func (r *ClaudeRunner) Run(ctx context.Context, req RunRequest) (*RunResult, err
 	defer cancel()
 
 	// --permission-mode bypassPermissions: see the equivalent comment in
-	// pkg/sessionsummary/claude.go. The daemon ALSO runs claude in `-p`
-	// mode for session summarization; without this flag the LLM hits a
-	// permission prompt and produces narration that fails validation,
-	// resulting in the failure-marker-stub output that clobbered 31
-	// Phase 2 sessions on 2026-04-25 (bd ox-5cc9, ox-91sl).
+	// pkg/sessionsummary/claude.go. In `-p` mode a permission prompt has no
+	// one to answer it, so the LLM narrates the block instead of answering;
+	// that produced the failure-marker stubs that clobbered 31 Phase 2
+	// sessions on 2026-04-25 (bd ox-5cc9, ox-91sl). An isolated run has no
+	// tools, so it never reaches a prompt and does not get the bypass.
 	args := []string{"--output-format", "stream-json", "--verbose"}
-	if req.Isolated {
-		if err := checkClaudeIsolation(ctx, r.binaryPath); err != nil {
+	isolated := false
+	if req.Isolated || req.IsolateIfSupported {
+		err := checkClaudeIsolation(ctx, r.binaryPath)
+		switch {
+		case err == nil:
+			isolated = true
+		case req.Isolated:
 			return nil, err
+		default:
+			r.logger.Warn("running claude without isolation; update Claude Code", "error", err)
 		}
+	}
+	if isolated {
 		args = append(args, claudeIsolatedArgs()...)
 	} else {
 		args = append(args, "--permission-mode", "bypassPermissions")
@@ -164,7 +173,7 @@ func (r *ClaudeRunner) Run(ctx context.Context, req RunRequest) (*RunResult, err
 
 	cmd := exec.CommandContext(ctx, r.binaryPath, args...)
 	cmd.Stdin = strings.NewReader(req.Prompt)
-	if req.Isolated {
+	if isolated {
 		cmd.Env = append(os.Environ(), isolatedEnv...)
 	}
 	if req.WorkDir != "" {

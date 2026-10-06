@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -228,6 +229,44 @@ func TestInstallAdapter_RejectsAttackerDownloadHost(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "allowlist") {
 		t.Errorf("error should mention host allowlist, got: %v", err)
+	}
+}
+
+// TestInstallAdapter_RejectsRedirectOffAllowlist: the host guard covers every
+// redirect hop, not only the asset URL the release lists. On the unverified
+// path there is no checksum gate behind it, so a followed redirect would install
+// and run bytes from any host.
+func TestInstallAdapter_RejectsRedirectOffAllowlist(t *testing.T) {
+	f := newFakeReleaseServer(t, "v1.0.0", []byte("bytes"))
+	// f.srv.Client() dials *.example.com to f.srv, so the redirect target is
+	// reachable and only the per-hop check stops the download.
+	redirector := httptest.NewTLSServer(http.RedirectHandler("https://attacker.example.com/asset", http.StatusFound))
+	t.Cleanup(redirector.Close)
+	f.assetHost = redirector.URL
+	allowed, err := url.Parse(redirector.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	verifyCalled := false
+	cfg := installConfig{
+		plan: installPlan{
+			owner: "someone", repo: "adapter", tag: "v1.0.0",
+			platform: fmt.Sprintf("%s_%s", runtime.GOOS, runtime.GOARCH),
+		},
+		apiBaseURL:   f.srv.URL,
+		httpClient:   f.srv.Client(),
+		allowedHosts: map[string]bool{allowed.Hostname(): true},
+		installDir:   t.TempDir(),
+		verify:       func(string) error { verifyCalled = true; return nil },
+	}
+
+	err = installAdapter(cfg)
+	if err == nil || !strings.Contains(err.Error(), "allowlist") {
+		t.Fatalf("install must refuse a redirect off the allowlist, got: %v", err)
+	}
+	if verifyCalled {
+		t.Error("a refused download must never reach verify")
 	}
 }
 

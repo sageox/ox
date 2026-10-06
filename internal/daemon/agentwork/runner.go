@@ -33,6 +33,9 @@ type RunRequest struct {
 	// or user config, no persisted session, and recording off. A CLI too old
 	// to isolate fails the run; it is never retried with broader permissions.
 	Isolated bool
+	// IsolateIfSupported isolates the run when this CLI can, and otherwise runs
+	// it as the daemon always has, so a CLI too old to isolate keeps working.
+	IsolateIfSupported bool
 }
 
 // RunResult captures the outcome of an agent invocation.

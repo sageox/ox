@@ -1202,6 +1202,9 @@ func (h *SessionFinalizeHandler) BuildPrompt(item *WorkItem) (RunRequest, error)
 		Prompt:  prompt,
 		WorkDir: payload.LedgerPath,
 		Model:   sessionsummary.DefaultSummaryModel(),
+		// The transcript holds whatever the session read, prompt injection
+		// included, and the summary needs no tools.
+		IsolateIfSupported: true,
 	}, nil
 }
 

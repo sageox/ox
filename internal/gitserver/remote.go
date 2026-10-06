@@ -75,6 +75,22 @@ func RefreshRemoteCredentials(repoPath, endpointURL string) error {
 	return nil
 }
 
+// RemoteOnGitServer reports whether remoteURL is on the git server behind
+// endpointURL: the server the SageOx API named when it issued the credentials
+// (serverURL, empty when unknown), or the endpoint's host or that host with a
+// git. prefix. Scheme and port are ignored.
+func RemoteOnGitServer(remoteURL, endpointURL, serverURL string) bool {
+	host := extractHost(remoteURL)
+	if host == "" {
+		return false
+	}
+	if serverURL != "" && host == extractHost(serverURL) {
+		return true
+	}
+	repoEp := endpointFromRemoteURL(remoteURL)
+	return repoEp != "" && endpointHostsEqual(endpointURL, repoEp)
+}
+
 // endpointHostsEqual returns true if two endpoint URLs name the same host
 // (case-insensitive, scheme-insensitive, ignoring trailing slash). Used by
 // RefreshRemoteCredentials to decide whether the caller's endpoint matches
