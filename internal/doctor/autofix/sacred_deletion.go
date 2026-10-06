@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/sageox/ox/internal/gitutil"
@@ -50,15 +52,24 @@ func checkLedgerSacredDeletion(ctx context.Context, ledgerPath string) CheckResu
 func scanLedgerSacredDeletions(ctx context.Context, ledgerPath, repoPath string) CheckResult {
 	// One bounded log walk: for each commit, its deleted paths under the sacred
 	// prefixes, grouped by a marker-prefixed header line.
-	args := append([]string{
+	//
+	// With an upstream, only unpushed commits are scanned: a deletion already on
+	// origin is a teammate's finished cleanup that cannot be prevented here, and
+	// re-reporting it every cycle is noise. Without one, fall back to the
+	// bounded full-history walk.
+	args := []string{
 		"log",
 		fmt.Sprintf("-n%d", sacredDeletionScanDepth),
 		"--no-merges",
 		"--diff-filter=D",
 		"--pretty=format:" + commitMarker + "%H",
 		"--name-only",
-		"--",
-	}, sacred.Prefixes...)
+	}
+	if _, err := gitutil.RunGit(ctx, ledgerPath, "rev-parse", "--verify", "--quiet", "@{u}"); err == nil {
+		args = append(args, "@{u}..HEAD")
+	}
+	args = append(args, "--")
+	args = append(args, sacred.Prefixes...)
 	out, err := gitutil.RunGit(ctx, ledgerPath, args...)
 	if err != nil {
 		return CheckResult{
@@ -123,6 +134,15 @@ func scanLedgerSacredDeletions(ctx context.Context, ledgerPath, repoPath string)
 	}
 	flush()
 
+	// Alert once per commit across cycles and daemon restarts.
+	alerted := loadAlertedCommits(ledgerPath)
+	fresh := hits[:0]
+	for _, h := range hits {
+		if !alerted[h.commit] {
+			fresh = append(fresh, h)
+		}
+	}
+	hits = fresh
 	if len(hits) == 0 {
 		return CheckResult{Status: StatusClean, Repo: repoPath}
 	}
@@ -143,6 +163,11 @@ func scanLedgerSacredDeletions(ctx context.Context, ledgerPath, repoPath string)
 		"sacred_deletions_total", total,
 		"sample", sample,
 		"threshold", sacred.DetectorEntityThreshold)
+	shas := make([]string, len(hits))
+	for i, h := range hits {
+		shas[i] = h.commit
+	}
+	recordAlertedCommits(ledgerPath, shas)
 	return CheckResult{
 		Status: StatusFound,
 		Repo:   repoPath,
@@ -226,6 +251,40 @@ func entityPopulation(ctx context.Context, ledgerPath, treeish string) (int, boo
 		}
 	}
 	return total, true
+}
+
+// alertedCommitsFile lists commits already alerted on, one sha per line. It
+// lives in the ledger's gitignored cache dir so it survives daemon restarts and
+// is shared across worktrees, but never syncs.
+func alertedCommitsFile(ledgerPath string) string {
+	return filepath.Join(ledgerPath, ".sageox", "cache", "sacred-deletion-alerted")
+}
+
+func loadAlertedCommits(ledgerPath string) map[string]bool {
+	alerted := map[string]bool{}
+	data, err := os.ReadFile(alertedCommitsFile(ledgerPath))
+	if err != nil {
+		return alerted // missing file just means nothing alerted yet
+	}
+	for _, line := range strings.Fields(string(data)) {
+		alerted[line] = true
+	}
+	return alerted
+}
+
+// recordAlertedCommits is best effort: a write failure only risks a repeat
+// alert, which is the safe direction for a detector.
+func recordAlertedCommits(ledgerPath string, shas []string) {
+	path := alertedCommitsFile(ledgerPath)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	_, _ = f.WriteString(strings.Join(shas, "\n") + "\n")
 }
 
 // shortSHA abbreviates a commit id for bounded log/summary output.
