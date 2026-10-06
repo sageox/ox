@@ -168,12 +168,13 @@ func upstreamCleanContent(ctx context.Context, ledgerPath, upstream, path string
 	return out, true
 }
 
-// keepUpstreamSide drops every "=======" .. ">>>>>>>" stash half and the marker lines, keeping
+// keepUpstreamSide drops the stash half (and any diff3 base section) and the marker lines, keeping
 // the "Updated upstream" half. It reports false on an unbalanced or orphaned marker.
 func keepUpstreamSide(data []byte) ([]byte, bool) {
 	const (
 		outside = iota
 		upstreamSide
+		baseSide // diff3 and zdiff3 add a "||||||| base" section between the two halves
 		stashSide
 	)
 	state := outside
@@ -186,14 +187,16 @@ func keepUpstreamSide(data []byte) ([]byte, bool) {
 				return nil, false
 			}
 			state = upstreamSide
-		case trimmed == "=======" && state == upstreamSide:
+		case strings.HasPrefix(line, "||||||| ") && state == upstreamSide:
+			state = baseSide
+		case trimmed == "=======" && (state == upstreamSide || state == baseSide):
 			state = stashSide
 		case strings.HasPrefix(line, ">>>>>>> "):
 			if state != stashSide {
 				return nil, false
 			}
 			state = outside
-		case state != stashSide:
+		case state == outside || state == upstreamSide:
 			kept = append(kept, line)
 		}
 	}

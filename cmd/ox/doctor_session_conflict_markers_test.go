@@ -129,3 +129,27 @@ func TestResolveCommittedConflictMarkers(t *testing.T) {
 		assert.False(t, report.Committed)
 	})
 }
+
+// diff3/zdiff3 conflict style adds a base section that must be dropped with the stash side.
+func TestKeepUpstreamSide(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+		ok   bool
+	}{
+		{"two-way", autostashConflict, "{\n\"title\":\"kept\"\n}\n", true},
+		{"diff3 base dropped", "{\n<<<<<<< Updated upstream\n\"a\":1\n||||||| base\n\"a\":0\n=======\n\"a\":2\n>>>>>>> Stashed changes\n}\n", "{\n\"a\":1\n}\n", true},
+		{"orphaned tail", "{}\n=======\n>>>>>>> Stashed changes\n", "", false},
+		{"unterminated block", "<<<<<<< Updated upstream\n{}\n=======\n", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := keepUpstreamSide([]byte(tt.in))
+			assert.Equal(t, tt.ok, ok)
+			if ok {
+				assert.Equal(t, tt.want, string(got))
+			}
+		})
+	}
+}
