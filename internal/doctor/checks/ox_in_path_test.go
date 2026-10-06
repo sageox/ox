@@ -209,6 +209,16 @@ func TestBashStartupFile(t *testing.T) {
 	}
 }
 
+// TestFileExists: bashStartupFile counts a regular file only.
+func TestFileExists(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, ".profile")
+	require.NoError(t, os.WriteFile(file, nil, 0o644))
+	assert.True(t, fileExists(file))
+	assert.False(t, fileExists(dir), "a directory is not a startup file")
+	assert.False(t, fileExists(filepath.Join(dir, ".bash_profile")))
+}
+
 // hostileDirs are install directories whose names a shell would expand or
 // run if pasted unescaped inside double quotes.
 var hostileDirs = []string{
