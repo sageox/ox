@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -56,7 +57,7 @@ func TestStatusRepairsRejectedPATs(t *testing.T) {
 		t.Skip("git not available")
 	}
 	for _, surface := range []string{"human", "json"} {
-		for _, outcome := range []string{"repaired", "bearer rejected", "replacement rejected"} {
+		for _, outcome := range []string{"repaired", "bearer rejected", "replacement rejected", "rotation refresh rejected"} {
 			t.Run(surface+"/"+outcome, func(t *testing.T) {
 				root := t.TempDir()
 				t.Chdir(root)
@@ -74,6 +75,10 @@ func TestStatusRepairsRejectedPATs(t *testing.T) {
 					case "old-pat":
 						if strings.HasSuffix(r.URL.Path, "/info/refs") {
 							oldProbes.Add(1)
+						}
+						if outcome == "rotation refresh rejected" {
+							backend.ServeHTTP(w, r)
+							return
 						}
 					case "fresh-pat":
 						if strings.HasSuffix(r.URL.Path, "/info/refs") {
@@ -97,7 +102,7 @@ func TestStatusRepairsRejectedPATs(t *testing.T) {
 					case "/api/v1/cli/repos":
 						refreshCalls.Add(1)
 						assert.Equal(t, "Bearer "+validTeamToken, r.Header.Get("Authorization"))
-						if outcome == "bearer rejected" {
+						if outcome == "bearer rejected" || outcome == "rotation refresh rejected" {
 							w.WriteHeader(http.StatusUnauthorized)
 							return
 						}
@@ -112,14 +117,22 @@ func TestStatusRepairsRejectedPATs(t *testing.T) {
 				}))
 				t.Cleanup(apiServer.Close)
 				setupAuthRenderEnv(t, apiServer.URL, validTeamToken)
+				cachedBearer := validTeamToken
+				if outcome == "rotation refresh rejected" {
+					cachedBearer = "oxt_rotated_1lKvCA"
+				}
 				require.NoError(t, gitserver.SaveCredentialsForEndpoint(apiServer.URL, gitserver.GitCredentials{
 					Token: "old-pat", ServerURL: gitServer.URL, ExpiresAt: time.Now().Add(24 * time.Hour),
-					BearerTokenHash: gitserver.BearerTokenFingerprint(validTeamToken),
+					BearerTokenHash: gitserver.BearerTokenFingerprint(cachedBearer),
 					Repos:           map[string]gitserver.RepoEntry{"team_test": {Name: "ledger", Type: "team-context", URL: gitServer.URL + "/ledger.git"}},
 				}))
-				_, err := auth.RefreshGitCredentialsForEndpoint(apiServer.URL, false)
-				require.NoError(t, err)
-				require.Zero(t, refreshCalls.Load(), "the fresh matching cache must initially skip refresh")
+				_, err := auth.RefreshGitCredentialsForEndpoint(context.Background(), apiServer.URL, false)
+				if outcome == "rotation refresh rejected" {
+					require.ErrorIs(t, err, api.ErrUnauthorized)
+				} else {
+					require.NoError(t, err)
+					require.Zero(t, refreshCalls.Load(), "the fresh matching cache must initially skip refresh")
+				}
 				var guidance string
 				if surface == "human" {
 					guidance = renderAuthStatus("/tmp/auth.json")
@@ -137,13 +150,20 @@ func TestStatusRepairsRejectedPATs(t *testing.T) {
 					guidance = output.Auth.GitPATReason
 				}
 				require.EqualValues(t, 1, refreshCalls.Load(), "a Git rejection must force exactly one refresh")
-				require.EqualValues(t, 1, oldProbes.Load(), "the old PAT must be probed once")
-				if outcome == "bearer rejected" {
+				if outcome == "rotation refresh rejected" {
+					require.Zero(t, oldProbes.Load(), "status must not use an old bearer's still-live PAT")
+					assert.Contains(t, guidance, "refresh required")
+					assert.Contains(t, guidance, "unverified for the current token")
+					assert.NotContains(t, guidance, "✓ valid")
+				} else {
+					require.EqualValues(t, 1, oldProbes.Load(), "the old PAT must be probed once")
+				}
+				if outcome == "bearer rejected" || outcome == "rotation refresh rejected" {
 					assert.Zero(t, freshProbes.Load(), "a failed refresh must not probe the cached PAT again")
 				} else {
 					assert.EqualValues(t, 1, freshProbes.Load(), "the replacement PAT must be probed once")
 				}
-				if outcome != "repaired" {
+				if outcome != "repaired" && outcome != "rotation refresh rejected" {
 					assert.Contains(t, guidance, "Rotate or re-mint")
 					assert.NotContains(t, guidance, "ox login")
 				}

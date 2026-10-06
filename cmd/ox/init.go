@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1099,7 +1100,7 @@ func runInit() error {
 // fetchGitCredentials fetches git credentials from GET /api/v1/cli/repos (team context repos only).
 // Returns the credentials without saving them. Ledger URLs come from a separate API.
 func fetchGitCredentials(client *api.RepoClient) (*gitserver.GitCredentials, error) {
-	return client.GetGitCredentials()
+	return client.GetGitCredentials(context.Background())
 }
 
 // fetchAndSaveGitCredentials fetches git credentials from GET /api/v1/cli/repos

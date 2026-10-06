@@ -103,7 +103,7 @@ func attemptPATAutoRepair(ep string) bool {
 	}
 
 	// fetch fresh git credentials from the API
-	if _, err := auth.RefreshGitCredentialsForEndpoint(ep, true); err != nil {
+	if _, err := auth.RefreshGitCredentialsForEndpoint(context.Background(), ep, true); err != nil {
 		slog.Debug("PAT auto-repair: credential sync failed", "error", err)
 		return false
 	}

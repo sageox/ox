@@ -717,7 +717,7 @@ func TestExchangeForJWT_ResponseFormats(t *testing.T) {
 			defer server.Close()
 
 			client := &http.Client{Timeout: 5 * time.Second}
-			resp, err := exchangeForJWT(client, server.URL, "test-opaque-token")
+			resp, err := exchangeForJWT(context.Background(), client, server.URL, "test-opaque-token")
 
 			if tt.wantErr {
 				require.Error(t, err)
@@ -752,7 +752,7 @@ func TestExchangeForJWT_RefreshTokenField(t *testing.T) {
 	defer server.Close()
 
 	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := exchangeForJWT(client, server.URL, "opaque-token")
+	resp, err := exchangeForJWT(context.Background(), client, server.URL, "opaque-token")
 	require.NoError(t, err)
 	assert.Equal(t, "jwt-token", resp.AccessToken)
 	assert.Equal(t, "jwt-refresh-token", resp.RefreshToken)

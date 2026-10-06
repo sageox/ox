@@ -256,12 +256,16 @@ func DeriveSlug(name string) string {
 // For ledger URLs, use GetLedgerStatus() which is project-scoped.
 // Requires authentication. Returns PAT, repo URLs, and token expiration.
 func (c *RepoClient) GetRepos() (*ReposResponse, error) {
+	return c.getRepos(context.Background())
+}
+
+func (c *RepoClient) getRepos(ctx context.Context) (*ReposResponse, error) {
 	reqURL := strings.TrimSuffix(c.baseURL, "/") + reposPath
 
 	logger.LogHTTPRequest("GET", reqURL)
 	start := time.Now()
 
-	httpReq, err := useragent.NewRequest(context.Background(), "GET", reqURL, nil)
+	httpReq, err := useragent.NewRequest(ctx, "GET", reqURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -320,8 +324,8 @@ func (c *RepoClient) GetRepos() (*ReposResponse, error) {
 }
 
 // GetGitCredentials binds the Git PAT returned by discovery to this client's bearer.
-func (c *RepoClient) GetGitCredentials() (*gitserver.GitCredentials, error) {
-	resp, err := c.GetRepos()
+func (c *RepoClient) GetGitCredentials(ctx context.Context) (*gitserver.GitCredentials, error) {
+	resp, err := c.getRepos(ctx)
 	if err != nil || resp == nil {
 		return nil, err
 	}

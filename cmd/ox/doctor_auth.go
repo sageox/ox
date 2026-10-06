@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -138,7 +139,7 @@ func refreshGitCredentials(reason string) checkResult {
 	}
 
 	// fetch credentials from API
-	if _, err := auth.RefreshGitCredentialsForEndpoint(projectEndpoint, true); err != nil {
+	if _, err := auth.RefreshGitCredentialsForEndpoint(context.Background(), projectEndpoint, true); err != nil {
 		return WarningCheck("Git credentials", fmt.Sprintf("%s (refresh failed)", reason),
 			fmt.Sprintf("API error: %v. %s", err, auth.ReauthenticationRemedy(projectEndpoint)))
 	}

@@ -6,9 +6,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/api"
+	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/useragent"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -600,4 +603,68 @@ func TestMakeRequest_HeadersPreserved(t *testing.T) {
 	// verify response headers are accessible
 	assert.Equal(t, "test-value", resp.Headers.Get("X-Custom-Header"))
 	assert.Equal(t, "12345", resp.Headers.Get("X-Request-ID"))
+}
+
+// A concurrent credential write during OAuth refresh must not substitute
+// another bearer's fresh PAT for the credential this request needs to fetch.
+func TestGitCredentials_RefreshKeepsIdentityWhenCacheChanges(t *testing.T) {
+	prevDir := gitserver.TestSetConfigDirOverride(t.TempDir())
+	prevFile := gitserver.TestSetForceFileStorage(true)
+	t.Cleanup(func() {
+		gitserver.TestSetConfigDirOverride(prevDir)
+		gitserver.TestSetForceFileStorage(prevFile)
+	})
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("OX_XDG_DISABLE", "")
+	t.Setenv(EnvVarToken, "")
+	var discoveryCalls atomic.Int32
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case TokenEndpoint:
+			// Another process replaces the endpoint cache while this request
+			// refreshes OAuth; freshness alone cannot validate that new cache.
+			if err := gitserver.SaveCredentialsForEndpoint(server.URL, gitserver.GitCredentials{
+				Token: "other-bearer-pat", ExpiresAt: time.Now().Add(24 * time.Hour),
+				BearerTokenHash: gitserver.BearerTokenFingerprint("other-bearer"),
+			}); err != nil {
+				t.Errorf("replace credential cache: %v", err)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"access_token": "refreshed-opaque", "expires_in": 3600,
+			})
+		case "/api/v1/cli/auth/token":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"access_token": "refreshed-bearer", "expires_in": 3600,
+			})
+		case "/api/v1/cli/repos":
+			discoveryCalls.Add(1)
+			assert.Equal(t, "Bearer refreshed-bearer", r.Header.Get("Authorization"))
+			_ = json.NewEncoder(w).Encode(api.ReposResponse{
+				Token: "matching-pat", ExpiresAt: time.Now().Add(24 * time.Hour),
+			})
+		default:
+			t.Errorf("unexpected request %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("SAGEOX_ENDPOINT", server.URL)
+	require.NoError(t, SaveTokenForEndpoint(server.URL, &StoredToken{
+		AccessToken: "old-bearer", RefreshToken: "refresh-token", ExpiresAt: time.Now().Add(-time.Minute),
+	}))
+	require.NoError(t, gitserver.SaveCredentialsForEndpoint(server.URL, gitserver.GitCredentials{
+		Token: "old-pat", ExpiresAt: time.Now().Add(30 * time.Minute),
+		BearerTokenHash: gitserver.BearerTokenFingerprint("old-bearer"),
+	}))
+
+	creds, err := RefreshGitCredentialsForEndpoint(context.Background(), server.URL, false)
+	require.NoError(t, err)
+	require.NotNil(t, creds)
+	require.EqualValues(t, 1, discoveryCalls.Load(), "a foreign cache write must not skip discovery")
+	require.Equal(t, "matching-pat", creds.Token)
+	require.Equal(t, gitserver.BearerTokenFingerprint("refreshed-bearer"), creds.BearerTokenHash)
 }

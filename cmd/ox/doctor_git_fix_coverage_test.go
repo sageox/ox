@@ -1,11 +1,18 @@
 package main
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/sageox/ox/internal/api"
+	"github.com/sageox/ox/internal/auth"
+	"github.com/sageox/ox/internal/gitserver"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -97,9 +104,24 @@ func TestHasLocalGitChanges_NotAGitRepo(t *testing.T) {
 	assert.True(t, hasLocalGitChanges(tmp))
 }
 
-func TestSaveGitCredentialsFromRepos_NilRepos(t *testing.T) {
-	err := saveGitCredentialsFromRepos(nil, "https://sageox.ai")
-	assert.NoError(t, err)
+// Doctor must retain the response's bearer binding so the helper can reuse its PAT.
+func TestSaveGitCredentialsFromRepos_BindsBearer(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("doctor's freshly saved PAT must not need another API call")
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	t.Cleanup(server.Close)
+	ep := server.URL
+	setupAuthRenderEnv(t, ep, validTeamToken)
+	require.NoError(t, saveGitCredentialsFromRepos(nil, ep, validTeamToken))
+	require.NoError(t, saveGitCredentialsFromRepos(&api.ReposResponse{
+		Token: "doctor-pat", ExpiresAt: time.Now().Add(24 * time.Hour),
+	}, ep, validTeamToken))
+	creds, err := auth.RefreshGitCredentialsForEndpoint(context.Background(), ep, false)
+	require.NoError(t, err, "doctor's freshly saved PAT must not need another API call")
+	require.NotNil(t, creds)
+	assert.Equal(t, "doctor-pat", creds.Token)
+	assert.Equal(t, gitserver.BearerTokenFingerprint(validTeamToken), creds.BearerTokenHash)
 }
 
 // TestValidateRepoPath exercises the repo path validator from doctor_git_repos_validate.go

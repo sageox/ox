@@ -733,3 +733,108 @@ func TestLFSRefreshesRejectedCredentials(t *testing.T) {
 		})
 	}
 }
+
+// Failure prevented: a canceled LFS batch waits for PAT, OAuth, or JWT refresh
+// and can persist fallback credentials after its caller has stopped the request.
+func TestLFSBatchCancelsCredentialRefresh(t *testing.T) {
+	for _, stage := range []string{"before batch", "after 401", "OAuth", "JWT"} {
+		t.Run(stage, func(t *testing.T) {
+			prevDir := gitserver.TestSetConfigDirOverride(t.TempDir())
+			prevFile := gitserver.TestSetForceFileStorage(true)
+			t.Cleanup(func() {
+				gitserver.TestSetConfigDirOverride(prevDir)
+				gitserver.TestSetForceFileStorage(prevFile)
+			})
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			t.Setenv("OX_XDG_DISABLE", "")
+			t.Setenv(auth.EnvVarToken, "oxt_test_1ljPfr")
+			blockedPath := "/api/v1/cli/repos"
+			if stage == "OAuth" {
+				blockedPath = auth.TokenEndpoint
+			} else if stage == "JWT" {
+				blockedPath = "/api/v1/cli/auth/token"
+			}
+			started, release := make(chan struct{}), make(chan struct{})
+			var batchCalls atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == blockedPath {
+					close(started)
+					select {
+					case <-r.Context().Done():
+					case <-release:
+					}
+					w.WriteHeader(http.StatusServiceUnavailable)
+					return
+				}
+				if r.URL.Path == auth.TokenEndpoint {
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"access_token": "refreshed-opaque", "expires_in": 3600,
+					})
+					return
+				}
+				batchCalls.Add(1)
+				w.WriteHeader(http.StatusUnauthorized)
+			}))
+			t.Cleanup(srv.Close)
+			t.Setenv(endpoint.EnvVar, srv.URL)
+			require.NoError(t, gitserver.SaveCredentialsForEndpoint(srv.URL, gitserver.GitCredentials{
+				Token: "old-pat", ExpiresAt: time.Now().Add(24 * time.Hour),
+				BearerTokenHash: gitserver.BearerTokenFingerprint("oxt_test_1ljPfr"),
+			}))
+			client, err := NewClientForEndpoint(srv.URL+"/ledger.git", srv.URL)
+			require.NoError(t, err)
+			if stage == "before batch" {
+				t.Setenv(auth.EnvVarToken, "oxt_rotated_1lKvCA")
+			} else if stage == "OAuth" || stage == "JWT" {
+				t.Setenv(auth.EnvVarToken, "")
+				require.NoError(t, auth.SaveTokenForEndpoint(srv.URL, &auth.StoredToken{
+					AccessToken: "expired-jwt", RefreshToken: "valid-refresh",
+					ExpiresAt: time.Now().Add(-time.Hour),
+				}))
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			done := make(chan error, 1)
+			go func() {
+				defer close(done)
+				_, err := client.BatchUploadContext(ctx, []BatchObject{{OID: "abc", Size: 3}})
+				done <- err
+			}()
+			t.Cleanup(func() {
+				cancel()
+				close(release)
+				select {
+				case <-done:
+				case <-time.After(time.Second):
+					t.Error("credential refresh did not stop during cleanup")
+				}
+			})
+			select {
+			case <-started:
+			case <-time.After(time.Second):
+				t.Fatal("credential refresh never reached the server")
+			}
+			cancel()
+			select {
+			case err := <-done:
+				require.ErrorIs(t, err, context.Canceled)
+			case <-time.After(time.Second):
+				t.Fatal("LFS credential refresh ignored caller cancellation")
+			}
+			if stage == "after 401" {
+				require.EqualValues(t, 1, batchCalls.Load())
+			} else {
+				require.Zero(t, batchCalls.Load())
+			}
+			creds, err := gitserver.LoadCredentialsForEndpoint(srv.URL)
+			require.NoError(t, err)
+			require.Equal(t, "old-pat", creds.Token, "cancellation must preserve the PAT cache")
+			if stage == "OAuth" || stage == "JWT" {
+				token, err := auth.GetTokenForEndpoint(srv.URL)
+				require.NoError(t, err)
+				require.Equal(t, "expired-jwt", token.AccessToken, "canceled JWT exchange must not save an opaque fallback")
+			}
+		})
+	}
+}

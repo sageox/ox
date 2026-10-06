@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -94,7 +95,7 @@ func runGitCredentialHelper(cmd *cobra.Command, args []string) error {
 		}
 		req, err := parseGitCredentialRequest(cmd.InOrStdin())
 		if err == nil && req["protocol"] != "" && req["host"] != "" {
-			_, _ = auth.RefreshGitCredentialsForEndpoint(EndpointURLForHost(req["protocol"], req["host"]), true)
+			_, _ = auth.RefreshGitCredentialsForEndpoint(context.Background(), EndpointURLForHost(req["protocol"], req["host"]), true)
 		}
 		return nil
 	case "store":
@@ -165,7 +166,7 @@ func helperGet(stdin io.Reader, stdout io.Writer) error {
 	endpointHost := strings.TrimPrefix(host, "git.")
 	endpointURL := req["protocol"] + "://" + endpointHost
 
-	creds, err := auth.RefreshGitCredentialsForEndpoint(endpointURL, false)
+	creds, err := auth.RefreshGitCredentialsForEndpoint(context.Background(), endpointURL, false)
 	if err != nil {
 		slog.Debug("git-credential-helper: load credentials failed",
 			"endpoint", endpointURL, "error", err)

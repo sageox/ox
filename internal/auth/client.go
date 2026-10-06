@@ -42,7 +42,10 @@ func (e *AuthenticationError) Error() string {
 // RefreshGitCredentialsForEndpoint refreshes expired, rotated, or rejected Git
 // credentials. A failed fetch preserves the cache but never returns a PAT fetched
 // by another bearer to the caller.
-func RefreshGitCredentialsForEndpoint(endpointURL string, force bool) (*gitserver.GitCredentials, error) {
+func RefreshGitCredentialsForEndpoint(ctx context.Context, endpointURL string, force bool) (*gitserver.GitCredentials, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	token, err := GetTokenForEndpoint(endpointURL)
 	if err != nil {
 		return nil, err
@@ -57,24 +60,27 @@ func RefreshGitCredentialsForEndpoint(endpointURL string, force bool) (*gitserve
 		}
 		return creds, nil // allow existing offline checkouts without a disk login
 	}
-	if creds == nil || creds.BearerTokenHash != gitserver.BearerTokenFingerprint(token.AccessToken) {
-		force = true
+	if !force && creds != nil && creds.BearerTokenHash == gitserver.BearerTokenFingerprint(token.AccessToken) &&
+		time.Until(creds.ExpiresAt) >= gitserver.NearExpiryThreshold {
+		return creds, nil
 	}
-	if force || gitserver.CheckCredentialStatusForEndpoint(endpointURL).NeedsRefresh() {
-		token, err = EnsureValidTokenForEndpoint(endpointURL, 300)
-		if err != nil {
-			return nil, err
-		}
-		if token == nil || token.AccessToken == "" {
-			return nil, api.ErrUnauthorized
-		}
+	token, err = ensureValidTokenForEndpoint(ctx, endpointURL, 300)
+	if err != nil {
+		return nil, err
+	}
+	if token == nil || token.AccessToken == "" {
+		return nil, api.ErrUnauthorized
 	}
 	client := api.NewRepoClientWithEndpoint(endpointURL).WithAuthToken(token.AccessToken)
-	result := gitserver.RefreshCredentialsForEndpoint(endpointURL, client.GetGitCredentials, force)
+	var refreshed *gitserver.GitCredentials
+	result := gitserver.RefreshCredentialsForEndpoint(endpointURL, func() (*gitserver.GitCredentials, error) {
+		refreshed, err = client.GetGitCredentials(ctx)
+		return refreshed, err
+	}, true)
 	if result.Error != nil {
 		return nil, result.Error
 	}
-	return gitserver.LoadCredentialsForEndpoint(endpointURL)
+	return refreshed, nil
 }
 
 // APIError is raised when API returns an error response

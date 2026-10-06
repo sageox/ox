@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/api"
+	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -203,6 +204,72 @@ func TestCredentialRevocation_ReportsTeamRemedyAndClearsOnRecovery(t *testing.T)
 			require.Equal(t, "recovered-pat", creds.Token)
 		})
 	}
+}
+
+// Failure prevented: team discovery treats an expired personal bearer as revoked
+// when its refresh token and cached Git PAT are still healthy.
+func TestTeamDiscovery_RefreshesExpiredPersonalBearer(t *testing.T) {
+	var refreshCalls, exchangeCalls, repoCalls atomic.Int32
+	patExpires := time.Now().Add(24 * time.Hour)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case auth.TokenEndpoint:
+			refreshCalls.Add(1)
+			assert.NoError(t, r.ParseForm())
+			assert.Equal(t, "refresh_token", r.Form.Get("grant_type"))
+			assert.Equal(t, "valid-refresh", r.Form.Get("refresh_token"))
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"access_token": "refreshed-opaque", "expires_in": 3600,
+			})
+		case "/api/v1/cli/auth/token":
+			exchangeCalls.Add(1)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"access_token": "refreshed-jwt", "expires_in": 900,
+			})
+		case "/api/v1/cli/repos":
+			repoCalls.Add(1)
+			if r.Header.Get("Authorization") != "Bearer refreshed-jwt" {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(api.ReposResponse{
+				Token: "fresh-pat", ExpiresAt: patExpires,
+			})
+		default:
+			t.Errorf("unexpected endpoint: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(server.Close)
+	s := newCredentialDiscoveryScheduler(t, server)
+	t.Setenv("SAGEOX_TOKEN", "")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("OX_XDG_DISABLE", "")
+	require.NoError(t, auth.SaveTokenForEndpoint(server.URL, &auth.StoredToken{
+		AccessToken: "expired-jwt", RefreshToken: "valid-refresh",
+		ExpiresAt: time.Now().Add(-time.Hour),
+	}))
+	require.NoError(t, gitserver.SaveCredentialsForEndpoint(server.URL, gitserver.GitCredentials{
+		Token: "fresh-pat", ExpiresAt: patExpires,
+		BearerTokenHash: gitserver.BearerTokenFingerprint("expired-jwt"),
+	}))
+
+	s.refreshCredentialsIfNeeded()
+	require.Zero(t, refreshCalls.Load(), "a matching fresh PAT skips the passive refresh")
+	require.Zero(t, repoCalls.Load())
+	s.discoverTeams()
+
+	require.EqualValues(t, 1, refreshCalls.Load())
+	require.EqualValues(t, 1, exchangeCalls.Load())
+	require.EqualValues(t, 1, repoCalls.Load())
+	_, found := s.issues.GetIssue(IssueTypeAuthExpiring, "")
+	require.False(t, found, "successful token refresh must not require another login")
+	creds, err := gitserver.LoadCredentialsForEndpoint(server.URL)
+	require.NoError(t, err)
+	require.NotNil(t, creds)
+	require.Equal(t, "fresh-pat", creds.Token)
+	require.Equal(t, gitserver.BearerTokenFingerprint("refreshed-jwt"), creds.BearerTokenHash)
 }
 
 // Failure prevented: the actual ledger fetch path never asks for a replacement

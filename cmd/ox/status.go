@@ -1692,7 +1692,7 @@ daemon health, and a tree view of all SageOx directory locations.`,
 
 			// ensure git credentials are valid (auto-refresh if needed)
 			// this is fast (local check) unless credentials need refresh
-			_, _ = auth.RefreshGitCredentialsForEndpoint(currentEndpoint, false)
+			_, _ = auth.RefreshGitCredentialsForEndpoint(cmd.Context(), currentEndpoint, false)
 		}
 
 		// get config paths
@@ -1999,7 +1999,11 @@ func buildStatusJSON(authenticated bool, authErr error, token *auth.StoredToken,
 		// PAT liveness for JSON output
 		projectEndpoint := endpoint.GetForProject(gitRoot)
 		creds, credErr := gitserver.LoadCredentialsForEndpoint(projectEndpoint)
-		if credErr == nil && creds != nil && creds.Token != "" && !creds.IsExpired() {
+		if credErr == nil && creds != nil && creds.BearerTokenHash != gitserver.BearerTokenFingerprint(token.AccessToken) {
+			valid := false
+			output.Auth.GitPATValid = &valid
+			output.Auth.GitPATReason = "Git credentials are unverified for the current token; refresh required"
+		} else if credErr == nil && creds != nil && creds.Token != "" && !creds.IsExpired() {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			liveness := gitserver.ValidatePATLiveness(ctx, creds)
 			cancel()
@@ -2371,6 +2375,8 @@ func renderAuthStatus(authFile string) string {
 			creds, credErr := gitserver.LoadCredentialsForEndpoint(ep)
 			if credErr != nil || creds == nil || creds.Token == "" {
 				b.WriteString(statusMutedStyle.Render("no git credentials"))
+			} else if creds.BearerTokenHash != gitserver.BearerTokenFingerprint(epToken.AccessToken) {
+				b.WriteString(statusWarningStyle.Render("? refresh required: credentials are unverified for the current token"))
 			} else if creds.IsExpired() {
 				b.WriteString(statusErrorStyle.Render("✗ expired"))
 			} else {

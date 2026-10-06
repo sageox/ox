@@ -68,7 +68,7 @@ func (s *SyncScheduler) refreshCredentials(force bool) {
 
 	// The scheduler refreshes within an hour of expiry; the shared cache
 	// helper also handles a changed bearer and explicit server rejections.
-	_, err = auth.RefreshGitCredentialsForEndpoint(projectEndpoint, true)
+	_, err = auth.RefreshGitCredentialsForEndpoint(context.Background(), projectEndpoint, true)
 	if err != nil {
 		s.logger.Warn("failed to refresh git credentials", "error", err)
 		if errors.Is(err, api.ErrUnauthorized) && s.issues != nil {
@@ -125,8 +125,8 @@ func (s *SyncScheduler) discoverTeams() {
 		return
 	}
 
-	// use the selected bearer to call the repos API
-	token, err := auth.GetTokenForEndpoint(projectEndpoint)
+	// refresh personal bearers before the API call; a fresh PAT can outlive them
+	token, err := auth.EnsureValidTokenForEndpoint(projectEndpoint, 300)
 	if err != nil {
 		s.logger.Debug("failed to get auth token for team discovery", "error", err)
 		return
@@ -136,7 +136,7 @@ func (s *SyncScheduler) discoverTeams() {
 	}
 
 	client := api.NewRepoClientWithEndpoint(projectEndpoint).WithAuthToken(token.AccessToken)
-	newCreds, err := client.GetGitCredentials()
+	newCreds, err := client.GetGitCredentials(context.Background())
 	if err != nil {
 		s.logger.Warn("failed to fetch repos for team discovery", "error", err)
 		if errors.Is(err, api.ErrUnauthorized) && s.issues != nil {

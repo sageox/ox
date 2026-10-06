@@ -361,7 +361,7 @@ func fixMissingRepos(gitRoot string, localCfg *config.LocalConfig) checkResult {
 		return result
 	}
 	if repos != nil {
-		if err := saveGitCredentialsFromRepos(repos, projectEndpoint); err != nil {
+		if err := saveGitCredentialsFromRepos(repos, projectEndpoint, token.AccessToken); err != nil {
 			slog.Warn("failed to save git credentials", "error", err)
 		}
 	}
@@ -782,17 +782,18 @@ func fetchTeamContextURLWithError(teamID string, currentEndpoint string) (string
 // saveGitCredentialsFromRepos builds and saves git credentials from an already-fetched
 // ReposResponse. This avoids a duplicate /api/v1/cli/repos call when the response is
 // already available (e.g., from fixMissingRepos).
-func saveGitCredentialsFromRepos(repos *api.ReposResponse, projectEndpoint string) error {
+func saveGitCredentialsFromRepos(repos *api.ReposResponse, projectEndpoint, bearerToken string) error {
 	if repos == nil {
 		return nil
 	}
 
 	creds := &gitserver.GitCredentials{
-		Token:     repos.Token,
-		ServerURL: repos.ServerURL,
-		Username:  repos.Username,
-		ExpiresAt: repos.ExpiresAt,
-		Repos:     make(map[string]gitserver.RepoEntry),
+		BearerTokenHash: gitserver.BearerTokenFingerprint(bearerToken),
+		Token:           repos.Token,
+		ServerURL:       repos.ServerURL,
+		Username:        repos.Username,
+		ExpiresAt:       repos.ExpiresAt,
+		Repos:           make(map[string]gitserver.RepoEntry),
 	}
 
 	for _, repo := range repos.Repos {

@@ -113,6 +113,10 @@ func EnsureValidToken(bufferSeconds int) (*StoredToken, error) {
 // refreshing proactively if the token expires within bufferSeconds.
 // Use this instead of GetTokenForEndpoint when the token will be used for API requests.
 func EnsureValidTokenForEndpoint(ep string, bufferSeconds int) (*StoredToken, error) {
+	return ensureValidTokenForEndpoint(context.Background(), ep, bufferSeconds)
+}
+
+func ensureValidTokenForEndpoint(ctx context.Context, ep string, bufferSeconds int) (*StoredToken, error) {
 	token, err := GetTokenForEndpoint(ep)
 	if err != nil {
 		return nil, err
@@ -129,7 +133,7 @@ func EnsureValidTokenForEndpoint(ep string, bufferSeconds int) (*StoredToken, er
 	}
 
 	if token.IsExpired(bufferSeconds) {
-		return refreshTokenForEndpoint(token, ep)
+		return refreshTokenForEndpointContext(ctx, token, ep)
 	}
 
 	return token, nil
@@ -184,6 +188,10 @@ func refreshToken(token *StoredToken) (*StoredToken, error) {
 
 // refreshTokenForEndpoint performs token refresh against a specific endpoint.
 func refreshTokenForEndpoint(token *StoredToken, ep string) (*StoredToken, error) {
+	return refreshTokenForEndpointContext(context.Background(), token, ep)
+}
+
+func refreshTokenForEndpointContext(ctx context.Context, token *StoredToken, ep string) (*StoredToken, error) {
 	baseURL := ep
 	tokenURL := baseURL + TokenEndpoint
 
@@ -202,7 +210,7 @@ func refreshTokenForEndpoint(token *StoredToken, ep string) (*StoredToken, error
 	data.Set("refresh_token", rt)
 
 	// create request
-	req, err := useragent.NewRequest(context.Background(), "POST", tokenURL, strings.NewReader(data.Encode()))
+	req, err := useragent.NewRequest(ctx, "POST", tokenURL, strings.NewReader(data.Encode()))
 	if err != nil {
 		return nil, &TokenRefreshError{
 			Message: "failed to create refresh request",
@@ -314,7 +322,10 @@ func refreshTokenForEndpoint(token *StoredToken, ep string) (*StoredToken, error
 
 	// exchange opaque token for JWT (same as initial device flow)
 	httpClient := &http.Client{Timeout: defaultTimeout}
-	jwtToken, err := exchangeForJWT(httpClient, baseURL, responseData.AccessToken)
+	jwtToken, err := exchangeForJWT(ctx, httpClient, baseURL, responseData.AccessToken)
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 
 	accessToken := responseData.AccessToken
 	if err != nil {
@@ -552,7 +563,7 @@ func (c *AuthClient) refreshToken(token *StoredToken) (*StoredToken, error) {
 
 	// exchange opaque token for JWT (same as initial device flow)
 	httpClient := &http.Client{Timeout: defaultTimeout}
-	jwtToken, err := exchangeForJWT(httpClient, baseURL, responseData.AccessToken)
+	jwtToken, err := exchangeForJWT(context.Background(), httpClient, baseURL, responseData.AccessToken)
 
 	accessToken := responseData.AccessToken
 	if err != nil {

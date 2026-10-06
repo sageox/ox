@@ -251,7 +251,7 @@ func (c *Client) doBatch(ctx context.Context, operation string, objects []BatchO
 	req.Header.Set("User-Agent", useragent.String())
 	req.Header.Set("Authorization", c.authHeader)
 	if c.credentialEndpoint != "" {
-		creds, err := auth.RefreshGitCredentialsForEndpoint(c.credentialEndpoint, false)
+		creds, err := auth.RefreshGitCredentialsForEndpoint(ctx, c.credentialEndpoint, false)
 		if err != nil {
 			return nil, fmt.Errorf("refresh LFS credentials: %w", err)
 		}
@@ -281,7 +281,7 @@ func (c *Client) doBatch(ctx context.Context, operation string, objects []BatchO
 	}
 	if resp.StatusCode == http.StatusUnauthorized && c.credentialEndpoint != "" {
 		resp.Body.Close()
-		creds, err := auth.RefreshGitCredentialsForEndpoint(c.credentialEndpoint, true)
+		creds, err := auth.RefreshGitCredentialsForEndpoint(ctx, c.credentialEndpoint, true)
 		if err != nil {
 			return nil, fmt.Errorf("refresh rejected LFS credentials: %w", err)
 		}
@@ -383,7 +383,7 @@ func NewClientFromLedger(ledgerPath, endpointURL string) (*Client, error) {
 
 // NewClientForEndpoint follows token rotation and refreshes a rejected Git PAT.
 func NewClientForEndpoint(repoURL, endpointURL string) (*Client, error) {
-	creds, err := auth.RefreshGitCredentialsForEndpoint(endpointURL, false)
+	creds, err := auth.RefreshGitCredentialsForEndpoint(context.Background(), endpointURL, false)
 	if err != nil {
 		return nil, fmt.Errorf("load credentials: %w", err)
 	}
