@@ -81,12 +81,9 @@ Output is JSON by default (the AI-coworker/plumbing path). Use --text for a huma
 			return err
 		}
 		// An authored HTML plan enriches via its DERIVED markdown — the
-		// detectors are section/file-keyed and must never parse raw HTML.
-		if plan.LooksLikeHTML(in.Path, in.Raw) {
-			p := plan.Parse(plan.ExtractMarkdown([]byte(in.Raw)))
-			p.Path = in.Path
-			in = p
-		}
+		// detectors are section/file-keyed and must never parse raw HTML. The
+		// page itself is kept so a save stores it as the plan of record.
+		in, authored := splitAuthoredHTML(in)
 
 		// No plan found anywhere: a clear message beats enriching empty input.
 		if in.Topic == "" && strings.TrimSpace(in.Raw) == "" {
@@ -106,7 +103,7 @@ Output is JSON by default (the AI-coworker/plumbing path). Use --text for a huma
 			// the save writes only to logs/ledger so stdout JSON stays clean.
 			saved := ""
 			if persist && gitRoot != "" && config.PlanSave(gitRoot) {
-				saved = savePlanWithProvenance(gitRoot, in, result, nil)
+				saved = saveEnrichedPlan(gitRoot, in, result, authored)
 			}
 			// Nothing persisted this plan, so the agent is about to implement
 			// from a document no teammate will ever see. Stamp it for the
@@ -121,7 +118,7 @@ Output is JSON by default (the AI-coworker/plumbing path). Use --text for a huma
 		}
 
 		// --text: human porcelain — auto-save (if enabled), metric, summary.
-		savedDir := maybeSavePlan(gitRoot, in, result)
+		savedDir := maybeSavePlan(gitRoot, in, result, authored)
 		if savedDir == "" {
 			if err := armUnsavedPlanStamp(gitRoot, envAgentID(), in, result); err != nil {
 				slog.Debug("plan: could not arm unsaved-plan stamp", "error", err)
@@ -281,14 +278,40 @@ mark must be self-contained (no live remote avatar). Advisory by default; pass
 }
 
 // maybeSavePlan captures the enriched plan to the ledger when auto-save is
-// enabled and a ledger is configured. html is nil for now — the porcelain path
+// enabled and a ledger is configured. authored is the page when the plan was
+// an authored HTML page (see splitAuthoredHTML), else nil — the porcelain path
 // never renders HTML just to save it (that's a skill-side, opt-in action).
 // Returns the saved directory, or "" when nothing was saved (disabled, no
 // ledger, or a write error — capture is best-effort and never aborts the
 // command).
-func maybeSavePlan(gitRoot string, in plan.Input, result plan.Result) string {
+func maybeSavePlan(gitRoot string, in plan.Input, result plan.Result, authored []byte) string {
 	if gitRoot == "" || !config.PlanSave(gitRoot) {
 		return ""
+	}
+	return saveEnrichedPlan(gitRoot, in, result, authored)
+}
+
+// splitAuthoredHTML returns in unchanged and a nil page for a markdown plan.
+// For an authored HTML page it returns the input parsed from the page's
+// DERIVED markdown, which is what the detectors read, plus the page bytes,
+// which are the plan of record. Same split `ox plan save --file` makes.
+func splitAuthoredHTML(in plan.Input) (plan.Input, []byte) {
+	if !plan.LooksLikeHTML(in.Path, in.Raw) {
+		return in, nil
+	}
+	page := []byte(in.Raw)
+	derived := plan.Parse(plan.ExtractMarkdown(page))
+	derived.Path = in.Path
+	return derived, page
+}
+
+// saveEnrichedPlan saves a plan the way `ox plan save --file` would: an
+// authored page goes in HTML-primary (plan.html verbatim, plan.md derived from
+// it), anything else markdown-primary. Passing a nil page for an authored
+// HTML plan is what dropped the page from the ledger (ox#1115).
+func saveEnrichedPlan(gitRoot string, in plan.Input, result plan.Result, authored []byte) string {
+	if authored != nil {
+		return savePlanArtifacts(gitRoot, in, result, authored, plan.PrimaryHTML)
 	}
 	return savePlanWithProvenance(gitRoot, in, result, nil)
 }

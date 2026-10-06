@@ -180,3 +180,110 @@ func TestPlanLintFile_RoutesByFileName(t *testing.T) {
 		t.Errorf("lint must refuse a markdown file, got %v", err)
 	}
 }
+
+// assertSavedAsAuthoredPage checks the ledger holds exactly one plan, saved
+// HTML-primary, with the page as plan.html and markdown derived from it as
+// plan.md. Save stamps the plan's identity <meta> tags into a page that has a
+// <head>, so only a head-less page is compared byte for byte.
+func assertSavedAsAuthoredPage(t *testing.T, page string) {
+	t.Helper()
+	info, meta := savedOnlyPlan(t)
+	if meta.Primary != plan.PrimaryHTML {
+		t.Errorf("meta.primary = %q, want %q", meta.Primary, plan.PrimaryHTML)
+	}
+	if !info.HasHTML {
+		t.Fatal("no plan.html stored: the authored page was dropped")
+	}
+	stored, err := os.ReadFile(filepath.Join(info.Dir, "plan.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(page, "<head>") {
+		if !strings.Contains(string(stored), "<h1>Real title</h1><p>Body.</p>") || !strings.Contains(string(stored), `name="sageox:plan-slug"`) {
+			t.Errorf("plan.html is not the authored page with identity stamped:\n%s", stored)
+		}
+	} else if string(stored) != page {
+		t.Errorf("plan.html is not the authored page verbatim:\n%s", stored)
+	}
+	md, err := os.ReadFile(filepath.Join(info.Dir, "plan.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(md), "<title>") || !strings.Contains(string(md), "# Real title") {
+		t.Errorf("plan.md is not markdown derived from the page:\n%s", md)
+	}
+}
+
+// TestPlanEnrichSave_KeepsAuthoredHTMLPage is the ox#1115 regression: enrich
+// swapped an authored page for its derived markdown, then saved with a nil
+// page, so the ledger got plan.md only, no plan.html and an empty primary.
+// Both enrich save paths, --persist (the ExitPlanMode hook) and the --text
+// auto-save, must store the page the way `ox plan save --file` does.
+func TestPlanEnrichSave_KeepsAuthoredHTMLPage(t *testing.T) {
+	pages := map[string]string{
+		"no doctype":   doctypelessPage,
+		"with doctype": "<!doctype html><html><head><title>My Plan</title></head><body><h1>Real title</h1><p>Body.</p></body></html>",
+	}
+	modes := map[string][]string{
+		"persist": {"persist", "true"},
+		"text":    {"text", "true"},
+	}
+	for pageName, page := range pages {
+		for modeName, flag := range modes {
+			t.Run(modeName+" "+pageName, func(t *testing.T) {
+				root := newPlanCaptureTestRepo(t)
+				t.Setenv("SAGEOX_AGENT_ID", "")
+
+				src := filepath.Join(root, ".context", "plan.html")
+				writePlanSource(t, src, page)
+				runPlanEnrich(t, "file", src, flag[0], flag[1])
+
+				assertSavedAsAuthoredPage(t, page)
+			})
+		}
+	}
+}
+
+// TestPlanEnrichSave_MarkdownStaysMarkdownPrimary: the ox#1115 fix must not
+// turn a markdown plan into an HTML-primary one.
+func TestPlanEnrichSave_MarkdownStaysMarkdownPrimary(t *testing.T) {
+	root := newPlanCaptureTestRepo(t)
+	t.Setenv("SAGEOX_AGENT_ID", "")
+
+	const md = "# Cache warmup\n\n## Approach\n\nWarm the cache on boot.\n"
+	src := filepath.Join(root, ".context", "plan.md")
+	writePlanSource(t, src, md)
+	runPlanEnrich(t, "file", src, "persist", "true")
+
+	info, meta := savedOnlyPlan(t)
+	if meta.Primary != "" || info.HasHTML {
+		t.Errorf("markdown plan saved with primary=%q html=%v, want markdown-primary with no plan.html", meta.Primary, info.HasHTML)
+	}
+	stored, err := os.ReadFile(filepath.Join(info.Dir, "plan.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(stored) != md {
+		t.Errorf("plan.md is not the authored markdown verbatim:\n%s", stored)
+	}
+}
+
+// TestPlanReviewSaveDraft_KeepsAuthoredHTMLPage: `ox plan review --file
+// plan.html` saved the same way as enrich (ox#1115) and also enriched the raw
+// HTML, so it stored the page's markup as plan.md and dropped the page.
+func TestPlanReviewSaveDraft_KeepsAuthoredHTMLPage(t *testing.T) {
+	root := newPlanCaptureTestRepo(t)
+	t.Setenv("SAGEOX_AGENT_ID", "")
+
+	src := filepath.Join(root, ".context", "plan.html")
+	writePlanSource(t, src, doctypelessPage)
+	cmd := &cobra.Command{}
+	cmd.Flags().StringSlice("companion", nil, "")
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	if _, err := reviewSaveDraft(cmd, src); err != nil {
+		t.Fatalf("reviewSaveDraft: %v", err)
+	}
+
+	assertSavedAsAuthoredPage(t, doctypelessPage)
+}
