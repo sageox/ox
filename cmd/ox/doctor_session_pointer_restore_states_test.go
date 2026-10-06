@@ -43,7 +43,7 @@ func TestRestoreUnpushedSessionPointers_WorkingCopyStates(t *testing.T) {
 			ledger := newWedgedLedger(t, false)
 			tt.mutate(t, ledger)
 
-			report, err := restoreUnpushedSessionPointers(ctx, ledger, true)
+			report, err := restoreUnpushedSessionPointers(ctx, ledger, true, nil)
 
 			require.NoError(t, err)
 			assert.ElementsMatch(t, tt.wantRestored, report.Restored)
@@ -69,7 +69,7 @@ func TestRestoreUnpushedSessionPointers_StorageGitIsNotRaw(t *testing.T) {
 	mustRunGit(t, ledger, "add", "-A")
 	mustRunGit(t, ledger, "commit", "-m", "git stored summary")
 
-	report, err := restoreUnpushedSessionPointers(context.Background(), ledger, false)
+	report, err := restoreUnpushedSessionPointers(context.Background(), ledger, false, nil)
 
 	require.NoError(t, err)
 	assert.NotContains(t, report.Raw, gitPath)
@@ -81,11 +81,11 @@ func TestRestoreUnpushedSessionPointers_StorageGitIsNotRaw(t *testing.T) {
 func TestRestoreUnpushedSessionPointers_SecondRunIsStable(t *testing.T) {
 	ctx := context.Background()
 	ledger := newWedgedLedger(t, true)
-	_, err := restoreUnpushedSessionPointers(ctx, ledger, true)
+	_, err := restoreUnpushedSessionPointers(ctx, ledger, true, nil)
 	require.NoError(t, err)
 	head, _ := runIsolatedGit(t, ledger, "rev-parse", "HEAD")
 
-	report, err := restoreUnpushedSessionPointers(ctx, ledger, true)
+	report, err := restoreUnpushedSessionPointers(ctx, ledger, true, nil)
 
 	require.NoError(t, err)
 	assert.Equal(t, []string{unknownRaw}, report.Raw)
@@ -126,7 +126,7 @@ func TestRunSessionPointerRestore_Results(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := runSessionPointerRestore(tt.setup(t), tt.fix)
+			result := runSessionPointerRestore(tt.setup(t), tt.fix, nil)
 
 			assert.Equal(t, tt.wantPassed, result.passed, "%s / %s", result.message, result.detail)
 			assert.Equal(t, tt.wantSkipped, result.skipped)

@@ -94,7 +94,7 @@ func TestRestoreUnpushedSessionPointers_WedgedLedger(t *testing.T) {
 		userCommit, _ := runIsolatedGit(t, ledger, "rev-parse", "HEAD")
 		require.Error(t, lfs.ValidateUnpushedTip(ctx, ledger, "origin/main"), "the validator must refuse the wedged tip")
 
-		report, err := restoreUnpushedSessionPointers(ctx, ledger, true)
+		report, err := restoreUnpushedSessionPointers(ctx, ledger, true, nil)
 
 		require.NoError(t, err)
 		assert.ElementsMatch(t, []string{teammateRaw, ownRaw}, report.Restored)
@@ -127,7 +127,7 @@ func TestRestoreUnpushedSessionPointers_WedgedLedger(t *testing.T) {
 		ledger := newWedgedLedger(t, false)
 		require.Error(t, lfs.ValidateUnpushedTip(ctx, ledger, "origin/main"))
 
-		report, err := restoreUnpushedSessionPointers(ctx, ledger, true)
+		report, err := restoreUnpushedSessionPointers(ctx, ledger, true, nil)
 
 		require.NoError(t, err)
 		assert.Empty(t, report.Unrepairable)
@@ -143,7 +143,7 @@ func TestRestoreUnpushedSessionPointers_WedgedLedger(t *testing.T) {
 		ledger := newWedgedLedger(t, true)
 		before, _ := runIsolatedGit(t, ledger, "rev-parse", "HEAD")
 
-		report, err := restoreUnpushedSessionPointers(ctx, ledger, false)
+		report, err := restoreUnpushedSessionPointers(ctx, ledger, false, nil)
 
 		require.NoError(t, err)
 		assert.ElementsMatch(t, []string{teammateRaw, ownRaw, unknownRaw}, report.Raw)
@@ -156,7 +156,7 @@ func TestRestoreUnpushedSessionPointers_WedgedLedger(t *testing.T) {
 		ledger := newWedgedLedger(t, false)
 		mustRunGit(t, ledger, "reset", "--hard", "origin/main")
 
-		report, err := restoreUnpushedSessionPointers(ctx, ledger, true)
+		report, err := restoreUnpushedSessionPointers(ctx, ledger, true, nil)
 
 		require.NoError(t, err)
 		assert.Empty(t, report.Raw)

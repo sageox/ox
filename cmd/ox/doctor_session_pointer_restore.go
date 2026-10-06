@@ -9,9 +9,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 
+	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitutil"
+	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/lfs/pointer"
 )
@@ -57,12 +61,16 @@ func checkSessionPointerRestore(fix bool) checkResult {
 		return SkippedCheck(pointerRestoreCheckName, "no ledger found", "")
 	}
 	// a Ledger that is not a git repo has no upstream, which the body reports as a skip
-	return runSessionPointerRestore(ledgerPath, fix)
+	projectEndpoint := endpoint.GetForProject(findGitRoot())
+	return runSessionPointerRestore(ledgerPath, fix, &ownArtifactUploader{
+		username: identity.AttributionDisplayName(projectEndpoint, config.GetDisplayName()),
+		client:   func() (*lfs.Client, error) { return lfs.NewClientFromLedger(ledgerPath, projectEndpoint) },
+	})
 }
 
 // runSessionPointerRestore is the check body for one resolved Ledger.
-func runSessionPointerRestore(ledgerPath string, fix bool) checkResult {
-	report, err := restoreUnpushedSessionPointers(context.Background(), ledgerPath, fix)
+func runSessionPointerRestore(ledgerPath string, fix bool, uploader *ownArtifactUploader) checkResult {
+	report, err := restoreUnpushedSessionPointers(context.Background(), ledgerPath, fix, uploader)
 	switch {
 	case errors.Is(err, errNoUpstream):
 		return SkippedCheck(pointerRestoreCheckName, "ledger has no upstream branch", "")
@@ -98,6 +106,12 @@ func runSessionPointerRestore(ledgerPath string, fix bool) checkResult {
 
 var errNoUpstream = errors.New("no upstream branch")
 
+// ownArtifactUploader lets the repair upload artifacts that were never uploaded.
+type ownArtifactUploader struct {
+	username string
+	client   func() (*lfs.Client, error)
+}
+
 // rawSessionArtifact is one content artifact whose HEAD blob is not a pointer.
 type rawSessionArtifact struct {
 	path    string // ledger-relative, slash-separated
@@ -110,7 +124,7 @@ type rawSessionArtifact struct {
 // to that pointer and committed once through CommitLedgerSnapshot with explicit
 // pathspecs. Existing commits are never amended or rewritten; anything nothing
 // vouches for is reported and left exactly as it is.
-func restoreUnpushedSessionPointers(ctx context.Context, ledgerPath string, fix bool) (pointerRestoreReport, error) {
+func restoreUnpushedSessionPointers(ctx context.Context, ledgerPath string, fix bool, uploader *ownArtifactUploader) (pointerRestoreReport, error) {
 	var report pointerRestoreReport
 	upstream, err := ledgerUpstream(ctx, ledgerPath)
 	if err != nil {
@@ -128,23 +142,28 @@ func restoreUnpushedSessionPointers(ctx context.Context, ledgerPath string, fix 
 	}
 
 	err = gitutil.WithRepoLock(ctx, ledgerPath, func() error {
-		var repairable []string
+		var repairable, pathspecs []string
 		for _, raw := range raws {
-			if reason := restoreOne(ctx, ledgerPath, upstream, raw); reason != "" {
+			reason, metaPath := restoreOne(ctx, ledgerPath, upstream, raw, uploader)
+			if reason != "" {
 				report.Unrepairable = append(report.Unrepairable, pointerRestoreFailure{Path: raw.path, Reason: reason})
 				continue
 			}
 			repairable = append(repairable, raw.path)
+			pathspecs = append(pathspecs, raw.path)
+			if metaPath != "" && !slices.Contains(pathspecs, metaPath) {
+				pathspecs = append(pathspecs, metaPath)
+			}
 		}
 		if len(repairable) == 0 {
 			return nil
 		}
 		guard := newSessionStageGuard(ledgerPath, filepath.Join(ledgerPath, "sessions"))
-		if err := guard.gitPathspec(ctx, repairable, "add", "--sparse"); err != nil {
+		if err := guard.gitPathspec(ctx, pathspecs, "add", "--sparse"); err != nil {
 			return fmt.Errorf("stage restored pointers: %w", err)
 		}
 		msg := fmt.Sprintf("doctor: restore LFS pointers for %d session artifacts", len(repairable))
-		committed, err := gitutil.CommitLedgerSnapshot(ctx, ledgerPath, msg, repairable...)
+		committed, err := gitutil.CommitLedgerSnapshot(ctx, ledgerPath, msg, pathspecs...)
 		if err != nil {
 			return fmt.Errorf("commit restored pointers: %w", err)
 		}
@@ -162,15 +181,26 @@ func restoreUnpushedSessionPointers(ctx context.Context, ledgerPath string, fix 
 
 // restoreOne rewrites one working-tree artifact to the pointer that the evidence
 // names, or returns the reason it cannot. It touches the file only after the
-// evidence matches the committed bytes exactly.
-func restoreOne(ctx context.Context, ledgerPath, upstream string, raw rawSessionArtifact) string {
+// evidence matches the committed bytes exactly. For an artifact nothing vouches
+// for, the current coworker's own sessions are uploaded (the bytes' sha256 is
+// the OID) and meta.json records the new FileRef; metaPath is then the extra
+// ledger-relative path the repair commit must include.
+func restoreOne(ctx context.Context, ledgerPath, upstream string, raw rawSessionArtifact, uploader *ownArtifactUploader) (reason, metaPath string) {
 	parts := strings.Split(raw.path, "/")
 	sessionID, name := parts[1], strings.Join(parts[2:], "/")
 	abs := filepath.Join(ledgerPath, filepath.FromSlash(raw.path))
+	meta := headSessionMeta(ctx, ledgerPath, sessionID)
 
-	ref, _, ok := lfs.ResolveRestorableRef(raw.content, name, headSessionMeta(ctx, ledgerPath, sessionID), upstreamPointer(ctx, ledgerPath, upstream, raw.path))
+	ref, _, ok := lfs.ResolveRestorableRef(raw.content, name, meta, upstreamPointer(ctx, ledgerPath, upstream, raw.path))
 	if !ok {
-		return "content sha256 matches no pointer on " + upstream + " and no entry in the session's meta.json"
+		if !uploader.owns(meta) {
+			return "content sha256 matches no pointer on " + upstream + " and no entry in the session's meta.json", ""
+		}
+		ref, reason = uploadOwnArtifact(ctx, ledgerPath, sessionID, name, abs, raw.content, uploader)
+		if reason != "" {
+			return reason, ""
+		}
+		metaPath = "sessions/" + sessionID + "/meta.json"
 	}
 
 	// the new commit is built from the working file, so it must be exactly what HEAD holds
@@ -178,21 +208,60 @@ func restoreOne(ctx context.Context, ledgerPath, upstream string, raw rawSession
 	working, err := os.ReadFile(abs)
 	switch {
 	case err != nil:
-		return fmt.Sprintf("working copy unreadable: %v", err)
+		return fmt.Sprintf("working copy unreadable: %v", err), ""
 	case bytes.Equal(working, raw.content):
 		cachePath := filepath.Join(ledgerPath, ".sageox", "cache", filepath.FromSlash(raw.path))
 		if err := lfs.RestorePointer(abs, cachePath, raw.content, ref); err != nil {
-			return err.Error()
+			return err.Error(), ""
 		}
 	case lfs.IsPointerFile(abs):
 		current, err := lfs.ReadPointerFile(abs)
 		if err != nil || current.BareOID() != ref.BareOID() || current.Size != ref.Size {
-			return "working copy is a different pointer than the committed content's OID"
+			return "working copy is a different pointer than the committed content's OID", ""
 		}
 	default:
-		return "working copy differs from the committed content (uncommitted local edit); commit or discard it first"
+		return "working copy differs from the committed content (uncommitted local edit); commit or discard it first", ""
 	}
-	return ""
+	return "", metaPath
+}
+
+// owns reports whether the session's author is the current coworker. The author
+// is meta.json's privacy-safe username, the same value recording stamps into it.
+func (u *ownArtifactUploader) owns(meta *lfs.SessionMeta) bool {
+	return u != nil && u.username != "" && meta != nil && strings.EqualFold(meta.Username, u.username)
+}
+
+// uploadOwnArtifact uploads content, then records its FileRef in the working
+// meta.json. Order matters: with the manifest written first, a failure before
+// the pointer lands leaves a state the next run resolves from the manifest.
+func uploadOwnArtifact(ctx context.Context, ledgerPath, sessionID, name, abs string, content []byte, uploader *ownArtifactUploader) (lfs.FileRef, string) {
+	if working, err := os.ReadFile(abs); err != nil || !bytes.Equal(working, content) {
+		return lfs.FileRef{}, "working copy differs from the committed content (uncommitted local edit); commit or discard it first"
+	}
+	client, err := uploader.client()
+	if err != nil {
+		return lfs.FileRef{}, fmt.Sprintf("never uploaded and cannot upload now: %v", err)
+	}
+	uploaded, err := lfs.UploadBlob(client, content)
+	if err != nil {
+		return lfs.FileRef{}, fmt.Sprintf("never uploaded and upload failed: %v", err)
+	}
+	ref := uploaded.Ref()
+	sessionDir := filepath.Join(ledgerPath, "sessions", sessionID)
+	err = lfs.MutateSessionMeta(ctx, sessionDir, func(m *lfs.SessionMeta) (*lfs.SessionMeta, error) {
+		if m == nil {
+			return nil, errors.New("meta.json missing")
+		}
+		if m.Files == nil {
+			m.Files = map[string]lfs.FileRef{}
+		}
+		m.Files[name] = ref
+		return m, nil
+	})
+	if err != nil {
+		return lfs.FileRef{}, fmt.Sprintf("uploaded but could not record the OID in meta.json: %v", err)
+	}
+	return ref, ""
 }
 
 func ledgerUpstream(ctx context.Context, ledgerPath string) (string, error) {

@@ -29,7 +29,7 @@ func TestRunSessionPointerRestore_UnreadableUpstreamFails(t *testing.T) {
 	ref := filepath.Join(ledger, ".git", "refs", "remotes", "origin", "main")
 	require.NoError(t, os.WriteFile(ref, []byte("0123456789012345678901234567890123456789\n"), 0o644))
 
-	result := runSessionPointerRestore(ledger, true)
+	result := runSessionPointerRestore(ledger, true, nil)
 
 	assert.False(t, result.passed, "%s", result.message)
 	assert.False(t, result.skipped, "%s", result.message)
