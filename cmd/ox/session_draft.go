@@ -255,15 +255,37 @@ func commitDraftLocally(ledgerPath, sessionName string) error {
 		return err
 	}
 
-	commitArgs := append([]string{
-		"-C", ledgerPath, "commit", "--no-verify",
-		"-m", fmt.Sprintf("session-draft: %s", sessionName),
-		"--",
-	}, paths...)
+	subject := fmt.Sprintf("session-draft: %s", sessionName)
+	commitArgs := []string{"-C", ledgerPath, "commit", "--no-verify"}
+	if isUnpushedDraftTip(ledgerPath, subject) {
+		// refresh in place: one draft commit per session instead of one per save
+		commitArgs = append(commitArgs, "--amend")
+	}
+	commitArgs = append(commitArgs, "-m", subject, "--")
+	commitArgs = append(commitArgs, paths...)
 	if out, err := exec.Command("git", commitArgs...).CombinedOutput(); err != nil {
-		return fmt.Errorf("git commit draft: %s: %w", strings.TrimSpace(string(out)), err)
+		return fmt.Errorf("git commit draft:%s: %w", strings.TrimSpace(string(out)), err)
 	}
 	return nil
+}
+
+// isUnpushedDraftTip reports whether HEAD is the commit with exactly this
+// draft subject and the upstream does not contain it yet. Only then may a
+// refresh rewrite it: a pushed commit is shared, append-only history, and
+// amending a buried commit would rewrite everything above it. A branch with
+// no upstream counts as unpushed. Any unexpected git failure answers false so
+// the caller falls back to a plain new commit.
+func isUnpushedDraftTip(ledgerPath, subject string) bool {
+	out, err := exec.Command("git", "-C", ledgerPath, "log", "-1", "--format=%s", "HEAD").Output()
+	if err != nil || strings.TrimSpace(string(out)) != subject {
+		return false
+	}
+	if err := exec.Command("git", "-C", ledgerPath, "rev-parse", "--verify", "--quiet", "@{u}").Run(); err != nil {
+		return true
+	}
+	err = exec.Command("git", "-C", ledgerPath, "merge-base", "--is-ancestor", "HEAD", "@{u}").Run()
+	var exitErr *exec.ExitError
+	return errors.As(err, &exitErr) && exitErr.ExitCode() == 1
 }
 
 // assertDraftStillStaged verifies, immediately before a partial commit, that
