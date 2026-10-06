@@ -11,6 +11,32 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// Failure prevented: one `ox doctor` run publishes a session that an older ox
+// stopped in manual mode (no hold yet): the upload retry ran before the step
+// that holds such sessions (GH #1093).
+func TestDoctor_HoldsUnmarkedManualSessionBeforeRetryingUploads(t *testing.T) {
+	f := newDownloadLedgerFixture(t)
+	t.Setenv("OX_SESSION_PUBLISHING", "")
+	// As installed, the Ledger folder is named after the repo ID: that is how
+	// the hold scan finds this repo's XDG cache.
+	repoID := filepath.Base(f.ledgerPath)
+	require.NoError(t, os.WriteFile(filepath.Join(f.projectRoot, ".sageox", "config.json"),
+		[]byte(`{"config_version":"2","repo_id":"`+repoID+`","session_publishing":"manual"}`), 0o644))
+	require.Equal(t, config.SessionPublishingManual, config.GetSessionPublishing(f.projectRoot))
+	require.Equal(t, repoID, getRepoIDOrDefault(f.projectRoot))
+	const name = "2026-10-01T10-00-devon-OxPrEh"
+	cacheDir := filepath.Join(session.GetContextPath(getRepoIDOrDefault(f.projectRoot)), "sessions", name)
+	require.NoError(t, os.MkdirAll(cacheDir, 0o755))
+	writeTestRawJSONLWithEntries(t, filepath.Join(cacheDir, ledgerFileRaw), 4)
+	t.Chdir(f.projectRoot)
+	remoteBefore := runGit(t, f.barePath, "rev-parse", "HEAD")
+
+	checkSessionHealth(doctorOptions{})
+
+	assert.Equal(t, remoteBefore, runGit(t, f.barePath, "rev-parse", "HEAD"), "doctor must not publish a manual-mode session")
+	assert.True(t, session.IsHeld(cacheDir), "doctor holds it instead")
+}
+
 // Failure prevented: an AI coworker running agent doctor is told nothing about
 // sessions the coworker keeps on this machine, or is nudged to publish them
 // without being asked (GH #1095).

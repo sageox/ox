@@ -22,8 +22,15 @@ func checkSessionHealth(opts doctorOptions) []checkResult {
 
 	var results []checkResult
 
-	// retry failed session uploads first (auto-fix: creates ledger files
-	// that downstream auto-stage/commit/push checks operate on)
+	// sessions kept on this machine, or waiting in the cache (GH #1095, #1077).
+	// First: in manual mode it holds unmarked cache sessions, and the upload
+	// retry below would otherwise publish them in this same run.
+	if heldResult, show := checkHeldSessions(gitRoot, getLedgerPath()); show {
+		results = append(results, heldResult)
+	}
+
+	// retry failed session uploads (auto-fix: creates ledger files that
+	// downstream auto-stage/commit/push checks operate on)
 	uploadRetryResult := checkSessionUploadRetry()
 	if !uploadRetryResult.passed || uploadRetryResult.message != "no pending uploads" {
 		results = append(results, uploadRetryResult)
@@ -44,11 +51,6 @@ func checkSessionHealth(opts doctorOptions) []checkResult {
 	dehydratedResult := checkSessionDehydrated(opts.shouldFix(CheckSlugSessionDehydrated))
 	if !dehydratedResult.skipped && (!dehydratedResult.passed || dehydratedResult.warning) {
 		results = append(results, dehydratedResult)
-	}
-
-	// sessions kept on this machine, or waiting in the cache (GH #1095, #1077)
-	if heldResult, show := checkHeldSessions(gitRoot, getLedgerPath()); show {
-		results = append(results, heldResult)
 	}
 
 	// create session checks from internal/doctor package
