@@ -1,4 +1,4 @@
-package daemon
+package gitutil
 
 import (
 	"context"
@@ -29,7 +29,7 @@ func TestPullBudget_ScalesWithAheadAndIsCapped(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, tt.want, pullBudget(tt.ahead))
+			assert.Equal(t, tt.want, PullBudget(tt.ahead))
 		})
 	}
 }
@@ -41,7 +41,7 @@ func TestPullContext(t *testing.T) {
 		t.Parallel()
 		parent, cancel := context.WithTimeout(context.Background(), time.Minute)
 		defer cancel()
-		got, release := pullContext(parent, longBacklogAhead-1)
+		got, release := PullContext(parent, longBacklogAhead-1)
 		defer release()
 		assert.Equal(t, parent, got)
 	})
@@ -50,7 +50,7 @@ func TestPullContext(t *testing.T) {
 		t.Parallel()
 		parent, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 		defer cancel()
-		got, release := pullContext(parent, 550)
+		got, release := PullContext(parent, 550)
 		defer release()
 
 		<-parent.Done()
@@ -58,13 +58,13 @@ func TestPullContext(t *testing.T) {
 		assert.NoError(t, got.Err(), "cycle deadline must not kill a long rebase")
 		dl, ok := got.Deadline()
 		require.True(t, ok)
-		assert.InDelta(t, pullBudget(550).Seconds(), time.Until(dl).Seconds(), 5)
+		assert.InDelta(t, PullBudget(550).Seconds(), time.Until(dl).Seconds(), 5)
 	})
 
 	t.Run("long backlog still honors cancellation such as daemon shutdown", func(t *testing.T) {
 		t.Parallel()
 		parent, cancel := context.WithCancel(context.Background())
-		got, release := pullContext(parent, 550)
+		got, release := PullContext(parent, 550)
 		defer release()
 		cancel()
 		select {
@@ -78,7 +78,7 @@ func TestPullContext(t *testing.T) {
 		t.Parallel()
 		parent, cancel := context.WithTimeout(context.Background(), time.Hour)
 		defer cancel()
-		got, release := pullContext(parent, 100)
+		got, release := PullContext(parent, 100)
 		defer release()
 		assert.Equal(t, parent, got)
 	})

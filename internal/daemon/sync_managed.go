@@ -894,11 +894,11 @@ func (s *SyncScheduler) fetchAndPullLocked(ctx context.Context, opts ManagedRepo
 		_, pullSpan := perf.Start(ctx, "git_pull_rebase")
 		pullArgs := append([]string{"-C", path}, gitHTTPTimeoutFlags()...)
 		pullArgs = append(pullArgs, "pull", "--rebase", "--autostash", "--quiet")
-		ahead = commitsAhead(ctx, path)
-		pullCtx, pullCancel := pullContext(ctx, ahead)
+		ahead = gitutil.CommitsAhead(ctx, path)
+		pullCtx, pullCancel := gitutil.PullContext(ctx, ahead)
 		pullCmd := gitutil.NewNetworkCmd(pullCtx, pullArgs...)
 		pullOutput, pullErr = pullCmd.CombinedOutput()
-		pullTimedOut := pullErr != nil && pullCtx.Err() != nil && errors.Is(context.Cause(pullCtx), context.DeadlineExceeded)
+		pullTimedOut := gitutil.PullTimedOut(pullCtx, pullErr)
 		pullCancel()
 		if pullErr != nil {
 			perf.RecordError(pullSpan, pullErr)
@@ -911,9 +911,9 @@ func (s *SyncScheduler) fetchAndPullLocked(ctx context.Context, opts ManagedRepo
 		if pullTimedOut {
 			// the killed pull leaves its rebase behind; clear it now so the
 			// repo is never wedged going into the next cycle
-			if found, abortErr := recoverPullTimeoutInRebase(ctx, path, repoName, ahead, logger); found {
+			if found, abortErr := gitutil.RecoverPullTimeoutInRebase(ctx, path, repoName, ahead, logger); found {
 				result := ManagedRepoPullResult{FetchHeadTime: fetchHeadTime, Diverged: diverged}
-				result.Err = fmt.Errorf("pull timed out after %s with %d commits ahead: %w", pullBudget(ahead), ahead, pullErr)
+				result.Err = fmt.Errorf("pull timed out after %s with %d commits ahead: %w", gitutil.PullBudget(ahead), ahead, pullErr)
 				if abortErr != nil {
 					result.Issue = &DaemonIssue{
 						Type:            IssueTypeRebaseStuck,

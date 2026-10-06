@@ -1,4 +1,4 @@
-package daemon
+package gitutil
 
 import (
 	"context"
@@ -8,8 +8,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/sageox/ox/internal/gitutil"
 )
 
 // Pull time budget. `git pull --rebase --autostash` replays every unpushed
@@ -31,9 +29,9 @@ const (
 	abortRecoveryTimeout = 30 * time.Second
 )
 
-// pullBudget returns how long a pull may run when the clone is `ahead`
+// PullBudget returns how long a pull may run when the clone is `ahead`
 // commits ahead of upstream: base + perCommit*ahead, capped.
-func pullBudget(ahead int) time.Duration {
+func PullBudget(ahead int) time.Duration {
 	if ahead < 0 {
 		ahead = 0
 	}
@@ -41,11 +39,11 @@ func pullBudget(ahead int) time.Duration {
 	return min(budget, pullMaxTimeout)
 }
 
-// commitsAhead returns the number of local commits not on upstream. Cheap
+// CommitsAhead returns the number of local commits not on upstream. Cheap
 // (`rev-list --count`); any failure (no upstream, unborn branch) reads as 0 so
 // the pull keeps the default budget.
-func commitsAhead(ctx context.Context, repoPath string) int {
-	out, err := gitutil.RunGit(ctx, repoPath, "rev-list", "--count", "@{u}..HEAD")
+func CommitsAhead(ctx context.Context, repoPath string) int {
+	out, err := RunGit(ctx, repoPath, "rev-list", "--count", "@{u}..HEAD")
 	if err != nil {
 		return 0
 	}
@@ -56,15 +54,15 @@ func commitsAhead(ctx context.Context, repoPath string) int {
 	return n
 }
 
-// pullContext returns the context for `git pull --rebase`. For a small backlog
+// PullContext returns the context for `git pull --rebase`. For a small backlog
 // it is the cycle context unchanged. For a long one it is detached from the
-// cycle's DEADLINE (but not its cancellation) and given pullBudget(ahead), so a
+// cycle's DEADLINE (but not its cancellation) and given PullBudget(ahead), so a
 // legitimately long rebase is not killed mid-replay every cycle.
-func pullContext(parent context.Context, ahead int) (context.Context, context.CancelFunc) {
+func PullContext(parent context.Context, ahead int) (context.Context, context.CancelFunc) {
 	if ahead < longBacklogAhead {
 		return parent, func() {}
 	}
-	budget := pullBudget(ahead)
+	budget := PullBudget(ahead)
 	if dl, ok := parent.Deadline(); ok && time.Until(dl) >= budget {
 		return parent, func() {}
 	}
@@ -81,21 +79,21 @@ func pullContext(parent context.Context, ahead int) (context.Context, context.Ca
 	}
 }
 
-// recoverPullTimeoutInRebase runs when the pull context expired. The pull's
+// RecoverPullTimeoutInRebase runs when the pull context expired. The pull's
 // process group was killed, which leaves .git/rebase-merge (or rebase-apply)
 // behind. Left alone, the next cycle sees a "wedged" rebase and every session
 // commit fails until it ages out; abort it now, in the same cycle, rescuing
 // any commits that exist only on a detached HEAD first.
 //
 // Returns whether a rebase was found and whether it was cleared.
-func recoverPullTimeoutInRebase(parent context.Context, path, repoName string, ahead int, logger *slog.Logger) (found bool, abortErr error) {
-	if !gitutil.IsRebaseInProgress(path) {
+func RecoverPullTimeoutInRebase(parent context.Context, path, repoName string, ahead int, logger *slog.Logger) (found bool, abortErr error) {
+	if !IsRebaseInProgress(path) {
 		return false, nil
 	}
 	// the pull context is expired; recovery needs its own budget
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), abortRecoveryTimeout)
 	defer cancel()
-	rescueRef, abortErr := gitutil.RescueIfNeededThenAbort(ctx, path, "pull timed out during rebase", logger)
+	rescueRef, abortErr := RescueIfNeededThenAbort(ctx, path, "pull timed out during rebase", logger)
 	if abortErr != nil {
 		logger.Error("pull timed out during rebase; abort failed",
 			"op", "pull_timeout_abort_failed", "repo", repoName, "ahead", ahead,
@@ -105,4 +103,10 @@ func recoverPullTimeoutInRebase(parent context.Context, path, repoName string, a
 	logger.Warn("pull timed out during rebase; aborted",
 		"op", "pull_timeout_rebase_aborted", "repo", repoName, "ahead", ahead, "rescue_ref", rescueRef)
 	return true, nil
+}
+
+// PullTimedOut reports whether a failed pull failed because its context
+// deadline expired (as opposed to a git error or a caller cancel).
+func PullTimedOut(pullCtx context.Context, pullErr error) bool {
+	return pullErr != nil && pullCtx.Err() != nil && errors.Is(context.Cause(pullCtx), context.DeadlineExceeded)
 }

@@ -475,7 +475,10 @@ func fixLedgerBranchBehind(ledgerPath string, behindCount int) checkResult {
 
 		// --autostash: uncommitted local changes must not block the pull.
 		// Bounded so a hung network pull can't hold the lock forever.
-		pullCtx, pullCancel := context.WithTimeout(context.Background(), 60*time.Second)
+		ahead := gitutil.CommitsAhead(context.Background(), ledgerPath)
+		baseCtx, baseCancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer baseCancel()
+		pullCtx, pullCancel := gitutil.PullContext(baseCtx, ahead)
 		if !hadRebaseBefore {
 			// Existing autostash conflicts need a lossless metadata repair,
 			// not the positional resolution used for an active rebase.
@@ -488,7 +491,19 @@ func fixLedgerBranchBehind(ledgerPath string, behindCount int) checkResult {
 		}
 		pullCmd := gitutil.NewNetworkCmd(pullCtx, "-C", ledgerPath, "pull", "--rebase", "--autostash")
 		output, err := pullCmd.CombinedOutput()
+		timedOut := gitutil.PullTimedOut(pullCtx, err)
 		pullCancel()
+		if timedOut {
+			// the killed pull leaves its rebase behind; clear it now
+			if found, abortErr := gitutil.RecoverPullTimeoutInRebase(lockCtx, ledgerPath, "ledger", ahead, slog.Default()); found {
+				if abortErr != nil {
+					result = FailedCheck("Ledger branch status", "pull timed out and rebase abort failed", abortErr.Error())
+				} else {
+					result = FailedCheck("Ledger branch status", "pull timed out", "The pull exceeded its time budget and was aborted cleanly; rerun ox doctor --fix")
+				}
+				return nil
+			}
+		}
 		if err != nil {
 			errStr := strings.TrimSpace(string(output))
 			if hadRebaseBefore {
