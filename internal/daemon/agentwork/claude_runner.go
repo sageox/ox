@@ -150,7 +150,7 @@ func (r *ClaudeRunner) Run(ctx context.Context, req RunRequest) (*RunResult, err
 		switch {
 		case err == nil:
 			isolated = true
-		case req.Isolated:
+		case req.Isolated || !errors.As(err, new(isolationUnsupported)):
 			return nil, err
 		default:
 			r.logger.Warn("running claude without isolation; update Claude Code", "error", err)

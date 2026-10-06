@@ -2,6 +2,7 @@ package gitserver
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"os/exec"
 	"strings"
@@ -76,19 +77,42 @@ func RefreshRemoteCredentials(repoPath, endpointURL string) error {
 }
 
 // RemoteOnGitServer reports whether remoteURL is on the git server behind
-// endpointURL: the server the SageOx API named when it issued the credentials
-// (serverURL, empty when unknown), or the endpoint's host or that host with a
-// git. prefix. Scheme and port are ignored.
+// endpointURL. When the SageOx API named that server for the credentials
+// (serverURL), only it qualifies; when it named none, the endpoint's host or
+// that host with a git. prefix does. Scheme, host, and port must all match.
 func RemoteOnGitServer(remoteURL, endpointURL, serverURL string) bool {
-	host := extractHost(remoteURL)
-	if host == "" {
+	remote := urlOrigin(remoteURL)
+	if remote == "" {
 		return false
 	}
-	if serverURL != "" && host == extractHost(serverURL) {
-		return true
+	if serverURL != "" {
+		return remote == urlOrigin(serverURL)
 	}
-	repoEp := endpointFromRemoteURL(remoteURL)
-	return repoEp != "" && endpointHostsEqual(endpointURL, repoEp)
+	ep, err := url.Parse(endpointURL)
+	if err != nil {
+		return false
+	}
+	return remote == urlOrigin(endpointURL) || remote == urlOrigin(ep.Scheme+"://git."+ep.Host)
+}
+
+// urlOrigin returns scheme://host:port with the scheme's default port filled
+// in, or "" when rawURL names no scheme or host.
+func urlOrigin(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Scheme == "" || u.Hostname() == "" {
+		return ""
+	}
+	scheme := strings.ToLower(u.Scheme)
+	port := u.Port()
+	if port == "" {
+		switch scheme {
+		case "https":
+			port = "443"
+		case "http":
+			port = "80"
+		}
+	}
+	return scheme + "://" + net.JoinHostPort(strings.ToLower(u.Hostname()), port)
 }
 
 // endpointHostsEqual returns true if two endpoint URLs name the same host

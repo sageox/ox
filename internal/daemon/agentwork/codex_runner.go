@@ -77,7 +77,7 @@ func (r *CodexRunner) Run(ctx context.Context, req RunRequest) (*RunResult, erro
 		switch {
 		case err == nil:
 			args = append(args, isolation...)
-		case req.Isolated:
+		case req.Isolated || !errors.As(err, new(isolationUnsupported)):
 			return nil, err
 		default:
 			r.logger.Warn("running codex without isolation; update Codex", "error", err)

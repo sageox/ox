@@ -202,14 +202,18 @@ if [ "$1" = "features" ]; then exec sleep 5; fi`, "did not answer within"},
 			t.Cleanup(func() { codexProbeTimeout = prior })
 			prompted := filepath.Join(t.TempDir(), "prompted")
 			script := fakeCLI(t, tt.cli, tt.body+"\ntouch \""+prompted+"\"\n")
-			var err error
-			if tt.cli == "claude" {
-				_, err = (&ClaudeRunner{binaryPath: script, logger: slog.Default()}).Run(context.Background(), RunRequest{Prompt: "p", Isolated: true})
-			} else {
-				_, err = (&CodexRunner{binaryPath: script, logger: slog.Default()}).Run(context.Background(), RunRequest{Prompt: "p", Isolated: true})
+			// A probe that failed proves nothing about the CLI, so the daemon's
+			// best-effort request must not fall back to running unisolated either.
+			for _, req := range []RunRequest{{Prompt: "p", Isolated: true}, {Prompt: "p", IsolateIfSupported: true}} {
+				var err error
+				if tt.cli == "claude" {
+					_, err = (&ClaudeRunner{binaryPath: script, logger: slog.Default()}).Run(context.Background(), req)
+				} else {
+					_, err = (&CodexRunner{binaryPath: script, logger: slog.Default()}).Run(context.Background(), req)
+				}
+				require.ErrorContains(t, err, tt.wantErr)
+				assert.NoFileExists(t, prompted, "no prompt-bearing run after a failed probe")
 			}
-			require.ErrorContains(t, err, tt.wantErr)
-			assert.NoFileExists(t, prompted, "no prompt-bearing run after a failed probe")
 		})
 	}
 }
