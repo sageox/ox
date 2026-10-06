@@ -85,7 +85,20 @@ func TestRestorePointer_KeepsLocalCopy(t *testing.T) {
 		assert.Equal(t, content, cached)
 	})
 
-	t.Run("an existing cache copy is not overwritten", func(t *testing.T) {
+	t.Run("an identical cache copy is kept", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "raw.jsonl")
+		cache := filepath.Join(dir, "cache", "raw.jsonl")
+		require.NoError(t, os.WriteFile(path, content, 0o644))
+		require.NoError(t, os.MkdirAll(filepath.Dir(cache), 0o755))
+		require.NoError(t, os.WriteFile(cache, content, 0o600))
+
+		require.NoError(t, RestorePointer(path, cache, content, ref))
+
+		assert.True(t, IsPointerFile(path))
+	})
+
+	t.Run("a mismatched cache copy fails closed and the file is untouched", func(t *testing.T) {
 		dir := t.TempDir()
 		path := filepath.Join(dir, "raw.jsonl")
 		cache := filepath.Join(dir, "cache", "raw.jsonl")
@@ -93,8 +106,12 @@ func TestRestorePointer_KeepsLocalCopy(t *testing.T) {
 		require.NoError(t, os.MkdirAll(filepath.Dir(cache), 0o755))
 		require.NoError(t, os.WriteFile(cache, []byte("already hydrated\n"), 0o600))
 
-		require.NoError(t, RestorePointer(path, cache, content, ref))
+		err := RestorePointer(path, cache, content, ref)
 
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "differs")
+		onDisk, _ := os.ReadFile(path)
+		assert.Equal(t, content, onDisk, "no copy of these bytes exists outside the file, so it must stay")
 		cached, _ := os.ReadFile(cache)
 		assert.Equal(t, "already hydrated\n", string(cached))
 	})

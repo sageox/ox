@@ -48,6 +48,7 @@ func TestSessionStageGuard_EdgeCases(t *testing.T) {
 		filepath.Join(".sageox", "sessions", trackedID, "raw.jsonl"),
 	}, out.Skipped)
 	assert.Len(t, out.Stage, 2, "the directory and the out-of-tree path are not this guard's business")
+	assert.Len(t, out.Skipped, 2)
 	onDisk, _ := os.ReadFile(filepath.Join(sessionsDir, blockedID, "raw.jsonl"))
 	assert.Equal(t, content, string(onDisk), "a failed restore leaves the hydrated file as it was")
 }

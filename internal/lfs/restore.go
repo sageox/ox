@@ -93,8 +93,12 @@ func RestorePointer(path, cachePath string, content []byte, ref FileRef) error {
 }
 
 func preserveInCache(cachePath string, content []byte) error {
-	if info, err := os.Stat(cachePath); err == nil && info.Size() > 0 {
-		// an existing cache copy is hydrated data already; never overwrite it
+	if existing, err := os.ReadFile(cachePath); err == nil && len(existing) > 0 {
+		// never overwrite a cache copy, and never pointerize over one that is not these bytes:
+		// the hydrated file would then have no copy anywhere but git history
+		if ComputeOID(existing) != ComputeOID(content) {
+			return fmt.Errorf("cache copy of %s differs from the hydrated file; refusing to replace it with a pointer", filepath.Base(cachePath))
+		}
 		return nil
 	}
 	if err := os.MkdirAll(filepath.Dir(cachePath), 0o700); err != nil {
