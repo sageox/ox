@@ -53,6 +53,23 @@ func TestCommitDraftLocally_WaitsForRepoLock(t *testing.T) {
 	assert.Contains(t, runGit(t, f.ledgerPath, "log", "-1", "--format=%s"), "session-draft: "+session)
 }
 
+// A failing `git rm` inside the locked purge/discard sequence surfaces as an
+// error and releases the lock (a following lock acquisition must not hang).
+func TestDraftRemoval_GitRmFailureSurfacesAndReleasesLock(t *testing.T) {
+	const session = "2026-01-01T00-00-testuser-OxRmFail"
+	f := newDraftLedgerFixture(t)
+	f.publish(t, session, 1)
+	require.NoError(t, os.WriteFile(filepath.Join(f.ledgerPath, ".git", "index"), []byte("not an index"), 0o644))
+
+	err := purgeDraftSessionDir(f.ledgerPath, session)
+	require.ErrorContains(t, err, "git rm draft")
+
+	_, err = deleteDraftFromLedger(f.ledgerPath, session)
+	require.ErrorContains(t, err, "git rm draft")
+
+	require.NoError(t, withDraftLedgerLock(f.ledgerPath, func() error { return nil }))
+}
+
 // A holder that outlasts the bounded wait yields a retryable "busy" error and
 // nothing runs behind the holder's back.
 func TestWithDraftLedgerLock_BusyIsRetryable(t *testing.T) {
