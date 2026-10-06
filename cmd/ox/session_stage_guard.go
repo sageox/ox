@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -89,7 +91,12 @@ func (g *sessionStageGuard) guardOne(rel string) (restored bool, skipReason stri
 	if meta.IsDraft() && name != "meta.json" {
 		return false, "session is a draft; a draft directory holds only meta.json"
 	}
-	if !lfs.IsContentArtifact(name) || lfs.IsPointerFile(abs) {
+	isContent := lfs.IsContentArtifact(name)
+	// unreadable metadata hides whether this is a draft directory; fail closed for anything but meta.json
+	if metaErr != nil && !errors.Is(metaErr, fs.ErrNotExist) && !isContent && name != "meta.json" {
+		return false, fmt.Sprintf("cannot read session metadata to rule out a draft: %v", metaErr)
+	}
+	if !isContent || lfs.IsPointerFile(abs) {
 		return false, ""
 	}
 	if meta.StoredInGit(name) {

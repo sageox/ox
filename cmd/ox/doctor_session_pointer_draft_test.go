@@ -75,6 +75,34 @@ func TestRestoreUnpushedSessionPointers_UntracksDraftArtifacts(t *testing.T) {
 	assert.Empty(t, mustGitStatus(t, ledger, "sessions/"+draftName), "no stray files are left in the draft directory")
 }
 
+// TestSessionStageGuard_CorruptMetaDoesNotBypassDraftCheck covers a session whose meta.json cannot be
+// read. Whether it is a draft is then unknown, so a non-meta.json file is not staged, while meta.json
+// itself and a directory with no meta.json at all keep their normal behavior.
+func TestSessionStageGuard_CorruptMetaDoesNotBypassDraftCheck(t *testing.T) {
+	project, _ := newSessionCommitProject(t)
+	sessionsDir := filepath.Join(project, ".sageox", "sessions")
+	corrupt := filepath.Join(sessionsDir, "2026-10-04T10-00-ryan-OxCCCC")
+	missing := filepath.Join(sessionsDir, "2026-10-04T11-00-ryan-OxDDDD")
+	for dir, files := range map[string]map[string]string{
+		corrupt: {"meta.json": "{not json", "notes.txt": "hello\n"},
+		missing: {"notes.txt": "hello\n"},
+	} {
+		require.NoError(t, os.MkdirAll(dir, 0o755))
+		for name, content := range files {
+			require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644))
+		}
+	}
+
+	out := newSessionStageGuard(project, sessionsDir).check([]string{
+		filepath.Join(".sageox", "sessions", "2026-10-04T10-00-ryan-OxCCCC", "meta.json"),
+		filepath.Join(".sageox", "sessions", "2026-10-04T10-00-ryan-OxCCCC", "notes.txt"),
+		filepath.Join(".sageox", "sessions", "2026-10-04T11-00-ryan-OxDDDD", "notes.txt"),
+	})
+
+	assert.Equal(t, []string{filepath.Join(".sageox", "sessions", "2026-10-04T10-00-ryan-OxCCCC", "notes.txt")}, out.Skipped)
+	assert.Len(t, out.Stage, 2)
+}
+
 // TestRestoreUnpushedSessionPointers_DraftCacheConflictFailsClosed covers a cache that already holds
 // different bytes for a draft artifact. Untracking it would leave the committed bytes with no copy
 // outside git history, so it stays tracked and is reported while the others are untracked.
