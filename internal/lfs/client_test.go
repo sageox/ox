@@ -749,9 +749,10 @@ func TestLFSBatchCancelsCredentialRefresh(t *testing.T) {
 			t.Setenv("OX_XDG_DISABLE", "")
 			t.Setenv(auth.EnvVarToken, "oxt_test_1ljPfr")
 			blockedPath := "/api/v1/cli/repos"
-			if stage == "OAuth" {
+			switch stage {
+			case "OAuth":
 				blockedPath = auth.TokenEndpoint
-			} else if stage == "JWT" {
+			case "JWT":
 				blockedPath = "/api/v1/cli/auth/token"
 			}
 			started, release := make(chan struct{}), make(chan struct{})
@@ -783,9 +784,10 @@ func TestLFSBatchCancelsCredentialRefresh(t *testing.T) {
 			}))
 			client, err := NewClientForEndpoint(srv.URL+"/ledger.git", srv.URL)
 			require.NoError(t, err)
-			if stage == "before batch" {
+			switch stage {
+			case "before batch":
 				t.Setenv(auth.EnvVarToken, "oxt_rotated_1lKvCA")
-			} else if stage == "OAuth" || stage == "JWT" {
+			case "OAuth", "JWT":
 				t.Setenv(auth.EnvVarToken, "")
 				require.NoError(t, auth.SaveTokenForEndpoint(srv.URL, &auth.StoredToken{
 					AccessToken: "expired-jwt", RefreshToken: "valid-refresh",
