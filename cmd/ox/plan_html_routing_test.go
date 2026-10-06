@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -181,10 +182,13 @@ func TestPlanLintFile_RoutesByFileName(t *testing.T) {
 	}
 }
 
+// identityMetaRe matches the identity <meta> tags save stamps into a <head>.
+var identityMetaRe = regexp.MustCompile(`<meta name="sageox:[^"]*" content="[^"]*">\n`)
+
 // assertSavedAsAuthoredPage checks the ledger holds exactly one plan, saved
 // HTML-primary, with the page as plan.html and markdown derived from it as
 // plan.md. Save stamps the plan's identity <meta> tags into a page that has a
-// <head>, so only a head-less page is compared byte for byte.
+// <head>; with those taken out the page must match byte for byte.
 func assertSavedAsAuthoredPage(t *testing.T, page string) {
 	t.Helper()
 	info, meta := savedOnlyPlan(t)
@@ -198,12 +202,8 @@ func assertSavedAsAuthoredPage(t *testing.T, page string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(page, "<head>") {
-		if !strings.Contains(string(stored), "<h1>Real title</h1><p>Body.</p>") || !strings.Contains(string(stored), `name="sageox:plan-slug"`) {
-			t.Errorf("plan.html is not the authored page with identity stamped:\n%s", stored)
-		}
-	} else if string(stored) != page {
-		t.Errorf("plan.html is not the authored page verbatim:\n%s", stored)
+	if got := identityMetaRe.ReplaceAllString(string(stored), ""); got != page {
+		t.Errorf("plan.html is not the authored page verbatim (identity metas aside):\n%s", stored)
 	}
 	md, err := os.ReadFile(filepath.Join(info.Dir, "plan.md"))
 	if err != nil {
@@ -247,13 +247,19 @@ func TestPlanEnrichSave_KeepsAuthoredHTMLPage(t *testing.T) {
 // TestPlanEnrichSave_MarkdownStaysMarkdownPrimary: the ox#1115 fix must not
 // turn a markdown plan into an HTML-primary one.
 func TestPlanEnrichSave_MarkdownStaysMarkdownPrimary(t *testing.T) {
+	for _, mode := range []string{"persist", "text"} {
+		t.Run(mode, func(t *testing.T) { checkEnrichSavesMarkdownPrimary(t, mode) })
+	}
+}
+
+func checkEnrichSavesMarkdownPrimary(t *testing.T, mode string) {
 	root := newPlanCaptureTestRepo(t)
 	t.Setenv("SAGEOX_AGENT_ID", "")
 
 	const md = "# Cache warmup\n\n## Approach\n\nWarm the cache on boot.\n"
 	src := filepath.Join(root, ".context", "plan.md")
 	writePlanSource(t, src, md)
-	runPlanEnrich(t, "file", src, "persist", "true")
+	runPlanEnrich(t, "file", src, mode, "true")
 
 	info, meta := savedOnlyPlan(t)
 	if meta.Primary != "" || info.HasHTML {
@@ -286,4 +292,56 @@ func TestPlanReviewSaveDraft_KeepsAuthoredHTMLPage(t *testing.T) {
 	}
 
 	assertSavedAsAuthoredPage(t, doctypelessPage)
+}
+
+// TestPlanEnrichPersist_StdinPageKeepsAuthoredHTML: the ExitPlanMode hook pipes
+// the plan on stdin with no path, so the page is recognized by its content.
+func TestPlanEnrichPersist_StdinPageKeepsAuthoredHTML(t *testing.T) {
+	newPlanCaptureTestRepo(t)
+	t.Setenv("SAGEOX_AGENT_ID", "")
+
+	const page = "<!doctype html><html><head><title>My Plan</title></head><body><h1>Real title</h1><p>Body.</p></body></html>"
+	cmd := planEnrichCmd
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetIn(strings.NewReader(page))
+	t.Cleanup(func() {
+		cmd.SetIn(strings.NewReader(""))
+		_ = cmd.Flags().Set("persist", "false")
+	})
+	if err := cmd.Flags().Set("persist", "true"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.RunE(cmd, nil); err != nil {
+		t.Fatalf("enrich RunE: %v", err)
+	}
+	var res plan.Result
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatalf("--persist stdout is not one JSON document: %v\n%s", err, out.String())
+	}
+
+	assertSavedAsAuthoredPage(t, page)
+}
+
+// TestPlanReviewSaveDraft_ReturnsTheSavedSlug: an authored page's
+// ox-plan-slug decides where it is saved, so the slug handed to the review
+// loop must be that one, not the one its title would give.
+func TestPlanReviewSaveDraft_ReturnsTheSavedSlug(t *testing.T) {
+	root := newPlanCaptureTestRepo(t)
+	t.Setenv("SAGEOX_AGENT_ID", "")
+
+	const page = `<meta name="ox-plan-slug" content="custom-slug"><title>My Plan</title><h1>Real title</h1><p>Body.</p>`
+	src := filepath.Join(root, ".context", "plan.html")
+	writePlanSource(t, src, page)
+	cmd := &cobra.Command{}
+	cmd.Flags().StringSlice("companion", nil, "")
+	slug, err := reviewSaveDraft(cmd, src)
+	if err != nil {
+		t.Fatalf("reviewSaveDraft: %v", err)
+	}
+	info, _ := savedOnlyPlan(t)
+	if slug != info.Slug || slug != "custom-slug" {
+		t.Errorf("reviewSaveDraft returned %q, saved plan slug is %q, want both %q", slug, info.Slug, "custom-slug")
+	}
 }
