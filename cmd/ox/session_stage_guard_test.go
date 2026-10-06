@@ -92,6 +92,7 @@ func TestSessionStageGuard_UnreadableRepoFails(t *testing.T) {
 
 	assert.Error(t, stageErr)
 	assert.Error(t, indexErr)
+	assert.Error(t, guard.gitPathspec(context.Background(), []string{"sessions/x"}, "add"))
 }
 
 // TestRunSessionCommit_NothingSafeToCommit covers a run where every changed artifact is unvouched raw

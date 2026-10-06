@@ -56,10 +56,7 @@ func checkSessionPointerRestore(fix bool) checkResult {
 	if ledgerPath == "" {
 		return SkippedCheck(pointerRestoreCheckName, "no ledger found", "")
 	}
-	if !isGitRepo(ledgerPath) {
-		return SkippedCheck(pointerRestoreCheckName, "ledger not a git repo", "")
-	}
-
+	// a Ledger that is not a git repo has no upstream, which the body reports as a skip
 	return runSessionPointerRestore(ledgerPath, fix)
 }
 

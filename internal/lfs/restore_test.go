@@ -128,6 +128,20 @@ func TestRestorePointer_KeepsLocalCopy(t *testing.T) {
 		assert.Equal(t, content, onDisk)
 	})
 
+	t.Run("a cache path that cannot be written fails before the file changes", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "raw.jsonl")
+		require.NoError(t, os.WriteFile(path, content, 0o644))
+		cache := filepath.Join(dir, "cache", "raw.jsonl")
+		require.NoError(t, os.MkdirAll(filepath.Join(cache, "child"), 0o755)) // a directory where the file belongs
+
+		err := RestorePointer(path, cache, content, ref)
+
+		require.Error(t, err)
+		onDisk, _ := os.ReadFile(path)
+		assert.Equal(t, content, onDisk)
+	})
+
 	t.Run("an unwritable cache location fails before the file changes", func(t *testing.T) {
 		dir := t.TempDir()
 		path := filepath.Join(dir, "raw.jsonl")
