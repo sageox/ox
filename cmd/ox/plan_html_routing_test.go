@@ -6,6 +6,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -343,5 +344,72 @@ func TestPlanReviewSaveDraft_ReturnsTheSavedSlug(t *testing.T) {
 	info, _ := savedOnlyPlan(t)
 	if slug != info.Slug || slug != "custom-slug" {
 		t.Errorf("reviewSaveDraft returned %q, saved plan slug is %q, want both %q", slug, info.Slug, "custom-slug")
+	}
+}
+
+// TestPlanReviewSaveDraft_ReportsWhySaveFailed: when the page's ox-plan-slug
+// names two live plans, save refuses to guess. review --file must say so and
+// name the cause, not just "could not save draft".
+func TestPlanReviewSaveDraft_ReportsWhySaveFailed(t *testing.T) {
+	root := newPlanCaptureTestRepo(t)
+	t.Setenv("SAGEOX_AGENT_ID", "")
+
+	const page = `<meta name="ox-plan-slug" content="dup-slug"><title>My Plan</title><h1>Real title</h1><p>Body.</p>`
+	src := filepath.Join(root, ".context", "plan.html")
+	writePlanSource(t, src, page)
+	cmd := &cobra.Command{}
+	cmd.Flags().StringSlice("companion", nil, "")
+	if _, err := reviewSaveDraft(cmd, src); err != nil {
+		t.Fatalf("first save: %v", err)
+	}
+	// a second live plan claiming the same slug, as a copied page would leave
+	info, _ := savedOnlyPlan(t)
+	twin := filepath.Join(filepath.Dir(info.Dir), "1999-01-01-dup-slug")
+	if err := os.MkdirAll(twin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	meta, err := os.ReadFile(filepath.Join(info.Dir, "meta.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(twin, "meta.json"), meta, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = reviewSaveDraft(cmd, src)
+	var amb *plan.AmbiguousSlugError
+	if !errors.As(err, &amb) {
+		t.Fatalf("err = %v, want it to wrap the AmbiguousSlugError that blocked the save", err)
+	}
+	if !strings.Contains(err.Error(), "could not save draft to the ledger") {
+		t.Errorf("err = %q, want the review-facing context kept", err)
+	}
+}
+
+// TestWritePlanHuman_NextStepFollowsWhatWasSaved: once enrich has saved the
+// authored page as the plan of record, the advice must not ask the coworker
+// to author and save a plan.html again; for a markdown plan it still must.
+func TestWritePlanHuman_NextStepFollowsWhatWasSaved(t *testing.T) {
+	result := plan.Result{Signals: plan.SignalSummary{Material: true}}
+	for _, tc := range []struct {
+		name      string
+		pageSaved bool
+		want      string
+		notWant   string
+	}{
+		{"page saved", true, "The page is saved as the plan of record", "Author a visual `plan.html`"},
+		{"markdown saved", false, "Author a visual `plan.html`", "The page is saved as the plan of record"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := &cobra.Command{}
+			var out bytes.Buffer
+			cmd.SetOut(&out)
+			if err := writePlanHuman(cmd, result, "/ledger/data/plans/x", tc.pageSaved); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(out.String(), tc.want) || strings.Contains(out.String(), tc.notWant) {
+				t.Errorf("advice for %s:\n%s", tc.name, out.String())
+			}
+		})
 	}
 }
