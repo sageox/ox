@@ -171,34 +171,7 @@ func (s *SyncScheduler) syncBubbles(ctx context.Context) {
 	listCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
-	// fan out over the ambient scopes and union the rows, deduped by
-	// kb_id (a bubble visible via two scopes must reconcile once).
-	var bubbles []api.KB
-	seen := make(map[string]bool)
-	for _, scope := range scopes {
-		rows, err := lister.ListBubbles(listCtx, scope)
-		if err != nil {
-			if errors.Is(err, api.ErrKBAPIUnavailable) {
-				// 403/404 — flag-gated, non-member, or endpoint missing.
-				// Silent skip per the sentinel doc on api.ErrKBAPIUnavailable.
-				s.logger.Debug("kb_sync scope unavailable, skipping",
-					"scope_type", scope.Type, "scope_id", scope.ID, "error", err)
-				continue
-			}
-			s.logger.Warn("kb_sync list failed for scope",
-				"scope_type", scope.Type, "scope_id", scope.ID, "error", err)
-			continue
-		}
-		for _, r := range rows {
-			if r.KBID != "" && seen[r.KBID] {
-				continue
-			}
-			if r.KBID != "" {
-				seen[r.KBID] = true
-			}
-			bubbles = append(bubbles, r)
-		}
-	}
+	bubbles := s.listKBScopes(listCtx, lister, scopes)
 
 	if len(bubbles) == 0 {
 		s.logger.Debug("kb_sync: no bubbles for caller")
@@ -217,6 +190,75 @@ func (s *SyncScheduler) syncBubbles(ctx context.Context) {
 	// coworkers can see them at <project>/.sageox/kb/team/<slug>. The
 	// reconciler is idempotent and safe to call when nothing changed.
 	s.reconcileOwnProjectSymlinks(ctx, bubbles)
+}
+
+// kbScopeFailure is an auth-rejected scope collected during one fan-out.
+type kbScopeFailure struct {
+	scope api.KBScope
+	err   error
+}
+
+// listKBScopes fans out over the scopes and unions the rows, deduped by
+// kb_id (a bubble visible via two scopes must reconcile once).
+//
+// Scopes parked by an earlier auth failure are skipped until their backoff
+// expires. Auth failures are handled after the loop so the message can say
+// whether the token worked for any other scope in the same cycle: if it did,
+// the token is fine and this scope is denied; "run 'ox login'" is only
+// accurate when every scope failed.
+func (s *SyncScheduler) listKBScopes(ctx context.Context, lister KBBubbleLister, scopes []api.KBScope) []api.KB {
+	var bubbles []api.KB
+	seen := make(map[string]bool)
+	var authFailures []kbScopeFailure
+	succeeded := 0
+	for _, scope := range scopes {
+		if s.kbScopeParks.parked(scope.ID) {
+			continue
+		}
+		rows, err := lister.ListBubbles(ctx, scope)
+		if err != nil {
+			if errors.Is(err, api.ErrKBAPIUnavailable) {
+				// 403/404 — flag-gated, non-member, or endpoint missing.
+				// Silent skip per the sentinel doc on api.ErrKBAPIUnavailable.
+				s.logger.Debug("kb_sync scope unavailable, skipping",
+					"scope_type", scope.Type, "scope_id", scope.ID, "error", err)
+				continue
+			}
+			if errors.Is(err, api.ErrUnauthorized) {
+				authFailures = append(authFailures, kbScopeFailure{scope: scope, err: err})
+				continue
+			}
+			s.logger.Warn("kb_sync list failed for scope",
+				"scope_type", scope.Type, "scope_id", scope.ID, "error", err)
+			continue
+		}
+		succeeded++
+		if s.kbScopeParks.succeed(scope.ID) {
+			s.logger.Info("kb_sync scope recovered",
+				"scope_type", scope.Type, "scope_id", scope.ID)
+		}
+		for _, r := range rows {
+			if r.KBID != "" && seen[r.KBID] {
+				continue
+			}
+			if r.KBID != "" {
+				seen[r.KBID] = true
+			}
+			bubbles = append(bubbles, r)
+		}
+	}
+
+	for _, f := range authFailures {
+		attempts, delay := s.kbScopeParks.fail(f.scope.ID)
+		errText := f.err.Error()
+		if succeeded > 0 {
+			errText = fmt.Sprintf("access denied for scope %s: server rejected the token for this team", f.scope.ID)
+		}
+		s.logger.Warn("kb_sync scope parked",
+			"scope_type", f.scope.Type, "scope_id", f.scope.ID,
+			"attempts", attempts, "retry_after", delay.String(), "error", errText)
+	}
+	return bubbles
 }
 
 // projectTeamIDForKB resolves the project's primary team id from the

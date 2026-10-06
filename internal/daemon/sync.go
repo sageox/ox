@@ -248,6 +248,9 @@ type SyncScheduler struct {
 	// fakes via SetKBBubbleListerFactory.
 	kbListerFactory kbBubbleListerFactory
 
+	// kbScopeParks backs off kb scopes the server rejects with 401.
+	kbScopeParks kbScopeParks
+
 	// OTel tracer for per-task trace contexts (nil = tracing disabled)
 	tracer *observability.DaemonTracer
 

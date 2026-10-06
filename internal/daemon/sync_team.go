@@ -58,6 +58,9 @@ func (s *SyncScheduler) TeamSync(progress *ProgressWriter) ([]TeamSyncResult, er
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
+	// a manual sync means the user wants a retry now; lift kb scope backoff
+	s.clearKBScopeParks()
+
 	results, err := s.doTeamSync(ctx, progress, true)
 	if err != nil {
 		// setup failure (e.g. config load) — propagate as-is; there are no
