@@ -28,7 +28,10 @@ func TestWaitForLockFiles(t *testing.T) {
 			time.Sleep(150 * time.Millisecond)
 			_ = os.Remove(lock)
 		}()
+		start := time.Now()
 		assert.Empty(t, WaitForLockFiles(context.Background(), dir, 5*time.Second))
+		// proves the waiter blocked on the lock rather than scanning after removal
+		assert.GreaterOrEqual(t, time.Since(start), 100*time.Millisecond)
 	})
 
 	t.Run("budget elapses with lock still held", func(t *testing.T) {
