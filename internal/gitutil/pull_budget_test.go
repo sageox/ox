@@ -41,7 +41,7 @@ func TestPullContext(t *testing.T) {
 		t.Parallel()
 		parent, cancel := context.WithTimeout(context.Background(), time.Minute)
 		defer cancel()
-		got, release := PullContext(parent, longBacklogAhead-1)
+		got, release := PullContext(parent, longBacklogAhead-1, nil)
 		defer release()
 		assert.Equal(t, parent, got)
 	})
@@ -50,7 +50,7 @@ func TestPullContext(t *testing.T) {
 		t.Parallel()
 		parent, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 		defer cancel()
-		got, release := PullContext(parent, 550)
+		got, release := PullContext(parent, 550, nil)
 		defer release()
 
 		<-parent.Done()
@@ -64,7 +64,7 @@ func TestPullContext(t *testing.T) {
 	t.Run("long backlog still honors cancellation such as daemon shutdown", func(t *testing.T) {
 		t.Parallel()
 		parent, cancel := context.WithCancel(context.Background())
-		got, release := PullContext(parent, 550)
+		got, release := PullContext(parent, 550, nil)
 		defer release()
 		cancel()
 		select {
@@ -74,11 +74,28 @@ func TestPullContext(t *testing.T) {
 		}
 	})
 
+	t.Run("shutdown cancels the pull even after the cycle deadline expired", func(t *testing.T) {
+		t.Parallel()
+		parent, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		defer cancel()
+		shutdown, stopDaemon := context.WithCancel(context.Background())
+		got, release := PullContext(parent, 550, shutdown)
+		defer release()
+		<-parent.Done()
+		require.NoError(t, got.Err())
+		stopDaemon()
+		select {
+		case <-got.Done():
+		case <-time.After(2 * time.Second):
+			t.Fatal("daemon shutdown did not cancel the detached pull")
+		}
+	})
+
 	t.Run("a parent with more time than the budget is left alone", func(t *testing.T) {
 		t.Parallel()
 		parent, cancel := context.WithTimeout(context.Background(), time.Hour)
 		defer cancel()
-		got, release := PullContext(parent, 100)
+		got, release := PullContext(parent, 100, nil)
 		defer release()
 		assert.Equal(t, parent, got)
 	})

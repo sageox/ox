@@ -340,7 +340,7 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 				ahead := CommitsAhead(ctx, repoPath)
 				baseCtx, baseCancel := context.WithTimeout(ctx, opTimeout)
 				defer baseCancel()
-				pullCtx, pullCancel := PullContext(baseCtx, ahead)
+				pullCtx, pullCancel := PullContext(baseCtx, ahead, nil)
 				// A prior pull may have left autostash conflicts without an
 				// active rebase. Never send those to the positional resolver.
 				if _, err := ResolveAutostashConflicts(pullCtx, repoPath, opts.AutoResolvePrefixes, opts.AutoResolveDenyPrefixes); err != nil {
@@ -352,8 +352,13 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 				pullCancel()
 				if timedOut {
 					// the killed pull leaves its rebase behind; clear it now
-					if found, abortErr := RecoverPullTimeoutInRebase(ctx, repoPath, repoPath, ahead, log); found && abortErr != nil {
-						return fmt.Errorf("git pull --rebase timed out: %w", abortErr)
+					if found, abortErr := RecoverPullTimeoutInRebase(ctx, repoPath, repoPath, ahead, log); found {
+						// report the timeout itself: falling through would run
+						// conflict handling on a rebase that no longer exists
+						if abortErr != nil {
+							return fmt.Errorf("git pull --rebase timed out: %w", abortErr)
+						}
+						return fmt.Errorf("git pull --rebase timed out after %s with %d commits ahead: %w", PullBudget(ahead), ahead, pullErr)
 					}
 				}
 				if pullErr != nil {

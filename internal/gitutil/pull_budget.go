@@ -58,7 +58,11 @@ func CommitsAhead(ctx context.Context, repoPath string) int {
 // it is the cycle context unchanged. For a long one it is detached from the
 // cycle's DEADLINE (but not its cancellation) and given PullBudget(ahead), so a
 // legitimately long rebase is not killed mid-replay every cycle.
-func PullContext(parent context.Context, ahead int) (context.Context, context.CancelFunc) {
+//
+// shutdown is an optional long-lived context (the daemon's) that cancels the
+// pull even after the cycle context has already expired, which parent alone
+// cannot report. Pass nil when there is none.
+func PullContext(parent context.Context, ahead int, shutdown context.Context) (context.Context, context.CancelFunc) {
 	if ahead < longBacklogAhead {
 		return parent, func() {}
 	}
@@ -73,8 +77,13 @@ func PullContext(parent context.Context, ahead int) (context.Context, context.Ca
 			cancel()
 		}
 	})
+	stopShutdown := func() bool { return true }
+	if shutdown != nil {
+		stopShutdown = context.AfterFunc(shutdown, cancel)
+	}
 	return ctx, func() {
 		stop()
+		stopShutdown()
 		cancel()
 	}
 }

@@ -895,7 +895,7 @@ func (s *SyncScheduler) fetchAndPullLocked(ctx context.Context, opts ManagedRepo
 		pullArgs := append([]string{"-C", path}, gitHTTPTimeoutFlags()...)
 		pullArgs = append(pullArgs, "pull", "--rebase", "--autostash", "--quiet")
 		ahead = gitutil.CommitsAhead(ctx, path)
-		pullCtx, pullCancel := gitutil.PullContext(ctx, ahead)
+		pullCtx, pullCancel := gitutil.PullContext(ctx, ahead, s.ctx)
 		pullCmd := gitutil.NewNetworkCmd(pullCtx, pullArgs...)
 		pullOutput, pullErr = pullCmd.CombinedOutput()
 		pullTimedOut := gitutil.PullTimedOut(pullCtx, pullErr)

@@ -478,7 +478,7 @@ func fixLedgerBranchBehind(ledgerPath string, behindCount int) checkResult {
 		ahead := gitutil.CommitsAhead(context.Background(), ledgerPath)
 		baseCtx, baseCancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer baseCancel()
-		pullCtx, pullCancel := gitutil.PullContext(baseCtx, ahead)
+		pullCtx, pullCancel := gitutil.PullContext(baseCtx, ahead, nil)
 		if !hadRebaseBefore {
 			// Existing autostash conflicts need a lossless metadata repair,
 			// not the positional resolution used for an active rebase.
