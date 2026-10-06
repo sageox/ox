@@ -229,37 +229,6 @@ func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPul
 		return ManagedRepoPullResult{CorruptRepo: true}
 	}
 
-	// Lock files: auto-remove stale ones, skip and report if still present
-	gitDir := filepath.Join(path, ".git")
-	if locks := gitutil.HasLockFiles(gitDir); len(locks) > 0 {
-		// attempt to remove stale locks before giving up
-		removed, lockErrs := gitutil.RemoveStaleLockFiles(gitDir)
-		for _, err := range lockErrs {
-			logger.Warn("failed to remove stale git lock file", "path", path, "error", err)
-		}
-		if len(removed) > 0 {
-			logger.Info("removed stale git lock files", "path", path, "locks", strings.Join(removed, ", "))
-		}
-		// re-check: if fresh locks remain, a live git process is holding them
-		if remaining := gitutil.HasLockFiles(gitDir); len(remaining) > 0 {
-			logger.Warn("git lock files detected, skipping pull",
-				"path", path, "locks", strings.Join(remaining, ", "))
-			return ManagedRepoPullResult{
-				Skipped:    true,
-				SkipReason: skipReasonLockFilesPresent,
-				Issue: &DaemonIssue{
-					Type:     IssueTypeGitLock,
-					Severity: SeverityWarning,
-					Repo:     repoName,
-					Summary: fmt.Sprintf("Lock files blocking sync: %s. If no git commands are running, remove with: rm %s/{%s}",
-						strings.Join(remaining, ", "),
-						gitDir,
-						strings.Join(remaining, ",")),
-				},
-			}
-		}
-	}
-
 	// --- Fetch + pull, serialized per clone ---
 	//
 	// ADR-030 D1: every mutating git operation on a managed clone runs
@@ -278,6 +247,16 @@ func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPul
 	// after a successful pull the pull's own verdict is real and must stand.
 	var pullRan bool
 	lockErr := gitutil.WithRepoLock(ctx, path, func() error {
+		// Lock files are checked under the repo lock: every ox writer holds it
+		// while git holds index.lock, so a lock file seen here belongs to a
+		// non-ox git or a crash, never to a peer this pull should have waited
+		// for. Checking before the lock turned every hook commit into a skipped
+		// pull.
+		if stop, lockResult := waitForForeignGitLocks(ctx, path, repoName, logger); stop {
+			result = lockResult
+			return nil
+		}
+
 		// Re-check and recover stale rebases only after taking the same
 		// cross-process lock used by fetch/pull. Checking age before waiting
 		// could turn a live operation stale, then abort it after the lock was
@@ -338,6 +317,52 @@ func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPul
 	// branch — the field must describe this cycle, not survive by luck.
 	result.PullRan = pullRan
 	return result
+}
+
+// foreignLockWait bounds how long a pull waits for a git lock file that is not
+// an ox writer's. Real git operations hold index.lock for milliseconds to
+// seconds; anything longer is a wedge, and the next cycle retries.
+const foreignLockWait = 3 * time.Second
+
+// waitForForeignGitLocks sweeps stale git lock files, then gives a live git
+// process (an editor integration, a human at the shell) foreignLockWait to
+// finish. stop is true when a lock outlives the wait: the pull is skipped with
+// a lock issue and never escalates to a rebase abort.
+// The caller holds gitutil.WithRepoLock(path).
+func waitForForeignGitLocks(ctx context.Context, path, repoName string, logger *slog.Logger) (stop bool, result ManagedRepoPullResult) {
+	gitDir := filepath.Join(path, ".git")
+	if len(gitutil.HasLockFiles(gitDir)) == 0 {
+		return false, ManagedRepoPullResult{}
+	}
+	removed, lockErrs := gitutil.RemoveStaleLockFiles(gitDir)
+	for _, err := range lockErrs {
+		logger.Warn("failed to remove stale git lock file", "path", path, "error", err)
+	}
+	if len(removed) > 0 {
+		logger.Info("removed stale git lock files", "path", path, "locks", strings.Join(removed, ", "))
+	}
+	remaining := gitutil.WaitForLockFiles(ctx, gitDir, foreignLockWait)
+	if len(remaining) == 0 {
+		return false, ManagedRepoPullResult{}
+	}
+	logger.Warn("git lock files detected, skipping pull", "path", path, "locks", strings.Join(remaining, ", "))
+	return true, lockFilesBusyResult(repoName, gitDir, remaining)
+}
+
+// lockFilesBusyResult is the skip verdict for a pull that met git lock files
+// it must not touch.
+func lockFilesBusyResult(repoName, gitDir string, locks []string) ManagedRepoPullResult {
+	return ManagedRepoPullResult{
+		Skipped:    true,
+		SkipReason: skipReasonLockFilesPresent,
+		Issue: &DaemonIssue{
+			Type:     IssueTypeGitLock,
+			Severity: SeverityWarning,
+			Repo:     repoName,
+			Summary: fmt.Sprintf("Lock files blocking sync: %s. If no git commands are running, remove with: rm %s/{%s}",
+				strings.Join(locks, ", "), gitDir, strings.Join(locks, ",")),
+		},
+	}
 }
 
 // classifyAutostashFailure decides what an error from ResolveAutostashConflicts
@@ -924,6 +949,24 @@ func (s *SyncScheduler) fetchAndPullLocked(ctx context.Context, opts ManagedRepo
 					}
 				}
 				return result
+			}
+		}
+		// A non-ox git took index.lock mid-pull. That is a busy repo, not a
+		// conflict: wait for it, retry once, and if it will not clear return a
+		// busy skip rather than climbing the conflict ladder, whose final rung
+		// is `rebase --abort` — itself blocked by the same lock (exit 128).
+		if gitutil.IsIndexLockContention(string(pullOutput)) {
+			if remaining := gitutil.WaitForLockFiles(ctx, filepath.Join(path, ".git"), foreignLockWait); len(remaining) > 0 {
+				logger.Warn("git lock files detected mid-pull, skipping", "repo", repoName, "locks", strings.Join(remaining, ", "))
+				busy := lockFilesBusyResult(repoName, filepath.Join(path, ".git"), remaining)
+				busy.FetchHeadTime, busy.Diverged = fetchHeadTime, diverged
+				return busy
+			}
+			// lock cleared; a rebase left behind is this call's own (the
+			// pre-pull guard saw none), so the ladder below may clear it
+			if attempt < maxFetchPullAttempts && !gitutil.IsRebaseInProgress(path) {
+				logger.Warn("git lock cleared mid-pull, retrying once", "repo", repoName, "attempt", attempt)
+				continue
 			}
 		}
 		if attempt < maxFetchPullAttempts && strings.Contains(string(pullOutput), fetchHeadRaceSignature) {

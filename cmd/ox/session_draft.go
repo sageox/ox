@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/gitserver"
@@ -215,7 +216,7 @@ func draftStagePaths(sessionName string) []string {
 // fire every N turns from every agent sharing the ledger clone, so the
 // co-staging window that is theoretical for session-stop is routine here.
 func commitDraftLocally(ledgerPath, sessionName string) error {
-	if err := prepareDraftLedgerWrite(ledgerPath, sessionName); err != nil {
+	if err := validateDraftWriteTarget(ledgerPath, sessionName); err != nil {
 		return err
 	}
 	gitserver.EnsureGitignoreBeforeCommit(ledgerPath)
@@ -224,6 +225,43 @@ func commitDraftLocally(ledgerPath, sessionName string) error {
 		slog.Debug("draft: ensure sessions gitignore", "error", err)
 	}
 
+	return withDraftLedgerLock(ledgerPath, func() error {
+		return stageAndCommitDraft(ledgerPath, sessionName)
+	})
+}
+
+// draftLockWait bounds how long a draft write waits for the ledger's repo lock.
+// A hook must not hang the agent's turn behind a long daemon pull; giving up is
+// safe because the next draft refresh retries.
+const draftLockWait = 15 * time.Second
+
+// withDraftLedgerLock runs a draft's git write sequence under the same
+// cross-process lock the daemon's pull-rebase holds, so the two can never meet
+// on .git/index.lock (#1190). Not re-entrant: fn must not take the lock again.
+//
+// The mid-rebase / lock-file safety check runs inside the lock: checked before
+// it, the daemon's own in-flight index.lock reads as "unsafe ledger".
+func withDraftLedgerLock(ledgerPath string, fn func() error) error {
+	ctx, cancel := context.WithTimeout(context.Background(), draftLockWait)
+	defer cancel()
+	guarded := func() error {
+		if err := assertLedgerSafeForDraftWrite(ledgerPath); err != nil {
+			return err
+		}
+		return fn()
+	}
+	if err := gitutil.WithRepoLock(ctx, ledgerPath, guarded); err != nil {
+		if gitutil.IsRepoLockBusy(err) {
+			return fmt.Errorf("ledger busy, draft write will retry: %w", err)
+		}
+		return err
+	}
+	return nil
+}
+
+// stageAndCommitDraft is the git write sequence of commitDraftLocally. The
+// caller holds the repo lock.
+func stageAndCommitDraft(ledgerPath, sessionName string) error {
 	paths := draftStagePaths(sessionName)
 
 	// --sparse: ledger repos use cone-mode sparse-checkout, and git 2.37+
@@ -318,6 +356,15 @@ func assertDraftStillStaged(ledgerPath, sessionName string, paths []string) erro
 // missing from a different subset of the four write paths — which is what
 // happens when a safety check is a convention rather than a chokepoint.
 func prepareDraftLedgerWrite(ledgerPath, sessionName string) error {
+	if err := validateDraftWriteTarget(ledgerPath, sessionName); err != nil {
+		return err
+	}
+	return assertLedgerSafeForDraftWrite(ledgerPath)
+}
+
+// validateDraftWriteTarget is the half of the gate that needs no lock: name,
+// path, and a wait out of the daemon's blue-green GC swap.
+func validateDraftWriteTarget(ledgerPath, sessionName string) error {
 	if err := validateDraftSessionName(sessionName); err != nil {
 		return err
 	}
@@ -326,7 +373,7 @@ func prepareDraftLedgerWrite(ledgerPath, sessionName string) error {
 	}
 	// The daemon's blue-green GC can rename-swap the clone out from under us.
 	waitForGCSwap(ledgerPath)
-	return assertLedgerSafeForDraftWrite(ledgerPath)
+	return nil
 }
 
 // validateDraftLedgerPath refuses to run git writes against anything that is
@@ -383,24 +430,26 @@ func validateDraftLedgerPath(ledgerPath string) error {
 // between write and commit) does not fail the purge; the working-tree removal
 // still runs.
 func purgeDraftSessionDir(ledgerPath, sessionName string) error {
-	if err := prepareDraftLedgerWrite(ledgerPath, sessionName); err != nil {
+	if err := validateDraftWriteTarget(ledgerPath, sessionName); err != nil {
 		return err
 	}
 	relDir := draftSessionRelDir(sessionName)
 
-	gitRm := exec.Command("git", "-C", ledgerPath, "rm", "-r", "--force", "--ignore-unmatch", "--", relDir)
-	if out, err := gitRm.CombinedOutput(); err != nil {
-		return fmt.Errorf("git rm draft %s: %s: %w", sessionName, strings.TrimSpace(string(out)), err)
-	}
+	return withDraftLedgerLock(ledgerPath, func() error {
+		gitRm := exec.Command("git", "-C", ledgerPath, "rm", "-r", "--force", "--ignore-unmatch", "--", relDir)
+		if out, err := gitRm.CombinedOutput(); err != nil {
+			return fmt.Errorf("git rm draft %s: %s: %w", sessionName, strings.TrimSpace(string(out)), err)
+		}
 
-	// git rm --ignore-unmatch leaves untracked files behind. Remove whatever
-	// remains so a server-authored artifact that was never committed here
-	// cannot survive into the finalized session either.
-	if err := os.RemoveAll(filepath.Join(ledgerPath, "sessions", sessionName)); err != nil {
-		return fmt.Errorf("remove draft dir %s: %w", sessionName, err)
-	}
+		// git rm --ignore-unmatch leaves untracked files behind. Remove whatever
+		// remains so a server-authored artifact that was never committed here
+		// cannot survive into the finalized session either.
+		if err := os.RemoveAll(filepath.Join(ledgerPath, "sessions", sessionName)); err != nil {
+			return fmt.Errorf("remove draft dir %s: %w", sessionName, err)
+		}
 
-	return commitDraftRemoval(ledgerPath, sessionName, "supersede")
+		return commitDraftRemoval(ledgerPath, sessionName, "supersede")
+	})
 }
 
 // commitDraftRemoval commits a staged draft deletion, scoped to that session's
@@ -477,7 +526,9 @@ func commitDraftRetraction(ledgerPath, sessionName string) error {
 	// it to the remote. Still commits defensively in case a caller reaches here
 	// with a staged-but-uncommitted deletion.
 	waitForGCSwap(ledgerPath)
-	if err := commitDraftRemoval(ledgerPath, sessionName, "retract"); err != nil {
+	if err := withDraftLedgerLock(ledgerPath, func() error {
+		return commitDraftRemoval(ledgerPath, sessionName, "retract")
+	}); err != nil {
 		return err
 	}
 	return pushLedger(context.Background(), ledgerPath)
@@ -561,18 +612,19 @@ func deleteDraftFromLedger(ledgerPath, sessionName string) (draftDeleteResult, e
 		return res, fmt.Errorf("%s is a finalized session in the ledger, not a draft; use 'ox agent session delete %s' to remove it", sessionName, sessionName)
 	}
 
-	if err := prepareDraftLedgerWrite(ledgerPath, sessionName); err != nil {
+	if err := validateDraftWriteTarget(ledgerPath, sessionName); err != nil {
 		return res, err
 	}
 
 	relDir := draftSessionRelDir(sessionName)
-	gitRm := exec.Command("git", "-C", ledgerPath, "rm", "-r", "--force", "--ignore-unmatch", "--", relDir)
-	if out, err := gitRm.CombinedOutput(); err != nil {
-		return res, fmt.Errorf("git rm draft %s: %s: %w", sessionName, strings.TrimSpace(string(out)), err)
-	}
-	_ = os.RemoveAll(sessionDir)
-
-	if err := commitDraftRemoval(ledgerPath, sessionName, "discard"); err != nil {
+	if err := withDraftLedgerLock(ledgerPath, func() error {
+		gitRm := exec.Command("git", "-C", ledgerPath, "rm", "-r", "--force", "--ignore-unmatch", "--", relDir)
+		if out, err := gitRm.CombinedOutput(); err != nil {
+			return fmt.Errorf("git rm draft %s: %s: %w", sessionName, strings.TrimSpace(string(out)), err)
+		}
+		_ = os.RemoveAll(sessionDir)
+		return commitDraftRemoval(ledgerPath, sessionName, "discard")
+	}); err != nil {
 		return res, err
 	}
 	res.Deleted = true

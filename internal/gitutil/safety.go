@@ -3,6 +3,7 @@
 package gitutil
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -67,6 +68,36 @@ func lockFilesIn(gitDir string) []string {
 // Returns the names of lock files found (empty slice = safe to proceed).
 func HasLockFiles(gitDir string) []string {
 	return lockFilesIn(gitDir)
+}
+
+// WaitForLockFiles polls until gitDir holds no lock files, the budget elapses,
+// or ctx ends, and returns whatever lock files remain (nil when clear). It never
+// removes anything: a lock held by a live git is not ours to touch.
+func WaitForLockFiles(ctx context.Context, gitDir string, budget time.Duration) []string {
+	deadline := time.NewTimer(budget)
+	defer deadline.Stop()
+	tick := time.NewTicker(50 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		locks := lockFilesIn(gitDir)
+		if len(locks) == 0 {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return locks
+		case <-deadline.C:
+			return lockFilesIn(gitDir)
+		case <-tick.C:
+		}
+	}
+}
+
+// IsIndexLockContention reports whether git output says another process holds
+// a lock file ("Unable to create '.../index.lock': File exists"). It marks a
+// busy repo, never a conflict.
+func IsIndexLockContention(output string) bool {
+	return strings.Contains(output, "Unable to create") && strings.Contains(output, ".lock': File exists")
 }
 
 // lockOwnerPID extracts the owning process ID from a lock filename that encodes
