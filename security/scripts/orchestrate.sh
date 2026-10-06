@@ -206,9 +206,10 @@ budget_or_cap() {
 # cost goes into the ledger — including a call the CLI stopped at --max-budget-usd,
 # which exits 1 but still spent money. The cap is checked before each call, and
 # each call gets the remaining budget as its --max-budget-usd. A hunt wave is
-# checked once, by the parent, and every hunter in it gets the same
-# [wave-budget]: the wave can overshoot the cap by at most its own cost, and
-# whether a hunter runs never depends on which sibling finished first.
+# checked once, by the parent, which splits the remaining budget evenly across
+# the hunters it launches and passes each its share as [wave-budget]: parallel
+# hunters can't jointly spend past the cap, and whether a hunter runs never
+# depends on which sibling finished first.
 # CC_SUBSIDIZED=1 (interactive Claude Code subsidy) records cost for the summary
 # but enforces nothing.
 #
@@ -390,10 +391,28 @@ for (( n = 1; n <= CHUNKS; n++ )); do
   python3 "$LIB" packet --role hunter --review "$OUT/review" --chunk "$n" \
     --scope-md "$OUT/scope.md" --surface-md "$OUT/surface.md" --det "$OUT/findings-deterministic.json" \
     --out "$OUT/review/packet-hunter-c${nn}.md"
+  # Each launched hunter gets an equal share of what is left. Handing all of
+  # them the whole remainder let a wave finish under every per-call limit while
+  # spending past the cap — and with no findings to dedup, no later call ever
+  # noticed.
   wave_budget=""
   wave_capped=0
-  if [[ "${CC_SUBSIDIZED:-0}" != "1" ]] && ! wave_budget="$(budget_or_cap "hunt:c${nn}")"; then
-    wave_capped=1
+  if [[ "${CC_SUBSIDIZED:-0}" != "1" ]]; then
+    launching=0
+    for h in "${HUNTERS[@]}"; do
+      if [[ -f "$SKILL/prompts/hunter-${h}.md" ]]; then launching=$((launching + 1)); fi
+    done
+    if (( launching > 0 )); then
+      if remaining="$(budget_or_cap "hunt:c${nn}")"; then
+        wave_budget="$(awk -v r="$remaining" -v n="$launching" 'BEGIN {printf "%.4f", r / n}')"
+        if awk -v b="$wave_budget" 'BEGIN {exit !(b < 0.01)}'; then
+          mark_cap_hit "hunt:c${nn}"
+          wave_capped=1
+        fi
+      else
+        wave_capped=1
+      fi
+    fi
   fi
   hunter_pids=()
   for h in "${HUNTERS[@]}"; do

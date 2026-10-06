@@ -394,7 +394,7 @@ class FindingsReportTest(unittest.TestCase):
     def render(self, mutate):
         state = full_state()
         state.update({"raw_count": 0, "deduped_count": 0, "dropped": 0, "malformed": 0, "cost": 0.5,
-                      "subsidized": False})
+                      "subsidized": False, "scanner_findings": []})
         state["manifest"].update({"files": [], "excluded_tests": []})
         mutate(state)
         cov = pipeline.compute_coverage(state)
@@ -408,6 +408,18 @@ class FindingsReportTest(unittest.TestCase):
         self.assertIn("**NO COVERAGE**", no_coverage)
         self.assertIn("coverage: none", no_coverage)
 
+    def test_scanner_findings_are_reported_but_never_called_clean(self):
+        # Before, a scanner hit no AI reviewer repeated vanished from FINDINGS.md.
+        det = {"findings": [{"tool": "gosec", "ruleId": "G304", "level": "warning",
+                             "message": "G304: Potential file inclusion via variable",
+                             "locations": [{"file": "cmd/ox/b.go", "line": 3}]}]}
+        report = self.render(lambda s: s.update(scanner_findings=pipeline.scanner_report_findings(det, [])))
+        self.assertIn("## Scanner findings (not validated by the AI tier)", report)
+        self.assertIn("| gosec | G304 | `cmd/ox/b.go:3` | G304: Potential file inclusion via variable |", report)
+        self.assertIn("scanner_findings: 1", report)
+        self.assertNotIn("ran clean", report)
+        self.assertIn("No AI-confirmed findings. 1 scanner finding(s) are listed below, unvalidated.", report)
+
     def test_unvalidated_findings_are_shown_and_tagged(self):
         def mutate(s):
             s["findings"] = [{"title": "Traversal", "severity": "high", "file": "cmd/ox/a.go", "line": 7,
@@ -418,6 +430,31 @@ class FindingsReportTest(unittest.TestCase):
         self.assertIn("`cmd/ox/a.go:7`", report)
         self.assertIn("patch: reject separators; design: resolve by listing", report)
         self.assertIn("**PARTIAL COVERAGE**", report)
+
+
+class ScannerFindingsTest(unittest.TestCase):
+    DET = {"findings": [
+        {"tool": "gosec", "ruleId": "G304", "level": "warning", "message": "dup of an AI finding",
+         "locations": [{"file": "cmd/ox/a.go", "line": 7}]},
+        {"tool": "gosec", "ruleId": "G204", "level": "warning", "message": "subprocess with variable",
+         "locations": [{"file": "cmd/ox/b.go", "line": 3}]},
+        {"tool": "govulncheck", "ruleId": "GO-2026-0001", "level": "error", "message": "bad parse",
+         "locations": [], "reachable": True},
+    ]}
+
+    def test_dedups_against_ai_findings_and_orders_advisories_first(self):
+        ai = [{"title": "t", "file": "cmd/ox/a.go:7"}]
+        got = pipeline.scanner_report_findings(self.DET, ai)
+        self.assertEqual([(f["tool"], f["rule"]) for f in got], [("govulncheck", "GO-2026-0001"), ("gosec", "G204")])
+        self.assertTrue(got[0]["reachable"])
+
+    def test_sarif_carries_scanner_results_with_their_location(self):
+        scan = pipeline.scanner_report_findings(self.DET, [])
+        sarif = pipeline.render_sarif([], scan)
+        results = {r["ruleId"]: r for r in sarif["runs"][0]["results"]}
+        self.assertEqual(results["gosec/G204"]["locations"][0]["physicalLocation"]["region"], {"startLine": 3})
+        self.assertNotIn("locations", results["govulncheck/GO-2026-0001"])
+        self.assertEqual(results["gosec/G204"]["properties"], {"source": "gosec", "validated": False})
 
 
 class ValidatorResultTest(unittest.TestCase):

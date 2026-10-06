@@ -62,7 +62,7 @@ Read the coverage line first — the frontmatter's `coverage:` and the banner un
 | `partial` | A stage was skipped, failed, truncated, or stopped at the cost cap. Findings are real; their absence is not, for the parts listed. | 0 (skips), 1 (a failure), 2 (cap) |
 | `none` | A required stage did not run: no hunter completed, every scanner was skipped or failed, or a `cmd/ox/`, `internal/daemon/`, `internal/session/` or `internal/auth/` change produced no entry points. Zero findings means nothing; listed findings are still real. | 3 |
 
-A `## Coverage` table at the end shows each stage: chunks reviewed, each scanner's status (`ran` / `skipped` / `failed`, with the reason), entry points mapped, hunter runs completed, findings validated, and cost.
+Scanner findings for the touched files, plus dependency advisories, get their own section: unvalidated tool output, minus anything an AI finding reports at the same line. They are in `findings.sarif` too, as `<tool>/<rule>`. A `## Coverage` table at the end shows each stage: chunks reviewed, each scanner's status (`ran` / `skipped` / `failed`, with the reason), entry points mapped, hunter runs completed, findings validated, and cost.
 
 Findings are grouped by hunter section (`#hunter-cli-input`, `#hunter-secrets-redaction`, `#hunter-daemon-ipc`, `#hunter-supply-chain`, `#hunter-llm-trust`). Each finding has:
 
@@ -82,7 +82,7 @@ Maintainers with private rule sets (vendor-internal patterns, embargoed CVE dete
 
 ## Cost model
 
-The AI tier is the only tier with a marginal cost. Spend is what each subagent call reports in `total_cost_usd` — a call the CLI stops at its budget still counts. The cap (`cost_cap_usd` in `config.yml`, or `--cap=N`) is checked before every call and once per wave of parallel hunters, so a run can overshoot by at most one wave (and the CLI can let a single call finish the model turn that crossed its budget). When it is reached, the remaining AI calls are skipped, findings not yet validated are kept and marked `UNVALIDATED`, and the run exits 2 with PARTIAL COVERAGE. `CC_SUBSIDIZED=1` keeps the tally but stops enforcing the cap.
+The AI tier is the only tier with a marginal cost. Spend is what each subagent call reports in `total_cost_usd` — a call the CLI stops at its budget still counts. The cap (`cost_cap_usd` in `config.yml`, or `--cap=N`) is checked before every call, and a wave of parallel hunters splits what is left evenly, so together they can't spend past it (the CLI can still let a single call finish the model turn that crossed its budget). When it is reached, the remaining AI calls are skipped, findings not yet validated are kept and marked `UNVALIDATED`, and the run exits 2 with PARTIAL COVERAGE. `CC_SUBSIDIZED=1` keeps the tally but stops enforcing the cap.
 
 If you're running the AI tier as a routine pre-commit check on every diff, you're holding it wrong — use `make sec-fast` for that, and `make sec` only when the diff touches one of the sensitive paths (auth, daemon, redaction, adapter install, `go.mod`).
 

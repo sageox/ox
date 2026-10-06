@@ -40,7 +40,7 @@ Show the user, coverage first:
 
 1. **Coverage** — the `coverage:` line of the SUMMARY block (also `coverage:` in the FINDINGS.md frontmatter). If it says `NO COVERAGE`, lead with that and its reasons: a required stage did not run, so never call the run clean or report "0 findings" as a result — any findings it lists are still real. `PARTIAL COVERAGE` means findings are real but their absence is not, for the parts listed.
 2. The headline counts: `N critical, M high, P medium, Q low` (from FINDINGS.md frontmatter).
-3. The top 3 findings (by severity then exploitability). `UNVALIDATED` findings were never checked by the validator; say so.
+3. The top 3 findings (by severity then exploitability). `UNVALIDATED` findings were never checked by the validator; say so. Scanner findings (their own section, `scanner_findings:` in the frontmatter) are unvalidated tool output; give their count.
 4. The path to the full report: `security/.output/FINDINGS.md`.
 5. The cost: the SUMMARY block's `cost:` line.
 

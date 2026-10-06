@@ -267,11 +267,34 @@ class OrchestrateE2ETest(unittest.TestCase):
 
         ledger = [line.split("\t") for line in self.repo.output(".cost-ledger").splitlines()]
         self.assertEqual(len(ledger), 6, self.explain(result))  # cartographer + five stopped hunters
-        self.assertAlmostEqual(sum(float(row[0]) for row in ledger), 0.3 + 5 * 0.201, places=6)
+        # The wave's $0.20 remainder is split five ways: each hunter stops at $0.04.
+        self.assertAlmostEqual(sum(float(row[0]) for row in ledger), 0.3 + 5 * 0.041, places=6)
         statuses = [line.split("\t")[2] for line in self.repo.output("hunter-status.tsv").splitlines()]
         self.assertEqual(statuses, ["cap"] * 5)
         self.assertIn("cost cap ($0.50) reached during the hunt phase", self.repo.output("FINDINGS.md"))
         self.assertEqual(result.returncode, 3, self.explain(result))
+
+    def test_parallel_hunters_cannot_jointly_spend_past_the_cap(self):
+        """Each hunter stays under its own limit; together they must not pass the cap."""
+        self.repo.plant_feature()
+        self.repo.install("claude", "golangci-lint")
+        # $0.20 per call, cap $1: the cartographer leaves $0.80 for five hunters.
+        # With no findings, nothing after the hunt would ever notice an overshoot.
+        result = self.repo.run("orchestrate.sh", "--cap=1.0", FAKE_COST="0.2", FAKE_PLANT="(matches nothing)")
+
+        spent = sum(float(line.split("\t")[0]) for line in self.repo.output(".cost-ledger").splitlines())
+        self.assertLessEqual(spent, 1.0 + 5 * 0.001 + 1e-9, self.explain(result))  # + the CLI's per-call overshoot
+        self.assertIn("cost cap ($1.00) reached during the hunt phase", self.repo.output("FINDINGS.md"))
+
+    def test_scanner_findings_reach_the_report(self):
+        """A gosec hit in a touched file is listed in FINDINGS.md and the SARIF."""
+        self.repo.plant_feature()
+        self.repo.install("claude", "golangci-lint")
+        result = self.repo.run("orchestrate.sh", FAKE_GOSEC="issue")
+
+        report = self.repo.output("FINDINGS.md")
+        self.assertIn("| gosec | G304 | `cmd/ox/upload.go:11` |", report, self.explain(result))
+        self.assertIn("gosec/G304", self.repo.output("findings.sarif"))
 
     def test_stale_clean_report_is_replaced_when_claude_is_missing(self):
         """Last week's report said "ran clean"; this run cannot reach claude."""

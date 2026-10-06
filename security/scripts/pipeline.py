@@ -438,6 +438,16 @@ def finding_path(f: dict) -> str:
     return path[2:] if path.startswith("./") else path
 
 
+def finding_line(f: dict) -> int:
+    """The finding's line: its `line` field, else a `path:line` suffix on `file`."""
+    for value in (f.get("line"), str(f.get("file") or "").partition(":")[2].split(":")[0]):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+    return 0
+
+
 def validator_packet(m: dict, review: Path, finding: dict) -> str:
     path = finding_path(finding)
     entry = next((e for e in m.get("files") or [] if e["path"] == path), None)
@@ -1222,6 +1232,35 @@ def ledger_total(path: Path) -> float:
     return total
 
 
+# Dependency advisories first (a reachable CVE leads), then code findings.
+SCANNER_ORDER = {"govulncheck": 0, "osv-scanner": 1, "grype": 1, "opengrep": 2, "gosec": 3}
+
+
+def scanner_report_findings(det, ai_findings: list) -> list:
+    """Scanner findings for the report, minus any an AI finding already reports
+    at the same file and line. Before, they reached only the reviewer packets:
+    a scanner hit no AI reviewer repeated vanished from FINDINGS.md and SARIF."""
+    taken = {(finding_path(f), finding_line(f)) for f in ai_findings if finding_line(f)}
+    found = []
+    items = det.get("findings") if isinstance(det, dict) else None
+    for f in items or []:
+        loc = next((l for l in f.get("locations") or [] if l.get("file")), {})
+        file, line = loc.get("file", ""), finding_line(loc)
+        if line and (file, line) in taken:
+            continue
+        found.append({
+            "tool": f.get("tool") or "?",
+            "rule": f.get("ruleId") or "",
+            "level": f.get("level") or "warning",
+            "file": file,
+            "line": line,
+            "message": (f.get("message") or "").strip().replace("\n", " "),
+            "reachable": bool(f.get("reachable")),
+        })
+    found.sort(key=lambda f: (SCANNER_ORDER.get(f["tool"], 4), f["level"] != "error", f["file"], f["line"]))
+    return found
+
+
 def gather_state(out: Path, a) -> dict:
     hunters = [h for h in a.hunters.split() if h]
     with_prompt = [h for h in hunters if (Path(a.skill) / "prompts" / f"hunter-{h}.md").is_file()]
@@ -1229,6 +1268,7 @@ def gather_state(out: Path, a) -> dict:
     surface = load_json(out / "surface.json")
     findings, dropped, malformed = read_validated(out / "findings-validated.jsonl")
     return {
+        "scanner_findings": scanner_report_findings(det, findings),
         "manifest": load_json(out / "review" / "manifest.json"),
         "tools": det.get("tools") if isinstance(det, dict) else None,
         "surface": surface if isinstance(surface, dict) else None,
@@ -1316,6 +1356,8 @@ def cost_text(s: dict) -> str:
     return f"${s.get('cost', 0):.2f} (cap ${s.get('cap', 0):.2f})"
 
 
+SCANNER_ROWS = 100
+
 BANNERS = {
     "none": "**NO COVERAGE** — a required stage of this review did not run, so the absence of findings "
     "means nothing (findings listed below are still real). Fix these and re-run:",
@@ -1331,6 +1373,7 @@ def render_findings(s: dict, cov: dict, counts: dict) -> str:
         f"generated: {datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}",
         f"coverage: {cov['level']}",
         f"counts: {counts}",
+        f"scanner_findings: {len(s.get('scanner_findings') or [])}",
     ]
     if s.get("malformed"):
         md.append(f"malformed_input_lines: {s['malformed']}  # see .malformed.jsonl")
@@ -1340,16 +1383,23 @@ def render_findings(s: dict, cov: dict, counts: dict) -> str:
         md.append(">")
         md += [f"> - {r}" for r in cov["none"] + cov["partial"]]
         md.append("")
+    scan = s.get("scanner_findings") or []
     if not findings:
-        if cov["level"] == "full":
-            md.append("_No confirmed findings. Pipeline ran clean: every stage completed (see Coverage)._")
-        elif cov["level"] == "empty":
-            md.append("_Nothing to review: " + "; ".join(cov["notes"]) + "._")
+        # "Ran clean" only when every stage ran and neither the AI tier nor a
+        # scanner found anything.
+        if cov["level"] == "empty":
+            message = "Nothing to review: " + "; ".join(cov["notes"]) + "."
+        elif cov["level"] == "full" and not scan:
+            message = "No confirmed findings. Pipeline ran clean: every stage completed (see Coverage)."
+        elif cov["level"] == "none":
+            message = "No AI findings — and no coverage, so this is not a result."
         elif cov["level"] == "partial":
-            md.append("_No findings in the parts that were reviewed._")
+            message = "No AI findings in the parts that were reviewed."
         else:
-            md.append("_No findings — and no coverage, so this is not a result._")
-        md.append("")
+            message = "No AI-confirmed findings."
+        if scan:
+            message += f" {len(scan)} scanner finding(s) are listed below, unvalidated."
+        md += [f"_{message}_", ""]
     for f in findings:
         tag = " (UNVALIDATED)" if f.get("verdict") == "unvalidated" else ""
         md.append(f"## [{str(f.get('severity') or '?').upper()}] {f.get('title') or '(no title)'}{tag}")
@@ -1366,6 +1416,17 @@ def render_findings(s: dict, cov: dict, counts: dict) -> str:
         for key, label in (("verdict_reason", "Why"), ("attack", "Attack"), ("fix", "Fix")):
             if f.get(key):
                 md += [f"**{label}**: {_fmt(f[key])}", ""]
+    if scan:
+        md += ["## Scanner findings (not validated by the AI tier)", "",
+               "| Tool | Rule | Where | Message |", "|---|---|---|---|"]
+        for f in scan[:SCANNER_ROWS]:
+            where = f"`{f['file']}:{f['line']}`" if f["file"] and f["line"] else (f"`{f['file']}`" if f["file"] else "dependency")
+            rule = f["rule"] + (" (reachable)" if f["reachable"] else "")
+            message = f["message"].replace("|", "\\|")[:160]
+            md.append(f"| {f['tool']} | {rule} | {where} | {message} |")
+        if len(scan) > SCANNER_ROWS:
+            md += ["", f"… {len(scan) - SCANNER_ROWS} more in `findings-deterministic.json`."]
+        md.append("")
     md += ["## Coverage", "", "| Stage | Result |", "|---|---|"]
     md += [f"| {stage} | {text} |" for stage, text in coverage_rows(s)]
     if cov["notes"] and cov["level"] != "empty":
@@ -1373,7 +1434,22 @@ def render_findings(s: dict, cov: dict, counts: dict) -> str:
     return "\n".join(md).rstrip() + "\n"
 
 
-def render_sarif(findings: list) -> dict:
+def scanner_sarif_result(f: dict) -> dict:
+    result = {
+        "ruleId": f"{f['tool']}/{f['rule'] or 'unknown'}",
+        "level": f["level"] if f["level"] in ("error", "warning", "note") else "warning",
+        "message": {"text": f["message"] or f["rule"] or f["tool"]},
+        "properties": {"source": f["tool"], "validated": False},
+    }
+    if f["file"]:
+        location = {"artifactLocation": {"uri": f["file"]}}
+        if f["line"]:
+            location["region"] = {"startLine": f["line"]}
+        result["locations"] = [{"physicalLocation": location}]
+    return result
+
+
+def render_sarif(findings: list, scanner: list = ()) -> dict:
     level = {"critical": "error", "high": "error", "medium": "warning", "low": "note", "info": "note"}
     return {
         "version": "2.1.0",
@@ -1390,7 +1466,8 @@ def render_sarif(findings: list) -> dict:
                         "properties": {"verdict": f.get("verdict", "")},
                     }
                     for f in findings
-                ],
+                ]
+                + [scanner_sarif_result(f) for f in scanner],
             }
         ],
     }
@@ -1405,6 +1482,8 @@ def render_summary(s: dict, cov: dict, counts: dict, out: Path) -> str:
     tally = " · ".join(f"{k} {v}" for k, v in counts.items())
     tail = "  (not a result: no coverage)" if cov["level"] == "none" and not findings else ""
     lines.append(f"findings: {len(findings)} ({tally}){tail}")
+    if s.get("scanner_findings"):
+        lines.append(f"scanner findings: {len(s['scanner_findings'])} (unvalidated; listed in FINDINGS.md)")
     lines += [
         f"report:  {out}/FINDINGS.md",
         f"sarif:   {out}/findings.sarif",
@@ -1433,7 +1512,7 @@ def cmd_aggregate(a) -> int:
     counts = {sev: sum(1 for f in s["findings"] if str(f.get("severity")).lower() == sev) for sev in SEVERITY_ORDER}
     (out / "coverage.json").write_text(json.dumps(cov, indent=2) + "\n")
     (out / "FINDINGS.md").write_text(render_findings(s, cov, counts))
-    (out / "findings.sarif").write_text(json.dumps(render_sarif(s["findings"]), indent=2) + "\n")
+    (out / "findings.sarif").write_text(json.dumps(render_sarif(s["findings"], s["scanner_findings"]), indent=2) + "\n")
     with open(out / "run-log.md", "a") as log:
         stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         log.write(f"\n## {stamp} — head {a.head}\n- scope: {a.scope_line}\n- coverage: {cov['level']}\n")
