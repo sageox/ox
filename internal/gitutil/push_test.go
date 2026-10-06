@@ -701,7 +701,7 @@ func TestPushWithRetry_OnUnresolvedConflictsHookCalled(t *testing.T) {
 				assert.Equal(t, strings.TrimSpace(merged), gitInRepo(t, bare, "show", "HEAD:shared.txt"))
 			} else {
 				require.Error(t, err)
-				assert.Contains(t, err.Error(), "git pull --rebase failed during retry")
+				assert.Contains(t, err.Error(), "git rebase failed during retry")
 				assert.Equal(t, remoteHead, gitInRepo(t, bare, "rev-parse", "HEAD"), "failed resolution must not push")
 				if tc.cancelEnumeration {
 					assert.ErrorIs(t, err, context.Canceled)
