@@ -111,19 +111,19 @@ print_path_warning() {
             rc_file="~/.zshenv"
             path_line="export PATH=\"\$PATH:$posix_dir\""
             explanation="AI coding tools run hooks in a non-interactive shell, which reads ~/.zshenv but not ~/.zshrc."
-            one_liner="echo $(shell_quote "$path_line") >> ~/.zshenv"
+            one_liner="printf '%s\\n' $(shell_quote "$path_line") >> ~/.zshenv"
             ;;
         bash)
             rc_file="~/.bashrc"
             path_line="export PATH=\"\$PATH:$posix_dir\""
-            one_liner="echo $(shell_quote "$path_line") >> ~/.bashrc"
+            one_liner="printf '%s\\n' $(shell_quote "$path_line") >> ~/.bashrc"
             restart_line="Then restart your AI coding tool from a new terminal so it picks up the change."
             explanation="AI coding tools inherit the environment of the terminal they were started from, not any change made after they launched."
             ;;
         fish)
             rc_file="~/.config/fish/config.fish"
             path_line="fish_add_path -- \"$fish_dir\""
-            one_liner="mkdir -p ~/.config/fish && echo $(shell_quote "$path_line") >> ~/.config/fish/config.fish"
+            one_liner="mkdir -p ~/.config/fish && printf '%s\\n' $(shell_quote "$path_line") >> ~/.config/fish/config.fish"
             restart_line="Then restart your AI coding tool from a new terminal so it picks up the change."
             explanation="AI coding tools inherit the environment of the terminal they were started from, not any change made after they launched."
             ;;
