@@ -50,6 +50,11 @@ func checkSessionConflictMarkers(fix bool) checkResult {
 	if ledgerPath == "" {
 		return SkippedCheck(conflictMarkersCheckName, "no ledger found", "")
 	}
+	return runSessionConflictMarkers(ledgerPath, fix)
+}
+
+// runSessionConflictMarkers is the check body for one resolved Ledger.
+func runSessionConflictMarkers(ledgerPath string, fix bool) checkResult {
 	fixCommand := "ox doctor --fix-slug=" + CheckSlugSessionConflictMarkers
 	report, err := resolveCommittedConflictMarkers(context.Background(), ledgerPath, fix)
 	switch {

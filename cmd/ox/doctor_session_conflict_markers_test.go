@@ -130,6 +130,77 @@ func TestResolveCommittedConflictMarkers(t *testing.T) {
 	})
 }
 
+func TestRunSessionConflictMarkers(t *testing.T) {
+	fixCmd := "ox doctor --fix-slug=" + CheckSlugSessionConflictMarkers
+	tests := []struct {
+		name        string
+		setup       func(t *testing.T) string
+		fix         bool
+		wantPassed  bool
+		wantSkipped bool
+		wantMessage string
+		wantDetail  []string
+	}{
+		{"no upstream is skipped", func(t *testing.T) string {
+			dir := t.TempDir()
+			mustRunGit(t, dir, "init", "--initial-branch=main")
+			return dir
+		}, true, false, true, "no upstream", nil},
+		{"clean ledger passes", func(t *testing.T) string { return newWedgedLedger(t, false) },
+			false, true, false, "no conflict markers", nil},
+		{"report only names the fix command", func(t *testing.T) string { return newMarkedLedger(t, false) },
+			false, false, false, "2 session file(s)", []string{fixCmd}},
+		{"unparseable file is named with its path and reason", func(t *testing.T) string { return newMarkedLedger(t, true) },
+			true, false, false, "could not be resolved", []string{markedUnparseable, "resolved 2", fixCmd}},
+		{"fully repairable ledger passes", func(t *testing.T) string { return newMarkedLedger(t, false) },
+			true, true, false, "resolved conflict markers in 2", nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := runSessionConflictMarkers(tt.setup(t), tt.fix)
+
+			assert.Equal(t, tt.wantPassed, result.passed, "%s / %s", result.message, result.detail)
+			assert.Equal(t, tt.wantSkipped, result.skipped)
+			assert.Contains(t, result.message, tt.wantMessage)
+			for _, fragment := range tt.wantDetail {
+				assert.Contains(t, result.detail, fragment)
+			}
+		})
+	}
+}
+
+func TestCheckSessionConflictMarkers_NoLedgerIsSkipped(t *testing.T) {
+	skipIntegration(t)
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(dir, "data"))
+	t.Chdir(dir)
+
+	result := checkSessionConflictMarkers(true)
+
+	assert.True(t, result.skipped, "%s", result.message)
+}
+
+func TestSessionConflictMarkersCheck_IsRegistered(t *testing.T) {
+	check, ok := DoctorCheckRegistry[CheckSlugSessionConflictMarkers]
+
+	require.True(t, ok, "--fix-slug needs the check registered")
+	assert.Equal(t, FixLevelSuggested, check.FixLevel)
+}
+
+func TestResolveMarkedFile_RefusesLocalEdit(t *testing.T) {
+	ledger := newMarkedLedger(t, false)
+	writeLedgerFile(t, ledger, markedLocalOnly, autostashConflict+"// newer local edit\n")
+
+	report, err := resolveCommittedConflictMarkers(context.Background(), ledger, true)
+
+	require.NoError(t, err)
+	require.Len(t, report.Unrepairable, 1)
+	assert.Equal(t, markedLocalOnly, report.Unrepairable[0].Path)
+	assert.Contains(t, report.Unrepairable[0].Reason, "uncommitted local edit")
+	assert.Equal(t, []string{markedUpstreamMeta}, report.Resolved)
+}
+
 // diff3/zdiff3 conflict style adds a base section that must be dropped with the stash side.
 func TestKeepUpstreamSide(t *testing.T) {
 	tests := []struct {
