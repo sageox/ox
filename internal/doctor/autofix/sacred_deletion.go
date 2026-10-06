@@ -2,7 +2,9 @@ package autofix
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -264,7 +266,10 @@ func loadAlertedCommits(ledgerPath string) map[string]bool {
 	alerted := map[string]bool{}
 	data, err := os.ReadFile(alertedCommitsFile(ledgerPath))
 	if err != nil {
-		return alerted // missing file just means nothing alerted yet
+		if !errors.Is(err, fs.ErrNotExist) {
+			slog.Warn("sacred-deletion alert cache unreadable; alerts may repeat", "ledger", ledgerPath, "error", err)
+		}
+		return alerted
 	}
 	for _, line := range strings.Fields(string(data)) {
 		alerted[line] = true
@@ -273,18 +278,26 @@ func loadAlertedCommits(ledgerPath string) map[string]bool {
 }
 
 // recordAlertedCommits is best effort: a write failure only risks a repeat
-// alert, which is the safe direction for a detector.
+// alert, which is the safe direction for a detector, so it is logged not returned.
 func recordAlertedCommits(ledgerPath string, shas []string) {
 	path := alertedCommitsFile(ledgerPath)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return
+	err := os.MkdirAll(filepath.Dir(path), 0o755)
+	if err == nil {
+		err = appendLines(path, shas)
 	}
+	if err != nil {
+		slog.Warn("sacred-deletion alert cache not written; alerts may repeat", "ledger", ledgerPath, "error", err)
+	}
+}
+
+func appendLines(path string, lines []string) (err error) {
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
-		return
+		return err
 	}
-	defer f.Close()
-	_, _ = f.WriteString(strings.Join(shas, "\n") + "\n")
+	defer func() { err = errors.Join(err, f.Close()) }()
+	_, err = f.WriteString(strings.Join(lines, "\n") + "\n")
+	return err
 }
 
 // shortSHA abbreviates a commit id for bounded log/summary output.
