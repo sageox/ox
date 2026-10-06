@@ -1,9 +1,11 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -293,11 +295,15 @@ func TestBuildLedgerIndex_ClassifiesOutcome(t *testing.T) {
 		indexErr    error
 		wantChanged bool
 		wantErr     bool
+
+		missingLedger bool
 	}{
 		{name: "object not found", indexErr: plumbing.ErrObjectNotFound, wantChanged: true, wantErr: true},
 		{name: "packfile not found", indexErr: dotgit.ErrPackfileNotFound, wantChanged: true, wantErr: true},
 		{name: "real failure", indexErr: errors.New("disk full"), wantErr: true},
 		{name: "success", indexErr: nil},
+		{name: "alternates are skipped, not failed", indexErr: index.ErrAlternatesUnsupported},
+		{name: "ledger path gone is a no-op", missingLedger: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -308,10 +314,39 @@ func TestBuildLedgerIndex_ClassifiesOutcome(t *testing.T) {
 				return tt.indexErr
 			}
 
+			if tt.missingLedger {
+				ledgerDir = filepath.Join(t.TempDir(), "gone")
+			}
+
 			err := s.codedb.BuildLedgerIndex(context.Background(), ledgerDir)
 			assert.Equal(t, tt.wantErr, err != nil)
 			assert.Equal(t, tt.wantChanged, errors.Is(err, ErrLedgerRepoChanged))
 			assert.False(t, errors.Is(err, ErrLedgerBuildYielded))
 		})
 	}
+}
+
+// TestBuildLedgerIndex_LaterStageFailureIsNonFatal pins that a failure after the
+// walk (symbol parsing here) is logged but does not fail a build whose commits are
+// already indexed, and does not look like a repository-changed race.
+// Failure prevented: a symbol-parse hiccup discarding or retrying a 20 minute walk.
+func TestBuildLedgerIndex_LaterStageFailureIsNonFatal(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
+	t.Parallel()
+
+	s, ledgerDir, _ := newLedgerStormScheduler(t)
+	useLedgerDataDir(t, s)
+	var logs bytes.Buffer
+	s.codedb.logger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	s.codedb.ledgerIndexRepoFn = func(ctx context.Context, db *codedb.DB, _ string, _ index.IndexOptions) error {
+		// the walk "succeeded"; make the next stage fail with a plain (non-corruption) error
+		_, err := db.Store().Exec("DROP TABLE IF EXISTS blobs")
+		return err
+	}
+
+	err := s.codedb.BuildLedgerIndex(context.Background(), ledgerDir)
+	assert.NoError(t, err)
+	assert.Contains(t, logs.String(), "stage failed")
 }
