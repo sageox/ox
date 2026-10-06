@@ -40,8 +40,9 @@ func (e *AuthenticationError) Error() string {
 }
 
 // RefreshGitCredentialsForEndpoint refreshes expired, rotated, or rejected Git
-// credentials. A failed fetch preserves the cache but never returns a PAT fetched
-// by another bearer to the caller.
+// credentials. A failed fetch preserves the cache without returning a PAT bound
+// to a different bearer when an access token is available. Without an access
+// token, non-forced calls may return cached credentials for offline checkouts.
 func RefreshGitCredentialsForEndpoint(ctx context.Context, endpointURL string, force bool) (*gitserver.GitCredentials, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err

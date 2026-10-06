@@ -668,3 +668,75 @@ func TestGitCredentials_RefreshKeepsIdentityWhenCacheChanges(t *testing.T) {
 	require.Equal(t, "matching-pat", creds.Token)
 	require.Equal(t, gitserver.BearerTokenFingerprint("refreshed-bearer"), creds.BearerTokenHash)
 }
+
+// A refused refresh must preserve the cache without lending its PAT to a
+// different bearer. Offline checkouts remain usable without a disk login.
+func TestGitCredentials_CacheAndRefreshFailures(t *testing.T) {
+	const teamToken = "oxt_test_1ljPfr"
+	for _, tc := range []struct {
+		name, bearer, wantError string
+		force, canceled         bool
+		wantRequests            int32
+	}{
+		{"matching bearer", teamToken, "", false, false, 0},
+		{"offline checkout", "", "", false, false, 0},
+		{"force without login", "", "authentication required", true, false, 0},
+		{"canceled", teamToken, "context canceled", true, true, 0},
+		{"malformed bearer", "oxt_invalid", "SAGEOX_TOKEN", true, false, 0},
+		{"expired personal bearer", "", "re-authentication required", true, false, 0},
+		{"rejected bearer", teamToken, "rotate or re-mint", true, false, 1},
+		{"empty PAT", teamToken, "empty token", true, false, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			prevDir := gitserver.TestSetConfigDirOverride(t.TempDir())
+			prevFile := gitserver.TestSetForceFileStorage(true)
+			t.Cleanup(func() {
+				gitserver.TestSetConfigDirOverride(prevDir)
+				gitserver.TestSetForceFileStorage(prevFile)
+			})
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			t.Setenv("OX_XDG_DISABLE", "")
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
+				assert.Equal(t, "Bearer "+teamToken, r.Header.Get("Authorization"))
+				if tc.name == "empty PAT" {
+					io.WriteString(w, `{}`)
+				} else {
+					w.WriteHeader(http.StatusUnauthorized)
+				}
+			}))
+			t.Cleanup(server.Close)
+			t.Setenv("SAGEOX_ENDPOINT", server.URL)
+			t.Setenv(EnvVarToken, tc.bearer)
+			if tc.name == "expired personal bearer" {
+				require.NoError(t, SaveTokenForEndpoint(server.URL, &StoredToken{
+					AccessToken: "expired-bearer", ExpiresAt: time.Now().Add(-time.Hour),
+				}))
+			}
+			require.NoError(t, gitserver.SaveCredentialsForEndpoint(server.URL, gitserver.GitCredentials{
+				Token: "cached-pat", ExpiresAt: time.Now().Add(24 * time.Hour),
+				BearerTokenHash: gitserver.BearerTokenFingerprint(teamToken),
+			}))
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tc.canceled {
+				cancel()
+			}
+			creds, err := RefreshGitCredentialsForEndpoint(ctx, server.URL, tc.force)
+			if tc.wantError == "" {
+				require.NoError(t, err)
+				require.NotNil(t, creds)
+				assert.Equal(t, "cached-pat", creds.Token)
+			} else {
+				require.ErrorContains(t, err, tc.wantError)
+				assert.Nil(t, creds, "failed refresh must not return a cached PAT")
+			}
+			assert.Equal(t, tc.wantRequests, requests.Load())
+			cached, err := gitserver.LoadCredentialsForEndpoint(server.URL)
+			require.NoError(t, err)
+			require.NotNil(t, cached)
+			assert.Equal(t, "cached-pat", cached.Token)
+		})
+	}
+}

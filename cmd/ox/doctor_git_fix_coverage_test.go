@@ -116,12 +116,16 @@ func TestSaveGitCredentialsFromRepos_BindsBearer(t *testing.T) {
 	require.NoError(t, saveGitCredentialsFromRepos(nil, ep, validTeamToken))
 	require.NoError(t, saveGitCredentialsFromRepos(&api.ReposResponse{
 		Token: "doctor-pat", ExpiresAt: time.Now().Add(24 * time.Hour),
+		Repos: map[string]api.RepoInfo{"team_test": {Name: "Doctor Team", Type: "team-context", TeamID: "team_test", Slug: "doctor-team"}},
 	}, ep, validTeamToken))
 	creds, err := auth.RefreshGitCredentialsForEndpoint(context.Background(), ep, false)
 	require.NoError(t, err, "doctor's freshly saved PAT must not need another API call")
 	require.NotNil(t, creds)
 	assert.Equal(t, "doctor-pat", creds.Token)
 	assert.Equal(t, gitserver.BearerTokenFingerprint(validTeamToken), creds.BearerTokenHash)
+	repo := creds.GetRepo("team_test")
+	require.NotNil(t, repo)
+	assert.Equal(t, "doctor-team", repo.Slug)
 }
 
 // TestValidateRepoPath exercises the repo path validator from doctor_git_repos_validate.go

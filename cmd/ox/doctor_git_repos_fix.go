@@ -802,6 +802,7 @@ func saveGitCredentialsFromRepos(repos *api.ReposResponse, projectEndpoint, bear
 			Type:   repo.Type,
 			URL:    repo.URL,
 			TeamID: repo.StableID(),
+			Slug:   repo.Slug,
 		})
 	}
 

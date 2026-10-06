@@ -18,6 +18,7 @@ import (
 
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/stretchr/testify/assert"
@@ -27,20 +28,64 @@ import (
 // Failure prevented: a revoked team token sends CI to a personal login flow
 // that cannot replace the token or repair the Git credential it minted.
 func TestTeamTokenAuthFailuresNameRotation(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusUnauthorized)
-	}))
-	t.Cleanup(srv.Close)
-	setupAuthRenderEnv(t, srv.URL, validTeamToken)
-
-	for _, guidance := range []string{
-		checkAuthentication().detail,
-		refreshGitCredentials("expired").detail,
-		statusExitError(false, false, nil).Error(),
-		hydrateHint(fmt.Errorf("HTTP 401")).Error(),
+	for _, tc := range []struct {
+		name, token, remedy, expiryMessage string
+		expiresIn                          time.Duration
+	}{
+		{"revoked team token", validTeamToken, "Rotate or re-mint", "expiring in", 30 * time.Minute},
+		{"malformed team token", "oxt_truncated", "Rotate or re-mint", "expired", -30 * time.Minute},
+		{"missing bearer", "", "ox login", "expired", -30 * time.Minute},
 	} {
-		assert.Contains(t, guidance, "Rotate or re-mint")
-		assert.NotContains(t, guidance, "ox login")
+		t.Run(tc.name, func(t *testing.T) {
+			var requests atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				requests.Add(1)
+				w.WriteHeader(http.StatusUnauthorized)
+			}))
+			t.Cleanup(srv.Close)
+			setupAuthRenderEnv(t, srv.URL, tc.token)
+			t.Setenv("XDG_DATA_HOME", t.TempDir())
+			root := createInitializedProjectWithConfig(t, nil)
+			hostedTestGit(t, root, "init")
+			t.Chdir(root)
+			cached := gitserver.GitCredentials{
+				Token: "old-pat", ExpiresAt: time.Now().Add(tc.expiresIn),
+				BearerTokenHash: gitserver.BearerTokenFingerprint(validTeamToken),
+			}
+			require.NoError(t, gitserver.SaveCredentialsForEndpoint(srv.URL, cached))
+			authCheck := checkAuthentication()
+			assert.False(t, authCheck.passed)
+			refresh := refreshGitCredentials("expired")
+			assert.True(t, refresh.warning, "failed refresh must not report repaired credentials")
+			freshness := checkGitCredentialsFreshness(false)
+			assert.True(t, freshness.warning)
+			assert.Contains(t, freshness.message, tc.expiryMessage)
+			localCfg := &config.LocalConfig{}
+			missing := fixMissingRepos(root, localCfg)
+			assert.False(t, missing.passed, "unusable bearer must not configure repos")
+			missingPath := filepath.Join(root, "missing-ledger")
+			paths := fixRepoPathIssues(root, localCfg, []repoPathIssue{{repoType: "ledger", path: missingPath, issue: "missing"}})
+			assert.True(t, paths.warning)
+			assert.NoDirExists(t, missingPath, "failed authentication must not start a clone")
+			assert.Equal(t, &config.LocalConfig{}, localCfg)
+			for _, guidance := range []string{
+				authCheck.detail, refresh.detail, freshness.detail, paths.detail,
+				statusExitError(false, false, nil).Error(), hydrateHint(fmt.Errorf("HTTP 401")).Error(),
+			} {
+				assert.Contains(t, guidance, tc.remedy)
+				if tc.token != "" {
+					assert.NotContains(t, guidance, "ox login")
+				}
+			}
+			if tc.token != validTeamToken {
+				assert.Zero(t, requests.Load(), "missing or malformed bearers must fail before contacting the API")
+			}
+			preserved, err := gitserver.LoadCredentialsForEndpoint(srv.URL)
+			require.NoError(t, err)
+			require.NotNil(t, preserved)
+			assert.Equal(t, cached.Token, preserved.Token)
+			assert.Equal(t, cached.BearerTokenHash, preserved.BearerTokenHash)
+		})
 	}
 }
 
@@ -166,6 +211,43 @@ func TestStatusRepairsRejectedPATs(t *testing.T) {
 				if outcome != "repaired" && outcome != "rotation refresh rejected" {
 					assert.Contains(t, guidance, "Rotate or re-mint")
 					assert.NotContains(t, guidance, "ox login")
+				}
+				if surface == "human" && outcome == "bearer rejected" {
+					hostedTestGit(t, root, "init")
+					requireSageoxDir(t, root)
+					require.NoError(t, config.SaveProjectConfig(root, &config.ProjectConfig{}))
+					for _, tc := range []struct {
+						name              string
+						fix, withoutRepo  bool
+						refreshes, probes int32
+					}{
+						{"check only", false, false, 1, 2},
+						{"failed repair", true, false, 2, 3},
+						{"missing repo URL", true, true, 3, 3},
+					} {
+						t.Run("doctor/"+tc.name, func(t *testing.T) {
+							cached, err := gitserver.LoadCredentialsForEndpoint(apiServer.URL)
+							require.NoError(t, err)
+							require.NotNil(t, cached)
+							if tc.withoutRepo {
+								cached.Repos = nil
+								require.NoError(t, gitserver.SaveCredentialsForEndpoint(apiServer.URL, *cached))
+							}
+							result := checkGitPATLiveness(tc.fix)
+							assert.False(t, result.passed)
+							assert.False(t, result.skipped, "failed repair must remain an actionable failure")
+							assert.Contains(t, result.detail, "Rotate or re-mint")
+							assert.NotContains(t, result.detail, "ox login")
+							assert.Equal(t, tc.refreshes, refreshCalls.Load(), "check-only must not refresh; repair must force one request")
+							assert.Equal(t, tc.probes, oldProbes.Load())
+							assert.Zero(t, freshProbes.Load())
+							preserved, err := gitserver.LoadCredentialsForEndpoint(apiServer.URL)
+							require.NoError(t, err)
+							require.NotNil(t, preserved)
+							assert.Equal(t, cached.Token, preserved.Token)
+							assert.Equal(t, cached.BearerTokenHash, preserved.BearerTokenHash)
+						})
+					}
 				}
 			})
 		}

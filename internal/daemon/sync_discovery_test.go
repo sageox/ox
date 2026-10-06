@@ -1,13 +1,20 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/cgi"
 	"net/http/httptest"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -102,12 +109,12 @@ func TestRefreshCredentials_ConcurrentCalls(t *testing.T) {
 
 // newCredentialDiscoveryScheduler keeps HTTP requests and credential writes in
 // the test's endpoint and temporary store.
-func newCredentialDiscoveryScheduler(t *testing.T, server *httptest.Server) *SyncScheduler {
+func newCredentialDiscoveryScheduler(t *testing.T, server *httptest.Server) (*SyncScheduler, string) {
 	t.Helper()
-	isolateCredentialsWithDir(t)
+	credDir := isolateCredentialsWithDir(t)
 	t.Setenv("SAGEOX_ENDPOINT", server.URL)
 	t.Setenv("SAGEOX_TOKEN", "oxt_test_1ljPfr")
-	return newDiscoveryTestScheduler(t)
+	return newDiscoveryTestScheduler(t), credDir
 }
 
 // Failure prevented: a rotated team token keeps using the prior token's PAT
@@ -123,7 +130,7 @@ func TestCredentialRotation_BypassesRefreshDedup(t *testing.T) {
 		})
 	}))
 	t.Cleanup(server.Close)
-	s := newCredentialDiscoveryScheduler(t, server)
+	s, _ := newCredentialDiscoveryScheduler(t, server)
 	require.NoError(t, gitserver.SaveCredentialsForEndpoint(server.URL, gitserver.GitCredentials{
 		Token: "old-pat", ExpiresAt: time.Now().Add(24 * time.Hour),
 		BearerTokenHash: gitserver.BearerTokenFingerprint("oxt_test_1ljPfr"),
@@ -153,6 +160,9 @@ func TestCredentialRevocation_ReportsTeamRemedyAndClearsOnRecovery(t *testing.T)
 			var rejected atomic.Bool
 			rejected.Store(true)
 			var calls atomic.Int32
+			var blockSave atomic.Bool
+			var credentialsPath string
+			expires := time.Now().Add(24 * time.Hour)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				calls.Add(1)
 				assert.Equal(t, "/api/v1/cli/repos", r.URL.Path)
@@ -161,16 +171,35 @@ func TestCredentialRevocation_ReportsTeamRemedyAndClearsOnRecovery(t *testing.T)
 					w.WriteHeader(http.StatusUnauthorized)
 					return
 				}
+				if blockSave.Load() {
+					// A directory at the destination deterministically fails an
+					// atomic cache replacement, including on root-run CI hosts.
+					assert.NoError(t, os.Remove(credentialsPath))
+					assert.NoError(t, os.Mkdir(credentialsPath, 0700))
+				}
 				_ = json.NewEncoder(w).Encode(api.ReposResponse{
-					Token: "recovered-pat", ExpiresAt: time.Now().Add(24 * time.Hour),
+					Token: "recovered-pat", ExpiresAt: expires,
 				})
 			}))
 			t.Cleanup(server.Close)
-			s := newCredentialDiscoveryScheduler(t, server)
+			s, credDir := newCredentialDiscoveryScheduler(t, server)
+			var logs bytes.Buffer
+			s.logger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 			require.NoError(t, gitserver.SaveCredentialsForEndpoint(server.URL, gitserver.GitCredentials{
 				Token: "old-pat", ExpiresAt: time.Now().Add(30 * time.Minute),
 				BearerTokenHash: gitserver.BearerTokenFingerprint("oxt_test_1ljPfr"),
 			}))
+			files, err := filepath.Glob(filepath.Join(credDir, "sageox", "git-credentials-*.json"))
+			require.NoError(t, err)
+			require.Len(t, files, 1)
+			credentialsPath = files[0]
+			t.Setenv("SAGEOX_TOKEN", "oxt_test_1ljPfX") // invalid checksum
+			s.refreshCredentialsIfNeeded()
+			s.discoverTeams()
+			require.Zero(t, calls.Load(), "malformed bearers must be refused before any API call")
+			require.Contains(t, logs.String(), "failed to get auth token for credential refresh")
+			t.Setenv("SAGEOX_TOKEN", "oxt_test_1ljPfr")
+			s.lastTeamDiscovery = time.Time{}
 			if path == "credential refresh" {
 				s.refreshCredentialsIfNeeded()
 			} else {
@@ -202,6 +231,35 @@ func TestCredentialRevocation_ReportsTeamRemedyAndClearsOnRecovery(t *testing.T)
 			require.NoError(t, err)
 			require.NotNil(t, creds)
 			require.Equal(t, "recovered-pat", creds.Token)
+
+			if path == "credential refresh" {
+				// A corrupted cache is preserved for diagnosis instead of
+				// silently fetching and replacing it with unrelated credentials.
+				require.NoError(t, os.WriteFile(credentialsPath, []byte("{broken"), 0600))
+				s.refreshCredentials(true)
+				require.EqualValues(t, 2, calls.Load())
+				require.Contains(t, logs.String(), "failed to load credentials for refresh check")
+				content, err := os.ReadFile(credentialsPath)
+				require.NoError(t, err)
+				require.Equal(t, "{broken", string(content))
+			} else {
+				before, err := os.Stat(credentialsPath)
+				require.NoError(t, err)
+				s.lastTeamDiscovery = time.Time{}
+				s.discoverTeams()
+				require.EqualValues(t, 3, calls.Load())
+				after, err := os.Stat(credentialsPath)
+				require.NoError(t, err)
+				require.True(t, os.SameFile(before, after), "unchanged discovery must not rewrite the cache")
+
+				creds.Token = "prior-pat"
+				require.NoError(t, gitserver.SaveCredentialsForEndpoint(server.URL, *creds))
+				blockSave.Store(true)
+				s.lastTeamDiscovery = time.Time{}
+				s.discoverTeams()
+				require.EqualValues(t, 4, calls.Load())
+				require.Contains(t, logs.String(), "failed to save credentials after team discovery")
+			}
 		})
 	}
 }
@@ -242,7 +300,7 @@ func TestTeamDiscovery_RefreshesExpiredPersonalBearer(t *testing.T) {
 		}
 	}))
 	t.Cleanup(server.Close)
-	s := newCredentialDiscoveryScheduler(t, server)
+	s, _ := newCredentialDiscoveryScheduler(t, server)
 	t.Setenv("SAGEOX_TOKEN", "")
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("OX_XDG_DISABLE", "")
@@ -278,6 +336,9 @@ func TestLedgerPull_AuthFailureRefreshesFreshPAT(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: real Git fetch")
 	}
+	if runtime.GOOS == "windows" {
+		t.Skip("CGI git-http-backend fixture requires Unix process semantics")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -290,7 +351,7 @@ func TestLedgerPull_AuthFailureRefreshesFreshPAT(t *testing.T) {
 		})
 	}))
 	t.Cleanup(apiServer.Close)
-	s := newCredentialDiscoveryScheduler(t, apiServer)
+	s, _ := newCredentialDiscoveryScheduler(t, apiServer)
 	require.NoError(t, gitserver.SaveCredentialsForEndpoint(apiServer.URL, gitserver.GitCredentials{
 		Token: "rejected-pat", ExpiresAt: time.Now().Add(24 * time.Hour),
 		BearerTokenHash: gitserver.BearerTokenFingerprint("oxt_test_1ljPfr"),
@@ -298,7 +359,22 @@ func TestLedgerPull_AuthFailureRefreshesFreshPAT(t *testing.T) {
 	s.refreshCredentialsIfNeeded()
 	require.Zero(t, calls.Load())
 
-	gitServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	gitRoot := t.TempDir()
+	gitInDir(t, gitRoot, "init", "--bare", "ledger.git")
+	gitExec, err := exec.Command("git", "--exec-path").Output()
+	require.NoError(t, err)
+	backend := &cgi.Handler{
+		Path: filepath.Join(strings.TrimSpace(string(gitExec)), "git-http-backend"),
+		Env:  []string{"GIT_PROJECT_ROOT=" + gitRoot, "GIT_HTTP_EXPORT_ALL=1"},
+	}
+	var acceptRecovered atomic.Bool
+	gitServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		username, token, _ := r.BasicAuth()
+		if acceptRecovered.Load() && username == "oauth2" && token == "replacement-pat" {
+			backend.ServeHTTP(w, r)
+			return
+		}
+		w.Header().Set("WWW-Authenticate", `Basic realm="ledger"`)
 		w.WriteHeader(http.StatusUnauthorized)
 	}))
 	t.Cleanup(gitServer.Close)
@@ -310,7 +386,9 @@ func TestLedgerPull_AuthFailureRefreshesFreshPAT(t *testing.T) {
 	s.config.LedgerPath = t.TempDir()
 	gitInDir(t, s.config.LedgerPath, "init", "-b", "main")
 	gitInDir(t, s.config.LedgerPath, "remote", "add", "origin", gitServer.URL+"/ledger.git")
-	err := s.doPull(context.Background(), nil, true, false)
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	err = s.doPull(context.Background(), nil, true, false)
 	require.Error(t, err)
 	require.True(t, gitserver.IsAuthFailure(err.Error()), "the real Git fetch must fail on authentication")
 	require.EqualValues(t, 1, calls.Load(), "ledger fetch authentication failures must force credential refresh")
@@ -318,4 +396,11 @@ func TestLedgerPull_AuthFailureRefreshesFreshPAT(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, creds)
 	require.Equal(t, "replacement-pat", creds.Token)
+
+	creds.ServerURL = gitServer.URL
+	creds.AddRepo(gitserver.RepoEntry{TeamID: "team_probe", URL: gitServer.URL + "/ledger.git"})
+	require.NoError(t, gitserver.SaveCredentialsForEndpoint(apiServer.URL, *creds))
+	acceptRecovered.Store(true)
+	s.refreshAfterAuthFailure(errors.New("authentication failed"))
+	require.EqualValues(t, 1, calls.Load(), "a PAT already repaired by the helper must not be fetched again")
 }

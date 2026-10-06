@@ -290,10 +290,7 @@ func (c *Client) doBatch(ctx context.Context, operation string, objects []BatchO
 			username = "oauth2"
 		}
 		req.SetBasicAuth(username, creds.Token)
-		req.Body, err = req.GetBody()
-		if err != nil {
-			return nil, err
-		}
+		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 		resp, err = c.httpClient.Do(req)
 		if err != nil {
 			return nil, fmt.Errorf("batch retry failed: %w", err)

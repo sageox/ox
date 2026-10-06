@@ -29,6 +29,28 @@ func TestNewClient(t *testing.T) {
 	assert.Equal(t, "https://git.sageox.io/sageox/ledger.git/info/lfs/objects/batch", c.batchURL)
 	assert.Equal(t, "Basic b2F1dGgyOnRlc3QtdG9rZW4=", c.authHeader)
 	assert.Equal(t, 2*time.Minute, c.httpClient.Timeout, "batch API timeout should be 2 minutes")
+
+	prevDir := gitserver.TestSetConfigDirOverride(t.TempDir())
+	prevFile := gitserver.TestSetForceFileStorage(true)
+	t.Cleanup(func() {
+		gitserver.TestSetConfigDirOverride(prevDir)
+		gitserver.TestSetForceFileStorage(prevFile)
+	})
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("OX_XDG_DISABLE", "")
+	t.Setenv(auth.EnvVarToken, "")
+	const ep = "https://api.test.sageox.ai"
+	_, err := NewClientForEndpoint("https://git.sageox.io/ledger.git", ep)
+	require.Error(t, err)
+	assert.Equal(t, errkind.NotLoggedIn, errkind.Of(err), "missing credentials retain their authentication classification")
+	require.NoError(t, gitserver.SaveCredentialsForEndpoint(ep, gitserver.GitCredentials{}))
+	_, err = NewClientForEndpoint("https://git.sageox.io/ledger.git", ep)
+	require.Error(t, err)
+	assert.Equal(t, errkind.NotLoggedIn, errkind.Of(err), "an empty offline PAT must not create a usable client")
+	t.Setenv(endpoint.EnvVar, ep)
+	t.Setenv(auth.EnvVarToken, "oxt_invalid")
+	_, err = NewClientForEndpoint("https://git.sageox.io/ledger.git", ep)
+	require.ErrorContains(t, err, "SAGEOX_TOKEN")
 }
 
 func TestNewClient_TrailingSlash(t *testing.T) {
@@ -671,8 +693,8 @@ func TestBatch_HTTPFailureKind(t *testing.T) {
 
 // A revoked PAT triggers one forced refresh; a revoked bearer returns the operator's remedy.
 func TestLFSRefreshesRejectedCredentials(t *testing.T) {
-	for _, rejectedBearer := range []bool{false, true} {
-		t.Run(fmt.Sprintf("bearer_rejected=%v", rejectedBearer), func(t *testing.T) {
+	for _, outcome := range []string{"repaired", "bearer rejected", "empty PAT"} {
+		t.Run(outcome, func(t *testing.T) {
 			prevDir := gitserver.TestSetConfigDirOverride(t.TempDir())
 			prevFile := gitserver.TestSetForceFileStorage(true)
 			t.Cleanup(func() {
@@ -684,8 +706,12 @@ func TestLFSRefreshesRejectedCredentials(t *testing.T) {
 				if r.URL.Path == "/api/v1/cli/repos" {
 					refreshCalls.Add(1)
 					assert.Equal(t, "Bearer oxt_test_1ljPfr", r.Header.Get("Authorization"))
-					if rejectedBearer {
+					if outcome == "bearer rejected" {
 						w.WriteHeader(http.StatusUnauthorized)
+						return
+					}
+					if outcome == "empty PAT" {
+						io.WriteString(w, `{}`)
 						return
 					}
 					json.NewEncoder(w).Encode(api.ReposResponse{Token: "fresh-pat", ExpiresAt: time.Now().Add(24 * time.Hour)})
@@ -716,12 +742,16 @@ func TestLFSRefreshesRejectedCredentials(t *testing.T) {
 			require.NoError(t, err)
 			_, err = client.BatchUpload([]BatchObject{{OID: "abc", Size: 3}})
 			assert.EqualValues(t, 1, refreshCalls.Load())
-			if rejectedBearer {
+			switch outcome {
+			case "bearer rejected":
 				require.ErrorIs(t, err, api.ErrUnauthorized)
 				assert.Contains(t, err.Error(), "rotate or re-mint")
 				assert.NotContains(t, err.Error(), "ox login")
 				assert.EqualValues(t, 1, batchCalls.Load())
-			} else {
+			case "empty PAT":
+				require.ErrorContains(t, err, "empty token")
+				assert.EqualValues(t, 1, batchCalls.Load(), "an invalid PAT must never be retried")
+			case "repaired":
 				require.NoError(t, err)
 				assert.EqualValues(t, 2, batchCalls.Load())
 				// A reused client must also handle logout without dereferencing a missing cache.
@@ -729,6 +759,11 @@ func TestLFSRefreshesRejectedCredentials(t *testing.T) {
 				require.NoError(t, gitserver.RemoveCredentialsForEndpoint(srv.URL))
 				_, err = client.BatchUpload(nil)
 				require.ErrorContains(t, err, "no git credentials found")
+			}
+			if outcome != "repaired" {
+				creds, loadErr := gitserver.LoadCredentialsForEndpoint(srv.URL)
+				require.NoError(t, loadErr)
+				assert.Equal(t, "old-pat", creds.Token, "failed refresh must preserve cached credentials")
 			}
 		})
 	}

@@ -329,6 +329,9 @@ func (c *RepoClient) GetGitCredentials(ctx context.Context) (*gitserver.GitCrede
 	if err != nil || resp == nil {
 		return nil, err
 	}
+	if resp.Token == "" {
+		return nil, fmt.Errorf("git credential discovery returned an empty token")
+	}
 	creds := &gitserver.GitCredentials{
 		BearerTokenHash: gitserver.BearerTokenFingerprint(c.authToken),
 		Token:           resp.Token,

@@ -68,7 +68,9 @@ func (s *SyncScheduler) refreshCredentials(force bool) {
 
 	// The scheduler refreshes within an hour of expiry; the shared cache
 	// helper also handles a changed bearer and explicit server rejections.
-	_, err = auth.RefreshGitCredentialsForEndpoint(context.Background(), projectEndpoint, true)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, err = auth.RefreshGitCredentialsForEndpoint(ctx, projectEndpoint, true)
 	if err != nil {
 		s.logger.Warn("failed to refresh git credentials", "error", err)
 		if errors.Is(err, api.ErrUnauthorized) && s.issues != nil {
