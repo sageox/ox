@@ -134,12 +134,16 @@ func checkUploadAccess(projectRoot string) error {
 // No OAuth needed — LFS upload uses the Git PAT (HTTP Basic auth).
 // Access control is enforced at push time by the PAT, not by a pre-check.
 func uploadSessionLFS(projectRoot, sessionPath string) (map[string]lfs.FileRef, error) {
+	return uploadSessionLFSContext(context.Background(), projectRoot, sessionPath)
+}
+
+func uploadSessionLFSContext(ctx context.Context, projectRoot, sessionPath string) (map[string]lfs.FileRef, error) {
 	// Every caller (upload, regenerate, migrate, retry) ends here, so this is the
 	// one place that keeps a quarantined recording's content out of the Ledger.
 	if recording, readErr := session.ReadRecordingStateFile(sessionPath); readErr == nil && recording != nil && recording.SourceRejected {
 		return nil, fmt.Errorf("session %s is held back for ownership review and was not uploaded; run 'ox agent %s session recover --release-quarantine' to re-check it", filepath.Base(sessionPath), recording.AgentID)
 	}
-	client, err := getLFSClient(projectRoot)
+	client, err := getLFSClientContext(ctx, projectRoot)
 	if err != nil {
 		return nil, fmt.Errorf("create LFS client: %w", err)
 	}
@@ -151,8 +155,17 @@ func uploadSessionLFS(projectRoot, sessionPath string) (map[string]lfs.FileRef, 
 // Uses the ledger's Git remote and refreshes credentials when the bearer
 // rotates or the server rejects the PAT.
 func getLFSClient(projectRoot string) (*lfs.Client, error) {
+	return getLFSClientContext(context.Background(), projectRoot)
+}
+
+func getLFSClientContext(ctx context.Context, projectRoot string) (*lfs.Client, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
 	ep := endpoint.GetForProject(projectRoot)
-	creds, err := auth.RefreshGitCredentialsForEndpoint(context.Background(), ep, false)
+	creds, err := auth.RefreshGitCredentialsForEndpoint(ctx, ep, false)
 	if err != nil {
 		return nil, fmt.Errorf("load credentials: %w", err)
 	}
@@ -177,7 +190,7 @@ func getLFSClient(projectRoot string) (*lfs.Client, error) {
 		return nil, fmt.Errorf("ledger has no remote URL configured")
 	}
 
-	return lfs.NewClientForEndpoint(repoURL, ep)
+	return lfs.NewClientForEndpoint(ctx, repoURL, ep)
 }
 
 // ensureSessionsGitignore delegates to lfs.EnsureSessionsGitignore.

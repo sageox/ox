@@ -104,7 +104,7 @@ Example:
 
 		// upload content files to LFS
 		fmt.Printf("Uploading session %s...\n", sessionName)
-		fileRefs, err := uploadSessionLFS(projectRoot, sessionPath)
+		fileRefs, err := uploadSessionLFSContext(cmd.Context(), projectRoot, sessionPath)
 		if err != nil {
 			if errors.Is(err, api.ErrReadOnly) {
 				fmt.Println("\nUpload skipped — you have read-only access to this public repo.")

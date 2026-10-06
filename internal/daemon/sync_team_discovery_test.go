@@ -619,10 +619,10 @@ func TestDiscoverTeams_RespectsDedup(t *testing.T) {
 	})
 
 	// first call should run (sets lastTeamDiscovery)
-	scheduler.discoverTeams()
+	scheduler.discoverTeams(context.Background())
 
 	// second immediate call should be deduped (no-op)
-	scheduler.discoverTeams()
+	scheduler.discoverTeams(context.Background())
 
 	// verify lastTeamDiscovery was set
 	scheduler.mu.Lock()
@@ -641,7 +641,7 @@ func TestDiscoverTeams_SkipsWithNoCredentials(t *testing.T) {
 	scheduler := newTestScheduler(projectDir)
 
 	// call without any credentials file — should return without error
-	scheduler.discoverTeams()
+	scheduler.discoverTeams(context.Background())
 
 	scheduler.mu.Lock()
 	assert.False(t, scheduler.lastTeamDiscovery.IsZero(), "lastTeamDiscovery should still be stamped")

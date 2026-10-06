@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
@@ -42,7 +43,7 @@ var sessionMigrateLFSCmd = &cobra.Command{
 				continue
 			}
 
-			if err := migrateSessionToLFS(projectRoot, ledgerPath, sessionPath, sessionName); err != nil {
+			if err := migrateSessionToLFS(cmd.Context(), projectRoot, ledgerPath, sessionPath, sessionName); err != nil {
 				fmt.Fprintf(os.Stderr, "failed to migrate %s: %v\n", sessionName, err)
 				failed = append(failed, sessionName)
 				continue
@@ -58,7 +59,7 @@ var sessionMigrateLFSCmd = &cobra.Command{
 	},
 }
 
-func migrateSessionToLFS(projectRoot, ledgerPath, sessionPath, sessionName string) error {
+func migrateSessionToLFS(ctx context.Context, projectRoot, ledgerPath, sessionPath, sessionName string) error {
 	// check if already migrated (all content files are pointers)
 	contentFiles := []string{ledgerFileRaw, ledgerFileSummaryMD, ledgerFileSessionMD, ledgerFilePlan}
 	allPointers := true
@@ -83,7 +84,7 @@ func migrateSessionToLFS(projectRoot, ledgerPath, sessionPath, sessionName strin
 	}
 
 	// upload content to LFS (skips files that are already pointers)
-	fileRefs, err := uploadSessionLFS(projectRoot, sessionPath)
+	fileRefs, err := uploadSessionLFSContext(ctx, projectRoot, sessionPath)
 	if err != nil {
 		return fmt.Errorf("LFS upload: %w", err)
 	}

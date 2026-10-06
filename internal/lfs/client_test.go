@@ -40,16 +40,16 @@ func TestNewClient(t *testing.T) {
 	t.Setenv("OX_XDG_DISABLE", "")
 	t.Setenv(auth.EnvVarToken, "")
 	const ep = "https://api.test.sageox.ai"
-	_, err := NewClientForEndpoint("https://git.sageox.io/ledger.git", ep)
+	_, err := NewClientForEndpoint(context.Background(), "https://git.sageox.io/ledger.git", ep)
 	require.Error(t, err)
 	assert.Equal(t, errkind.NotLoggedIn, errkind.Of(err), "missing credentials retain their authentication classification")
 	require.NoError(t, gitserver.SaveCredentialsForEndpoint(ep, gitserver.GitCredentials{}))
-	_, err = NewClientForEndpoint("https://git.sageox.io/ledger.git", ep)
+	_, err = NewClientForEndpoint(context.Background(), "https://git.sageox.io/ledger.git", ep)
 	require.Error(t, err)
 	assert.Equal(t, errkind.NotLoggedIn, errkind.Of(err), "an empty offline PAT must not create a usable client")
 	t.Setenv(endpoint.EnvVar, ep)
 	t.Setenv(auth.EnvVarToken, "oxt_invalid")
-	_, err = NewClientForEndpoint("https://git.sageox.io/ledger.git", ep)
+	_, err = NewClientForEndpoint(context.Background(), "https://git.sageox.io/ledger.git", ep)
 	require.ErrorContains(t, err, "SAGEOX_TOKEN")
 }
 
@@ -738,7 +738,7 @@ func TestLFSRefreshesRejectedCredentials(t *testing.T) {
 				Token: "old-pat", ExpiresAt: time.Now().Add(24 * time.Hour),
 				BearerTokenHash: gitserver.BearerTokenFingerprint("oxt_test_1ljPfr"),
 			}))
-			client, err := NewClientForEndpoint(srv.URL+"/ledger.git", srv.URL)
+			client, err := NewClientForEndpoint(context.Background(), srv.URL+"/ledger.git", srv.URL)
 			require.NoError(t, err)
 			_, err = client.BatchUpload([]BatchObject{{OID: "abc", Size: 3}})
 			assert.EqualValues(t, 1, refreshCalls.Load())
@@ -772,7 +772,7 @@ func TestLFSRefreshesRejectedCredentials(t *testing.T) {
 // Failure prevented: a canceled LFS batch waits for PAT, OAuth, or JWT refresh
 // and can persist fallback credentials after its caller has stopped the request.
 func TestLFSBatchCancelsCredentialRefresh(t *testing.T) {
-	for _, stage := range []string{"before batch", "after 401", "OAuth", "JWT"} {
+	for _, stage := range []string{"constructor", "before batch", "after 401", "OAuth", "JWT"} {
 		t.Run(stage, func(t *testing.T) {
 			prevDir := gitserver.TestSetConfigDirOverride(t.TempDir())
 			prevFile := gitserver.TestSetForceFileStorage(true)
@@ -817,10 +817,10 @@ func TestLFSBatchCancelsCredentialRefresh(t *testing.T) {
 				Token: "old-pat", ExpiresAt: time.Now().Add(24 * time.Hour),
 				BearerTokenHash: gitserver.BearerTokenFingerprint("oxt_test_1ljPfr"),
 			}))
-			client, err := NewClientForEndpoint(srv.URL+"/ledger.git", srv.URL)
+			client, err := NewClientForEndpoint(context.Background(), srv.URL+"/ledger.git", srv.URL)
 			require.NoError(t, err)
 			switch stage {
-			case "before batch":
+			case "constructor", "before batch":
 				t.Setenv(auth.EnvVarToken, "oxt_rotated_1lKvCA")
 			case "OAuth", "JWT":
 				t.Setenv(auth.EnvVarToken, "")
@@ -835,6 +835,11 @@ func TestLFSBatchCancelsCredentialRefresh(t *testing.T) {
 			done := make(chan error, 1)
 			go func() {
 				defer close(done)
+				if stage == "constructor" {
+					_, err := NewClientForEndpoint(ctx, srv.URL+"/ledger.git", srv.URL)
+					done <- err
+					return
+				}
 				_, err := client.BatchUploadContext(ctx, []BatchObject{{OID: "abc", Size: 3}})
 				done <- err
 			}()

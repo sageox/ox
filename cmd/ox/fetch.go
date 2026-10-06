@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -50,6 +51,10 @@ func init() {
 }
 
 func runFetch(cmd *cobra.Command, args []string) error {
+	ctx := cmd.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	pointerPath, err := filepath.Abs(args[0])
 	if err != nil {
 		return fmt.Errorf("resolve path: %w", err)
@@ -98,13 +103,13 @@ func runFetch(cmd *cobra.Command, args []string) error {
 
 	// create LFS client for the detected repo
 	projectRoot, _ := findProjectRoot()
-	client, err := newFetchLFSClient(projectRoot, repoRoot)
+	client, err := newFetchLFSClient(ctx, projectRoot, repoRoot)
 	if err != nil {
 		return hydrateHint(err)
 	}
 
 	// download
-	resp, err := client.BatchDownload([]lfs.BatchObject{{OID: oid, Size: ref.Size}})
+	resp, err := client.BatchDownloadContext(ctx, []lfs.BatchObject{{OID: oid, Size: ref.Size}})
 	if err != nil {
 		return hydrateHint(fmt.Errorf("LFS batch download: %w", err))
 	}
@@ -185,7 +190,7 @@ func detectRepo(pointerPath string) (string, error) {
 
 // newFetchLFSClient creates an LFS client for any SageOx-managed repo
 // (team context or ledger). Credentials come from the project's endpoint.
-func newFetchLFSClient(projectRoot, repoRoot string) (*lfs.Client, error) {
+func newFetchLFSClient(ctx context.Context, projectRoot, repoRoot string) (*lfs.Client, error) {
 	ep := endpoint.GetForProject(projectRoot)
 
 	repoURL, err := gitserver.GetBareRemoteURL(repoRoot)
@@ -196,7 +201,7 @@ func newFetchLFSClient(projectRoot, repoRoot string) (*lfs.Client, error) {
 		return nil, fmt.Errorf("repo has no remote URL: %s", repoRoot)
 	}
 
-	return lfs.NewClientForEndpoint(repoURL, ep)
+	return lfs.NewClientForEndpoint(ctx, repoURL, ep)
 }
 
 // isCacheHit returns true if the cached file exists and its size matches.

@@ -65,7 +65,7 @@ func RefreshGitCredentialsForEndpoint(ctx context.Context, endpointURL string, f
 		time.Until(creds.ExpiresAt) >= gitserver.NearExpiryThreshold {
 		return creds, nil
 	}
-	token, err = ensureValidTokenForEndpoint(ctx, endpointURL, 300)
+	token, err = EnsureValidTokenForEndpointContext(ctx, endpointURL, 300)
 	if err != nil {
 		return nil, err
 	}

@@ -368,6 +368,11 @@ func (c *Client) doBatch(ctx context.Context, operation string, objects []BatchO
 // and credentials loaded for the given endpoint. This is a convenience constructor
 // for callers that already have the ledger path (e.g., daemon session finalization).
 func NewClientFromLedger(ledgerPath, endpointURL string) (*Client, error) {
+	return NewClientFromLedgerContext(context.Background(), ledgerPath, endpointURL)
+}
+
+// NewClientFromLedgerContext creates an LFS client with cancelable credential setup.
+func NewClientFromLedgerContext(ctx context.Context, ledgerPath, endpointURL string) (*Client, error) {
 	repoURL, err := gitserver.GetBareRemoteURL(ledgerPath)
 	if err != nil {
 		return nil, fmt.Errorf("get ledger remote URL: %w", err)
@@ -375,12 +380,14 @@ func NewClientFromLedger(ledgerPath, endpointURL string) (*Client, error) {
 	if repoURL == "" {
 		return nil, fmt.Errorf("ledger has no remote URL configured")
 	}
-	return NewClientForEndpoint(repoURL, endpointURL)
+	return NewClientForEndpoint(ctx, repoURL, endpointURL)
 }
 
 // NewClientForEndpoint follows token rotation and refreshes a rejected Git PAT.
-func NewClientForEndpoint(repoURL, endpointURL string) (*Client, error) {
-	creds, err := auth.RefreshGitCredentialsForEndpoint(context.Background(), endpointURL, false)
+func NewClientForEndpoint(ctx context.Context, repoURL, endpointURL string) (*Client, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	creds, err := auth.RefreshGitCredentialsForEndpoint(ctx, endpointURL, false)
 	if err != nil {
 		return nil, fmt.Errorf("load credentials: %w", err)
 	}

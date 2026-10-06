@@ -195,7 +195,7 @@ func TestCredentialRevocation_ReportsTeamRemedyAndClearsOnRecovery(t *testing.T)
 			credentialsPath = files[0]
 			t.Setenv("SAGEOX_TOKEN", "oxt_test_1ljPfX") // invalid checksum
 			s.refreshCredentialsIfNeeded()
-			s.discoverTeams()
+			s.discoverTeams(context.Background())
 			require.Zero(t, calls.Load(), "malformed bearers must be refused before any API call")
 			require.Contains(t, logs.String(), "failed to get auth token for credential refresh")
 			t.Setenv("SAGEOX_TOKEN", "oxt_test_1ljPfr")
@@ -203,7 +203,7 @@ func TestCredentialRevocation_ReportsTeamRemedyAndClearsOnRecovery(t *testing.T)
 			if path == "credential refresh" {
 				s.refreshCredentialsIfNeeded()
 			} else {
-				s.discoverTeams()
+				s.discoverTeams(context.Background())
 			}
 			require.EqualValues(t, 1, calls.Load())
 			issue, found := s.issues.GetIssue(IssueTypeAuthExpiring, "")
@@ -222,7 +222,7 @@ func TestCredentialRevocation_ReportsTeamRemedyAndClearsOnRecovery(t *testing.T)
 				s.refreshCredentials(true)
 			} else {
 				s.lastTeamDiscovery = time.Time{}
-				s.discoverTeams()
+				s.discoverTeams(context.Background())
 			}
 			require.EqualValues(t, 2, calls.Load())
 			_, found = s.issues.GetIssue(IssueTypeAuthExpiring, "")
@@ -246,7 +246,7 @@ func TestCredentialRevocation_ReportsTeamRemedyAndClearsOnRecovery(t *testing.T)
 				before, err := os.Stat(credentialsPath)
 				require.NoError(t, err)
 				s.lastTeamDiscovery = time.Time{}
-				s.discoverTeams()
+				s.discoverTeams(context.Background())
 				require.EqualValues(t, 3, calls.Load())
 				after, err := os.Stat(credentialsPath)
 				require.NoError(t, err)
@@ -256,7 +256,7 @@ func TestCredentialRevocation_ReportsTeamRemedyAndClearsOnRecovery(t *testing.T)
 				require.NoError(t, gitserver.SaveCredentialsForEndpoint(server.URL, *creds))
 				blockSave.Store(true)
 				s.lastTeamDiscovery = time.Time{}
-				s.discoverTeams()
+				s.discoverTeams(context.Background())
 				require.EqualValues(t, 4, calls.Load())
 				require.Contains(t, logs.String(), "failed to save credentials after team discovery")
 			}
@@ -268,6 +268,8 @@ func TestCredentialRevocation_ReportsTeamRemedyAndClearsOnRecovery(t *testing.T)
 // when its refresh token and cached Git PAT are still healthy.
 func TestTeamDiscovery_RefreshesExpiredPersonalBearer(t *testing.T) {
 	var refreshCalls, exchangeCalls, repoCalls atomic.Int32
+	var blockDiscovery atomic.Bool
+	started, release := make(chan struct{}), make(chan struct{})
 	patExpires := time.Now().Add(24 * time.Hour)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -290,6 +292,13 @@ func TestTeamDiscovery_RefreshesExpiredPersonalBearer(t *testing.T) {
 			if r.Header.Get("Authorization") != "Bearer refreshed-jwt" {
 				w.WriteHeader(http.StatusUnauthorized)
 				return
+			}
+			if blockDiscovery.Load() {
+				close(started)
+				select {
+				case <-r.Context().Done():
+				case <-release:
+				}
 			}
 			_ = json.NewEncoder(w).Encode(api.ReposResponse{
 				Token: "fresh-pat", ExpiresAt: patExpires,
@@ -316,7 +325,7 @@ func TestTeamDiscovery_RefreshesExpiredPersonalBearer(t *testing.T) {
 	s.refreshCredentialsIfNeeded()
 	require.Zero(t, refreshCalls.Load(), "a matching fresh PAT skips the passive refresh")
 	require.Zero(t, repoCalls.Load())
-	s.discoverTeams()
+	s.discoverTeams(context.Background())
 
 	require.EqualValues(t, 1, refreshCalls.Load())
 	require.EqualValues(t, 1, exchangeCalls.Load())
@@ -328,6 +337,42 @@ func TestTeamDiscovery_RefreshesExpiredPersonalBearer(t *testing.T) {
 	require.NotNil(t, creds)
 	require.Equal(t, "fresh-pat", creds.Token)
 	require.Equal(t, gitserver.BearerTokenFingerprint("refreshed-jwt"), creds.BearerTokenHash)
+
+	t.Run("canceled discovery preserves cached PAT", func(t *testing.T) {
+		creds.Token = "cached-before-cancel"
+		require.NoError(t, gitserver.SaveCredentialsForEndpoint(server.URL, *creds))
+		s.lastTeamDiscovery = time.Time{}
+		blockDiscovery.Store(true)
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			s.discoverTeams(ctx)
+		}()
+		t.Cleanup(func() {
+			cancel()
+			close(release)
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Error("team discovery did not stop during cleanup")
+			}
+		})
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("team discovery never reached the server")
+		}
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("team discovery ignored its caller's cancellation")
+		}
+		cached, err := gitserver.LoadCredentialsForEndpoint(server.URL)
+		require.NoError(t, err)
+		require.Equal(t, "cached-before-cancel", cached.Token)
+	})
 }
 
 // Failure prevented: the actual ledger fetch path never asks for a replacement

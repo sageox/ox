@@ -113,10 +113,12 @@ func EnsureValidToken(bufferSeconds int) (*StoredToken, error) {
 // refreshing proactively if the token expires within bufferSeconds.
 // Use this instead of GetTokenForEndpoint when the token will be used for API requests.
 func EnsureValidTokenForEndpoint(ep string, bufferSeconds int) (*StoredToken, error) {
-	return ensureValidTokenForEndpoint(context.Background(), ep, bufferSeconds)
+	return EnsureValidTokenForEndpointContext(context.Background(), ep, bufferSeconds)
 }
 
-func ensureValidTokenForEndpoint(ctx context.Context, ep string, bufferSeconds int) (*StoredToken, error) {
+// EnsureValidTokenForEndpointContext refreshes an endpoint's token while honoring
+// the caller's cancellation and deadline through OAuth and JWT exchange.
+func EnsureValidTokenForEndpointContext(ctx context.Context, ep string, bufferSeconds int) (*StoredToken, error) {
 	token, err := GetTokenForEndpoint(ep)
 	if err != nil {
 		return nil, err

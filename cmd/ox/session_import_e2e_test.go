@@ -443,7 +443,7 @@ func (f *importFixture) envFor(ledgerPath string, opts importOptions) (*importEn
 		summarizer:  opts.summarizer,
 		logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
-	env.deps = productionImportDeps(env)
+	env.deps = productionImportDeps(context.Background(), env)
 	env.deps.readNative = f.readNative
 	env.deps.runner = func(nativeimport.Agent) agentwork.Runner { return f.summarizer }
 	env.deps.lfsClient = func() (*lfs.Client, error) { return f.store.client(), nil }

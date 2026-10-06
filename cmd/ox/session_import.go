@@ -164,7 +164,7 @@ func runSessionImport(cmd *cobra.Command, _ []string) error {
 	if failure != nil {
 		return renderImportFailure(out, opts.jsonOut, *failure)
 	}
-	env.deps = productionImportDeps(env)
+	env.deps = productionImportDeps(ctx, env)
 	env.progress = cmd.ErrOrStderr()
 	return runSessionImportFlow(ctx, out, opts, env, dest)
 }
@@ -328,7 +328,7 @@ func fetchImportDestination(ep, repoID string, dest *importDestination) {
 	}
 }
 
-func productionImportDeps(env *importEnv) importDeps {
+func productionImportDeps(ctx context.Context, env *importEnv) importDeps {
 	runners := map[nativeimport.Agent]agentwork.Runner{}
 	projectCfg, _ := config.LoadProjectConfig(env.projectRoot)
 	return importDeps{
@@ -340,7 +340,7 @@ func productionImportDeps(env *importEnv) importDeps {
 			return runners[agent]
 		},
 		lfsClient: func() (*lfs.Client, error) {
-			return lfs.NewClientFromLedger(env.ledgerPath, env.endpoint)
+			return lfs.NewClientFromLedgerContext(ctx, env.ledgerPath, env.endpoint)
 		},
 		push: pushLedger,
 		notify: func(meta *lfs.SessionMeta, name string) {

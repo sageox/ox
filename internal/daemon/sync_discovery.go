@@ -105,7 +105,7 @@ func (s *SyncScheduler) refreshAfterAuthFailure(err error) {
 // discoverTeams re-fetches the team list from the API independently of token refresh.
 // This ensures new teams are discovered promptly even when the credential token is
 // still fresh. The PAT and its bearer fingerprint are saved with the discovered repos.
-func (s *SyncScheduler) discoverTeams() {
+func (s *SyncScheduler) discoverTeams(ctx context.Context) {
 	s.mu.Lock()
 	if !s.lastTeamDiscovery.IsZero() && time.Since(s.lastTeamDiscovery) < teamDiscoveryInterval {
 		s.mu.Unlock()
@@ -128,7 +128,9 @@ func (s *SyncScheduler) discoverTeams() {
 	}
 
 	// refresh personal bearers before the API call; a fresh PAT can outlive them
-	token, err := auth.EnsureValidTokenForEndpoint(projectEndpoint, 300)
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	token, err := auth.EnsureValidTokenForEndpointContext(ctx, projectEndpoint, 300)
 	if err != nil {
 		s.logger.Debug("failed to get auth token for team discovery", "error", err)
 		return
@@ -138,7 +140,7 @@ func (s *SyncScheduler) discoverTeams() {
 	}
 
 	client := api.NewRepoClientWithEndpoint(projectEndpoint).WithAuthToken(token.AccessToken)
-	newCreds, err := client.GetGitCredentials(context.Background())
+	newCreds, err := client.GetGitCredentials(ctx)
 	if err != nil {
 		s.logger.Warn("failed to fetch repos for team discovery", "error", err)
 		if errors.Is(err, api.ErrUnauthorized) && s.issues != nil {
