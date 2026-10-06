@@ -71,9 +71,7 @@ func bugReportConfigShape(t *testing.T, dir string) (cfgPath string, snapshot []
 func keepDescriptorsStorer(dir string) *filesystem.Storage {
 	dot := osfs.New(filepath.Join(dir, ".git"), osfs.WithBoundOS())
 	repositoryFs := dotgit.NewRepositoryFilesystem(dot, nil)
-	return filesystem.NewStorageWithOptions(repositoryFs, cache.NewObjectLRUDefault(), filesystem.Options{
-		KeepDescriptors: true,
-	})
+	return filesystem.NewStorageWithOptions(repositoryFs, cache.NewObjectLRUDefault(), filesystem.Options{})
 }
 
 // TestReadOnlyConfigStorer_NeverWritesSourceConfig proves the guard intercepts
