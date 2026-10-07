@@ -26,7 +26,54 @@ const maxIPCMessageSize = 1 * 1024 * 1024 // 1MB
 
 // maxConcurrentConnections limits the number of concurrent IPC connections.
 // Prevents file descriptor or memory exhaustion from connection floods.
-const maxConcurrentConnections = 100
+//
+// Sizing: one `ox agent hook PostToolUse` dials the daemon 5 times (two
+// liveness pings, heartbeat, settings fetch, whispers). A fan-out agent session
+// spawns ~5 hooks/s with up to 40 alive at once (each 1-2 s under load), so a
+// burst can hold 40 hooks x 5 dials = 200 connections. 512 gives ~2.5x headroom
+// over that; unix sockets are cheap (one fd + one goroutine each).
+const maxConcurrentConnections = 512
+
+// connectionWaitTimeout bounds how long the accept loop waits for a free slot
+// before rejecting a connection. A burst queues for a moment instead of being
+// dropped; only a genuinely stuck daemon (no slot frees in this window) rejects.
+const connectionWaitTimeout = 2 * time.Second
+
+// rejectionLogInterval is the minimum spacing between "connection limit
+// reached" warnings. Rejections inside the window are counted and summarized.
+const rejectionLogInterval = 5 * time.Second
+
+// rejectionLog coalesces per-connection rejection warnings into one line per
+// burst plus one summary count. The zero value is ready to use.
+type rejectionLog struct {
+	mu         sync.Mutex
+	suppressed int
+	timer      *time.Timer
+}
+
+// note records one rejection. The first rejection in a burst logs immediately;
+// later ones are counted and reported by a single summary when the window ends.
+func (r *rejectionLog) note(logger *slog.Logger, limit int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.timer == nil {
+		logger.Warn("connection limit reached, rejecting", "limit", limit)
+		r.timer = time.AfterFunc(rejectionLogInterval, func() { r.flush(logger, limit) })
+		return
+	}
+	r.suppressed++
+}
+
+func (r *rejectionLog) flush(logger *slog.Logger, limit int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.suppressed > 0 {
+		logger.Warn("connection limit reached, rejected more connections",
+			"limit", limit, "additional_rejected", r.suppressed, "window", rejectionLogInterval)
+	}
+	r.suppressed = 0
+	r.timer = nil
+}
 
 // finalResponseWriteTimeout bounds delivery of the authoritative response after
 // a long-running handler. ProgressWriter deliberately installs a very short
@@ -1061,6 +1108,9 @@ type Server struct {
 	mu       sync.Mutex
 	connWg   sync.WaitGroup // tracks active connection handler goroutines
 	connSem  chan struct{}  // semaphore for connection limit
+	connWait time.Duration  // how long accept waits for a free slot before rejecting
+
+	rejections rejectionLog // coalesces connection-limit warnings per burst
 
 	startTime time.Time
 
@@ -1224,6 +1274,7 @@ func NewServer(logger *slog.Logger) *Server {
 		service:   svc,
 		startTime: time.Now(),
 		connSem:   make(chan struct{}, maxConcurrentConnections),
+		connWait:  connectionWaitTimeout,
 	}
 	s.router = s.buildRouter()
 	return s
@@ -1237,6 +1288,7 @@ func NewServerWithService(logger *slog.Logger, service DaemonService) *Server {
 		service:   service,
 		startTime: time.Now(),
 		connSem:   make(chan struct{}, maxConcurrentConnections),
+		connWait:  connectionWaitTimeout,
 	}
 	s.router = s.buildRouter()
 	return s
@@ -1551,23 +1603,21 @@ func (s *Server) Start(ctx context.Context) error {
 			}
 			backoff = 100 * time.Millisecond // reset on success
 
-			// rate limit: try to acquire a slot from the semaphore
-			select {
-			case s.connSem <- struct{}{}:
-				// got slot, proceed with connection
-				s.connWg.Add(1)
-				go func(c net.Conn) {
-					defer func() {
-						<-s.connSem // release slot
-						s.connWg.Done()
-					}()
-					s.handleConnection(ctx, c)
-				}(conn)
-			default:
-				// at connection limit, reject
-				s.logger.Warn("connection limit reached, rejecting", "limit", maxConcurrentConnections)
+			// rate limit: acquire a slot, waiting briefly so a burst queues
+			// instead of dropping hook events
+			if !s.acquireConnSlot(ctx) {
+				s.rejections.note(s.logger, cap(s.connSem))
 				conn.Close()
+				continue
 			}
+			s.connWg.Add(1)
+			go func(c net.Conn) {
+				defer func() {
+					<-s.connSem // release slot
+					s.connWg.Done()
+				}()
+				s.handleConnection(ctx, c)
+			}(conn)
 		}
 	}()
 
@@ -1591,6 +1641,26 @@ func (s *Server) Start(ctx context.Context) error {
 	// on-disk path gone). the legitimate pre-bind unlink of stale paths
 	// still happens in listen() for the next daemon to start at this path.
 	return ctx.Err()
+}
+
+// acquireConnSlot takes a connection slot, waiting up to s.connWait when the
+// semaphore is full. Returns false if no slot freed in time or ctx was canceled.
+func (s *Server) acquireConnSlot(ctx context.Context) bool {
+	select {
+	case s.connSem <- struct{}{}:
+		return true
+	default:
+	}
+	timer := time.NewTimer(s.connWait)
+	defer timer.Stop()
+	select {
+	case s.connSem <- struct{}{}:
+		return true
+	case <-timer.C:
+		return false
+	case <-ctx.Done():
+		return false
+	}
 }
 
 // handleConnection handles a single client connection.

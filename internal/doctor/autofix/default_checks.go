@@ -6,13 +6,16 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/hooks/claude"
+	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/lfs"
 )
 
@@ -254,30 +257,17 @@ func checkClaudeHooksFormat(_ context.Context, repoPath string) CheckResult {
 // fails for some reason, sessions exhaust MaxSummaryAttempts (3) and get
 // re-marked unrecoverable. The daily check would reset them again, but
 // only 3 LLM calls per session per day — bounded by design.
-func checkSessionInlineSummaryRetry(_ context.Context, repoPath string) CheckResult {
+func checkSessionInlineSummaryRetry(ctx context.Context, repoPath string) CheckResult {
 	if repoPath == "" {
 		return CheckResult{Status: StatusClean}
 	}
-	ctx, err := config.LoadProjectContext(repoPath)
-	if err != nil || ctx == nil {
+	projectCtx, err := config.LoadProjectContext(repoPath)
+	if err != nil || projectCtx == nil {
 		return CheckResult{Status: StatusClean, Repo: repoPath}
 	}
-	ledgerPath := ctx.DefaultLedgerPath()
+	ledgerPath := projectCtx.DefaultLedgerPath()
 	if ledgerPath == "" {
 		return CheckResult{Status: StatusClean, Repo: repoPath}
-	}
-
-	sessionsDir := filepath.Join(ledgerPath, "sessions")
-	entries, err := os.ReadDir(sessionsDir)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return CheckResult{Status: StatusClean, Repo: repoPath}
-		}
-		return CheckResult{
-			Status:  StatusError,
-			Repo:    repoPath,
-			Summary: fmt.Sprintf("read sessions dir: %v", err),
-		}
 	}
 
 	// best-effort LFS client for hydrating pointer stubs
@@ -287,23 +277,132 @@ func checkSessionInlineSummaryRetry(_ context.Context, repoPath string) CheckRes
 		lfsClient, _ = lfs.NewClientFromLedger(ledgerPath, ep)
 	}
 
-	var resetCount int
+	// same identity recording stamps into meta.json (privacy-safe display name)
+	username := identity.AttributionDisplayName(ep, config.GetDisplayName())
+	result := rearmInlineSummarySessions(ctx, ledgerPath, username, lfsClient)
+	result.Repo = repoPath
+	return result
+}
+
+// rearmInlineSummarySessions is the lock-, ownership- and commit-aware core of
+// checkSessionInlineSummaryRetry.
+//
+// Resetting a session rewrites sessions/<s>/meta.json in the Ledger working
+// tree. Left uncommitted, those edits make every later `git pull --rebase`
+// fail with "cannot rebase: You have unstaged changes", and they accumulate
+// autostash entries. So the pass:
+//   - skips while the Ledger's push is suspended: finalize is paused too, so a
+//     re-armed session could not be summarized and pushed anyway;
+//   - holds the repo lock for the whole reset-and-commit transaction;
+//   - only touches the current user's sessions (a teammate's meta.json is
+//     theirs to repair, and editing it creates a conflict on their next push);
+//   - commits what it rewrote in one snapshot commit, and restores the files if
+//     that fails so the tree is never left dirty.
+func rearmInlineSummarySessions(ctx context.Context, ledgerPath, username string, lfsClient *lfs.Client) CheckResult {
+	if until, wedged := gitutil.PushWedgedUntil(ledgerPath); wedged {
+		return CheckResult{
+			Status:  StatusClean,
+			Summary: fmt.Sprintf("ledger push suspended until %s; inline-summary re-arm deferred", until.Format(time.RFC3339)),
+		}
+	}
+	if username == "" {
+		// fail closed: without an identity no session can be proven ours
+		return CheckResult{Status: StatusClean}
+	}
+
+	lockCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	result := CheckResult{Status: StatusClean}
+	lockErr := gitutil.WithRepoLock(lockCtx, ledgerPath, func() error {
+		result = rearmInlineSummaryLocked(ctx, ledgerPath, username, lfsClient)
+		return nil
+	})
+	switch {
+	case lockErr == nil:
+		return result
+	case gitutil.IsRepoLockBusy(lockErr):
+		return CheckResult{Status: StatusClean, Summary: "ledger busy; inline-summary re-arm deferred"}
+	default:
+		return CheckResult{Status: StatusError, Summary: fmt.Sprintf("acquire ledger lock for inline-summary re-arm: %v", lockErr)}
+	}
+}
+
+// rearmInlineSummaryLocked must run inside gitutil.WithRepoLock.
+func rearmInlineSummaryLocked(ctx context.Context, ledgerPath, username string, lfsClient *lfs.Client) CheckResult {
+	sessionsDir := filepath.Join(ledgerPath, "sessions")
+	entries, err := os.ReadDir(sessionsDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return CheckResult{Status: StatusClean}
+		}
+		return CheckResult{Status: StatusError, Summary: fmt.Sprintf("read sessions dir: %v", err)}
+	}
+
+	var resetPaths []string
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
 		}
-		if lfs.ResetInlineSummaryEligible(filepath.Join(sessionsDir, e.Name()), false, lfsClient, ledgerPath) {
-			resetCount++
+		sessionDir := filepath.Join(sessionsDir, e.Name())
+		meta, readErr := lfs.ReadSessionMeta(sessionDir)
+		if readErr != nil || meta == nil || !strings.EqualFold(meta.Username, username) {
+			continue
+		}
+		metaPath := path.Join("sessions", e.Name(), "meta.json")
+		if metaDiffersFromHead(ctx, ledgerPath, metaPath) {
+			// restoreRearmedMetas would discard these edits on a failed commit
+			continue
+		}
+		if lfs.ResetInlineSummaryEligible(sessionDir, false, lfsClient, ledgerPath) {
+			resetPaths = append(resetPaths, metaPath)
 		}
 	}
+	if len(resetPaths) == 0 {
+		return CheckResult{Status: StatusClean}
+	}
 
-	if resetCount == 0 {
-		return CheckResult{Status: StatusClean, Repo: repoPath}
+	msg := fmt.Sprintf("fix: re-arm %d sessions for re-summarization", len(resetPaths))
+	if err := commitRearmedMetas(ctx, ledgerPath, msg, resetPaths); err != nil {
+		restoreRearmedMetas(ctx, ledgerPath, resetPaths)
+		return CheckResult{Status: StatusError, Summary: fmt.Sprintf("commit inline-summary re-arm: %v", err)}
 	}
 	return CheckResult{
 		Status:  StatusFixed,
-		Repo:    repoPath,
-		Summary: fmt.Sprintf("reset %d sessions for inline-prompt re-summarization", resetCount),
+		Summary: fmt.Sprintf("reset %d sessions for inline-prompt re-summarization", len(resetPaths)),
+	}
+}
+
+// metaDiffersFromHead reports whether the file is untracked or has staged or
+// unstaged edits. Fails closed: any git error counts as dirty.
+func metaDiffersFromHead(ctx context.Context, ledgerPath, relPath string) bool {
+	if _, err := gitutil.RunGit(ctx, ledgerPath, "ls-files", "--error-unmatch", "--", relPath); err != nil {
+		return true
+	}
+	_, err := gitutil.RunGit(ctx, ledgerPath, "diff", "--quiet", "HEAD", "--", relPath)
+	return err != nil
+}
+
+func commitRearmedMetas(ctx context.Context, ledgerPath, msg string, paths []string) error {
+	addArgs := append([]string{"add", "--sparse", "--"}, paths...)
+	if _, err := gitutil.RunGit(ctx, ledgerPath, addArgs...); err != nil {
+		return fmt.Errorf("stage meta.json: %w", err)
+	}
+	if _, err := gitutil.CommitLedgerSnapshot(ctx, ledgerPath, msg, paths...); err != nil {
+		return fmt.Errorf("snapshot commit: %w", err)
+	}
+	return nil
+}
+
+// restoreRearmedMetas puts the rewritten files back to HEAD after a failed
+// commit. Best effort by design: the caller already reports StatusError.
+func restoreRearmedMetas(ctx context.Context, ledgerPath string, paths []string) {
+	resetArgs := append([]string{"reset", "-q", "--"}, paths...)
+	if _, err := gitutil.RunGit(ctx, ledgerPath, resetArgs...); err != nil {
+		slog.WarnContext(ctx, "unstage inline-summary re-arm failed", "error", err)
+	}
+	checkoutArgs := append([]string{"checkout", "--"}, paths...)
+	if _, err := gitutil.RunGit(ctx, ledgerPath, checkoutArgs...); err != nil {
+		slog.WarnContext(ctx, "restore inline-summary re-arm failed", "error", err)
 	}
 }
 

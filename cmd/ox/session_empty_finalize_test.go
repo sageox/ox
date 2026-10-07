@@ -133,9 +133,18 @@ func moveLedgerToDefaultPath(t *testing.T, f *downloadLedgerFixture) {
 	}))
 }
 
+// actAsFixtureOwner makes this machine's attribution identity match the
+// username on the fixture's session ("riley"). The re-arm only touches
+// sessions owned by the current identity and fails closed without one.
+func actAsFixtureOwner(t *testing.T) {
+	t.Helper()
+	require.NoError(t, config.SetDisplayName("riley"))
+}
+
 func TestEmptyLedgerSession_SettledOnceWithoutLLM(t *testing.T) {
 	f := newDownloadLedgerFixture(t)
 	moveLedgerToDefaultPath(t, f)
+	actAsFixtureOwner(t)
 
 	const name = "2026-09-24T23-03-riley-OxRiLy"
 	stoppedAt := time.Date(2026, 9, 24, 23, 4, 0, 0, time.UTC)
@@ -174,8 +183,8 @@ func TestEmptyLedgerSession_SettledOnceWithoutLLM(t *testing.T) {
 	assert.Equal(t, rawPointer, runGit(t, f.barePath, "show", "HEAD:sessions/"+name+"/raw.jsonl"),
 		"the transcript pointer must not change")
 
-	// And one commit, touching only this session, reached the remote.
-	assert.Equal(t, "1", runGit(t, f.barePath, "rev-list", "--count", remoteBefore+"..HEAD"))
+	// And the re-arm commit plus the settle commit, both touching only this session, reached the remote.
+	assert.Equal(t, "2", runGit(t, f.barePath, "rev-list", "--count", remoteBefore+"..HEAD"))
 	for _, path := range strings.Fields(runGit(t, f.barePath, "diff", "--name-only", remoteBefore, "HEAD")) {
 		assert.True(t, strings.HasPrefix(path, "sessions/"+name+"/"), "unexpected path in the commit: %s", path)
 	}
@@ -204,6 +213,7 @@ func TestEmptyLedgerSession_SettledOnceWithoutLLM(t *testing.T) {
 func TestEmptyLedgerSession_SettledAfterFailedPush(t *testing.T) {
 	f := newDownloadLedgerFixture(t)
 	moveLedgerToDefaultPath(t, f)
+	actAsFixtureOwner(t)
 
 	const name = "2026-09-24T23-03-riley-OxRiLy"
 	f.publishEmptyFailedSession(t, name, time.Date(2026, 9, 24, 23, 4, 0, 0, time.UTC))
