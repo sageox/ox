@@ -140,23 +140,26 @@ func TestAccumulator_MultipleFiles(t *testing.T) {
 	assert.Equal(t, ChangeDeleted, byPath["src/c.go"])
 }
 
+// Virtual time prevents scheduler delays from settling the first event before
+// the second is added, and checks the exact reset boundary.
 func TestAccumulator_SettleResetsOnNewEvent(t *testing.T) {
-	acc := NewChangeAccumulator(100 * time.Millisecond)
-	defer acc.Stop()
-
-	acc.AddChange("src/foo.go", ChangeModified, false)
-	time.Sleep(60 * time.Millisecond)                  // 60ms < 100ms settle
-	acc.AddChange("src/bar.go", ChangeModified, false) // resets timer
-
-	// at 60ms after first event, timer was reset — should not have settled yet
-	changes := acc.DrainSettled()
-	assert.Nil(t, changes)
-
-	// wait for full settle period from last event
-	require.Eventually(t, func() bool {
-		changes = acc.DrainSettled()
-		return len(changes) == 2
-	}, 2*time.Second, 10*time.Millisecond)
+	synctest.Test(t, func(t *testing.T) {
+		acc := NewChangeAccumulator(100 * time.Millisecond)
+		defer acc.Stop()
+		acc.AddChange("src/foo.go", ChangeModified, false)
+		time.Sleep(60 * time.Millisecond)
+		acc.AddChange("src/bar.go", ChangeModified, false)
+		require.Nil(t, acc.DrainSettled())
+		time.Sleep(99 * time.Millisecond)
+		synctest.Wait()
+		require.Nil(t, acc.DrainSettled(), "a new event must restart the full settle period")
+		time.Sleep(time.Millisecond)
+		synctest.Wait()
+		changes := acc.DrainSettled()
+		require.Len(t, changes, 2)
+		paths := []string{changes[0].Path, changes[1].Path}
+		require.ElementsMatch(t, []string{"src/foo.go", "src/bar.go"}, paths)
+	})
 }
 
 // --- OnSettled callback tests ---

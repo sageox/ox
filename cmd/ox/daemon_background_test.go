@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -51,17 +52,29 @@ func killTestDaemons(t *testing.T, oxBin string) {
 }
 
 func listTestDaemons(oxBin string) ([]int, error) {
-	out, err := exec.Command("ps", "-Ao", "pid=,args=").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "ps", "-Ao", "pid=,args=")
+	cmd.WaitDelay = 100 * time.Millisecond
+	out, err := cmd.Output()
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	if err != nil {
 		return nil, err
 	}
 	var pids []int
 	for _, line := range strings.Split(string(out), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 4 || fields[1] != oxBin || fields[2] != "daemon" || fields[3] != "start" {
+		pidText, command, ok := strings.Cut(strings.TrimSpace(line), " ")
+		if !ok {
 			continue
 		}
-		if pid, err := strconv.Atoi(fields[0]); err == nil {
+		args, owned := strings.CutPrefix(strings.TrimSpace(command), oxBin+" ")
+		fields := strings.Fields(args)
+		if !owned || len(fields) < 2 || fields[0] != "daemon" || fields[1] != "start" {
+			continue
+		}
+		if pid, err := strconv.Atoi(pidText); err == nil {
 			pids = append(pids, pid)
 		}
 	}
@@ -151,18 +164,24 @@ func TestBackgroundDaemonSurvivesCommandCleanup(t *testing.T) {
 func TestTestDaemonDiscoveryReportsFailure(t *testing.T) {
 	for _, tt := range []struct {
 		name, script string
+		oxBin        string
 		wantError    bool
 		want         []int
 	}{
 		{name: "discovery failure", script: "#!/bin/sh\nexit 1\n", wantError: true},
 		{name: "empty success", script: "#!/bin/sh\nexit 0\n"},
+		{name: "path with spaces", oxBin: "/tmp/Test Dir/ox", script: "#!/bin/sh\nprintf '%s\\n' '123 /tmp/Test Dir/ox daemon start --foreground' '456 /tmp/Test Dir/ox-other daemon start' '789 /tmp/Test Dir/ox version'\n", want: []int{123}},
 		{name: "only owned daemon", script: "#!/bin/sh\nprintf '%s\\n' '123 /tmp/test-ox daemon start --foreground' '456 /tmp/other-ox daemon start' '789 /tmp/test-ox version'\n", want: []int{123}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			bin := t.TempDir()
 			require.NoError(t, os.WriteFile(filepath.Join(bin, "ps"), []byte(tt.script), 0o755))
 			t.Setenv("PATH", bin)
-			pids, err := listTestDaemons("/tmp/test-ox")
+			oxBin := tt.oxBin
+			if oxBin == "" {
+				oxBin = "/tmp/test-ox"
+			}
+			pids, err := listTestDaemons(oxBin)
 			if tt.wantError {
 				require.Error(t, err)
 				require.Nil(t, pids)
@@ -190,4 +209,19 @@ func TestDaemonCleanupFailsWhenProcessDiscoveryFails(t *testing.T) {
 	require.ErrorAs(t, err, &exitErr)
 	require.Equal(t, 1, exitErr.ExitCode())
 	require.Contains(t, string(out), "cannot verify test daemon cleanup")
+}
+
+// A stuck process listing must not leave a cleanup callback blocked indefinitely.
+func TestTestDaemonDiscoveryBoundsStalledCommand(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: exercises a one-second subprocess deadline")
+	}
+	bin := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "ps"), []byte("#!/bin/sh\nexec /bin/sleep 60\n"), 0o755))
+	t.Setenv("PATH", bin)
+	start := time.Now()
+	pids, err := listTestDaemons("/tmp/test-ox")
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Nil(t, pids)
+	require.Less(t, time.Since(start), 3*time.Second)
 }
