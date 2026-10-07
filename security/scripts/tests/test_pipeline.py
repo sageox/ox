@@ -167,12 +167,15 @@ class ScannerStatusTest(unittest.TestCase):
             return pipeline.scanner_status(out, tool)
 
     def test_statuses(self):
+        """Verify scanner statuses and reasons, including tool-specific install hints."""
         sarif = json.dumps({"runs": [{"results": []}]})
         gosec_ok = json.dumps({"Issues": None, "Report": {}})
         gosec_typecheck = json.dumps({"Issues": [{"FromLinter": "typecheck",
                                                   "Text": "export data version 4 is greater than maximum supported version 2"}]})
         cases = [
-            ("opengrep", "missing", {}, "skipped", "not installed"),
+            ("opengrep", "missing", {}, "skipped", "not installed — run `make sec-install`"),
+            # make sec-install does not install golangci-lint; the reason must name what is missing.
+            ("gosec", "missing", {}, "skipped", "golangci-lint v2 is not installed"),
             ("opengrep", "nofiles", {}, "skipped", "no changed files"),
             ("opengrep", 0, {"det-opengrep.sarif": sarif}, "ran", ""),
             ("opengrep", 0, {}, "failed", "no SARIF output"),

@@ -87,6 +87,14 @@ jobs:
         with:
           go-version-file: 'go.mod'
 
+      # gosec runs through golangci-lint, which make sec-install does not install.
+      # Same action and version as the lint job in ci.yml; move the two together.
+      - name: Install golangci-lint for gosec
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.11.4
+          install-only: true
+
       - name: Cache security scanner binaries
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:

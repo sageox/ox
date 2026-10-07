@@ -189,9 +189,11 @@ run_syft_grype() {
   record grype "$rc"
 }
 
+# Run gosec through golangci-lint v2, saving its JSON report and log under OUT.
+# Record the exit code, or "missing" when golangci-lint is unavailable.
 run_gosec() {
   if ! command -v golangci-lint >/dev/null; then
-    echo "golangci-lint: not installed (run make lint)" > "$OUT/det-gosec.log"
+    echo "golangci-lint: not installed (gosec needs golangci-lint v2)" > "$OUT/det-gosec.log"
     record gosec missing
     return 0
   fi
