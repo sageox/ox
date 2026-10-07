@@ -168,11 +168,11 @@ func TestEvaluatePlanPointers_WarnThenFix(t *testing.T) {
 	fix := evaluatePlanPointers(client, pointers, true, func() (*lfs.ReconcileResult, error) {
 		called = true
 		require.NoError(t, os.WriteFile(htmlPath, []byte{}, 0o644)) // simulate the blank
-		return &lfs.ReconcileResult{Replaced: 1}, nil
+		return &lfs.ReconcileResult{RecoveredUploads: 1}, nil
 	})
 	assert.True(t, called, "the --fix path must invoke the reconcile")
 	assert.False(t, fix.warning, "a successful reconcile is a passed result")
-	assert.Contains(t, fix.message, "reconciled")
+	assert.Contains(t, fix.message, "restored")
 
 	// reconcile-failure path: a reconcile error must surface as a warning (with
 	// the count preserved), never be swallowed into a passing result.

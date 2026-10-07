@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/manifest"
@@ -38,7 +39,18 @@ func applySparseFromManifest(ctx context.Context, repoPath string, cfg *manifest
 		return nil
 	}
 	args := append([]string{"sparse-checkout", "set", "--no-cone"}, paths...)
-	if _, err := gitutil.RunGit(ctx, repoPath, args...); err != nil {
+	_, err := gitutil.RunGit(ctx, repoPath, args...)
+	if err != nil && gitutil.IsIndexLockContention(err.Error()) {
+		// a git process that died mid-write leaves info/sparse-checkout.lock
+		// behind and every later pass fails on it; clear stale locks and retry once
+		if removed, _ := gitutil.RemoveStaleLockFiles(filepath.Join(repoPath, ".git")); len(removed) > 0 {
+			if logger != nil {
+				logger.Warn("sparse-checkout: removed stale lock files, retrying", "path", repoPath, "removed", removed)
+			}
+			_, err = gitutil.RunGit(ctx, repoPath, args...)
+		}
+	}
+	if err != nil {
 		if logger != nil {
 			logger.Warn("sparse-checkout set failed", "path", repoPath, "error", err)
 		}

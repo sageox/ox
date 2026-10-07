@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sageox/ox/internal/sacred"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -311,4 +312,114 @@ func TestCommitLedgerSnapshot_SparseCheckout(t *testing.T) {
 	require.True(t, committed)
 	assert.Equal(t, updated, headBlob(t, repo, "sessions/x/meta.json"))
 	assert.Equal(t, "plan\n", headBlob(t, repo, "data/plans/p.md"), "paths outside the pathspec must be preserved")
+}
+
+// seedSacredSessionFiles commits n tracked files under sessions/ and returns
+// their ledger-relative paths.
+func seedSacredSessionFiles(t *testing.T, repo string, n int) []string {
+	t.Helper()
+	var paths []string
+	for i := 0; i < n; i++ {
+		path := filepath.ToSlash(filepath.Join("sessions", "s"+string(rune('a'+i)), "raw.jsonl"))
+		writeGitutilFixture(t, repo, path, "recording "+path+"\n")
+		paths = append(paths, path)
+	}
+	gitInRepo(t, repo, "add", "--sparse", "sessions/")
+	gitInRepo(t, repo, "commit", "-m", "seed sessions")
+	return paths
+}
+
+func writeCacheCopy(t *testing.T, repo, path, content string) {
+	t.Helper()
+	writeGitutilFixture(t, repo, filepath.ToSlash(filepath.Join(".sageox", "cache", path)), content)
+}
+
+// TestCommitLedgerSnapshotPreserving_ExemptsOnlyCacheVerifiedPaths covers the
+// narrow replacement for the removed override env var: a bulk untrack commits
+// only when every deleted path's exact bytes sit in .sageox/cache.
+func TestCommitLedgerSnapshotPreserving_ExemptsOnlyCacheVerifiedPaths(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git repository")
+	}
+	exact := func(p string) (string, bool) { return "recording " + p + "\n", true }
+	tests := []struct {
+		name       string
+		cacheFor   func(path string) (string, bool)
+		preserved  func(paths []string) []string
+		wantCommit bool
+	}{
+		{
+			name:       "cache holds exact bytes for every preserved path",
+			cacheFor:   exact,
+			preserved:  func(paths []string) []string { return paths },
+			wantCommit: true,
+		},
+		{
+			name:       "same deletion without cache proof is refused",
+			cacheFor:   func(string) (string, bool) { return "", false },
+			preserved:  func(paths []string) []string { return paths },
+			wantCommit: false,
+		},
+		{
+			name:       "cache holds different bytes",
+			cacheFor:   func(p string) (string, bool) { return "recording " + p + " (short)\n", true },
+			preserved:  func(paths []string) []string { return paths },
+			wantCommit: false,
+		},
+		{
+			name:       "cache is right but paths were not declared",
+			cacheFor:   exact,
+			preserved:  func([]string) []string { return nil },
+			wantCommit: false,
+		},
+		{
+			name:       "only some deleted paths are preserved",
+			cacheFor:   exact,
+			preserved:  func(paths []string) []string { return paths[:3] },
+			wantCommit: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := newSnapshotRepo(t)
+			paths := seedSacredSessionFiles(t, repo, sacred.MassDeleteThreshold+4)
+			for _, p := range paths {
+				if content, ok := tt.cacheFor(p); ok {
+					writeCacheCopy(t, repo, p, content)
+				}
+			}
+			before := headBlob(t, repo, paths[0])
+			gitInRepo(t, repo, "rm", "-q", "--cached", "--sparse", "-r", "sessions")
+
+			committed, err := CommitLedgerSnapshotPreserving(context.Background(), repo, "doctor: untrack", tt.preserved(paths), "sessions")
+
+			if tt.wantCommit {
+				require.NoError(t, err)
+				assert.True(t, committed)
+				assert.False(t, headHasPath(t, repo, paths[0]))
+				return
+			}
+			require.Error(t, err)
+			assert.False(t, committed)
+			assert.Equal(t, before, headBlob(t, repo, paths[0]), "a refused commit leaves every sacred blob in HEAD")
+		})
+	}
+}
+
+// TestCommitLedgerSnapshot_NoOverrideEnv proves the retired env var no longer
+// bypasses the guard, even when set.
+func TestCommitLedgerSnapshot_NoOverrideEnv(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git repository")
+	}
+	repo := newSnapshotRepo(t)
+	paths := seedSacredSessionFiles(t, repo, sacred.MassDeleteThreshold+2)
+	gitInRepo(t, repo, "rm", "-q", "--cached", "--sparse", "-r", "sessions")
+	t.Setenv("OX_ALLOW_SACRED_MASS_DELETE", "1")
+
+	committed, err := CommitLedgerSnapshot(context.Background(), repo, "bulk removal")
+
+	require.Error(t, err)
+	assert.False(t, committed)
+	assert.True(t, headHasPath(t, repo, paths[0]))
 }

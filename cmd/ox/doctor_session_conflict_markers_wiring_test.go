@@ -146,16 +146,7 @@ func TestSessionsPhase_EveryRegisteredCheckIsInvoked(t *testing.T) {
 	}
 	require.NotEmpty(t, registrations, "found no Sessions checks; the scan is broken")
 
-	// registered but never run today; wire them or drop the registration, then delete the entry
-	knownUnwired := map[string]bool{
-		"CheckSlugSessionDraftOrphan": true,
-		"CheckSlugSessionUncommitted": true,
-	}
-
 	for _, reg := range registrations {
-		if knownUnwired[reg.slugConst] {
-			continue
-		}
 		invoked := phaseIdents[reg.slugConst]
 		for _, callee := range reg.run {
 			invoked = invoked || phaseCalls[callee]

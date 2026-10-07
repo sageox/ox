@@ -102,7 +102,6 @@ func TestReconcile_ReuploadsExactRecoveryCacheWithoutLocalMutation(t *testing.T)
 
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.RecoveredUploads)
-	assert.Zero(t, result.Replaced)
 	assert.True(t, result.Changed())
 	assert.Equal(t, content, uploaded[ref.BareOID()])
 	assert.Equal(t, headBefore, git(t, ledger, "rev-parse", "HEAD"))
@@ -171,7 +170,6 @@ func TestReconcile_RecoveryCacheFailuresAreAtomic(t *testing.T) {
 
 			require.ErrorContains(t, err, test.wantError)
 			assert.Zero(t, result.RecoveredUploads)
-			assert.Zero(t, result.Replaced)
 			assert.False(t, result.Changed())
 			assert.Equal(t, headBefore, git(t, ledger, "rev-parse", "HEAD"))
 			assert.Equal(t, indexBefore, git(t, ledger, "write-tree"))
@@ -238,7 +236,7 @@ func TestReconcile_DivergedBranchDoesNotMutate(t *testing.T) {
 	assert.FileExists(t, pointerPath)
 }
 
-func TestReconcile_MassDeletionPreflightDoesNotMutate(t *testing.T) {
+func TestReconcile_ManyUnrecoverablePointersDoNotMutate(t *testing.T) {
 	ledger, _ := initLedgerWithRemote(t)
 	missing := make(map[string]bool)
 	files := make(map[string]string)
@@ -255,7 +253,7 @@ func TestReconcile_MassDeletionPreflightDoesNotMutate(t *testing.T) {
 
 	result, err := reconcileUnpushedPointers(context.Background(), ledger, nil, func() (*Client, error) { return client, nil })
 
-	require.ErrorContains(t, err, "exceeding threshold")
+	require.ErrorContains(t, err, "will not be removed")
 	assert.False(t, result.Changed())
 	assert.Equal(t, headBefore, git(t, ledger, "rev-parse", "HEAD"))
 	assert.Equal(t, indexBefore, git(t, ledger, "write-tree"))
@@ -265,7 +263,7 @@ func TestReconcile_MassDeletionPreflightDoesNotMutate(t *testing.T) {
 	}
 }
 
-func TestReconcile_MixedReuploadAndUnrecoverableRepair(t *testing.T) {
+func TestReconcile_MixedReuploadAndUnrecoverableKeepsPushPaused(t *testing.T) {
 	ledger, _ := initLedgerWithRemote(t)
 	content := []byte("keep the recording\n")
 	pointerPath, metaPath, cachePath, sessionRef := commitMissingSessionPointer(t, ledger, "mixed", content)
@@ -280,15 +278,16 @@ func TestReconcile_MixedReuploadAndUnrecoverableRepair(t *testing.T) {
 
 	result, err := reconcileUnpushedPointers(context.Background(), ledger, nil, func() (*Client, error) { return client, nil })
 
-	require.NoError(t, err)
+	var unrecoverable *UnrecoverablePointersError
+	require.ErrorAs(t, err, &unrecoverable)
+	assert.Equal(t, 1, unrecoverable.Uploaded)
 	assert.Equal(t, 1, result.RecoveredUploads)
-	assert.Equal(t, 1, result.Replaced)
 	assert.True(t, result.Changed())
 	assert.Equal(t, content, uploaded[sessionRef.BareOID()])
 	assert.Equal(t, pointerBefore, mustReadFile(t, pointerPath))
 	assert.Equal(t, metaBefore, mustReadFile(t, metaPath))
 	assert.Equal(t, content, mustReadFile(t, cachePath))
-	assert.NoFileExists(t, planPath)
+	assert.FileExists(t, planPath, "the unrecoverable plan pointer is never removed")
 }
 
 func mustReadFile(t *testing.T, path string) []byte {

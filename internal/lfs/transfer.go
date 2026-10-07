@@ -1,6 +1,7 @@
 package lfs
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -14,6 +15,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/sageox/ox/internal/auth"
@@ -156,6 +158,11 @@ type UploadResult struct {
 }
 
 // UploadObject uploads a single blob using the action href from the batch response.
+//
+// The body is the in-memory bytes behind a bytes.Reader, so the request always
+// carries Content-Length and is never sent chunked: object stores behind a WAF
+// or proxy reject chunked PUTs. A connection reset or unexpected EOF is retried
+// once with a fresh request, since the reset says nothing about the object.
 func UploadObject(action *Action, content []byte) error {
 	if action == nil || action.Href == "" {
 		return fmt.Errorf("no upload action provided")
@@ -164,25 +171,28 @@ func UploadObject(action *Action, content []byte) error {
 		return fmt.Errorf("upload: %w", err)
 	}
 
-	client := lfsHTTPClient
+	err := putObject(action, content)
+	if err != nil && isConnectionReset(err) {
+		err = putObject(action, content)
+	}
+	return err
+}
 
-	req, err := http.NewRequest("PUT", action.Href, nil)
+// putObject sends one PUT with an explicit Content-Length.
+func putObject(action *Action, content []byte) error {
+	req, err := http.NewRequest(http.MethodPut, action.Href, bytes.NewReader(content))
 	if err != nil {
 		return fmt.Errorf("create upload request: %w", err)
 	}
+	req.ContentLength = int64(len(content))
 
 	// only User-Agent for external Git host; no X-Orchestrator
 	req.Header.Set("User-Agent", useragent.String())
-
-	// set headers from action
 	if err := action.setRequestHeaders(req); err != nil {
 		return err
 	}
 
-	req.Body = io.NopCloser(io.NewSectionReader(newBytesReaderAt(content), 0, int64(len(content))))
-	req.ContentLength = int64(len(content))
-
-	resp, err := client.Do(req)
+	resp, err := lfsHTTPClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("upload failed: %w", err)
 	}
@@ -192,8 +202,18 @@ func UploadObject(action *Action, content []byte) error {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("upload returned HTTP %d: %s", resp.StatusCode, string(body))
 	}
-
 	return nil
+}
+
+// isConnectionReset reports a transport failure that happened mid-request
+// (reset, broken pipe, premature EOF) rather than a server verdict on the object.
+func isConnectionReset(err error) bool {
+	return errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.EPIPE) ||
+		errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, io.EOF) ||
+		strings.Contains(err.Error(), "connection reset") ||
+		strings.Contains(err.Error(), "broken pipe")
 }
 
 // VerifyObject confirms a blob was received by the server by POSTing to the
@@ -527,24 +547,4 @@ func DownloadAll(resp *BatchResponse, maxConcurrent int) []DownloadResult {
 
 	wg.Wait()
 	return results
-}
-
-// bytesReaderAt wraps a byte slice to implement io.ReaderAt.
-type bytesReaderAt struct {
-	data []byte
-}
-
-func newBytesReaderAt(data []byte) *bytesReaderAt {
-	return &bytesReaderAt{data: data}
-}
-
-func (r *bytesReaderAt) ReadAt(p []byte, off int64) (n int, err error) {
-	if off >= int64(len(r.data)) {
-		return 0, io.EOF
-	}
-	n = copy(p, r.data[off:])
-	if n < len(p) {
-		return n, io.EOF
-	}
-	return n, nil
 }

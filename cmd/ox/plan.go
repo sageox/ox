@@ -323,6 +323,17 @@ func planLFSClient(gitRoot string) *lfs.Client {
 	return client
 }
 
+// planHTMLUploadFailedReason is the share verdict when a large plan.html could
+// not be uploaded to the LFS store and the save therefore committed nothing.
+const planHTMLUploadFailedReason = "plan.html upload failed; nothing was committed; re-run ox plan save to retry"
+
+// planLFSClientFn and planDehydrateHTML are indirected so tests can drive the
+// upload-failure path without a real ledger remote.
+var (
+	planLFSClientFn   = planLFSClient
+	planDehydrateHTML = plan.DehydrateHTML
+)
+
 // planSaveOpts carries the optional, caller-supplied facts about a save that
 // most call sites do not have an opinion about.
 type planSaveOpts struct {
@@ -477,15 +488,30 @@ func savePlanArtifacts(gitRoot string, in plan.Input, result plan.Result, html [
 	// Dehydrate a large plan.html to an LFS pointer BEFORE committing, so the
 	// commit carries a pointer and dehydrated clones stay lean — but only after
 	// the blob is uploaded, so a pointer whose object is missing never reaches the
-	// remote (the GH #810 wedge). Best-effort: on any failure the plain plan.html
-	// Save wrote stays on disk and is committed as-is (retrievable and pushable),
-	// deferring dehydration to a later save / doctor. Small renders and offline
-	// saves stay plain by design.
+	// remote (the GH #810 wedge). Small renders and offline saves stay plain by
+	// design. When the upload of a large render FAILS, nothing is committed: the
+	// plain plan.html stays on disk (the bytes are safe), the plan dir is not
+	// shared, and re-running the save retries the upload. Committing the plain
+	// multi-megabyte page instead would bury the failure in ledger history.
 	if html != nil {
 		// DehydrateHTML reads the on-disk (stamped) plan.html itself, so the
 		// uploaded blob's OID matches the committed file — see its doc comment.
-		if pointerized, derr := plan.DehydrateHTML(dir, planLFSClient(gitRoot)); derr != nil {
-			slog.Warn("plan: plan.html LFS dehydration failed, committing plain", "error", derr, "dir", dir)
+		if pointerized, derr := planDehydrateHTML(dir, planLFSClientFn(gitRoot)); derr != nil {
+			slog.Warn("plan: plan.html LFS upload failed, nothing committed", "error", derr, "dir", dir)
+			planID := planIDForDir(dir)
+			*report = planSaveReport{
+				Dir:      dir,
+				Slug:     slug,
+				PlanID:   planID,
+				URL:      planShareURL(gitRoot, planID),
+				Event:    savedKind,
+				Revision: planRevisionCount(dir),
+				Share: planShareStatus{
+					Reason: planHTMLUploadFailedReason,
+					Fix:    "ox plan save",
+				},
+			}
+			return dir
 		} else if pointerized {
 			slog.Debug("plan: plan.html dehydrated to LFS pointer", "dir", dir)
 		}

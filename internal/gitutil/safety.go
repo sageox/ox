@@ -26,6 +26,14 @@ var knownLockFiles = []string{
 	"shallow.lock",
 	"config.lock",
 	"HEAD.lock",
+	"info/sparse-checkout.lock",
+}
+
+// briefLocks are ownerless locks whose holder only rewrites one small file and
+// never waits on the network, so a lock past StaleLockAge is a crash, not a slow
+// operation. They do not need the hour-long AbandonedLockAge that index.lock does.
+var briefLocks = map[string]bool{
+	"info/sparse-checkout.lock": true,
 }
 
 // knownLockGlobs are lock-file patterns whose exact name isn't predictable.
@@ -193,6 +201,10 @@ func RemoveStaleLockFiles(gitDir string) (removed []string, errs []error) {
 			}
 			if age < StaleLockAge {
 				continue // owner is gone, but give a just-exited process room
+			}
+		} else if briefLocks[lock] {
+			if age < StaleLockAge {
+				continue
 			}
 		} else if age < AbandonedLockAge {
 			// Ownerless lock. git's index.lock IS the lock — no PID to probe —

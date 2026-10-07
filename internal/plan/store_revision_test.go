@@ -411,3 +411,70 @@ func TestKindsHint_ListsExactlyTheValidKinds(t *testing.T) {
 		t.Error("ValidKind accepted an unknown kind")
 	}
 }
+
+// TestSave_FullDirectoryNameAsSlugRevisesThatPlan covers the advice an
+// AmbiguousSlugError gives: pass the full dated directory name. Failure
+// prevented: the name was treated as a brand-new slug and minted a duplicate
+// plan at <today>-<full-dir-name> with a new id and link.
+func TestSave_FullDirectoryNameAsSlugRevisesThatPlan(t *testing.T) {
+	ledger := t.TempDir()
+	withLedger(t, ledger)
+	plansDir := filepath.Join(ledger, "data", "plans")
+	day1 := time.Date(2026, 10, 1, 9, 0, 0, 0, time.UTC)
+	day2 := time.Date(2026, 10, 2, 9, 0, 0, 0, time.UTC)
+	first := saveWithSlug(t, "team-glance", day1, "v1")
+	second := filepath.Join(plansDir, "2026-10-02-team-glance")
+	if err := os.MkdirAll(second, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeMetaForTest(second, Meta{Topic: "team glance", Slug: "team-glance", CreatedAt: day2}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Save("/fake/git/root", Input{Raw: "x"}, Result{}, nil, Meta{Topic: "t", Slug: "team-glance", CreatedAt: day2}); err == nil {
+		t.Fatal("precondition: the shared slug must be ambiguous")
+	}
+
+	dir, _, err := Save("/fake/git/root", Input{Raw: "v2"}, Result{}, []byte("<html><body>v2</body></html>"),
+		Meta{Topic: "Revision target", Slug: filepath.Base(first), CreatedAt: day2, Primary: PrimaryHTML})
+
+	if err != nil {
+		t.Fatalf("Save with the full directory name: %v", err)
+	}
+	if dir != first {
+		t.Fatalf("dir = %s, want the named plan %s", dir, first)
+	}
+	events, err := LoadEvents(first)
+	if err != nil || len(events) != 2 || events[1].Kind != EventRevised || events[0].PlanID != events[1].PlanID {
+		t.Fatalf("events = %+v err=%v, want [created, revised] with one plan id", events, err)
+	}
+	meta, err := LoadMeta(first)
+	if err != nil || meta.Slug != "team-glance" {
+		t.Errorf("slug = %q err=%v, want the plan's own slug kept", meta.Slug, err)
+	}
+	entries, _ := os.ReadDir(plansDir)
+	if len(entries) != 2 {
+		t.Errorf("plans dir has %d entries, want the original 2 (no duplicate)", len(entries))
+	}
+}
+
+// A full directory name that names a CLOSED plan is refused, never forked.
+func TestSave_FullDirectoryNameOfClosedPlanIsRefused(t *testing.T) {
+	ledger := t.TempDir()
+	withLedger(t, ledger)
+	day := time.Date(2026, 10, 1, 9, 0, 0, 0, time.UTC)
+	closed := saveWithSlug(t, "done-plan", day, "v1")
+	if _, err := AppendPlanEvent(context.Background(), closed, EventAbandoned, PlanEventFields{Reason: "dropped"}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err := Save("/fake/git/root", Input{Raw: "v2"}, Result{}, nil,
+		Meta{Topic: "t", Slug: filepath.Base(closed), CreatedAt: day.Add(48 * time.Hour)})
+
+	if err == nil {
+		t.Fatal("want an error for a closed plan's directory name")
+	}
+	entries, _ := os.ReadDir(filepath.Join(ledger, "data", "plans"))
+	if len(entries) != 1 {
+		t.Errorf("plans dir has %d entries, want 1: no dated duplicate may be minted", len(entries))
+	}
+}

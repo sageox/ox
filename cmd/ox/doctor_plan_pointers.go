@@ -101,7 +101,7 @@ func evaluatePlanPointers(client *lfs.Client, pointers []planPointer, fix bool, 
 		}
 	}
 	return PassedCheck(planPointersCheckName,
-		fmt.Sprintf("reconciled %d orphaned pointer(s); ledger push unblocked", res.Replaced))
+		fmt.Sprintf("restored %d plan pointer blob(s); ledger push unblocked", res.RecoveredUploads))
 }
 
 // collectPlanHTMLPointers finds every data/plans/<dir>/plan.html that is an LFS
