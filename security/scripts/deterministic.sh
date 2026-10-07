@@ -191,7 +191,7 @@ run_syft_grype() {
 
 run_gosec() {
   if ! command -v golangci-lint >/dev/null; then
-    echo "golangci-lint: not installed (run make lint)" > "$OUT/det-gosec.log"
+    echo "golangci-lint: not installed (gosec needs golangci-lint v2)" > "$OUT/det-gosec.log"
     record gosec missing
     return 0
   fi

@@ -800,7 +800,7 @@ smoke-test: build ## Run smoke tests against SageOx cloud (requires SAGEOX_CI_PA
 # Code quality
 # Targets below are agent-friendly by default (quiet). V=1 for verbose.
 lint: lint-test-env lint-sessionprovenance ## Run golangci-lint
-	@which golangci-lint > /dev/null || (echo "golangci-lint not found. Install from https://golangci-lint.run/usage/install/" && exit 1)
+	@which golangci-lint > /dev/null || (echo "golangci-lint not found. Install from https://golangci-lint.run/docs/welcome/install/" && exit 1)
 	@# --allow-parallel-runners: multiple AI coding agent sessions routinely run
 	@# `make lint` at the same time in this repo. golangci-lint's default file
 	@# lock turns that into a hard failure ("parallel golangci-lint is running")
@@ -812,7 +812,7 @@ lint: lint-test-env lint-sessionprovenance ## Run golangci-lint
 # against the main module, so pkg/sessionprovenance would ship unlinted.
 .PHONY: lint-sessionprovenance
 lint-sessionprovenance: ## Lint the public native-session contract
-	@which golangci-lint > /dev/null || (echo "golangci-lint not found. Install from https://golangci-lint.run/usage/install/" && exit 1)
+	@which golangci-lint > /dev/null || (echo "golangci-lint not found. Install from https://golangci-lint.run/docs/welcome/install/" && exit 1)
 	@cd pkg/sessionprovenance && golangci-lint run -c $(CURDIR)/.config/golangci.yml --allow-parallel-runners ./...
 
 lint-test-env: ## Check that test files use testguard instead of os.Environ()

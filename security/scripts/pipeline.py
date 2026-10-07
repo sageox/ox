@@ -884,6 +884,8 @@ def scanner_status(out: Path, tool: str) -> dict:
     if not code:
         return _failed("did not record an exit status")
     if code == "missing":
+        if tool == "gosec":  # make sec-install does not install golangci-lint
+            return {"status": "skipped", "reason": "golangci-lint v2 is not installed — https://golangci-lint.run/docs/welcome/install/"}
         return {"status": "skipped", "reason": "not installed — run `make sec-install`"}
     if code == "nofiles":
         return {"status": "skipped", "reason": "no changed files to scan"}
