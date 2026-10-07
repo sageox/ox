@@ -358,8 +358,12 @@ func (d *Daemon) Start() error {
 		throttleDuration = time.Since(throttleStart)
 	}
 
-	// record this startup attempt for loop detection
-	if err := recordRestart(); err != nil {
+	// record this startup attempt for loop detection, unless the spawner
+	// killed a live daemon to make room for us: that restart is deliberate
+	if os.Getenv(supersedeEnvVar) != "" {
+		_ = os.Unsetenv(supersedeEnvVar) // don't leak to children we spawn
+		d.logger.Debug("startup supersedes a live daemon, not recording restart")
+	} else if err := recordRestart(); err != nil {
 		d.logger.Debug("failed to record restart", "error", err)
 	}
 

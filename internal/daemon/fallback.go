@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -9,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/proc"
 	"github.com/sageox/ox/internal/repotools"
 	"github.com/sageox/ox/internal/selfexec"
@@ -153,13 +156,73 @@ func StartDaemonNoWait() error {
 	return ensureDaemonImpl(false)
 }
 
+// startLockTimeout bounds how long a caller waits for another process that is
+// already starting the daemon before giving up.
+const startLockTimeout = 5 * time.Second
+
+// startLockPollTimeout is the per-attempt lock acquire window; between attempts
+// the caller re-checks whether the daemon came up so it can return as soon as
+// the holder succeeds.
+const startLockPollTimeout = 100 * time.Millisecond
+
+// supersedeEnvVar tells a freshly spawned daemon that it replaces a live one
+// killed by the spawner, so the replacement is not counted in the
+// restart-loop history (the killer caused it, not a crash loop).
+const supersedeEnvVar = "SAGEOX_DAEMON_SUPERSEDE"
+
+// spawnDaemonFn starts the daemon process and returns its PID. Package-level so
+// tests can count spawns without exec'ing a real binary.
+var spawnDaemonFn = spawnDaemonProcess
+
+// startLockTarget is the path whose advisory lock serializes daemon starts for
+// this workspace across processes.
+func startLockTarget(workspaceID string) string {
+	return filepath.Join(filepath.Dir(PidPathForWorkspace(workspaceID)), "start-"+workspaceID)
+}
+
 // ensureDaemonImpl starts the daemon if it's not already running. When wait is
 // true it blocks up to 2 seconds for the daemon to become responsive; when
 // false it returns as soon as the process is spawned (or a startup is already
 // in flight).
+//
+// The whole check-and-spawn runs under a per-workspace file lock. Without it,
+// N hook processes observing "not running" in the same window each spawned a
+// daemon and the new daemons killed each other. A caller that cannot get the
+// lock never spawns: it waits (bounded) for the holder's daemon to come up.
 func ensureDaemonImpl(wait bool) error {
 	if IsRunning() {
 		return nil // already running on new (repo-based) socket
+	}
+
+	target := startLockTarget(CurrentWorkspaceID())
+	deadline := time.Now().Add(startLockTimeout)
+	for {
+		err := fileutil.WithFileLockTimeout(context.Background(), target, startLockPollTimeout, func() error {
+			return startDaemonLocked(wait)
+		})
+		var lockErr *fileutil.ErrLockTimeout
+		if !errors.As(err, &lockErr) {
+			return err
+		}
+		// another process holds the start lock: it is spawning the daemon
+		if !wait {
+			return nil
+		}
+		if IsRunning() {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timed out waiting for another process to start the daemon: %w", err)
+		}
+	}
+}
+
+// startDaemonLocked is the check-then-spawn sequence; callers must hold the
+// workspace start lock.
+func startDaemonLocked(wait bool) error {
+	// re-check under the lock: the previous holder may have just finished
+	if IsRunning() {
+		return nil
 	}
 
 	// A daemon may be alive but not yet listening on its socket (startup/throttle).
@@ -186,53 +249,20 @@ func ensureDaemonImpl(wait bool) error {
 	// Kill any stale daemon for this workspace before starting a new one.
 	// Reached when: daemon stopped, daemon stuck (past startup window), or
 	// wait loop expired. IPC stop will likely fail; SIGTERM is the fallback.
-	if err := KillStaleDaemon(CurrentWorkspaceID()); err != nil {
+	workspaceID := CurrentWorkspaceID()
+	supersede := liveDaemonRegistered(workspaceID)
+	if err := KillStaleDaemon(workspaceID); err != nil {
 		return fmt.Errorf("failed to stop stale daemon: %w", err)
 	}
 
 	// migration: stop old path-based daemon if one exists on a legacy socket
 	stopLegacyDaemon()
 
-	// get the path to the current executable
-	exe, err := selfexec.Path()
+	pid, err := spawnDaemonFn(supersede)
 	if err != nil {
-		return fmt.Errorf("failed to get executable path: %w", err)
+		return err // nothing was marked, so state stays Stopped
 	}
-
-	// create log directory
-	logPath := LogPath()
-	if err := os.MkdirAll(filepath.Dir(logPath), 0755); err != nil {
-		return fmt.Errorf("failed to create log directory: %w", err)
-	}
-
-	// keep the log bounded: nothing rotates it while the daemon runs
-	RotateDaemonLog(logPath)
-
-	// open log file
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
-	if err != nil {
-		return fmt.Errorf("failed to open log file: %w", err)
-	}
-
-	// start daemon process
-	cmd := exec.Command(exe, buildDaemonArgs(resolveRepoName())...)
-	proc.Detach(cmd)
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
-	// set CWD to project root so daemon computes correct repo-based workspace ID
-	// from .sageox/config.json (without this, subdirectory CWDs cause fallback
-	// to path-based hashing, creating duplicate daemons per clone/worktree)
-	if root := findProjectRootForDaemon(); root != "" {
-		cmd.Dir = root
-	}
-
-	if err := cmd.Start(); err != nil {
-		logFile.Close()
-		return fmt.Errorf("failed to start daemon: %w", err)
-	}
-
-	// don't wait for the process
-	logFile.Close()
+	markDaemonStarting(workspaceID, pid)
 
 	if !wait {
 		return nil // spawned — caller does not need readiness
@@ -247,6 +277,84 @@ func ensureDaemonImpl(wait bool) error {
 	}
 
 	return fmt.Errorf("daemon started but not responding")
+}
+
+// liveDaemonRegistered reports whether the registry names a live process for
+// the workspace, i.e. whether KillStaleDaemon is about to supersede a daemon.
+func liveDaemonRegistered(workspaceID string) bool {
+	reg, err := LoadRegistry()
+	if err != nil {
+		return false
+	}
+	info := reg.FindByWorkspaceID(workspaceID)
+	return info != nil && signalProcessFn(info.PID, 0) == nil
+}
+
+// markDaemonStarting records the spawned PID so GetState reports Starting while
+// the daemon boots, closing the gap in which concurrent callers saw "stopped".
+// The daemon overwrites the file with its own PID on startup; if the child dies
+// instead, the PID is dead and GetState reports Stopped again.
+func markDaemonStarting(workspaceID string, pid int) {
+	if pid <= 0 {
+		return
+	}
+	pidPath := PidPathForWorkspace(workspaceID)
+	if err := os.MkdirAll(filepath.Dir(pidPath), 0700); err != nil {
+		slog.Debug("failed to mark daemon starting", "error", err)
+		return
+	}
+	if err := os.WriteFile(pidPath, []byte(fmt.Sprintf("%d", pid)), 0600); err != nil {
+		slog.Debug("failed to mark daemon starting", "error", err)
+	}
+}
+
+// spawnDaemonProcess execs a detached daemon and returns its PID. supersede is
+// passed to the child so it skips the restart-loop history.
+func spawnDaemonProcess(supersede bool) (int, error) {
+	// get the path to the current executable
+	exe, err := selfexec.Path()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get executable path: %w", err)
+	}
+
+	// create log directory
+	logPath := LogPath()
+	if err := os.MkdirAll(filepath.Dir(logPath), 0755); err != nil {
+		return 0, fmt.Errorf("failed to create log directory: %w", err)
+	}
+
+	// keep the log bounded: nothing rotates it while the daemon runs
+	RotateDaemonLog(logPath)
+
+	// open log file
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		return 0, fmt.Errorf("failed to open log file: %w", err)
+	}
+
+	// start daemon process
+	cmd := exec.Command(exe, buildDaemonArgs(resolveRepoName())...)
+	proc.Detach(cmd)
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	if supersede {
+		cmd.Env = append(os.Environ(), supersedeEnvVar+"=1")
+	}
+	// set CWD to project root so daemon computes correct repo-based workspace ID
+	// from .sageox/config.json (without this, subdirectory CWDs cause fallback
+	// to path-based hashing, creating duplicate daemons per clone/worktree)
+	if root := findProjectRootForDaemon(); root != "" {
+		cmd.Dir = root
+	}
+
+	if err := cmd.Start(); err != nil {
+		logFile.Close()
+		return 0, fmt.Errorf("failed to start daemon: %w", err)
+	}
+
+	// don't wait for the process
+	logFile.Close()
+	return cmd.Process.Pid, nil
 }
 
 // maxDaemonLogBytes is the size above which the daemon log is rotated at
