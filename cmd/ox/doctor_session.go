@@ -90,6 +90,13 @@ func checkSessionHealth(opts doctorOptions) []checkResult {
 		results = append(results, sessionCommitResult)
 	}
 
+	// committed conflict markers in session files block every push and make the pointer-restore
+	// validator below refuse the tip, so they are resolved first
+	conflictMarkersResult := checkSessionConflictMarkers(opts.shouldFix(CheckSlugSessionConflictMarkers))
+	if !conflictMarkersResult.skipped && (!conflictMarkersResult.passed || conflictMarkersResult.message != "no conflict markers in unpushed session files") {
+		results = append(results, conflictMarkersResult)
+	}
+
 	// hydrated session content committed where LFS pointers belong blocks every push (#1174);
 	// repair runs before the push check so a fix here lets that push proceed
 	pointerRestoreResult := checkSessionPointerRestore(opts.shouldFix(CheckSlugSessionPointerRestore))
