@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os/exec"
 	"path/filepath"
 	"slices"
@@ -13,6 +14,7 @@ import (
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/gitutil"
+	"github.com/sageox/ox/internal/plan"
 )
 
 // errBackfillCommitFailed marks a commitPlanBackfillToLedger failure at or
@@ -187,7 +189,14 @@ func commitPlanLocalCtx(ctx context.Context, ledgerPath, planDir, msgPrefix stri
 			return fmt.Errorf("ledger not safe for plan commit (%s): %w", ledgerPath, err)
 		}
 		// --sparse: ledger repos use sparse-checkout (cone mode).
-		if out, err := gitutil.RunGit(ctx, ledgerPath, "add", "--sparse", "--", rel); err != nil {
+		addArgs := []string{"add", "--sparse", "--", rel}
+		if planHTMLAwaitingUpload(planDir) {
+			// a large plain plan.html left by a failed upload must never be committed:
+			// it would bury multi-megabyte HTML in history and the pointer retry would
+			// then find nothing to dehydrate
+			addArgs = append(addArgs, ":(exclude)"+rel+"/"+planHTMLFileName)
+		}
+		if out, err := gitutil.RunGit(ctx, ledgerPath, addArgs...); err != nil {
 			return fmt.Errorf("git add %s failed: %s: %w", rel, gitutil.SanitizeOutput(out), err)
 		}
 		if _, err := gitutil.CommitLedgerSnapshot(ctx, ledgerPath, msgPrefix+filepath.Base(planDir), rel); err != nil {
@@ -269,4 +278,24 @@ func commitPlanBackfillToLedger(ledgerPath string, renames [][2]string, touchedP
 	// landed locally, so a failure past this point must NOT match
 	// errBackfillCommitFailed — see the caller's best-effort push contract.
 	return pushLedger(context.Background(), ledgerPath)
+}
+
+// planHTMLAwaitingUpload reports whether planDir holds a large plain plan.html
+// that could not be moved to the LFS store. It re-attempts the upload first, so a
+// transient failure heals on the next commit pass. With no reachable store the
+// file stays plain by design (see plan.DehydrateHTML) and is committed as is.
+func planHTMLAwaitingUpload(planDir string) bool {
+	if !plan.HasLargePlainHTML(planDir) {
+		return false
+	}
+	gitRoot := findGitRoot()
+	client := planLFSClientFn(gitRoot)
+	if client == nil {
+		return false
+	}
+	if _, err := planDehydrateHTML(planDir, client); err != nil {
+		slog.Warn("plan: plan.html upload failed, leaving it out of the commit", "error", err, "dir", planDir)
+		return true
+	}
+	return plan.HasLargePlainHTML(planDir)
 }

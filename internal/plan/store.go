@@ -27,6 +27,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -58,10 +59,6 @@ const (
 	// directly. Only genuinely large renders past 1MiB cross to LFS to keep the
 	// git tree from bloating.
 	htmlLFSThreshold = 1024 * 1024
-
-	// HTMLLFSThreshold lets CLI snapshot callers apply the same upload policy
-	// before committing an earlier uncommitted render.
-	HTMLLFSThreshold = htmlLFSThreshold
 )
 
 // PlanStatus is the plan's own lifecycle, independent of the producing
@@ -674,10 +671,12 @@ func liveDirNamed(plansDir, name string) (dir string, prior Meta, found bool, er
 	candidate := filepath.Join(plansDir, name)
 	m, merr := readMeta(candidate)
 	if merr != nil {
-		if errors.Is(merr, os.ErrNotExist) {
-			return "", Meta{}, false, nil // a directory without meta.json is not a saved plan
+		if errors.Is(merr, fs.ErrNotExist) {
+			return "", Meta{}, false, nil // not a saved plan directory
 		}
-		return "", Meta{}, false, fmt.Errorf("read existing plan directory %q: %w", name, merr)
+		// a named plan whose meta.json cannot be read or parsed is not "no match":
+		// falling through would mint a dated duplicate of a plan we failed to open
+		return "", Meta{}, false, fmt.Errorf("plan directory %q has an unreadable meta.json: %w", name, merr)
 	}
 	if isClosedStatus(CurrentStatus(candidate)) {
 		return "", Meta{}, false, fmt.Errorf("plan directory %q is %s, not open to revision; save under a new --slug", name, CurrentStatus(candidate))

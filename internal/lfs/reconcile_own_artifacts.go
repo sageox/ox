@@ -74,28 +74,23 @@ func uploadOwnStagedPlainArtifacts(ctx context.Context, ledgerPath string, clien
 			return refused, fmt.Errorf("upload staged %s: %w", path, err)
 		}
 		ref := uploaded.Ref()
-		pointerPath := filepath.Join(ledgerPath, filepath.FromSlash(path))
-		existing, readErr := os.ReadFile(pointerPath)
+		// The bytes are now safe in the cache and on the store. Only replace the
+		// worktree copy if it still holds exactly what was staged: a coworker
+		// may have edited or removed it since, and a pointer written over their
+		// unstaged work would silently discard it.
+		worktreePath := filepath.Join(ledgerPath, filepath.FromSlash(path))
+		worktree, readErr := os.ReadFile(worktreePath)
 		if readErr != nil {
-			return refused, fmt.Errorf("inspect worktree %s: %w", path, readErr)
+			return refused, fmt.Errorf("inspect worktree copy of %s: %w", path, readErr)
 		}
-		if !bytes.Equal(existing, staged) && !bytes.Equal(existing, []byte(FormatPointer(ref.OID, ref.Size))) {
-			return refused, fmt.Errorf("refusing to overwrite unstaged content %s", path)
+		if !bytes.Equal(worktree, staged) {
+			return refused, fmt.Errorf("refusing to overwrite unstaged content at %s: worktree differs from the staged bytes (uploaded as %s)", path, ref.OID)
 		}
-		err = MutateSessionMeta(ctx, sessionDir, func(m *SessionMeta) (*SessionMeta, error) {
-			if m == nil {
-				return nil, fmt.Errorf("meta.json for %s disappeared", sessionID)
-			}
-			if m.Files == nil {
-				m.Files = map[string]FileRef{}
-			}
-			m.Files[name] = ref
-			return m, nil
-		})
+		err = MutateSessionMeta(ctx, sessionDir, recordFileRef(sessionID, name, ref))
 		if err != nil {
 			return refused, fmt.Errorf("record %s in meta.json: %w", path, err)
 		}
-		if err := WritePointerFile(pointerPath, uploaded); err != nil {
+		if err := WritePointerFile(worktreePath, uploaded); err != nil {
 			return refused, fmt.Errorf("write pointer for %s: %w", path, err)
 		}
 		if _, err := gitutil.RunGit(ctx, ledgerPath, "add", "--sparse", "--", path, "sessions/"+sessionID+"/meta.json"); err != nil {
@@ -104,4 +99,20 @@ func uploadOwnStagedPlainArtifacts(ctx context.Context, ledgerPath string, clien
 		logger.Info("lfs reconcile: uploaded own staged session artifact and staged its pointer", "path", path, "oid", ref.OID)
 	}
 	return refused, nil
+}
+
+// recordFileRef registers one uploaded artifact in a session's manifest. A nil
+// meta means meta.json vanished between the ownership read and the lock; that is
+// an error, never a fresh manifest, because the session is no longer ours to describe.
+func recordFileRef(sessionID, name string, ref FileRef) func(*SessionMeta) (*SessionMeta, error) {
+	return func(m *SessionMeta) (*SessionMeta, error) {
+		if m == nil {
+			return nil, fmt.Errorf("meta.json for %s disappeared", sessionID)
+		}
+		if m.Files == nil {
+			m.Files = map[string]FileRef{}
+		}
+		m.Files[name] = ref
+		return m, nil
+	}
 }

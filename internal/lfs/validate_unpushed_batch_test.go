@@ -19,7 +19,7 @@ import (
 func countGitSpawns(t *testing.T) func(subcommand string) int {
 	t.Helper()
 	if runtime.GOOS == "windows" {
-		t.Skip("git PATH wrapper needs a POSIX shell")
+		t.Skip("the git PATH wrapper is a POSIX shell script; PATH lookup does not run it on Windows")
 	}
 	realGit, err := exec.LookPath("git")
 	require.NoError(t, err)

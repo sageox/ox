@@ -74,3 +74,15 @@ func DehydrateHTML(dir string, client *lfs.Client) (bool, error) {
 	}
 	return true, nil
 }
+
+// HasLargePlainHTML reports whether dir holds a plan.html that is a plain file
+// above the LFS threshold: the state a failed upload leaves behind. Callers that
+// commit a plan dir use it to tell "plain by design" apart from "awaiting upload".
+func HasLargePlainHTML(dir string) bool {
+	htmlPath := filepath.Join(dir, planHTMLFile)
+	info, err := os.Stat(htmlPath)
+	if err != nil || !info.Mode().IsRegular() || info.Size() <= htmlLFSThreshold {
+		return false
+	}
+	return !lfs.IsPointerFile(htmlPath)
+}

@@ -192,7 +192,7 @@ func (opts doctorOptions) runSessionRepairs() []checkResult {
 func checkSessionUncommittedViaRegistry(opts doctorOptions) checkResult {
 	check := GetDoctorCheck(CheckSlugSessionUncommitted)
 	if check == nil {
-		return SkippedCheck(CheckSlugSessionUncommitted, "check is not registered", "")
+		return SkippedCheck("session uncommitted", "check not registered", "")
 	}
 	return check.Run(opts.shouldFix(CheckSlugSessionUncommitted))
 }
@@ -200,7 +200,7 @@ func checkSessionUncommittedViaRegistry(opts doctorOptions) checkResult {
 func checkSessionDraftOrphanViaRegistry(opts doctorOptions) checkResult {
 	check := GetDoctorCheck(CheckSlugSessionDraftOrphan)
 	if check == nil {
-		return SkippedCheck(CheckSlugSessionDraftOrphan, "check is not registered", "")
+		return SkippedCheck("session draft orphan", "check not registered", "")
 	}
 	return check.Run(opts.shouldFix(CheckSlugSessionDraftOrphan))
 }

@@ -10,26 +10,56 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// an ownerless sparse lock can outlive any age threshold while Git updates the
-// worktree; sweeping must preserve its identity and bytes.
-func TestSparseCheckoutLock_DetectedButNeverRemovedByAge(t *testing.T) {
+// HasLockFiles and RemoveStaleLockFiles must agree on info/sparse-checkout.lock:
+// a lock one detects and the other cannot clear is a permanent wedge.
+func TestSparseCheckoutLock_DetectedAndClearedAfterStaleAge(t *testing.T) {
 	gitDir := filepath.Join(t.TempDir(), ".git")
 	lock := filepath.Join(gitDir, "info", "sparse-checkout.lock")
 	require.NoError(t, os.MkdirAll(filepath.Dir(lock), 0o755))
-	require.NoError(t, os.WriteFile(lock, []byte("live sparse patterns\n"), 0o644))
+	require.NoError(t, os.WriteFile(lock, nil, 0o644))
 	assert.Equal(t, []string{"info/sparse-checkout.lock"}, HasLockFiles(gitDir))
 
 	removed, errs := RemoveStaleLockFiles(gitDir)
 	assert.Empty(t, errs)
 	assert.Empty(t, removed, "a fresh lock is left alone")
 
-	old := time.Now().Add(-(AbandonedLockAge * 24))
+	// past StaleLockAge but inside the sparse-checkout window: a live
+	// sparse-checkout on a huge checkout may still hold it
+	mid := time.Now().Add(-(StaleLockAge + time.Minute))
+	require.NoError(t, os.Chtimes(lock, mid, mid))
+	removed, errs = RemoveStaleLockFiles(gitDir)
+	assert.Empty(t, errs)
+	assert.Empty(t, removed, "a lock older than StaleLockAge but younger than SparseCheckoutLockAge is retained")
+
+	old := time.Now().Add(-(SparseCheckoutLockAge + time.Second))
 	require.NoError(t, os.Chtimes(lock, old, old))
 	removed, errs = RemoveStaleLockFiles(gitDir)
 	assert.Empty(t, errs)
-	assert.Empty(t, removed)
-	assert.Equal(t, []string{"info/sparse-checkout.lock"}, HasLockFiles(gitDir))
-	content, err := os.ReadFile(lock)
+	assert.Equal(t, []string{"info/sparse-checkout.lock"}, removed)
+	assert.Empty(t, HasLockFiles(gitDir))
+}
+
+// A lock judged abandoned can be unlinked and recreated by a live writer before
+// the sweep removes it. The sweep must remove only the exact file it inspected.
+func TestRemoveStaleLockFiles_NeverRemovesLockRecreatedAfterInspection(t *testing.T) {
+	gitDir := filepath.Join(t.TempDir(), ".git")
+	lock := filepath.Join(gitDir, "index.lock")
+	require.NoError(t, os.MkdirAll(gitDir, 0o755))
+	require.NoError(t, os.WriteFile(lock, []byte("old"), 0o644))
+	old := time.Now().Add(-(AbandonedLockAge + time.Minute))
+	require.NoError(t, os.Chtimes(lock, old, old))
+
+	beforeLockRemoveHook = func(path string) {
+		require.NoError(t, os.Remove(path))
+		require.NoError(t, os.WriteFile(path, []byte("live writer"), 0o644))
+	}
+	t.Cleanup(func() { beforeLockRemoveHook = nil })
+
+	removed, errs := RemoveStaleLockFiles(gitDir)
+
+	assert.Empty(t, errs)
+	assert.Empty(t, removed, "a recreated lock belongs to a live writer")
+	data, err := os.ReadFile(lock)
 	require.NoError(t, err)
-	assert.Equal(t, "live sparse patterns\n", string(content))
+	assert.Equal(t, "live writer", string(data))
 }
