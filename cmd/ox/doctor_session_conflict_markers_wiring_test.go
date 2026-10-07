@@ -69,7 +69,7 @@ func TestDoctorRun_SessionConflictMarkersIsInvoked(t *testing.T) {
 // "Sessions" category is never invoked by checkSessionHealth. That phase calls checks
 // explicitly (the registry only supplies metadata and --fix-slug validation), so a registration
 // without a call site passes --fix-slug validation yet runs nothing. A check counts as invoked
-// when doctor_session.go names its slug constant or a function its Run calls is called elsewhere.
+// when doctor_session.go names its slug constant or calls a function its Run calls.
 func TestSessionsPhase_EveryRegisteredCheckIsInvoked(t *testing.T) {
 	files, err := filepath.Glob(repoPath("*.go"))
 	require.NoError(t, err)
@@ -77,10 +77,9 @@ func TestSessionsPhase_EveryRegisteredCheckIsInvoked(t *testing.T) {
 	type registration struct {
 		file, slugConst string
 		run             []string // callee names the Run function reaches
-		viaClosure      bool     // the registration itself holds one call to each callee
 	}
 	var registrations []registration
-	callCount := map[string]int{}
+	phaseCalls := map[string]bool{}  // functions doctor_session.go calls
 	phaseIdents := map[string]bool{} // identifiers named in doctor_session.go
 
 	fset := token.NewFileSet()
@@ -94,8 +93,8 @@ func TestSessionsPhase_EveryRegisteredCheckIsInvoked(t *testing.T) {
 		ast.Inspect(parsed, func(n ast.Node) bool {
 			switch node := n.(type) {
 			case *ast.CallExpr:
-				if ident, ok := node.Fun.(*ast.Ident); ok {
-					callCount[ident.Name]++
+				if ident, ok := node.Fun.(*ast.Ident); ok && isPhase {
+					phaseCalls[ident.Name] = true
 				}
 			case *ast.Ident:
 				if isPhase {
@@ -123,7 +122,6 @@ func TestSessionsPhase_EveryRegisteredCheckIsInvoked(t *testing.T) {
 						}
 					case *ast.FuncLit:
 						if key.Name == "Run" {
-							reg.viaClosure = true
 							ast.Inspect(value, func(inner ast.Node) bool {
 								if call, ok := inner.(*ast.CallExpr); ok {
 									if ident, ok := call.Fun.(*ast.Ident); ok {
@@ -158,13 +156,9 @@ func TestSessionsPhase_EveryRegisteredCheckIsInvoked(t *testing.T) {
 		if knownUnwired[reg.slugConst] {
 			continue
 		}
-		own := 0 // calls that live inside the registration itself
-		if reg.viaClosure {
-			own = 1
-		}
 		invoked := phaseIdents[reg.slugConst]
 		for _, callee := range reg.run {
-			invoked = invoked || callCount[callee] > own
+			invoked = invoked || phaseCalls[callee]
 		}
 		assert.True(t, invoked, "%s registers %s in Sessions but checkSessionHealth never runs it, so --fix-slug does nothing", reg.file, reg.slugConst)
 	}
