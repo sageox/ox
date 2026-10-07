@@ -741,6 +741,8 @@ def cmd_validator_result(a) -> int:
         status, obj = classify_payload(Path(a.output), "verdict")
         if status == "ok" and obj.get("verdict") in VALIDATOR_VERDICTS:
             merged = {**original, **{k: v for k, v in obj.items() if v not in (None, "")}}
+            if a.model:
+                merged["validator_model"] = a.model
         else:
             if status == "ok":
                 reason = f"validator returned verdict {obj.get('verdict')!r}"
@@ -751,6 +753,74 @@ def cmd_validator_result(a) -> int:
             # Keep the hunter's finding, flagged. Dropping it is a silent false negative.
             merged = {**original, "verdict": "unvalidated", "verdict_reason": reason}
     print(json.dumps(merged))
+    return 0
+
+
+# --- validator routing ---------------------------------------------------------
+
+# Used when security/config.yml does not set the model.
+DEFAULT_VALIDATOR_MODEL = "claude-sonnet-5"
+DEFAULT_HARD_CLASS_MODEL = "claude-opus-5-5"
+
+
+def unquote(value: str) -> str:
+    """A YAML scalar without its surrounding quotes, if it has a matching pair."""
+    v = value.strip()
+    if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+        return v[1:-1].strip()
+    return v
+
+
+def config_scalar(config, key: str, default: str) -> str:
+    """The first `key: value` line in config.yml, at any indent (orchestrate.sh's
+    config_value, for the keys pipeline.py reads)."""
+    for line in read_text(config).splitlines():
+        k, sep, v = line.split("#", 1)[0].strip().partition(":")
+        if sep and k == key and unquote(v):
+            return unquote(v)
+    return default
+
+
+def config_list_from_text(text: str, key: str) -> list:
+    """The items of the top-level `key:` list, as a block (`- item` lines) or in
+    flow style (`key: [a, b]`), quoted or not. Empty items are dropped."""
+    items, inside = [], False
+    for line in text.splitlines():
+        code = line.split("#", 1)[0].rstrip()
+        if not code.strip():
+            continue
+        if not line[0].isspace():
+            k, _, rest = code.partition(":")
+            rest = rest.strip()
+            inside = k.strip() == key and not rest
+            if k.strip() == key and rest.startswith("[") and rest.endswith("]"):
+                items += [unquote(i) for i in rest[1:-1].split(",")]
+        elif inside and code.lstrip().startswith("- "):
+            items.append(unquote(code.lstrip()[2:]))
+    return [i for i in items if i]
+
+
+def config_list(config, key: str) -> list:
+    """The items of the top-level `key:` list in config.yml."""
+    return config_list_from_text(read_text(config), key)
+
+
+def validator_model(finding: dict, config) -> str:
+    """The hard-class model for a finding whose class is listed in hard_classes,
+    the default validator model otherwise. A finding's class is the hunter that
+    reported it, and dedup keeps it, so hard_classes must name hunters' classes."""
+    hard = {c.lower() for c in config_list(config, "hard_classes")}
+    if str(finding.get("class") or "").strip().lower() in hard:
+        return config_scalar(config, "validator_hard_class_model", DEFAULT_HARD_CLASS_MODEL)
+    return config_scalar(config, "validator_model", DEFAULT_VALIDATOR_MODEL)
+
+
+def cmd_validator_model(a) -> int:
+    try:
+        finding = json.loads(read_text(a.finding))
+    except ValueError:
+        finding = {}
+    print(validator_model(finding if isinstance(finding, dict) else {}, a.config))
     return 0
 
 
@@ -1410,6 +1480,8 @@ def render_findings(s: dict, cov: dict, counts: dict) -> str:
         md.append(f"- **class**: `{f.get('class', '?')}`")
         md.append(f"- **file**: `{location}`")
         md.append(f"- **verdict**: `{f.get('verdict', '?')}`")
+        if f.get("validator_model"):
+            md.append(f"- **validated by**: `{f['validator_model']}`")
         if f.get("hunter"):
             md.append(f"- **hunter**: `{f['hunter']}`")
         md.append("")
@@ -1576,7 +1648,13 @@ def main(argv=None) -> int:
     v.add_argument("--finding", required=True)
     v.add_argument("--output", default="")
     v.add_argument("--unvalidated", default="")
+    v.add_argument("--model", default="", help="the model that produced --output")
     v.set_defaults(fn=cmd_validator_result)
+
+    r = sub.add_parser("validator-model", help="print the model that validates one finding")
+    r.add_argument("--config", required=True)
+    r.add_argument("--finding", required=True)
+    r.set_defaults(fn=cmd_validator_model)
 
     m = sub.add_parser("det-merge", help="classify scanner runs and merge their findings")
     m.add_argument("--out", required=True)
