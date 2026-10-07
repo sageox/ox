@@ -129,3 +129,18 @@ func TestAgentHookInvocationDialBudget(t *testing.T) {
 	require.Equal(t, int64(3), dials.Load(), "hook must spend exactly three dials and none on liveness pings")
 	require.ElementsMatch(t, []string{daemon.MsgTypeHeartbeat, daemon.MsgTypeSettingsGet, daemon.MsgTypeWhispers}, received())
 }
+
+// Failure prevented: a non-hook command skipping the liveness ping and dialing
+// a daemon that is not there; only hook invocations get the shortcut.
+func TestDaemonReachable_NonHookChecksDaemon(t *testing.T) {
+	t.Setenv("OX_XDG_ENABLE", "1")
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	status := &cobra.Command{Use: "status"}
+	require.False(t, daemonReachable(status), "no daemon socket: non-hook commands must report unreachable")
+
+	hook := &cobra.Command{Use: "agent"}
+	require.NoError(t, hook.ParseFlags([]string{"hook", "PostToolUse"}))
+	require.True(t, daemonReachable(hook), "hook invocations skip the liveness ping")
+}

@@ -5,6 +5,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -31,10 +32,11 @@ func killTestDaemons(t *testing.T, oxBin string) {
 	if os.Getenv(testguard.TestOxBinaryEnv) != "" {
 		return
 	}
-	listDaemons := func() []int {
+	listDaemons := func() ([]int, error) {
 		out, err := exec.Command("ps", "-Ao", "pid=,args=").Output()
 		if err != nil {
-			return nil
+			// an error must never read as "no daemons": the cleanup fails instead
+			return nil, fmt.Errorf("list processes: %w", err)
 		}
 		var pids []int
 		for _, line := range strings.Split(string(out), "\n") {
@@ -46,13 +48,17 @@ func killTestDaemons(t *testing.T, oxBin string) {
 				pids = append(pids, pid)
 			}
 		}
-		return pids
+		return pids, nil
 	}
 	t.Cleanup(func() {
 		// kill inside the poll: a dying `daemon start` parent can still spawn its
 		// foreground child after the first sweep.
 		require.Eventually(t, func() bool {
-			pids := listDaemons()
+			pids, err := listDaemons()
+			if err != nil {
+				t.Errorf("process discovery failed; cannot prove no test daemon survived: %v", err)
+				return true // stop polling; the error above fails the test
+			}
 			for _, pid := range pids {
 				_ = syscall.Kill(pid, syscall.SIGKILL)
 			}
