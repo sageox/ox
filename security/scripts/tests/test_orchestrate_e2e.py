@@ -200,6 +200,24 @@ class OrchestrateE2ETest(unittest.TestCase):
         self.assertIn("PARTIAL COVERAGE", report)  # four scanners are not installed here
         self.assertEqual(result.returncode, 0, self.explain(result))
 
+    def test_subagents_get_no_context_from_the_reviewed_branch(self):
+        """Avery reviews a stranger's PR: its commit messages, branch name, CLAUDE.md, rules and
+        project hooks are the PR author's, so none of them may reach a reviewer's context."""
+        self.repo.plant_feature()
+        self.repo.install("claude", "golangci-lint")
+        result = self.repo.run("orchestrate.sh")
+
+        calls = self.repo.calls()
+        self.assertTrue(calls, self.explain(result))
+        for call in calls:
+            with self.subTest(role=call["role"]):
+                self.assertEqual(call["setting_sources"], "user",
+                                 "project settings would run the branch's hooks and MCP servers")
+                self.assertEqual(call["env"]["CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS"], "1",
+                                 "the git status snapshot carries the branch name and its commit messages")
+                self.assertEqual(call["env"]["CLAUDE_CODE_DISABLE_CLAUDE_MDS"], "1",
+                                 "CLAUDE.md and .claude/rules files come from the branch")
+
     def test_sensitive_change_without_entry_points_reports_no_coverage(self):
         """Avery's run maps no entry points for a cmd/ox + daemon change."""
         self.repo.plant_feature()

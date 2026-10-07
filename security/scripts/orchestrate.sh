@@ -252,9 +252,11 @@ invoke_claude() {
     # and tolerate hooks/auto-memory noise rather than no findings at all.
     #
     # --setting-sources user: only load ~/.claude/settings.json, not project
-    # .claude/settings.json. The project SessionStart hook runs `ox agent prime`, which
-    # may exit 1 in some environments and can derail subagent startup. User settings
-    # still give us OAuth/keychain auth.
+    # .claude/settings.json. The reviewed branch controls the project settings, so
+    # loading them would run its hooks and MCP servers and put its CLAUDE.md and
+    # .claude/rules in every subagent's context (security/SECURITY.md#hunter-llm-trust).
+    # It also skips the project SessionStart hook (`ox agent prime`), which can derail
+    # subagent startup. User settings still give us OAuth/keychain auth.
     --setting-sources user
     # --no-session-persistence: subagent invocations are one-shot. We don't want
     # them appearing in /resume pickers or polluting session history.
@@ -280,7 +282,15 @@ invoke_claude() {
   # $$ is the parent shell's PID, shared across the subshells of one hunt wave.
   local raw rc=0 parsed cost subtype is_error denials
   raw="$(mktemp "$OUT/.claude-raw.${BASHPID:-$$}.$(basename "$prompt").XXXXXX")"
-  claude "${cli_args[@]}" < "$input" > "$raw" 2>>"$OUT/run-log.md" || rc=$?
+  # The reviewed branch is untrusted, and so is its git metadata. Claude Code puts a
+  # git status snapshot (branch name, recent commit messages) in the system prompt,
+  # outside the diff's data framing; CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS=1 drops it
+  # (--exclude-dynamic-system-prompt-sections only moves it to the first user message).
+  # CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 keeps every CLAUDE.md and .claude/rules file out
+  # even if --setting-sources ever loads the project, and keeps the reviewer's own
+  # memory files from steering the review.
+  CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS=1 CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 \
+    claude "${cli_args[@]}" < "$input" > "$raw" 2>>"$OUT/run-log.md" || rc=$?
   # Parse the envelope whatever the exit code: a budget stop exits 1 but still
   # reports what it spent.
   parsed="$(python3 "$LIB" envelope --raw "$raw" --output "$output" ${schema:+--structured})" \

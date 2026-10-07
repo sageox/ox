@@ -270,6 +270,26 @@ flowchart LR
 - No automated test that a known-injection-payload commit message in a test repo fails to escalate.
 - Post-emit obfuscation decoders (zero-width chars, base64-of-short-strings) before redaction are not implemented.
 
+### Review pipeline subagents
+
+`/security-review` is itself an LLM reading attacker-controlled input. Whoever opens a PR controls its diff, its files, its commit messages and branch name, and any `CLAUDE.md`, `.claude/rules/`, `.claude/settings.json` or `.mcp.json` in it. Each subagent is a `claude --print` run in the reviewed checkout (`invoke_claude` in `security/scripts/orchestrate.sh`).
+
+| PR-controlled channel | Reaches a subagent? | What keeps it out, or contains it |
+|---|---|---|
+| The diff and scope | yes, by design | nonce-marked BEGIN/END data blocks and the data rules in each packet (`pipeline.py packet`) |
+| Files read with Read/Grep/Glob | yes, by design | the same data rules; read-only tools, no shell, no network |
+| Commit messages and branch name (Claude Code's git status snapshot) | no | `CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS=1`. `--exclude-dynamic-system-prompt-sections` does not help: it moves the snapshot into the first user message |
+| `CLAUDE.md`, `.claude/rules/*.md` | no | `--setting-sources user`, and `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1` in case the sources ever widen |
+| Project hooks, project MCP servers (code execution) | no | `--setting-sources user` |
+
+Verified on Claude Code 2.1.293: a scratch repo carried a marker in each channel, and a subagent with the pipeline's flags and no tools listed the markers in its context. It saw only the commit message until `CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS=1` was set, then none, and still knew its working directory. The control run, with project settings loaded, saw every marker and ran the planted hook and MCP server. `make sec-test` pins the flag and both variables on every subagent call (`test_subagents_get_no_context_from_the_reviewed_branch`).
+
+**Residual risk.**
+
+- The diff and the files it touches remain attacker text. The data rules are an instruction to the model, not an enforcement boundary; an injection that works suppresses findings silently. The deterministic tier does not read prose and is unaffected.
+- User-level settings still load, so the reviewer's own hooks run for every subagent, and anything they print is not framed as data.
+- These guards depend on Claude Code honoring the flag and the variables. After a Claude Code upgrade, repeat the marker check before trusting a clean review.
+
 ---
 
 ## Cross-references
