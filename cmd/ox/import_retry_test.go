@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -42,6 +43,9 @@ type importRetryFixture struct {
 func newImportRetryFixture(t *testing.T) *importRetryFixture {
 	t.Helper()
 	bare, clone := createBareAndClone(t)
+	// import reads push settings; a developer's push.default or pushInsteadOf must not change outcomes
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	for _, key := range []string{"XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR"} {
 		t.Setenv(key, t.TempDir())
 	}
@@ -292,6 +296,10 @@ func TestImport_PushFailureCanBeRetriedWithoutAnotherCommit(t *testing.T) {
 	require.NotEqual(t, remoteBefore, committed, "the import must have committed before its push failed")
 	assert.Equal(t, remoteBefore, runGit(t, f.bare, "rev-parse", "HEAD"))
 
+	_, err = f.importDoc(false)
+	require.ErrorContains(t, err, "committed locally but not published", "a retry that still cannot push must say what is left to do")
+	assert.Equal(t, committed, runGit(t, tcPath, "rev-parse", "HEAD"))
+
 	runGit(t, tcPath, "remote", "set-url", "--push", "origin", f.bare)
 	runGit(t, tcPath, "remote", "set-url", "origin", f.bare)
 	out, err := f.importDoc(false)
@@ -442,7 +450,7 @@ func TestImport_RemovedPublishedDocumentIsNotRetried(t *testing.T) {
 			indexBefore := runGit(t, tcPath, "ls-files", "--stage")
 
 			out, err := f.importDoc(false)
-			assert.Error(t, err, "a removed published import must not be resumed as a new document")
+			assert.ErrorContains(t, err, "previously published and removed", "a removed published import must not be resumed as a new document")
 			assert.NotContains(t, out, "Imported:")
 			assert.NotContains(t, out, "Already imported")
 			assert.Equal(t, rewritten, runGit(t, f.bare, "rev-parse", "HEAD"), "the retry must not publish private commits")
@@ -462,8 +470,9 @@ func TestImport_RemovedPublishedDocumentIsNotRetried(t *testing.T) {
 	}
 }
 
-// TestImport_RetryWaitsForSynchronization keeps pending work local until an ordinary upstream advance is synchronized.
-func TestImport_RetryWaitsForSynchronization(t *testing.T) {
+// TestImport_RetrySynchronizesWithUpstream verifies a retry publishes a pending import after a teammate pushed.
+// Without this, every retry's push is rejected as non-fast-forward and the import never reaches the team.
+func TestImport_RetrySynchronizesWithUpstream(t *testing.T) {
 	t.Setenv("GIT_ALLOW_PROTOCOL", "file")
 	f := newImportRetryFixture(t)
 	tcPath := f.useFileGitRemote(t)
@@ -475,8 +484,7 @@ func TestImport_RetryWaitsForSynchronization(t *testing.T) {
 	require.NoError(t, os.WriteFile(hook, []byte("#!/bin/sh\necho 'Permission denied' >&2\nexit 1\n"), 0o755))
 	_, err := f.importDoc(false)
 	require.ErrorContains(t, err, "Permission denied")
-	pendingImport := runGit(t, tcPath, "rev-parse", "HEAD")
-	require.NotEqual(t, initial, pendingImport)
+	require.NotEqual(t, initial, runGit(t, tcPath, "rev-parse", "HEAD"), "the import must have committed before its push failed")
 	require.Equal(t, initial, runGit(t, f.bare, "rev-parse", "HEAD"))
 	require.NoError(t, os.Remove(hook))
 
@@ -486,91 +494,151 @@ func TestImport_RetryWaitsForSynchronization(t *testing.T) {
 	runGit(t, other, "commit", "--no-verify", "-m", "advance upstream")
 	runGit(t, other, "push", "origin", "main")
 	advanced := runGit(t, f.bare, "rev-parse", "HEAD")
-	require.NotEqual(t, initial, advanced)
-	// The retry's publication check still sees the old ref; the real push must reject the new remote head.
-	require.Equal(t, initial, runGit(t, tcPath, "rev-parse", "refs/remotes/origin/main"))
 	draft := filepath.Join(tcPath, "draft.md")
 	require.NoError(t, os.WriteFile(draft, []byte("staged draft\n"), 0o644))
 	runGit(t, tcPath, "add", "draft.md")
 	require.NoError(t, os.WriteFile(draft, []byte("working draft\n"), 0o644))
 	docBefore := readDocFiles(t, f.docDir())
-	indexBefore := runGit(t, tcPath, "ls-files", "--stage")
 
 	out, err := f.importDoc(false)
-	assert.ErrorContains(t, err, "git push failed")
-	assert.NotContains(t, out, "Imported:")
-	assert.Equal(t, pendingImport, runGit(t, tcPath, "rev-parse", "HEAD"))
-	assert.Equal(t, initial, runGit(t, tcPath, "rev-parse", "refs/remotes/origin/main"), "the retry must not fetch or rebase")
-	assert.Equal(t, advanced, runGit(t, f.bare, "rev-parse", "HEAD"))
-	assert.Empty(t, runGit(t, f.bare, "ls-tree", "HEAD", "--", "draft.md"))
-	assert.Empty(t, runGit(t, f.bare, "ls-tree", "-r", "HEAD", "--", "data/docs/2026/09/19/q3-plan"))
-	assert.Equal(t, docBefore, readDocFiles(t, f.docDir()))
-	assert.Equal(t, indexBefore, runGit(t, tcPath, "ls-files", "--stage"))
-	content, err := os.ReadFile(draft)
-	require.NoError(t, err)
-	assert.Equal(t, "working draft\n", string(content))
-
-	// Explicitly synchronize the ordinary upstream advance, then run the same import command again.
-	runGit(t, tcPath, "stash", "push", "--include-untracked", "--message", "preserve draft while synchronizing")
-	runGit(t, tcPath, "fetch", "origin")
-	runGit(t, tcPath, "rebase", "--quiet", "refs/remotes/origin/main")
-	runGit(t, tcPath, "stash", "pop", "--index")
-	synchronized := runGit(t, tcPath, "rev-parse", "HEAD")
-	out, err = f.importDoc(false)
-	require.NoError(t, err, "an ordinary synchronized import must remain retryable")
+	require.NoError(t, err, "a retry must synchronize with an ordinary upstream advance and publish")
 	assert.Contains(t, out, "Imported:")
-	assert.Equal(t, synchronized, runGit(t, tcPath, "rev-parse", "HEAD"), "retrying must not create another commit")
-	assert.Equal(t, synchronized, runGit(t, f.bare, "rev-parse", "HEAD"))
+	assert.Equal(t, advanced, runGit(t, f.bare, "rev-parse", "HEAD^"), "the import must land on top of the teammate's commit")
+	assert.Equal(t, "import: doc q3-plan", runGit(t, f.bare, "log", "-1", "--format=%s"), "retrying must not create another commit")
 	assert.Equal(t, "remote change", runGit(t, f.bare, "show", "HEAD:upstream.md"))
-	assert.Empty(t, runGit(t, f.bare, "ls-tree", "HEAD", "--", "draft.md"))
+	assert.Empty(t, runGit(t, f.bare, "ls-tree", "HEAD", "--", "draft.md"), "the retry must not publish unrelated work")
 	const remoteDoc = "data/docs/2026/09/19/q3-plan"
 	var meta docMeta
 	require.NoError(t, json.Unmarshal([]byte(runGit(t, f.bare, "show", "HEAD:"+remoteDoc+"/metadata.json")), &meta))
 	assert.Equal(t, "sha256:c322135151cf0bc395a4d1e2a3e560e6cb0a62057e70e749c4f18cdbb81f32d7", meta.SourceOID)
 	assert.Equal(t, "version https://git-lfs.github.com/spec/v1\noid "+meta.SourceOID+"\nsize 10", runGit(t, f.bare, "show", "HEAD:"+remoteDoc+"/q3-plan.md"))
 	assert.Equal(t, docBefore, readDocFiles(t, f.docDir()))
-	assert.Equal(t, "staged draft", runGit(t, tcPath, "show", ":draft.md"))
-	content, err = os.ReadFile(draft)
+	content, err := os.ReadFile(draft)
 	require.NoError(t, err)
-	assert.Equal(t, "working draft\n", string(content))
+	assert.Equal(t, "working draft\n", string(content), "the retry must keep the coworker's unpublished draft")
 }
 
-// TestImport_UnknownPublicationIsNotReportedAsSuccess verifies uncertain publication leaves the document untouched.
-// Without this, a metadata match reports success even when its publication cannot be established.
-func TestImport_UnknownPublicationIsNotReportedAsSuccess(t *testing.T) {
+// TestImport_PublishedDuplicateIgnoresPushConfiguration verifies push settings Git accepts keep deduplication working.
+// Without this, re-importing a published document fails instead of reporting it as already imported.
+func TestImport_PublishedDuplicateIgnoresPushConfiguration(t *testing.T) {
 	for _, tc := range []struct {
-		name       string
-		missingRef bool
+		name   string
+		config []string
 	}{
-		{name: "different fetch and push URLs"},
-		{name: "missing push tracking ref", missingRef: true},
+		// the fixture fetches from the LFS server and pushes to the bare remote
+		{name: "separate push URL"},
+		{name: "push.default matching", config: []string{"push.default", "matching"}},
+		{name: "explicit push refspec", config: []string{"remote.origin.push", "refs/heads/*:refs/heads/*"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newImportRetryFixture(t)
 			tcPath := filepath.Join(paths.TeamsDataDir(f.endpoint), importRetryTeamID)
 			_, err := f.importDoc(false)
 			require.NoError(t, err)
-			if tc.missingRef {
-				runGit(t, tcPath, "remote", "set-url", "origin", f.bare)
-				runGit(t, tcPath, "config", "--local", "--unset-all", "remote.origin.pushurl")
-				pushRef := runGit(t, tcPath, "rev-parse", "--symbolic-full-name", "@{push}")
-				runGit(t, tcPath, "update-ref", "-d", pushRef)
+			if tc.config != nil {
+				runGit(t, tcPath, append([]string{"config", "--local"}, tc.config...)...)
 			}
-			before := readDocFiles(t, f.docDir())
-			indexBefore := runGit(t, tcPath, "ls-files", "--stage")
 			headBefore := runGit(t, tcPath, "rev-parse", "HEAD")
 			remoteBefore := runGit(t, f.bare, "rev-parse", "HEAD")
 
 			out, err := f.importDoc(false)
-			require.ErrorContains(t, err, "cannot determine import publication")
-			assert.NotContains(t, err.Error(), f.endpoint, "diagnostics must not expose a remote URL")
-			assert.NotContains(t, out, "Already imported")
-			assert.Equal(t, before, readDocFiles(t, f.docDir()))
-			assert.Equal(t, indexBefore, runGit(t, tcPath, "ls-files", "--stage"))
+			require.NoError(t, err, "a published document must still deduplicate")
+			assert.Contains(t, out, "Already imported")
 			assert.Equal(t, headBefore, runGit(t, tcPath, "rev-parse", "HEAD"))
 			assert.Equal(t, remoteBefore, runGit(t, f.bare, "rev-parse", "HEAD"))
 		})
 	}
+}
+
+// TestImport_UnknownPublicationIsNotReportedAsSuccess verifies uncertain publication leaves the document untouched.
+// Without this, a metadata match reports success even when its publication cannot be established.
+func TestImport_UnknownPublicationIsNotReportedAsSuccess(t *testing.T) {
+	f := newImportRetryFixture(t)
+	tcPath := filepath.Join(paths.TeamsDataDir(f.endpoint), importRetryTeamID)
+	_, err := f.importDoc(false)
+	require.NoError(t, err)
+	runGit(t, tcPath, "remote", "set-url", "origin", f.bare)
+	runGit(t, tcPath, "config", "--local", "--unset-all", "remote.origin.pushurl")
+	pushRef := runGit(t, tcPath, "rev-parse", "--symbolic-full-name", "@{push}")
+	runGit(t, tcPath, "update-ref", "-d", pushRef)
+	before := readDocFiles(t, f.docDir())
+	indexBefore := runGit(t, tcPath, "ls-files", "--stage")
+	headBefore := runGit(t, tcPath, "rev-parse", "HEAD")
+	remoteBefore := runGit(t, f.bare, "rev-parse", "HEAD")
+
+	out, err := f.importDoc(false)
+	require.ErrorContains(t, err, "cannot determine import publication")
+	assert.ErrorContains(t, err, "--force", "the error must say what the coworker can do next")
+	assert.NotContains(t, err.Error(), f.endpoint, "diagnostics must not expose a remote URL")
+	assert.NotContains(t, out, "Already imported")
+	assert.Equal(t, before, readDocFiles(t, f.docDir()))
+	assert.Equal(t, indexBefore, runGit(t, tcPath, "ls-files", "--stage"))
+	assert.Equal(t, headBefore, runGit(t, tcPath, "rev-parse", "HEAD"))
+	assert.Equal(t, remoteBefore, runGit(t, f.bare, "rev-parse", "HEAD"))
+}
+
+// TestImport_WriteFailureAfterUploadDoesNotBlockRetry verifies a failed pointer or manifest write leaves no document directory.
+// Without this, the leftover directory makes the retry fail as a concurrent import unless --force is passed.
+func TestImport_WriteFailureAfterUploadDoesNotBlockRetry(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		wantErr string
+		write   func(dir string, files map[string]lfs.UploadedRef) ([]string, error)
+	}{
+		{
+			name: "pointer write fails", wantErr: "write pointer files",
+			write: func(string, map[string]lfs.UploadedRef) ([]string, error) { return nil, errors.New("disk full") },
+		},
+		{
+			name: "metadata write fails", wantErr: "write metadata.json",
+			write: func(dir string, files map[string]lfs.UploadedRef) ([]string, error) {
+				written, err := lfs.WritePointerFiles(dir, files)
+				if err != nil {
+					return written, err
+				}
+				// a directory where the manifest goes makes the metadata.json write fail
+				return written, os.Mkdir(filepath.Join(dir, "metadata.json"), 0o755)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newImportRetryFixture(t)
+			prior := writeDocPointerFiles
+			t.Cleanup(func() { writeDocPointerFiles = prior })
+			writeDocPointerFiles = tc.write
+			_, err := f.importDoc(false)
+			require.ErrorContains(t, err, tc.wantErr)
+			assert.NoDirExists(t, f.docDir(), "a failed write must leave no document directory behind")
+
+			writeDocPointerFiles = prior
+			out, err := f.importDoc(false)
+			require.NoError(t, err, "the retry must succeed without --force")
+			assert.Contains(t, out, "Imported:")
+			assert.Equal(t, "import: doc q3-plan", runGit(t, f.bare, "log", "-1", "--format=%s"), "the retry must reach the remote")
+		})
+	}
+}
+
+// TestImport_MissingCommittedAttributesPointsToDoctor verifies an import never rewrites attributes it cannot see.
+// Without this, an old sparse checkout publishes a replacement .gitattributes that drops the team's attributes.
+func TestImport_MissingCommittedAttributesPointsToDoctor(t *testing.T) {
+	f := newImportRetryFixture(t)
+	tcPath := filepath.Join(paths.TeamsDataDir(f.endpoint), importRetryTeamID)
+	attrs := filepath.Join(tcPath, ".gitattributes")
+	require.NoError(t, os.WriteFile(attrs, []byte("*.txt text\n"), 0o644))
+	runGit(t, tcPath, "add", ".gitattributes")
+	runGit(t, tcPath, "commit", "--no-verify", "-m", "team attributes")
+	runGit(t, tcPath, "push")
+	// a sparse checkout that never materialized root-level files
+	runGit(t, tcPath, "update-index", "--skip-worktree", ".gitattributes")
+	require.NoError(t, os.Remove(attrs))
+	remoteBefore := runGit(t, f.bare, "rev-parse", "HEAD")
+
+	_, err := f.importDoc(false)
+	require.ErrorContains(t, err, "ox doctor")
+	assert.NoFileExists(t, attrs)
+	assert.Equal(t, remoteBefore, runGit(t, f.bare, "rev-parse", "HEAD"))
+	assert.Equal(t, "*.txt text", runGit(t, f.bare, "show", "HEAD:.gitattributes"), "the team's attributes must survive")
 }
 
 // TestImport_RetryPreservesStagedDocumentDeletion verifies a retry refuses conflicting index ownership.

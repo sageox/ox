@@ -276,7 +276,7 @@ func TestPushTeamContext_ConflictRetry(t *testing.T) {
 	runGit(t, otherClone, "push")
 
 	// pushTeamContext should handle non-fast-forward with rebase retry
-	err := pushTeamContext(context.Background(), clonePath, "https://test.invalid", 0)
+	err := pushTeamContext(context.Background(), clonePath, "https://test.invalid")
 	require.NoError(t, err, "pushTeamContext should succeed after rebase retry")
 
 	// verify both commits on remote
@@ -305,7 +305,7 @@ func TestPushTeamContext_AuthFailure(t *testing.T) {
 	// git repository" which exhausts retries quickly (no network timeout)
 	runGit(t, clonePath, "remote", "set-url", "origin", "/nonexistent/bare/repo.git")
 
-	err := pushTeamContext(context.Background(), clonePath, "https://test.invalid", 0)
+	err := pushTeamContext(context.Background(), clonePath, "https://test.invalid")
 	require.Error(t, err, "should fail when remote is unreachable")
 
 	// local commit preserved
