@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -319,4 +320,39 @@ func TestResolveRebaseAcceptTheirs_ThreeLevelNesting(t *testing.T) {
 		[]string{"data/", "data/proprietary/public/"}, []string{"data/proprietary/"})
 	assert.NoError(t, err)
 	assert.False(t, IsRebaseInProgress(repo), "rebase should be complete")
+}
+
+// Failure prevented (2026-10-07): the daemon's push-retry and pull-cycle resolvers
+// ran under one 60-second operation budget. A 700-commit replay in the macOS
+// background band spent that budget in a few steps, the next `git ls-files
+// --unmerged` probe died with "context deadline exceeded", the rebase was
+// aborted, and a rescue branch was minted — 22 times in one morning, with the
+// conflicts themselves trivially resolvable. The resolver must finish a
+// resolvable rebase even when the caller's deadline has already passed; only an
+// explicit cancellation may stop it between steps.
+func TestResolveRebaseAcceptTheirs_SurvivesCallerDeadline(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git rebase operations")
+	}
+	_, repo := setupDivergentRepos(t, "sessions/s1/meta.json", `{"local":true}`, `{"remote":true}`)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
+	defer cancel()
+	<-ctx.Done() // the caller's budget is already gone before the first step
+
+	err := ResolveRebaseAcceptTheirs(ctx, repo, []string{"sessions/"})
+	require.NoError(t, err, "an expired caller deadline must not abort a resolvable rebase")
+	assert.False(t, IsRebaseInProgress(repo), "rebase should have completed")
+}
+
+func TestResolveRebaseAcceptTheirs_CancellationStopsBetweenSteps(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git rebase operations")
+	}
+	_, repo := setupDivergentRepos(t, "sessions/s1/meta.json", `{"local":true}`, `{"remote":true}`)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := ResolveRebaseAcceptTheirs(ctx, repo, []string{"sessions/"})
+	require.ErrorIs(t, err, context.Canceled)
+	assert.True(t, IsRebaseInProgress(repo), "a cancelled resolver leaves the rebase for the caller to abort")
 }
