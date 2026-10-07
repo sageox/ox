@@ -133,7 +133,10 @@ func saveRestartHistory(h *restartHistory) error {
 
 // recordRestart adds the current time to restart history.
 func recordRestart() error {
-	h, _ := loadRestartHistory() // ignore errors, start fresh if needed
+	h, err := loadRestartHistory()
+	if err != nil {
+		h = &restartHistory{} // unreadable history: start fresh rather than dereference nil
+	}
 	h.Restarts = append(h.Restarts, time.Now())
 	return saveRestartHistory(h)
 }

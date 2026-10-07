@@ -158,7 +158,7 @@ func StartDaemonNoWait() error {
 
 // startLockTimeout bounds how long a caller waits for another process that is
 // already starting the daemon before giving up.
-const startLockTimeout = 5 * time.Second
+var startLockTimeout = 5 * time.Second
 
 // startLockPollTimeout is the per-attempt lock acquire window; between attempts
 // the caller re-checks whether the daemon came up so it can return as soon as
@@ -234,15 +234,18 @@ func startDaemonLocked(wait bool) error {
 		}
 		for i := 0; i < 20; i++ {
 			time.Sleep(100 * time.Millisecond)
-			switch GetState() {
-			case DaemonStateRunning:
-				return nil
-			case DaemonStateStarting:
-				continue
-			default:
-				// stopped or stuck — fall through to kill+restart
+			if state := GetState(); state != DaemonStateStarting {
+				if state == DaemonStateRunning {
+					return nil
+				}
+				break // stopped or stuck — fall through to kill+restart
 			}
-			break
+			if i == 19 {
+				// A live child younger than the stuck threshold (e.g. delayed by
+				// restart-loop throttling) is still the in-flight startup. Expiry of
+				// this short wait is not permission to spawn a competitor.
+				return fmt.Errorf("daemon is still starting")
+			}
 		}
 	}
 
@@ -316,7 +319,13 @@ func spawnDaemonProcess(supersede bool) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("failed to get executable path: %w", err)
 	}
+	return startDaemonProcess(exe, supersede)
+}
 
+// startDaemonProcess execs exe as a detached daemon. Split from
+// spawnDaemonProcess so tests can drive it with a stand-in executable; the real
+// os.Executable() under `go test` is the test binary, which selfexec refuses.
+func startDaemonProcess(exe string, supersede bool) (int, error) {
 	// create log directory
 	logPath := LogPath()
 	if err := os.MkdirAll(filepath.Dir(logPath), 0755); err != nil {
