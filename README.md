@@ -160,8 +160,8 @@ removed; there's no TTL or automatic pruning.
 Occasionally a Ledger ends up with history the server refuses: a session file committed
 with Git conflict markers, or a session artifact committed as full content instead of its
 LFS pointer. The daemon then pauses uploads and keeps your work local until the history is
-clean. `ox doctor` reports what is in the way, and two targeted repairs fix it. Each repair
-adds exactly one commit and never rewrites existing history.
+clean. `ox doctor` reports what is in the way, and two targeted repairs fix it. A repair that changes at least one file
+adds exactly one commit; one with nothing to fix adds none. Neither rewrites existing history.
 
 | Step | Command | What it does |
 |------|---------|--------------|
