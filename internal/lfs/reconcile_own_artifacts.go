@@ -36,13 +36,38 @@ func reconcileOwner(ctx context.Context) string {
 // in meta.json, replaced in the working tree by the pointer, and re-staged. Files
 // reconcile may not repair (a teammate's session, a draft) are returned, never
 // touched.
+//
+// The same repair covers an own artifact that is already committed in unpushed
+// history (a finalize that committed before its upload landed): the tip
+// validation refuses the raw blob on every attempt, so the pointer is also
+// committed, scoped to the repaired paths, and the Ledger stops being wedged.
 func uploadOwnStagedPlainArtifacts(ctx context.Context, ledgerPath string, client *Client, logger *slog.Logger) (refused []string, err error) {
 	out, err := gitPlumbing(ctx, ledgerPath, nil, "diff", "--cached", "--name-only", "-z", "--diff-filter=AM", "--", "sessions")
 	if err != nil {
 		return nil, fmt.Errorf("list staged session files: %w", err)
 	}
+	paths := strings.Split(string(out), "\x00")
+	committed := map[string]bool{}
+	if upstream, upErr := gitPlumbing(ctx, ledgerPath, nil, "rev-parse", "--verify", "@{upstream}"); upErr == nil {
+		unpushed, listErr := gitPlumbing(ctx, ledgerPath, nil, "diff", "--name-only", "-z", "--diff-filter=AM", strings.TrimSpace(string(upstream)), "HEAD", "--", "sessions")
+		if listErr != nil {
+			return nil, fmt.Errorf("list unpushed session files: %w", listErr)
+		}
+		for _, path := range strings.Split(string(unpushed), "\x00") {
+			if path != "" && !committed[path] {
+				committed[path] = true
+				paths = append(paths, path)
+			}
+		}
+	}
+	var repaired []string // committed paths now holding pointers, plus their meta.json
 	owner := reconcileOwner(ctx)
-	for _, path := range strings.Split(string(out), "\x00") {
+	seen := map[string]bool{}
+	for _, path := range paths {
+		if path == "" || seen[path] {
+			continue
+		}
+		seen[path] = true
 		parts := strings.Split(path, "/")
 		if len(parts) != 3 || parts[0] != "sessions" || !isLedgerContentFile(parts[2]) {
 			continue
@@ -133,6 +158,18 @@ func uploadOwnStagedPlainArtifacts(ctx context.Context, ledgerPath string, clien
 			return refused, fmt.Errorf("stage meta.json for %s: %w", path, err)
 		}
 		logger.Info("lfs reconcile: uploaded own staged session artifact and staged its pointer", "path", path, "oid", ref.OID)
+		if committed[path] {
+			repaired = append(repaired, path, "sessions/"+sessionID+"/meta.json")
+		}
+	}
+	if len(repaired) > 0 {
+		// the raw blob is in unpushed history: commit the pointer so the tip
+		// validation sees pointers, scoped so nothing else staged is swept in
+		msg := fmt.Sprintf("ledger: dehydrate %d own session artifacts", len(repaired)/2)
+		if _, err := gitutil.CommitLedgerSnapshot(ctx, ledgerPath, msg, repaired...); err != nil {
+			return refused, fmt.Errorf("commit dehydrated own session artifacts: %w", err)
+		}
+		logger.Info("lfs reconcile: committed pointers for own session artifacts that were committed plain", "paths", repaired)
 	}
 	return refused, nil
 }

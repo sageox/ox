@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -156,4 +157,42 @@ func TestReconcile_WorktreeReplacedByDirectoryDuringOwnArtifactUploadIsReported(
 	_, err := uploadOwnStagedPlainArtifacts(ctx, ledger, client, slog.Default())
 	require.ErrorContains(t, err, "inspect worktree copy")
 	assert.DirExists(t, rawPath)
+}
+
+// commitPlainSession commits plain raw.jsonl content for a session whose
+// meta.json names username: a finalize that committed before its upload
+// landed, then kept failing to push.
+func commitPlainSession(t *testing.T, ledger, session, username string, content []byte) string {
+	t.Helper()
+	rawPath := stagePlainSession(t, ledger, session, username, content)
+	git(t, ledger, "commit", "-q", "--no-verify", "-m", "finalize session "+session)
+	return rawPath
+}
+
+// An own session's plain artifact that is already committed in unpushed
+// history is uploaded, replaced by its pointer, and committed, so the tip
+// validation passes and the repair continues. Failure prevented: reconcile
+// refused with "validate unpushed Ledger before LFS reconcile: ... must contain
+// an LFS pointer" on every attempt and the Ledger stayed wedged.
+func TestReconcile_UploadsOwnCommittedPlainArtifactInsteadOfRefusing(t *testing.T) {
+	ledger, _ := initLedgerWithRemote(t)
+	recoverable := []byte("recoverable recording\n")
+	_, _, cachePath, ref := commitMissingSessionPointer(t, ledger, "wedged", recoverable)
+	require.NoError(t, os.MkdirAll(filepath.Dir(cachePath), 0o700))
+	require.NoError(t, os.WriteFile(cachePath, recoverable, 0o600))
+	content := []byte("{\"type\":\"user\",\"content\":\"committed before the upload landed\"}\n")
+	rawPath := commitPlainSession(t, ledger, "own", "ryan", content)
+	client, store := newFakeUploadStore(t, false, false)
+	ctx := withReconcileOwner(context.Background(), "ryan")
+
+	result, err := reconcileUnpushedPointers(ctx, ledger, nil, func() (*Client, error) { return client, nil })
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.RecoveredUploads)
+	assert.True(t, IsPointerFile(rawPath), "the plain artifact is replaced by its pointer")
+	assert.Equal(t, content, store.stored[NewFileRef(content).BareOID()], "the blob exists on the store")
+	assert.Equal(t, recoverable, store.stored[ref.BareOID()])
+	assert.Equal(t, content, mustReadFile(t, filepath.Join(ledger, ".sageox", "cache", "sessions", "own", "raw.jsonl")), "the bytes stay in the cache")
+	assert.Contains(t, git(t, ledger, "show", "HEAD:sessions/own/raw.jsonl"), "version https://git-lfs", "the pointer is what is committed")
+	assert.Empty(t, strings.TrimSpace(git(t, ledger, "status", "--porcelain", "--", "sessions/own")), "nothing is left staged or dirty")
 }
