@@ -10,10 +10,11 @@ import (
 	"syscall"
 )
 
-// daemonNiceness is the nice value the daemon runs at. 10 is the conventional
-// "background job" value: the scheduler still gives the daemon every idle cycle
-// but yields to a coworker's editor, build, or agent whenever they contend.
-const daemonNiceness = 10
+// daemonNiceness is the nice value the daemon runs at: polite enough to yield
+// to a coworker's editor, build, or agent whenever they contend, but still a
+// timeshare process that is scheduled under load. The daemon's pushes and
+// reconciles are what unwedge a Ledger, so it must never be starved to zero.
+const daemonNiceness = 5
 
 // lowerDaemonPriority makes the daemon a polite background process.
 //
@@ -23,6 +24,14 @@ const daemonNiceness = 10
 // foreground. At nice 10 a runaway still wastes battery but no longer makes the
 // machine feel slow. Child processes inherit the niceness of the thread that
 // forks them, so git subprocesses are covered too.
+//
+// Nice is the only lever used. macOS's background band (PRIO_DARWIN_BG) is
+// deliberately NOT entered: it schedules the process and every git it spawns
+// at priority 4, and under a busy machine (load in the hundreds from parallel
+// builds and VMs) that is zero CPU for minutes. A Ledger push then sat behind
+// a `git status` that was never run, clients timed out, and hooks auto-started
+// replacement daemons that starved the same way (#1235). Heat from a runaway
+// is bounded by GOMAXPROCS instead.
 //
 // Linux nice values are per thread, not per process: setpriority(PRIO_PROCESS, 0)
 // only touches the calling thread, and the Go runtime has already started
@@ -35,13 +44,10 @@ const daemonNiceness = 10
 // refuse it, and the daemon is fully functional either way. The error is
 // returned so the caller can log it at debug level.
 func lowerDaemonPriority() error {
-	var niceErr error
 	if runtime.GOOS == "linux" {
-		niceErr = lowerPriorityAllThreads(daemonNiceness)
-	} else {
-		niceErr = syscall.Setpriority(syscall.PRIO_PROCESS, 0, daemonNiceness)
+		return lowerPriorityAllThreads(daemonNiceness)
 	}
-	return errors.Join(niceErr, enterBackgroundBand())
+	return syscall.Setpriority(syscall.PRIO_PROCESS, 0, daemonNiceness)
 }
 
 // lowerPriorityAllThreads applies nice to every thread listed in

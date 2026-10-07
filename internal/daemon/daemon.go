@@ -404,6 +404,7 @@ func (d *Daemon) Start() error {
 	if runtime.GOMAXPROCS(0) > daemonMaxProcs {
 		runtime.GOMAXPROCS(daemonMaxProcs)
 	}
+	d.logger.Info("daemon priority", "nice", daemonNiceness, "gomaxprocs", runtime.GOMAXPROCS(0))
 
 	// write PID file (informational only)
 	if err := d.writePidFile(); err != nil {
