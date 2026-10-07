@@ -1109,6 +1109,7 @@ def cmd_det_merge(a) -> int:
         "coverage": level,
     }
     (out / "findings-deterministic.json").write_text(json.dumps(doc, indent=2) + "\n")
+    (out / "det-summary.md").write_text(render_det_summary(doc))
 
     state = {"none": "no-coverage", "partial": "degraded", "full": "complete"}[level]
     print()
@@ -1357,6 +1358,49 @@ def gather_state(out: Path, a) -> dict:
     }
 
 
+def scanner_table(scan: list) -> list:
+    """Markdown rows for scanner findings, at most SCANNER_ROWS of them."""
+    md = ["| Tool | Rule | Where | Message |", "|---|---|---|---|"]
+    for f in scan[:SCANNER_ROWS]:
+        where = f"`{f['file']}:{f['line']}`" if f["file"] and f["line"] else (f"`{f['file']}`" if f["file"] else "dependency")
+        rule = f["rule"] + (" (reachable)" if f["reachable"] else "")
+        message = f["message"].replace("|", "\\|")[:160]
+        md.append(f"| {f['tool']} | {rule} | {where} | {message} |")
+    if len(scan) > SCANNER_ROWS:
+        md += ["", f"… {len(scan) - SCANNER_ROWS} more in `findings-deterministic.json`."]
+    return md
+
+
+def render_det_summary(doc: dict) -> str:
+    """The fast tier's report: what each scanner did and what it found. CI appends it
+    to the job summary, so it must never read as clean when nothing was scanned."""
+    tools = doc.get("tools") or {}
+    ran = sum(1 for v in tools.values() if v.get("status") == "ran")
+    if doc.get("coverage") == "none":
+        headline = "**NO COVERAGE**: every scanner was skipped or failed, so this run says nothing about the change."
+    elif doc.get("coverage") == "partial":
+        headline = f"**PARTIAL COVERAGE**: {ran} of {len(tools)} scanners ran."
+    else:
+        headline = f"All {len(tools)} scanners ran."
+    md = ["## Deterministic security scan", "",
+          f"{headline} Scope: {doc.get('scope', '?')} vs `{doc.get('since', '?')}`, "
+          f"{doc.get('touched_files', 0)} touched file(s). Advisory only; never blocks merge.", "",
+          "| Scanner | Result |", "|---|---|"]
+    for tool, v in tools.items():
+        if v.get("status") == "ran":
+            result = f"ran: {v.get('findings', 0)} finding(s)"
+        else:
+            result = f"{v.get('status', '?')}: {v.get('reason') or 'no reason recorded'}"
+        md.append(f"| {tool} | {result} |")
+    scan = scanner_report_findings(doc, [])
+    md.append("")
+    if scan:
+        md += scanner_table(scan)
+    elif ran:
+        md.append("No scanner findings.")
+    return "\n".join(md) + "\n"
+
+
 def _fmt(value) -> str:
     if isinstance(value, dict):
         return "; ".join(f"{k}: {v}" for k, v in value.items() if v)
@@ -1489,16 +1533,7 @@ def render_findings(s: dict, cov: dict, counts: dict) -> str:
             if f.get(key):
                 md += [f"**{label}**: {_fmt(f[key])}", ""]
     if scan:
-        md += ["## Scanner findings (not validated by the AI tier)", "",
-               "| Tool | Rule | Where | Message |", "|---|---|---|---|"]
-        for f in scan[:SCANNER_ROWS]:
-            where = f"`{f['file']}:{f['line']}`" if f["file"] and f["line"] else (f"`{f['file']}`" if f["file"] else "dependency")
-            rule = f["rule"] + (" (reachable)" if f["reachable"] else "")
-            message = f["message"].replace("|", "\\|")[:160]
-            md.append(f"| {f['tool']} | {rule} | {where} | {message} |")
-        if len(scan) > SCANNER_ROWS:
-            md += ["", f"… {len(scan) - SCANNER_ROWS} more in `findings-deterministic.json`."]
-        md.append("")
+        md += ["## Scanner findings (not validated by the AI tier)", ""] + scanner_table(scan) + [""]
     md += ["## Coverage", "", "| Stage | Result |", "|---|---|"]
     md += [f"| {stage} | {text} |" for stage, text in coverage_rows(s)]
     if cov["notes"] and cov["level"] != "empty":

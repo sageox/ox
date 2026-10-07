@@ -450,6 +450,28 @@ class ScannerFindingsTest(unittest.TestCase):
         self.assertEqual([(f["tool"], f["rule"]) for f in got], [("govulncheck", "GO-2026-0001"), ("gosec", "G204")])
         self.assertTrue(got[0]["reachable"])
 
+    def test_det_summary_lists_each_scanner_and_its_findings(self):
+        doc = {**self.DET, "scope": "diff", "since": "origin/main", "touched_files": 2, "coverage": "partial",
+               "tools": {"opengrep": {"status": "ran", "findings": 0},
+                         "govulncheck": {"status": "ran", "findings": 1},
+                         "osv-scanner": {"status": "skipped", "reason": "not installed"},
+                         "grype": {"status": "failed", "reason": "exit 2"},
+                         "gosec": {"status": "ran", "findings": 2}}}
+        md = pipeline.render_det_summary(doc)
+        self.assertIn("**PARTIAL COVERAGE**", md)
+        self.assertIn("| grype | failed: exit 2 |", md)
+        self.assertIn("| osv-scanner | skipped: not installed |", md)
+        self.assertIn("| gosec | ran: 2 finding(s) |", md)
+        self.assertIn("| govulncheck | GO-2026-0001 (reachable) | dependency | bad parse |", md)
+        self.assertIn("| gosec | G204 | `cmd/ox/b.go:3` | subprocess with variable |", md)
+
+    def test_det_summary_never_reads_clean_without_coverage(self):
+        doc = {"findings": [], "coverage": "none", "scope": "diff", "since": "origin/main", "touched_files": 1,
+               "tools": {t: {"status": "skipped", "reason": "not installed"} for t in pipeline.SCANNERS}}
+        md = pipeline.render_det_summary(doc)
+        self.assertIn("**NO COVERAGE**", md)
+        self.assertNotIn("No scanner findings", md)
+
     def test_sarif_carries_scanner_results_with_their_location(self):
         scan = pipeline.scanner_report_findings(self.DET, [])
         sarif = pipeline.render_sarif([], scan)

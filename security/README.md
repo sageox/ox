@@ -26,7 +26,7 @@ make sec           # optional, AI tier — requires ANTHROPIC_API_KEY
 make sec-test      # changing the pipeline itself? its tests — fake claude + scanners, no cost
 ```
 
-Output lands in `security/.output/FINDINGS.md`. SARIF goes to the GitHub Security tab when run from CI.
+Output lands in `security/.output/FINDINGS.md`. In CI, the fast tier writes `det-summary.md` to the job summary and saves `security/.output/` as the run's `security-findings-<run id>` artifact; nothing is uploaded to the Security tab.
 
 ## Layout
 
@@ -91,7 +91,7 @@ If you're running the AI tier as a routine pre-commit check on every diff, you'r
 The CI workflow at `.github/workflows/security-review.yml` runs the fast deterministic tier on every PR but **does not** run the AI tier. This is a deliberate choice:
 
 - **Cost-DoS risk.** Any contributor who can land a PR can label one as `needs-security-review`; ~$4/run × N labels drains the budget.
-- **Public finding disclosure.** SARIF uploaded to a public repo's Security tab is world-readable. A real exploitable finding becomes a 0-day announcement before it can be patched.
+- **Public finding disclosure.** CI output on a public repo is public: anyone can read a run's job summary and PR annotations, and anyone signed in to GitHub can download its artifacts. A real exploitable finding from the AI tier would become a 0-day announcement before it could be patched. (The fast tier's findings come from public scanners on public code, so the job summary carries them.)
 - **Prompt injection via PR content.** A diff can carry adversarial strings that hijack the hunter prompts. Locally, the branch's commit messages, branch name, `CLAUDE.md`, rules and project hooks are kept out of every subagent; the diff itself can't be ([what reaches a subagent](SECURITY.md#review-pipeline-subagents)).
 - **Marginal value.** Maintainers can run `make sec` locally for free via the Claude Code subsidy.
 

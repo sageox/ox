@@ -263,6 +263,18 @@ class OrchestrateE2ETest(unittest.TestCase):
         self.assertIn("ran (1 finding(s))", gosec_line, self.explain(clean))
         self.assertEqual(clean.returncode, 0, self.explain(clean))
 
+    def test_fast_tier_writes_a_findings_summary(self):
+        """Riley's PR runs the fast tier in CI; the job summary says what each scanner found."""
+        self.repo.plant_feature()
+        self.repo.install("golangci-lint")
+        result = self.repo.run("deterministic.sh", FAKE_GOSEC="issue")
+
+        summary = self.repo.output("det-summary.md")
+        self.assertIn("| gosec | ran: 1 finding(s) |", summary, self.explain(result))
+        self.assertIn("| opengrep | skipped: not installed", summary)
+        self.assertIn("| gosec | G304 | `cmd/ox/upload.go:11` |", summary)
+        self.assertIn("**PARTIAL COVERAGE**", summary)
+
     def test_reported_cost_is_tracked_and_the_cap_stops_later_phases(self):
         """Quinn caps a run at $0.50; each call reports $0.20 in total_cost_usd."""
         self.repo.plant_feature()
