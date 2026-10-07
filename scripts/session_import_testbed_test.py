@@ -177,6 +177,41 @@ class Testbed(unittest.TestCase):
                     path.unlink()
                     shutil.rmtree(self.tmp / "fixture", ignore_errors=True)
 
+    # Failure prevented: a tracked file whose folder was swapped for a symlink
+    # publishing whatever the link points at.
+    def test_capture_refuses_a_file_under_a_symlinked_folder(self):
+        outside = self.tmp / "outside"
+        outside.mkdir()
+        (outside / ".gitignore").write_text("private settings\n")
+        shutil.rmtree(self.source / "pkg")
+        (self.source / "pkg").symlink_to(outside, target_is_directory=True)
+        # Hide the link itself from git's untracked list, so the only entry is the
+        # tracked pkg/.gitignore beneath it, which is the case to catch.
+        with open(self.source / ".git" / "info" / "exclude", "a") as f:
+            f.write("pkg\n")
+        code, text, out = self.capture()
+        self.assertEqual(1, code, text)
+        self.assertIn("symlink", text)
+        self.assertFalse(out.exists() and any(out.iterdir()))
+
+    # Failure prevented: a file edited between its check and the copy reaching
+    # the fixture unchecked; the fixture holds exactly the checked bytes.
+    def test_capture_writes_the_bytes_it_checked(self):
+        app = self.source / "app.py"
+        app.chmod(0o755)
+        checked = tb.code_files
+
+        def check_then_edit(source, identities):
+            files = checked(source, identities)
+            app.write_text("print('Dana Real')\n")
+            return files
+
+        with mock.patch.object(tb, "code_files", side_effect=check_then_edit):
+            code, text, out = self.capture()
+        self.assertEqual(0, code, text)
+        self.assertEqual("print('hi')\n", (out / "code" / "app.py").read_text())
+        self.assertEqual(0o755, (out / "code" / "app.py").stat().st_mode & 0o777, "the file mode carries over")
+
     # Failure prevented: a session file cut off mid-line crashing capture with a
     # traceback instead of saying which file to wait for.
     def test_capture_refuses_a_line_that_is_not_json(self):

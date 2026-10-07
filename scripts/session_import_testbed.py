@@ -30,6 +30,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -297,10 +298,11 @@ def capture(args):
         dest = out / agent / filename
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(text, encoding="utf-8")
-    for parts, src in code:
+    for parts, data, mode in code:
         target = (out / "code").joinpath(*parts)
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, target)
+        target.write_bytes(data)
+        os.chmod(target, mode)
     write_provenance(out, source, cleaned)
     print("Captured %d sessions into %s. Review them and PROVENANCE.md before committing." % (len(cleaned), out))
     return 0
@@ -311,27 +313,32 @@ def code_files(source, identities):
     listed = subprocess.run(["git", "-C", str(source), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
                             capture_output=True, check=True).stdout.decode().split("\0")
     files = []
+    real_source = os.path.realpath(source)
     for rel in sorted(filter(None, listed)):
         if rel.startswith(OX_MANAGED) or rel in OX_MANAGED_FILES or JUNK.search(rel):
             continue
         src = source / rel
-        # A link can point anywhere on the machine; copying would publish its target.
-        if src.is_symlink():
-            raise Refused("code/%s is a symlink; the fixture copies only regular files" % rel)
+        # A link anywhere along the path, the file or a folder above it, can point
+        # anywhere on the machine; copying would publish its target.
+        if os.path.realpath(src) != os.path.join(real_source, *rel.split("/")):
+            raise Refused("code/%s is or sits under a symlink; the fixture copies only regular files" % rel)
         if not src.is_file():
             continue
         # A nested .gitignore or .gitattributes would apply to the fixture inside the ox repo.
         parts = rel.split("/")
         parts[-1] = "dot-" + parts[-1][1:] if parts[-1] in (".gitignore", ".gitattributes") else parts[-1]
         check_private("the name code/" + rel, rel, identities)
+        data = src.read_bytes()
         try:
-            text = src.read_bytes().decode("utf-8")
+            text = data.decode("utf-8")
         except UnicodeDecodeError:
             raise Refused("code/%s is not UTF-8 text, so it cannot be checked; remove it from the repo first" % rel)
         if "\x00" in text:  # UTF-16 without a byte-order mark still decodes, a NUL between letters
             raise Refused("code/%s holds NUL bytes, so it cannot be checked as text; remove it from the repo first" % rel)
         check_private("code/" + rel, text, identities)
-        files.append((parts, src))
+        # The fixture gets these exact bytes, never a second read of a file that
+        # may have changed since it was checked.
+        files.append((parts, data, stat.S_IMODE(src.stat().st_mode)))
     return files
 
 
