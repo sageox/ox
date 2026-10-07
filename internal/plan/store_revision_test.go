@@ -504,3 +504,31 @@ func TestResolveSaveDir_NamedDirWithUnreadableMetaIsAnError(t *testing.T) {
 		t.Fatalf("a meta-less directory is not a plan and must not error: %v", err)
 	}
 }
+
+// Failure prevented: Save on an exact plan name whose meta.json is corrupt
+// minting a fresh dated duplicate (or rewriting the broken plan) instead of
+// failing. Both filesystem outcomes are asserted, not just the resolver.
+func TestSave_NamedDirWithCorruptMetaFailsWithoutSideEffects(t *testing.T) {
+	day := time.Date(2026, 9, 23, 9, 0, 0, 0, time.UTC)
+	ledger := t.TempDir()
+	withLedger(t, ledger)
+	existing := saveWithSlug(t, "named", day, "first")
+	name := filepath.Base(existing)
+	corrupt := []byte("{not json")
+	if err := os.WriteFile(filepath.Join(existing, planMetaFile), corrupt, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := Save("/fake/git/root", Input{Raw: "v2"}, Result{}, nil,
+		Meta{Topic: "x", Slug: name, CreatedAt: day.Add(24 * time.Hour)})
+	if err == nil {
+		t.Fatal("Save on a named plan with corrupt meta.json must fail")
+	}
+	entries, _ := os.ReadDir(filepath.Join(ledger, "data", "plans"))
+	if len(entries) != 1 {
+		t.Errorf("plans dir has %d entries, want 1: no dated duplicate may be minted", len(entries))
+	}
+	got, _ := os.ReadFile(filepath.Join(existing, planMetaFile))
+	if string(got) != string(corrupt) {
+		t.Errorf("existing plan's meta.json was rewritten: %q", got)
+	}
+}

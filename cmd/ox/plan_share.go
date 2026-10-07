@@ -161,7 +161,12 @@ func snapshotPriorRevision(gitRoot, planDir string) error {
 	// the snapshot, and refuse the save if it still fails rather than lose or
 	// commit that render
 	if plan.HasLargePlainHTML(planDir) {
-		if _, err := planDehydrateHTML(planDir, planLFSClientFn(gitRoot)); err != nil {
+		client := planLFSClientFn(gitRoot)
+		if client == nil {
+			// a nil client makes dehydration a no-op, which is not an upload
+			return fmt.Errorf("prior plan.html is awaiting upload and no content store is reachable")
+		}
+		if _, err := planDehydrateHTML(planDir, client); err != nil {
 			return fmt.Errorf("prior plan.html is awaiting upload: %w", err)
 		}
 	}

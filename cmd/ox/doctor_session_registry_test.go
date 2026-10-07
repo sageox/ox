@@ -16,7 +16,12 @@ func TestSessionRegistryChecks_UnregisteredSlugSkipsInsteadOfPanicking(t *testin
 	}
 
 	assert.NotPanics(t, func() {
-		assert.True(t, checkSessionUncommittedViaRegistry(doctorOptions{}).skipped)
-		assert.True(t, checkSessionDraftOrphanViaRegistry(doctorOptions{}).skipped)
+		uncommitted := checkSessionUncommittedViaRegistry(doctorOptions{})
+		assert.True(t, uncommitted.skipped)
+		assert.Equal(t, "session uncommitted", uncommitted.name)
+		assert.Equal(t, "check not registered", uncommitted.message)
+		draftOrphan := checkSessionDraftOrphanViaRegistry(doctorOptions{})
+		assert.True(t, draftOrphan.skipped)
+		assert.Equal(t, "session draft orphan", draftOrphan.name)
 	})
 }

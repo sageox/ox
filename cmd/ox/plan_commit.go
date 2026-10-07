@@ -195,6 +195,11 @@ func commitPlanLocalCtx(ctx context.Context, ledgerPath, planDir, msgPrefix stri
 			// it would bury multi-megabyte HTML in history and the pointer retry would
 			// then find nothing to dehydrate
 			addArgs = append(addArgs, ":(exclude)"+rel+"/"+planHTMLFileName)
+			// an earlier add may already have staged the plain page; the exclude
+			// above does not touch the index, so unstage it explicitly
+			if out, err := gitutil.RunGit(ctx, ledgerPath, "reset", "-q", "--", rel+"/"+planHTMLFileName); err != nil {
+				return fmt.Errorf("unstage pending %s: %s: %w", planHTMLFileName, gitutil.SanitizeOutput(out), err)
+			}
 		}
 		if out, err := gitutil.RunGit(ctx, ledgerPath, addArgs...); err != nil {
 			return fmt.Errorf("git add %s failed: %s: %w", rel, gitutil.SanitizeOutput(out), err)
@@ -291,7 +296,10 @@ func planHTMLAwaitingUpload(planDir string) bool {
 	gitRoot := findGitRoot()
 	client := planLFSClientFn(gitRoot)
 	if client == nil {
-		return false
+		// no store reachable: the page is still awaiting upload (a nil client is
+		// not a successful dehydration); keep it out of the commit
+		slog.Warn("plan: no content store reachable, leaving the large plan.html out of the commit", "dir", planDir)
+		return true
 	}
 	if _, err := planDehydrateHTML(planDir, client); err != nil {
 		slog.Warn("plan: plan.html upload failed, leaving it out of the commit", "error", err, "dir", planDir)

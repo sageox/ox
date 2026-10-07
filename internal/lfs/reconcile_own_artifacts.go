@@ -79,19 +79,37 @@ func uploadOwnStagedPlainArtifacts(ctx context.Context, ledgerPath string, clien
 		// may have edited or removed it since, and a pointer written over their
 		// unstaged work would silently discard it.
 		worktreePath := filepath.Join(ledgerPath, filepath.FromSlash(path))
+		before, statErr := os.Stat(worktreePath)
+		if statErr != nil {
+			return refused, fmt.Errorf("inspect worktree copy of %s: %w", path, statErr)
+		}
 		worktree, readErr := os.ReadFile(worktreePath)
 		if readErr != nil {
 			return refused, fmt.Errorf("inspect worktree copy of %s: %w", path, readErr)
 		}
-		if !bytes.Equal(worktree, staged) {
+		switch {
+		case bytes.Equal(worktree, staged):
+			// the common case: the plain copy is replaced by its pointer below
+		case pointerShaped(worktree) && pointerMatches(worktree, ref):
+			// a previous pass wrote the pointer but failed to stage it: resume
+		default:
 			return refused, fmt.Errorf("refusing to overwrite unstaged content at %s: worktree differs from the staged bytes (uploaded as %s)", path, ref.OID)
 		}
 		err = MutateSessionMeta(ctx, sessionDir, recordFileRef(sessionID, name, ref))
 		if err != nil {
 			return refused, fmt.Errorf("record %s in meta.json: %w", path, err)
 		}
-		if err := WritePointerFile(worktreePath, uploaded); err != nil {
-			return refused, fmt.Errorf("write pointer for %s: %w", path, err)
+		if !pointerShaped(worktree) {
+			// the comparison above and the write here must see the same file: a
+			// coworker editing it in between wins, so re-check identity (inode,
+			// mtime, size) right before writing and refuse on any change
+			now, statErr := os.Stat(worktreePath)
+			if statErr != nil || !os.SameFile(before, now) || !now.ModTime().Equal(before.ModTime()) || now.Size() != before.Size() {
+				return refused, fmt.Errorf("refusing to overwrite unstaged content at %s: the worktree copy changed during reconcile", path)
+			}
+			if err := WritePointerFile(worktreePath, uploaded); err != nil {
+				return refused, fmt.Errorf("write pointer for %s: %w", path, err)
+			}
 		}
 		if _, err := gitutil.RunGit(ctx, ledgerPath, "add", "--sparse", "--", path, "sessions/"+sessionID+"/meta.json"); err != nil {
 			return refused, fmt.Errorf("stage pointer for %s: %w", path, err)
@@ -115,4 +133,13 @@ func recordFileRef(sessionID, name string, ref FileRef) func(*SessionMeta) (*Ses
 		m.Files[name] = ref
 		return m, nil
 	}
+}
+
+// pointerMatches reports whether a worktree pointer names exactly the uploaded blob.
+func pointerMatches(worktree []byte, ref FileRef) bool {
+	oid, size, err := ParsePointer(string(worktree))
+	if err != nil {
+		return false
+	}
+	return strings.TrimPrefix(oid, "sha256:") == ref.BareOID() && size == ref.Size
 }
