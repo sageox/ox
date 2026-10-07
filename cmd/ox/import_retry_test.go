@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/gitserver"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/spf13/cobra"
@@ -42,10 +44,10 @@ type importRetryFixture struct {
 // newImportRetryFixture builds the fixture: a team context clone, an LFS test server and a source document.
 func newImportRetryFixture(t *testing.T) *importRetryFixture {
 	t.Helper()
-	bare, clone := createBareAndClone(t)
 	// import reads push settings; a developer's push.default or pushInsteadOf must not change outcomes
 	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	bare, clone := createBareAndClone(t)
 	for _, key := range []string{"XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR"} {
 		t.Setenv(key, t.TempDir())
 	}
@@ -239,8 +241,9 @@ func TestImport_FailedImportDoesNotBlockRetry(t *testing.T) {
 // TestImport_CommitFailureCanBeRetried verifies a retry publishes the document after a failed commit.
 // Without this, the leftover metadata makes the retry report success while the remote has no document.
 func TestImport_CommitFailureCanBeRetried(t *testing.T) {
+	t.Setenv("GIT_ALLOW_PROTOCOL", "file")
 	f := newImportRetryFixture(t)
-	tcPath := filepath.Join(paths.TeamsDataDir(f.endpoint), importRetryTeamID)
+	tcPath := f.useFileGitRemote(t)
 	remoteBefore := runGit(t, f.bare, "rev-parse", "HEAD")
 	runGit(t, tcPath, "config", "--local", "user.name", "")
 	// Empty names also override any identity inherited from the test runner.
@@ -296,8 +299,9 @@ func TestImport_PushFailureCanBeRetriedWithoutAnotherCommit(t *testing.T) {
 	require.NotEqual(t, remoteBefore, committed, "the import must have committed before its push failed")
 	assert.Equal(t, remoteBefore, runGit(t, f.bare, "rev-parse", "HEAD"))
 
+	runGit(t, tcPath, "remote", "set-url", "origin", denied.URL+"/team.git")
 	_, err = f.importDoc(false)
-	require.ErrorContains(t, err, "committed locally but not published", "a retry that still cannot push must say what is left to do")
+	require.ErrorContains(t, err, "could not confirm publication", "a retry that still cannot push must say what is left to do")
 	assert.Equal(t, committed, runGit(t, tcPath, "rev-parse", "HEAD"))
 
 	runGit(t, tcPath, "remote", "set-url", "--push", "origin", f.bare)
@@ -316,6 +320,416 @@ func TestImport_PushFailureCanBeRetriedWithoutAnotherCommit(t *testing.T) {
 	assert.Equal(t, sourceOID, meta.SourceOID)
 	pointer := runGit(t, f.bare, "show", "HEAD:"+remoteDoc+"/q3-plan.md")
 	assert.Equal(t, "version https://git-lfs.github.com/spec/v1\noid "+sourceOID+"\nsize 10", pointer)
+}
+
+// TestImport_RetryDoesNotPublishPrivateCommits keeps unrelated committed history local during recovery.
+// Without this, a retry publishes private commits added after the import's first push failed.
+func TestImport_RetryDoesNotPublishPrivateCommits(t *testing.T) {
+	t.Setenv("GIT_ALLOW_PROTOCOL", "file")
+	f := newImportRetryFixture(t)
+	tcPath := f.useFileGitRemote(t)
+	runGit(t, tcPath, "branch", "-M", "main")
+	runGit(t, tcPath, "push", "--set-upstream", "origin", "main")
+	runGit(t, f.bare, "symbolic-ref", "HEAD", "refs/heads/main")
+	initial := runGit(t, f.bare, "rev-parse", "HEAD")
+	hook := filepath.Join(f.bare, "hooks", "pre-receive")
+	require.NoError(t, os.WriteFile(hook, []byte("#!/bin/sh\necho 'Permission denied' >&2\nexit 1\n"), 0o755))
+	_, err := f.importDoc(false)
+	require.ErrorContains(t, err, "git push failed")
+	require.ErrorContains(t, err, "Permission denied")
+	pendingImport := runGit(t, tcPath, "rev-parse", "HEAD")
+	require.NotEqual(t, initial, pendingImport)
+	require.Equal(t, "1", runGit(t, tcPath, "rev-list", "--count", initial+"..HEAD"))
+	require.Equal(t, initial, runGit(t, f.bare, "rev-parse", "HEAD"))
+	t.Logf("real bare hook rejected the saved import commit %s: %v", pendingImport, err)
+
+	private := filepath.Join(tcPath, "private.md")
+	require.NoError(t, os.WriteFile(private, []byte("synthetic private notes\n"), 0o644))
+	runGit(t, tcPath, "add", "private.md")
+	runGit(t, tcPath, "commit", "--no-verify", "-m", "private notes")
+	privateHead := runGit(t, tcPath, "rev-parse", "HEAD")
+	require.NoError(t, os.Remove(hook))
+	pending := filepath.Join(tcPath, "pending.md")
+	require.NoError(t, os.WriteFile(pending, []byte("staged personal notes\n"), 0o644))
+	runGit(t, tcPath, "add", "pending.md")
+	require.NoError(t, os.WriteFile(pending, []byte("working personal notes\n"), 0o644))
+	docBefore := readDocFiles(t, f.docDir())
+	indexBefore := runGit(t, tcPath, "ls-files", "--stage")
+	indexBytes, err := os.ReadFile(filepath.Join(tcPath, ".git", "index"))
+	require.NoError(t, err)
+	sourceBefore, err := os.ReadFile(f.src)
+	require.NoError(t, err)
+
+	out, retryErr := f.importDoc(false)
+	remoteHead := runGit(t, f.bare, "rev-parse", "HEAD")
+	remotePrivate := runGit(t, f.bare, "ls-tree", "HEAD", "--", "private.md")
+	const remoteDoc = "data/docs/2026/09/19/q3-plan"
+	remoteFiles := runGit(t, f.bare, "ls-tree", "-r", "HEAD", "--", remoteDoc)
+	t.Logf("retry err=%v output=%q localHEAD=%s remoteHEAD=%s private=%q document=%q", retryErr, out, privateHead, remoteHead, remotePrivate, remoteFiles)
+	if remotePrivate != "" {
+		t.Logf("remote private bytes: %q", runGit(t, f.bare, "show", "HEAD:private.md"))
+	}
+	if remoteFiles != "" {
+		t.Logf("remote metadata: %s", runGit(t, f.bare, "show", "HEAD:"+remoteDoc+"/metadata.json"))
+		t.Logf("remote pointer: %s", runGit(t, f.bare, "show", "HEAD:"+remoteDoc+"/q3-plan.md"))
+	}
+	assert.ErrorContains(t, retryErr, "outgoing history includes other commits or a merge",
+		"recovery must refuse to publish unrelated private commits")
+	assert.NotContains(t, out, "Imported:")
+	assert.NotContains(t, out, "Already imported")
+	assert.Equal(t, initial, remoteHead)
+	assert.Empty(t, remotePrivate)
+	assert.Empty(t, remoteFiles)
+	assert.Equal(t, privateHead, runGit(t, tcPath, "rev-parse", "HEAD"))
+	assert.Equal(t, initial, runGit(t, tcPath, "rev-parse", "refs/remotes/origin/main"))
+	assert.Equal(t, docBefore, readDocFiles(t, f.docDir()))
+	assert.Equal(t, indexBefore, runGit(t, tcPath, "ls-files", "--stage"))
+	indexAfter, err := os.ReadFile(filepath.Join(tcPath, ".git", "index"))
+	require.NoError(t, err)
+	assert.Equal(t, indexBytes, indexAfter)
+	for path, expected := range map[string][]byte{
+		private: []byte("synthetic private notes\n"),
+		pending: []byte("working personal notes\n"),
+		f.src:   sourceBefore,
+	} {
+		content, err := os.ReadFile(path)
+		require.NoError(t, err)
+		assert.Equal(t, expected, content, path)
+	}
+}
+
+// TestImport_UncommittedRetryRejectsPrivateHistoryBeforeWriting preserves a failed commit's saved files.
+// Without this, recovery creates another commit before refusing unrelated unpublished history.
+func TestImport_UncommittedRetryRejectsPrivateHistoryBeforeWriting(t *testing.T) {
+	t.Setenv("GIT_ALLOW_PROTOCOL", "file")
+	f := newImportRetryFixture(t)
+	tcPath := f.useFileGitRemote(t)
+	runGit(t, tcPath, "branch", "-M", "main")
+	runGit(t, tcPath, "push", "--set-upstream", "origin", "main")
+	runGit(t, f.bare, "symbolic-ref", "HEAD", "refs/heads/main")
+	initial := runGit(t, f.bare, "rev-parse", "HEAD")
+	runGit(t, tcPath, "config", "--local", "user.name", "")
+	t.Setenv("GIT_AUTHOR_NAME", "")
+	t.Setenv("GIT_COMMITTER_NAME", "")
+	_, err := f.importDoc(false)
+	require.ErrorContains(t, err, "empty ident name")
+	require.Equal(t, initial, runGit(t, tcPath, "rev-parse", "HEAD"))
+	require.Contains(t, readDocFiles(t, f.docDir()), "metadata.json")
+
+	runGit(t, tcPath, "config", "--local", "user.name", "Test")
+	t.Setenv("GIT_AUTHOR_NAME", "Test")
+	t.Setenv("GIT_COMMITTER_NAME", "Test")
+	private := filepath.Join(tcPath, "private.md")
+	require.NoError(t, os.WriteFile(private, []byte("synthetic private notes\n"), 0o644))
+	runGit(t, tcPath, "add", "private.md")
+	// The user's private commit leaves the failed import's staged files untouched.
+	runGit(t, tcPath, "commit", "--no-verify", "-m", "private notes", "--", ":(literal)private.md")
+	privateHead := runGit(t, tcPath, "rev-parse", "HEAD")
+	require.Equal(t, "1", runGit(t, tcPath, "rev-list", "--count", initial+"..HEAD"))
+	require.Empty(t, runGit(t, tcPath, "ls-tree", "-r", "HEAD", "--", "data/docs"))
+	docBefore := readDocFiles(t, f.docDir())
+	indexBefore, err := os.ReadFile(filepath.Join(tcPath, ".git", "index"))
+	require.NoError(t, err)
+	stagedBefore := runGit(t, tcPath, "ls-files", "--stage")
+
+	out, err := f.importDoc(false)
+	assert.ErrorContains(t, err, "outgoing history includes other commits or a merge")
+	assert.NotContains(t, out, "Imported:")
+	assert.NotContains(t, out, "Already imported")
+	assert.Equal(t, privateHead, runGit(t, tcPath, "rev-parse", "HEAD"), "refusing private history must not create an import commit")
+	assert.Equal(t, initial, runGit(t, f.bare, "rev-parse", "HEAD"))
+	assert.Equal(t, initial, runGit(t, tcPath, "rev-parse", "refs/remotes/origin/main"))
+	assert.Empty(t, runGit(t, f.bare, "ls-tree", "HEAD", "--", "private.md"))
+	assert.Equal(t, docBefore, readDocFiles(t, f.docDir()))
+	assert.Equal(t, stagedBefore, runGit(t, tcPath, "ls-files", "--stage"))
+	indexAfter, err := os.ReadFile(filepath.Join(tcPath, ".git", "index"))
+	require.NoError(t, err)
+	assert.Equal(t, indexBefore, indexAfter)
+	content, err := os.ReadFile(private)
+	require.NoError(t, err)
+	assert.Equal(t, "synthetic private notes\n", string(content))
+}
+
+// TestImport_RetryRejectsOtherChangesInImportCommit refuses unrelated content even within a single commit.
+// Without this, amending the pending import bypasses a check that only counts outgoing commits.
+func TestImport_RetryRejectsOtherChangesInImportCommit(t *testing.T) {
+	t.Setenv("GIT_ALLOW_PROTOCOL", "file")
+	for _, name := range []string{"private file", "unrelated attributes", "private filename with leading space"} {
+		t.Run(name, func(t *testing.T) {
+			f := newImportRetryFixture(t)
+			tcPath := f.useFileGitRemote(t)
+			runGit(t, tcPath, "branch", "-M", "main")
+			runGit(t, tcPath, "push", "--set-upstream", "origin", "main")
+			runGit(t, f.bare, "symbolic-ref", "HEAD", "refs/heads/main")
+			initial := runGit(t, f.bare, "rev-parse", "HEAD")
+			hook := filepath.Join(f.bare, "hooks", "pre-receive")
+			require.NoError(t, os.WriteFile(hook, []byte("#!/bin/sh\necho 'Permission denied' >&2\nexit 1\n"), 0o755))
+			_, err := f.importDoc(false)
+			require.ErrorContains(t, err, "Permission denied")
+			require.Equal(t, initial, runGit(t, f.bare, "rev-parse", "HEAD"))
+
+			changed := filepath.Join(tcPath, "private.md")
+			content := []byte("synthetic private notes\n")
+			if name == "private filename with leading space" {
+				changed = filepath.Join(tcPath, " .gitattributes")
+			}
+			if name == "unrelated attributes" {
+				changed = filepath.Join(tcPath, ".gitattributes")
+				attrs, err := os.ReadFile(changed)
+				require.NoError(t, err)
+				content = append(attrs, []byte("private.md -diff\n")...)
+			}
+			require.NoError(t, os.WriteFile(changed, content, 0o644))
+			runGit(t, tcPath, "add", "--", filepath.Base(changed))
+			runGit(t, tcPath, "commit", "--amend", "--no-verify", "--no-edit")
+			amended := runGit(t, tcPath, "rev-parse", "HEAD")
+			require.Equal(t, "1", runGit(t, tcPath, "rev-list", "--count", initial+"..HEAD"))
+			require.NoError(t, os.Remove(hook))
+			docBefore := readDocFiles(t, f.docDir())
+			indexBefore, err := os.ReadFile(filepath.Join(tcPath, ".git", "index"))
+			require.NoError(t, err)
+
+			out, err := f.importDoc(false)
+			t.Logf("amended %s retry err=%v output=%q remoteHEAD=%s", name, err, out, runGit(t, f.bare, "rev-parse", "HEAD"))
+			if name == "private filename with leading space" && runGit(t, f.bare, "ls-tree", "HEAD", "--", ":(literal) .gitattributes") != "" {
+				t.Logf("remote private filename bytes: %q", runGit(t, f.bare, "show", "HEAD: .gitattributes"))
+			}
+			if name == "unrelated attributes" {
+				assert.ErrorContains(t, err, "unrelated .gitattributes changes")
+			} else {
+				assert.ErrorContains(t, err, "commit includes changes outside this document")
+			}
+			assert.NotContains(t, out, "Imported:")
+			assert.Equal(t, initial, runGit(t, f.bare, "rev-parse", "HEAD"))
+			assert.Empty(t, runGit(t, f.bare, "ls-tree", "HEAD", "--", "private.md"))
+			assert.Equal(t, amended, runGit(t, tcPath, "rev-parse", "HEAD"))
+			assert.Equal(t, docBefore, readDocFiles(t, f.docDir()))
+			indexAfter, err := os.ReadFile(filepath.Join(tcPath, ".git", "index"))
+			require.NoError(t, err)
+			assert.Equal(t, indexBefore, indexAfter)
+			after, err := os.ReadFile(changed)
+			require.NoError(t, err)
+			assert.Equal(t, content, after)
+		})
+	}
+}
+
+// TestImport_RetryDoesNotRestoreRemovedHistory preserves upstream history removed before a pending import.
+// A fork point can include removed commits which are still ancestors of the local import.
+func TestImport_RetryDoesNotRestoreRemovedHistory(t *testing.T) {
+	t.Setenv("GIT_ALLOW_PROTOCOL", "file")
+	for _, failure := range []string{"push", "commit"} {
+		t.Run(failure, func(t *testing.T) {
+			f := newImportRetryFixture(t)
+			tcPath := f.useFileGitRemote(t)
+			runGit(t, tcPath, "branch", "-M", "main")
+			runGit(t, tcPath, "push", "--set-upstream", "origin", "main")
+			runGit(t, f.bare, "symbolic-ref", "HEAD", "refs/heads/main")
+			initial := runGit(t, f.bare, "rev-parse", "HEAD")
+			removed := filepath.Join(tcPath, "removed.md")
+			require.NoError(t, os.WriteFile(removed, []byte("removed upstream content\n"), 0o644))
+			runGit(t, tcPath, "add", "removed.md")
+			runGit(t, tcPath, "commit", "--no-verify", "-m", "old upstream content")
+			runGit(t, tcPath, "push", "origin", "main")
+			oldUpstream := runGit(t, f.bare, "rev-parse", "HEAD")
+
+			hook := filepath.Join(f.bare, "hooks", "pre-receive")
+			if failure == "push" {
+				require.NoError(t, os.WriteFile(hook, []byte("#!/bin/sh\necho 'Permission denied' >&2\nexit 1\n"), 0o755))
+			} else {
+				runGit(t, tcPath, "config", "--local", "user.name", "")
+				t.Setenv("GIT_AUTHOR_NAME", "")
+				t.Setenv("GIT_COMMITTER_NAME", "")
+			}
+			_, err := f.importDoc(false)
+			if failure == "push" {
+				require.ErrorContains(t, err, "Permission denied")
+				require.NoError(t, os.Remove(hook))
+			} else {
+				require.ErrorContains(t, err, "empty ident name")
+				runGit(t, tcPath, "config", "--local", "user.name", "Test")
+				t.Setenv("GIT_AUTHOR_NAME", "Test")
+				t.Setenv("GIT_COMMITTER_NAME", "Test")
+			}
+			pending := runGit(t, tcPath, "rev-parse", "HEAD")
+			other := cloneBare(t, f.bare)
+			runGit(t, other, "reset", "--hard", initial)
+			runGit(t, other, "push", "--force", "origin", "main")
+			runGit(t, tcPath, "fetch", "origin")
+			require.Equal(t, initial, runGit(t, tcPath, "rev-parse", "refs/remotes/origin/main"))
+			require.Equal(t, oldUpstream, runGit(t, tcPath, "merge-base", "--fork-point", "refs/remotes/origin/main", "HEAD"))
+			docBefore := readDocFiles(t, f.docDir())
+			indexBefore, err := os.ReadFile(filepath.Join(tcPath, ".git", "index"))
+			require.NoError(t, err)
+
+			out, err := f.importDoc(false)
+			t.Logf("%s failure retry err=%v output=%q remoteHEAD=%s", failure, err, out, runGit(t, f.bare, "rev-parse", "HEAD"))
+			assert.ErrorContains(t, err, "outgoing history includes other commits or a merge")
+			assert.NotContains(t, out, "Imported:")
+			assert.Equal(t, initial, runGit(t, f.bare, "rev-parse", "HEAD"))
+			assert.Empty(t, runGit(t, f.bare, "ls-tree", "-r", "HEAD", "--", "removed.md", "data/docs"))
+			assert.Equal(t, pending, runGit(t, tcPath, "rev-parse", "HEAD"))
+			assert.Equal(t, initial, runGit(t, tcPath, "rev-parse", "refs/remotes/origin/main"))
+			assert.Equal(t, docBefore, readDocFiles(t, f.docDir()))
+			indexAfter, err := os.ReadFile(filepath.Join(tcPath, ".git", "index"))
+			require.NoError(t, err)
+			assert.Equal(t, indexBefore, indexAfter)
+			content, err := os.ReadFile(removed)
+			require.NoError(t, err)
+			assert.Equal(t, "removed upstream content\n", string(content))
+		})
+	}
+}
+
+// TestImport_RetryRejectsDeletedPrivateHistoryAndMerges checks history rather than only the final tree.
+func TestImport_RetryRejectsDeletedPrivateHistoryAndMerges(t *testing.T) {
+	t.Setenv("GIT_ALLOW_PROTOCOL", "file")
+	for _, name := range []string{"deleted private file", "merge commit"} {
+		t.Run(name, func(t *testing.T) {
+			f := newImportRetryFixture(t)
+			tcPath := f.useFileGitRemote(t)
+			runGit(t, tcPath, "branch", "-M", "main")
+			runGit(t, tcPath, "push", "--set-upstream", "origin", "main")
+			runGit(t, f.bare, "symbolic-ref", "HEAD", "refs/heads/main")
+			ancestor := runGit(t, tcPath, "rev-parse", "HEAD")
+			require.NoError(t, os.WriteFile(filepath.Join(tcPath, "upstream.md"), []byte("upstream content\n"), 0o644))
+			runGit(t, tcPath, "add", "upstream.md")
+			runGit(t, tcPath, "commit", "--no-verify", "-m", "upstream content")
+			runGit(t, tcPath, "push", "origin", "main")
+			initial := runGit(t, f.bare, "rev-parse", "HEAD")
+			hook := filepath.Join(f.bare, "hooks", "pre-receive")
+			require.NoError(t, os.WriteFile(hook, []byte("#!/bin/sh\necho 'Permission denied' >&2\nexit 1\n"), 0o755))
+			_, err := f.importDoc(false)
+			require.ErrorContains(t, err, "Permission denied")
+			if name == "deleted private file" {
+				require.NoError(t, os.WriteFile(filepath.Join(tcPath, "private.md"), []byte("synthetic private notes\n"), 0o644))
+				runGit(t, tcPath, "add", "private.md")
+				runGit(t, tcPath, "commit", "--no-verify", "-m", "private notes")
+				runGit(t, tcPath, "rm", "private.md")
+				runGit(t, tcPath, "commit", "--no-verify", "-m", "remove private notes")
+				require.Empty(t, runGit(t, tcPath, "ls-tree", "HEAD", "--", "private.md"))
+			} else {
+				// Both parents were published: this isolates one outgoing merge with an import-only tree.
+				tree := runGit(t, tcPath, "rev-parse", "HEAD^{tree}")
+				merge := runGit(t, tcPath, "commit-tree", tree, "-p", initial, "-p", ancestor, "-m", "merge saved import")
+				runGit(t, tcPath, "update-ref", "HEAD", merge)
+				require.Equal(t, "1", runGit(t, tcPath, "rev-list", "--count", initial+"..HEAD"))
+			}
+			pending := runGit(t, tcPath, "rev-parse", "HEAD")
+			require.NoError(t, os.Remove(hook))
+			docBefore := readDocFiles(t, f.docDir())
+			indexBefore, err := os.ReadFile(filepath.Join(tcPath, ".git", "index"))
+			require.NoError(t, err)
+
+			out, err := f.importDoc(false)
+			remoteHistory := runGit(t, f.bare, "log", "--format=%H", "HEAD", "--", ":(literal)private.md")
+			t.Logf("%s retry err=%v output=%q remotePrivateHistory=%q", name, err, out, remoteHistory)
+			assert.ErrorContains(t, err, "outgoing history includes other commits or a merge")
+			assert.NotContains(t, out, "Imported:")
+			assert.Equal(t, initial, runGit(t, f.bare, "rev-parse", "HEAD"))
+			assert.Empty(t, remoteHistory)
+			assert.Empty(t, runGit(t, f.bare, "ls-tree", "-r", "HEAD", "--", "data/docs"))
+			assert.Equal(t, pending, runGit(t, tcPath, "rev-parse", "HEAD"))
+			assert.Equal(t, docBefore, readDocFiles(t, f.docDir()))
+			indexAfter, err := os.ReadFile(filepath.Join(tcPath, ".git", "index"))
+			require.NoError(t, err)
+			assert.Equal(t, indexBefore, indexAfter)
+		})
+	}
+}
+
+// TestImport_LiteralFilenameCanBeRetried verifies legitimate pathspec metacharacters stay importable.
+func TestImport_LiteralFilenameCanBeRetried(t *testing.T) {
+	t.Setenv("GIT_ALLOW_PROTOCOL", "file")
+	f := newImportRetryFixture(t)
+	tcPath := f.useFileGitRemote(t)
+	renamed := filepath.Join(filepath.Dir(f.src), "[q3]-plan.md")
+	require.NoError(t, os.Rename(f.src, renamed))
+	f.src = renamed
+	initial := runGit(t, f.bare, "rev-parse", "HEAD")
+	hook := filepath.Join(f.bare, "hooks", "pre-receive")
+	require.NoError(t, os.WriteFile(hook, []byte("#!/bin/sh\necho 'Permission denied' >&2\nexit 1\n"), 0o755))
+	_, err := f.importDoc(false)
+	require.ErrorContains(t, err, "Permission denied")
+	pending := runGit(t, tcPath, "rev-parse", "HEAD")
+	require.NotEqual(t, initial, pending)
+	require.NoError(t, os.Remove(hook))
+
+	out, err := f.importDoc(false)
+	require.NoError(t, err)
+	assert.Contains(t, out, "Imported:")
+	assert.Equal(t, pending, runGit(t, f.bare, "rev-parse", "HEAD"))
+	assert.Equal(t, pending, runGit(t, tcPath, "rev-parse", "HEAD"))
+	const remoteDoc = "data/docs/2026/09/19/q3-plan"
+	var meta docMeta
+	require.NoError(t, json.Unmarshal([]byte(runGit(t, f.bare, "show", "HEAD:"+remoteDoc+"/metadata.json")), &meta))
+	assert.Equal(t, "sha256:c322135151cf0bc395a4d1e2a3e560e6cb0a62057e70e749c4f18cdbb81f32d7", meta.SourceOID)
+	assert.Equal(t, "[q3]-plan.md", meta.SourceFilename)
+	assert.Equal(t, "version https://git-lfs.github.com/spec/v1\noid "+meta.SourceOID+"\nsize 10", runGit(t, f.bare, "show", "HEAD:"+remoteDoc+"/[q3]-plan.md"))
+	assert.Equal(t, "data/**/metadata.json !filter !diff !merge text", runGit(t, f.bare, "show", "HEAD:.gitattributes"))
+}
+
+// TestImport_RetryHoldsRepoLockThroughPush keeps managed writers out between validation and publication.
+func TestImport_RetryHoldsRepoLockThroughPush(t *testing.T) {
+	t.Setenv("GIT_ALLOW_PROTOCOL", "file")
+	f := newImportRetryFixture(t)
+	tcPath := f.useFileGitRemote(t)
+	hook := filepath.Join(f.bare, "hooks", "pre-receive")
+	require.NoError(t, os.WriteFile(hook, []byte("#!/bin/sh\necho 'Permission denied' >&2\nexit 1\n"), 0o755))
+	_, err := f.importDoc(false)
+	require.ErrorContains(t, err, "Permission denied")
+	pending := runGit(t, tcPath, "rev-parse", "HEAD")
+	started := filepath.Join(f.bare, "hooks", "push-started")
+	released := filepath.Join(f.bare, "hooks", "push-released")
+	require.NoError(t, os.WriteFile(hook, []byte(`#!/bin/sh
+marker="$(dirname "$0")/push-started"
+release="$(dirname "$0")/push-released"
+: > "$marker"
+n=0
+while [ ! -f "$release" ]; do
+  n=$((n + 1))
+  if [ "$n" -ge 1000 ]; then exit 1; fi
+  sleep 0.01
+done
+`), 0o755))
+	type result struct {
+		out string
+		err error
+	}
+	done := make(chan result, 1)
+	finished := false
+	t.Cleanup(func() {
+		_ = os.WriteFile(released, nil, 0o644)
+		if !finished {
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Error("import did not finish after releasing the bare hook")
+			}
+		}
+	})
+	go func() {
+		out, err := f.importDoc(false)
+		done <- result{out, err}
+	}()
+	require.Eventually(t, func() bool { _, err := os.Stat(started); return err == nil }, 5*time.Second, 10*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	acquired := false
+	err = gitutil.WithRepoLock(ctx, tcPath, func() error { acquired = true; return nil })
+	assert.True(t, gitutil.IsRepoLockBusy(err), "a managed writer must wait while the recovery push is in flight")
+	assert.False(t, acquired)
+	require.NoError(t, os.WriteFile(released, nil, 0o644))
+	select {
+	case retry := <-done:
+		finished = true
+		require.NoError(t, retry.err)
+		assert.Contains(t, retry.out, "Imported:")
+	case <-time.After(5 * time.Second):
+		t.Fatal("import did not finish after releasing the bare hook")
+	}
+	assert.Equal(t, pending, runGit(t, f.bare, "rev-parse", "HEAD"))
+	assert.Equal(t, pending, runGit(t, tcPath, "rev-parse", "HEAD"))
 }
 
 // TestImport_NoOpCommitStillPushesPendingDocument verifies a no-op snapshot publishes an earlier failed push.
@@ -495,8 +909,6 @@ func TestImport_RetrySynchronizesWithUpstream(t *testing.T) {
 	runGit(t, other, "push", "origin", "main")
 	advanced := runGit(t, f.bare, "rev-parse", "HEAD")
 	draft := filepath.Join(tcPath, "draft.md")
-	require.NoError(t, os.WriteFile(draft, []byte("staged draft\n"), 0o644))
-	runGit(t, tcPath, "add", "draft.md")
 	require.NoError(t, os.WriteFile(draft, []byte("working draft\n"), 0o644))
 	docBefore := readDocFiles(t, f.docDir())
 
@@ -568,7 +980,7 @@ func TestImport_UnknownPublicationIsNotReportedAsSuccess(t *testing.T) {
 
 	out, err := f.importDoc(false)
 	require.ErrorContains(t, err, "cannot determine import publication")
-	assert.ErrorContains(t, err, "--force", "the error must say what the coworker can do next")
+	assert.ErrorContains(t, err, "rerun ox import", "the error must say what the coworker can do next")
 	assert.NotContains(t, err.Error(), f.endpoint, "diagnostics must not expose a remote URL")
 	assert.NotContains(t, out, "Already imported")
 	assert.Equal(t, before, readDocFiles(t, f.docDir()))
@@ -783,8 +1195,9 @@ func TestImport_RetryRejectsConflictingDocumentContent(t *testing.T) {
 // TestImport_RetryKeepsSavedManifestAndSidecars verifies recovery publishes the original saved document.
 // Without this, a retry can rename or redate the document and drop a previously uploaded sidecar.
 func TestImport_RetryKeepsSavedManifestAndSidecars(t *testing.T) {
+	t.Setenv("GIT_ALLOW_PROTOCOL", "file")
 	f := newImportRetryFixture(t)
-	tcPath := filepath.Join(paths.TeamsDataDir(f.endpoint), importRetryTeamID)
+	tcPath := f.useFileGitRemote(t)
 	f.text = filepath.Join(filepath.Dir(f.src), "extracted.md")
 	require.NoError(t, os.WriteFile(f.text, []byte("extracted text\n"), 0o644))
 	runGit(t, tcPath, "config", "--local", "user.name", "")

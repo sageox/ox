@@ -28,6 +28,13 @@ type PushOpts struct {
 	// Non-nil errors are logged as warnings but do not prevent the push attempt.
 	PrePush func(repoPath string) error
 
+	// ValidatePush checks whether the current history may be published before
+	// every push attempt, including retries after rebase or LFS reconciliation.
+	// It runs under WithRepoLock, held through the push, and must not acquire
+	// that lock itself. Errors stop immediately; alreadyPublished skips the push
+	// and returns success without publishing unrelated pending commits.
+	ValidatePush func(ctx context.Context, repoPath string) (alreadyPublished bool, err error)
+
 	// ReconcileLFS is called when a push fails with "LFS objects are missing".
 	// If set, PushWithRetry calls this instead of failing permanently, then
 	// retries the push once. This allows the caller to wire lfs.ReconcileUnpushedPointers
@@ -240,8 +247,8 @@ const lfsObjectsMissing = "LFS objects are missing"
 // Retry loop: up to MaxRetries attempts with linear backoff (1s, 2s, 3s...).
 // On non-fast-forward rejection: pulls with --rebase --autostash, optionally
 // auto-resolves conflicts for paths in AutoResolvePrefixes.
-// The retry pull acquires WithRepoLock; callers and conflict hooks must not
-// acquire that same non-reentrant lock around this call or inside the hook.
+// The retry pull and validated push acquire WithRepoLock; callers and callbacks
+// must not acquire that same non-reentrant lock around this call or inside a hook.
 func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 	log := opts.logger()
 	breaker := opts.pushBreaker()
@@ -274,7 +281,29 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		attemptCtx, cancel := context.WithTimeout(ctx, opTimeout)
-		outStr, err := RunGit(attemptCtx, repoPath, "push", "--quiet")
+		var outStr string
+		var err error
+		if opts.ValidatePush == nil {
+			outStr, err = RunGit(attemptCtx, repoPath, "push", "--quiet")
+		} else {
+			validationErr := WithRepoLock(attemptCtx, repoPath, func() error {
+				if err := IsSafeForGitOps(repoPath); err != nil {
+					return fmt.Errorf("repo blocked: %w", err)
+				}
+				alreadyPublished, validationErr := opts.ValidatePush(attemptCtx, repoPath)
+				if validationErr != nil {
+					return validationErr
+				}
+				if !alreadyPublished {
+					outStr, err = RunGit(attemptCtx, repoPath, "push", "--quiet")
+				}
+				return nil
+			})
+			if validationErr != nil {
+				cancel()
+				return validationErr
+			}
+		}
 		cancel()
 		if err == nil {
 			breaker.clear(repoPath)
@@ -347,6 +376,14 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 				baseCtx, baseCancel := context.WithTimeout(ctx, opTimeout)
 				defer baseCancel()
 				pullCtx, pullCancel := PullContext(baseCtx, ahead, nil)
+				if opts.ValidatePush != nil {
+					// autostash restoration does not preserve differing staged
+					// and working copies, so validated publication must stop here.
+					if _, err := RunGit(pullCtx, repoPath, "diff", "--cached", "--quiet", "--"); err != nil {
+						pullCancel()
+						return fmt.Errorf("automatic synchronization stopped; staged changes remain untouched: save the staged draft before manual synchronization, then rerun import: %w", err)
+					}
+				}
 				// A prior pull may have left autostash conflicts without an
 				// active rebase. Never send those to the positional resolver.
 				if _, err := ResolveAutostashConflicts(pullCtx, repoPath, opts.AutoResolvePrefixes, opts.AutoResolveDenyPrefixes); err != nil {
