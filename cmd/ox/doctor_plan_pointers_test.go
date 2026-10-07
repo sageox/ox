@@ -216,7 +216,12 @@ func TestEvaluatePlanPointers_InspectionErrorIsInconclusive(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(planDir, "plan.html"), []byte(lfs.FormatPointer("sha256:"+oid, 6)), 0o644))
 	pointers := collectPlanHTMLPointers(filepath.Join(ledger, "data", "plans"), ledger)
 	require.Len(t, pointers, 1)
-	client := newFakeDownloadServer(t, map[string]int{oid: http.StatusInternalServerError})
+	// the Batch request itself fails (not a per-object error, which is "present")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "store unavailable", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(srv.Close)
+	client := lfs.NewClient(srv.URL, "oauth2", "token")
 	res := evaluatePlanPointers(client, pointers, true, func() (*lfs.ReconcileResult, error) {
 		t.Fatal("reconcile must not run on an inconclusive inspection")
 		return nil, nil
