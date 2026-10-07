@@ -489,14 +489,18 @@ const fetchRetryWait = time.Second
 // remote-tracking ref to rebase onto (e.g. refs/remotes/origin/main). A single
 // cannot-lock-ref failure is retried once.
 func fetchUpstream(ctx context.Context, repoPath string) (target, out string, err error) {
-	remote, branch, err := upstreamRemoteBranch(ctx, repoPath)
+	remote, source, target, err := upstreamRefs(ctx, repoPath)
 	if err != nil {
 		return "", err.Error(), err
 	}
+	// explicit source:destination so a non-default fetch refspec mapping
+	// (branch.<b>.merge fetched into a differently named tracking ref) still
+	// lands where the rebase looks
+	refspec := "+" + source + ":" + target
 	for try := 0; ; try++ {
-		out, err = RunGit(ctx, repoPath, "fetch", "--quiet", remote, branch)
+		out, err = RunGit(ctx, repoPath, "fetch", "--quiet", remote, refspec)
 		if err == nil {
-			return "refs/remotes/" + remote + "/" + branch, out, nil
+			return target, out, nil
 		}
 		if try > 0 || !strings.Contains(out, cannotLockRef) {
 			return "", out, err
@@ -509,21 +513,27 @@ func fetchUpstream(ctx context.Context, repoPath string) (target, out string, er
 	}
 }
 
-// upstreamRemoteBranch resolves the tracked remote and branch of HEAD, falling
-// back to origin and the current branch when no upstream is configured.
-func upstreamRemoteBranch(ctx context.Context, repoPath string) (remote, branch string, err error) {
-	if out, upErr := RunGit(ctx, repoPath, "rev-parse", "--symbolic-full-name", "@{u}"); upErr == nil {
-		if rest, ok := strings.CutPrefix(strings.TrimSpace(out), "refs/remotes/"); ok {
-			if remote, branch, ok = strings.Cut(rest, "/"); ok && remote != "" && branch != "" {
-				return remote, branch, nil
-			}
-		}
-	}
-	out, err := RunGit(ctx, repoPath, "symbolic-ref", "--short", "HEAD")
+// upstreamRefs resolves the remote, the remote ref to fetch (branch.<b>.merge)
+// and the remote-tracking ref holding it (@{u}) for HEAD. Without an upstream
+// it falls back to origin and the current branch.
+func upstreamRefs(ctx context.Context, repoPath string) (remote, source, target string, err error) {
+	branchOut, err := RunGit(ctx, repoPath, "symbolic-ref", "--short", "HEAD")
 	if err != nil {
-		return "", "", fmt.Errorf("resolve current branch: %w", err)
+		return "", "", "", fmt.Errorf("resolve current branch: %w", err)
 	}
-	return "origin", strings.TrimSpace(out), nil
+	branch := strings.TrimSpace(branchOut)
+
+	trackOut, trackErr := RunGit(ctx, repoPath, "rev-parse", "--symbolic-full-name", "@{u}")
+	mergeOut, mergeErr := RunGit(ctx, repoPath, "config", "--get", "branch."+branch+".merge")
+	remoteOut, remoteErr := RunGit(ctx, repoPath, "config", "--get", "branch."+branch+".remote")
+	track := strings.TrimSpace(trackOut)
+	merge := strings.TrimSpace(mergeOut)
+	remote = strings.TrimSpace(remoteOut)
+	if trackErr == nil && mergeErr == nil && remoteErr == nil &&
+		strings.HasPrefix(track, "refs/remotes/") && merge != "" && remote != "" {
+		return remote, merge, track, nil
+	}
+	return "origin", "refs/heads/" + branch, "refs/remotes/origin/" + branch, nil
 }
 
 // tripPushWedge opens the breaker for repoPath and returns the error for the

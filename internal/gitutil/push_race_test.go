@@ -92,6 +92,24 @@ func TestPushWithRetry_ConflictAbortsAndNeedsPullCycle(t *testing.T) {
 	assert.JSONEq(t, `{"from":"first"}`, string(content), "local commit preserved")
 }
 
+func TestPushWithRetry_RebasesOntoRenamedTrackingRef(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git push with retry")
+	}
+	repo := divergedRepo(t)
+	branch := currentBranch(t, repo)
+	// map the remote branch into a differently named tracking ref
+	run(t, repo, "git", "config", "remote.origin.fetch", "+refs/heads/"+branch+":refs/remotes/origin/stable")
+	run(t, repo, "git", "update-ref", "-d", "refs/remotes/origin/"+branch)
+	run(t, repo, "git", "fetch", "--quiet", "origin")
+	run(t, repo, "git", "branch", "--set-upstream-to=origin/stable")
+
+	err := PushWithRetry(context.Background(), repo, PushOpts{MaxRetries: 3, OpTimeout: 10 * time.Second})
+	require.NoError(t, err)
+	assert.FileExists(t, filepath.Join(repo, "b.txt"))
+	assert.FileExists(t, filepath.Join(repo, "c.txt"))
+}
+
 func currentBranch(t *testing.T, repo string) string {
 	t.Helper()
 	out, err := exec.Command("git", "-C", repo, "branch", "--show-current").Output()
@@ -132,6 +150,6 @@ func TestPushWithRetry_RetriesFetchOnCannotLockRef(t *testing.T) {
 
 	calls, err := os.ReadFile(logPath)
 	require.NoError(t, err)
-	assert.Equal(t, 2, strings.Count(string(calls), "fetch --quiet origin "+branch), "fetch retried exactly once")
+	assert.Equal(t, 2, strings.Count(string(calls), "fetch --quiet origin +refs/heads/"+branch+":refs/remotes/origin/"+branch), "fetch retried exactly once")
 	assert.FileExists(t, filepath.Join(repo, "b.txt"))
 }
