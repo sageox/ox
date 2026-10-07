@@ -331,6 +331,7 @@ func extractGitHubDetail(err error) string {
 func (m *GitHubSyncManager) pushLedger(ctx context.Context, ledgerPath string) error {
 	ep := endpoint.GetForProject(m.projectRoot)
 	return gitutil.PushWithRetry(ctx, ledgerPath, gitutil.PushOpts{
+		ImmutablePaths:      true, // the Ledger never renames paths
 		AutoResolvePrefixes: ledger.AutoResolvePrefixes,
 		Logger:              m.logger,
 		SuspendWhenWedged:   true,

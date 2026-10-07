@@ -2392,6 +2392,7 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 	// push with retry (best-effort — failures are non-fatal)
 	ep := endpoint.GetForProject(h.projectRoot)
 	if err := gitutil.PushWithRetry(ctx, ledgerPath, gitutil.PushOpts{
+		ImmutablePaths:      true, // the Ledger never renames paths
 		AutoResolvePrefixes: ledger.AutoResolvePrefixes,
 		Logger:              h.logger,
 		SuspendWhenWedged:   true,

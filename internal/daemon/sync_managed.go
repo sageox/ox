@@ -30,6 +30,11 @@ type ManagedRepoPullOpts struct {
 	// RepoName identifies the repo in issues and logs (e.g., "ledger", "team-context-foo").
 	RepoName string
 
+	// ImmutablePaths declares that this repository's paths never move (the
+	// Ledger). Pull-rebase and conflict resolution then skip git's rename
+	// detection; see gitutil.WithImmutablePaths.
+	ImmutablePaths bool
+
 	// ProjectRoot is the user's project root, used to resolve the endpoint
 	// for credential refresh.
 	ProjectRoot string
@@ -212,6 +217,9 @@ type ManagedRepoPullResult struct {
 // Callers wrap this with repo-specific concerns: auto-clone, backoff, mutex,
 // metrics, post-pull signals.
 func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPullOpts) ManagedRepoPullResult {
+	if opts.ImmutablePaths {
+		ctx = gitutil.WithImmutablePaths(ctx)
+	}
 	ctx, span := perf.Start(ctx, "daemon:pull_managed_repo")
 	defer span.End()
 
@@ -918,8 +926,8 @@ func (s *SyncScheduler) fetchAndPullLocked(ctx context.Context, opts ManagedRepo
 		// --- Pull ---
 		_, pullSpan := perf.Start(ctx, "git_pull_rebase")
 		pullArgs := append([]string{"-C", path}, gitHTTPTimeoutFlags()...)
-		// no rename detection: Ledger paths never rename and the scan cost minutes per step (2026-10-07)
-		pullArgs = append(pullArgs, "-c", "merge.renames=false", "-c", "diff.renames=false", "pull", "--rebase", "--autostash", "--quiet")
+		pullArgs = append(pullArgs, gitutil.RenameDetectionFlags(ctx)...)
+		pullArgs = append(pullArgs, "pull", "--rebase", "--autostash", "--quiet")
 		ahead = gitutil.CommitsAhead(ctx, path)
 		pullCtx, pullCancel := gitutil.PullContext(ctx, ahead, s.ctx)
 		pullCmd := gitutil.NewNetworkCmd(pullCtx, pullArgs...)

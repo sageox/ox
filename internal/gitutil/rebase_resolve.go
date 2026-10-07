@@ -345,14 +345,10 @@ func rebaseStepIsEmpty(ctx context.Context, repoPath string) bool {
 // skipping it would discard a resolution that was staged but never recorded.
 // Matters more now that this runs in a loop that can fire hundreds of times.
 func runRebaseStep(ctx context.Context, repoPath, arg string) (string, error) {
-	cmd := commandContext(ctx, "git", "-C", repoPath,
-		"-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false",
-		// Ledger content never renames (session and plan dirs are immutable
-		// paths), but git still ran inexact rename detection over 47k-65k paths
-		// on EVERY replayed step; on 2026-10-07 that alone put a step past two
-		// minutes in the background band. Off, a step is seconds.
-		"-c", "merge.renames=false", "-c", "diff.renames=false",
-		"rebase", arg)
+	args := []string{"-C", repoPath, "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"}
+	args = append(args, RenameDetectionFlags(ctx)...)
+	args = append(args, "rebase", arg)
+	cmd := commandContext(ctx, "git", args...)
 	cmd.Dir = repoPath
 	cmd.Env = append(cmd.Environ(), "GIT_EDITOR=true", "LC_ALL=C", "LANG=C")
 	out, err := cmd.CombinedOutput()
@@ -590,4 +586,33 @@ func matchesSafePrefix(path string, prefixes []string, denyPrefixes []string) bo
 		}
 	}
 	return safe
+}
+
+// immutablePathsKey marks a context whose repository never renames paths.
+type immutablePathsKey struct{}
+
+// WithImmutablePaths marks ctx as operating on a repository whose paths never
+// move: a Ledger, where session and plan directories are append-only. Rebase
+// steps under such a context skip git's rename detection, which otherwise runs
+// over every tracked path on every replayed commit (47k-65k paths per step on
+// 2026-10-07, minutes per step in the background band). Repositories where a
+// rename can legitimately race an add under the old name (team context, a
+// project checkout) must not be marked; there the detection stays on.
+func WithImmutablePaths(ctx context.Context) context.Context {
+	return context.WithValue(ctx, immutablePathsKey{}, true)
+}
+
+// HasImmutablePaths reports whether ctx was marked with WithImmutablePaths.
+func HasImmutablePaths(ctx context.Context) bool {
+	v, _ := ctx.Value(immutablePathsKey{}).(bool)
+	return v
+}
+
+// RenameDetectionFlags returns the git -c flags that disable rename detection
+// when ctx carries WithImmutablePaths, and nothing otherwise.
+func RenameDetectionFlags(ctx context.Context) []string {
+	if !HasImmutablePaths(ctx) {
+		return nil
+	}
+	return []string{"-c", "merge.renames=false", "-c", "diff.renames=false"}
 }

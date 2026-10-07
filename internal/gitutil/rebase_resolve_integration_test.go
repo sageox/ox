@@ -422,17 +422,27 @@ func TestRunRebaseStep_DisablesRenameDetection(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(binDir, "git"), []byte(wrapper), 0o755))
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	require.NoError(t, ResolveRebaseAcceptTheirs(context.Background(), repo, []string{"sessions/"}))
+	require.NoError(t, ResolveRebaseAcceptTheirs(WithImmutablePaths(context.Background()), repo, []string{"sessions/"}))
 	logged, err := os.ReadFile(argsLog)
 	require.NoError(t, err)
+	continueLine := ""
 	for _, line := range strings.Split(strings.TrimSpace(string(logged)), "\n") {
 		if strings.Contains(line, "rebase --continue") {
-			assert.Contains(t, line, "merge.renames=false", "every rebase step must skip rename detection")
-			assert.Contains(t, line, "diff.renames=false")
-			return
+			continueLine = line
+			break
 		}
 	}
-	t.Fatal("no rebase --continue invocation recorded")
+	require.NotEmpty(t, continueLine, "no rebase --continue invocation recorded")
+	assert.Contains(t, continueLine, "merge.renames=false", "a Ledger rebase step must skip rename detection")
+	assert.Contains(t, continueLine, "diff.renames=false")
+
+	// a repository that is NOT marked immutable keeps rename detection on
+	_, repo2 := setupDivergentRepos(t, "docs/a.md", "local", "remote")
+	require.NoError(t, os.WriteFile(argsLog, nil, 0o644))
+	require.NoError(t, ResolveRebaseAcceptTheirs(context.Background(), repo2, []string{"docs/"}))
+	logged, err = os.ReadFile(argsLog)
+	require.NoError(t, err)
+	assert.NotContains(t, string(logged), "merge.renames=false", "only immutable-path repositories skip rename detection")
 }
 
 func TestAdvanceNonConflictRebaseStep_ReportsStepTimeout(t *testing.T) {
