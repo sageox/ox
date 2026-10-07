@@ -3,6 +3,8 @@ package lfs
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
@@ -12,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/gitutil"
+	"github.com/sageox/ox/internal/sacred"
 	"github.com/sageox/ox/internal/session/pipeline"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -677,5 +680,49 @@ func TestReconcile_MissingTraceClearsAttachmentMetadata(t *testing.T) {
 			assert.Equal(t, strings.TrimSpace(retainedPointer), git(t, ledger, "show", "HEAD:sessions/trace-repair/"+retainedArtifact))
 			assert.Equal(t, 1, unpushedCount(t, ledger))
 		})
+	}
+}
+
+// commitUnrecoverablePointers commits n session pointers whose blobs are
+// absent from the remote and from local recovery content.
+func commitUnrecoverablePointers(t *testing.T, ledger string, n int) (*Client, []string) {
+	t.Helper()
+	missing := make(map[string]bool)
+	var paths []string
+	for i := 0; i < n; i++ {
+		name := fmt.Sprintf("s%02d", i)
+		_, _, _, ref := commitMissingSessionPointer(t, ledger, name, []byte("content "+name+"\n"))
+		missing[ref.BareOID()] = true
+		paths = append(paths, "sessions/"+name+"/raw.jsonl")
+	}
+	client, _ := recoveryLFSServer(t, missing, 0)
+	return client, paths
+}
+
+func TestReconcile_OverThresholdWithoutOverrideNamesEnvVar(t *testing.T) {
+	t.Setenv(sacred.OverrideEnv, "")
+	ledger, _ := initLedgerWithRemote(t)
+	client, _ := commitUnrecoverablePointers(t, ledger, sacred.MassDeleteThreshold+2)
+
+	result, err := reconcileUnpushedPointers(context.Background(), ledger, nil, func() (*Client, error) { return client, nil })
+
+	var unrecoverable *UnrecoverablePointersError
+	require.True(t, errors.As(err, &unrecoverable), "got %v", err)
+	assert.Contains(t, err.Error(), sacred.OverrideEnv)
+	assert.Zero(t, result.Replaced)
+}
+
+func TestReconcile_OverThresholdWithOverrideReplacesPointers(t *testing.T) {
+	t.Setenv(sacred.OverrideEnv, "1")
+	ledger, _ := initLedgerWithRemote(t)
+	n := sacred.MassDeleteThreshold + 2
+	client, paths := commitUnrecoverablePointers(t, ledger, n)
+
+	result, err := reconcileUnpushedPointers(context.Background(), ledger, nil, func() (*Client, error) { return client, nil })
+
+	require.NoError(t, err)
+	assert.Equal(t, n, result.Replaced)
+	for _, path := range paths {
+		assert.NoFileExists(t, filepath.Join(ledger, path))
 	}
 }

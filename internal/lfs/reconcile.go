@@ -46,8 +46,8 @@ type UnrecoverablePointersError struct {
 }
 
 func (e *UnrecoverablePointersError) Error() string {
-	return fmt.Sprintf("refusing LFS reconcile: uploaded %d; %d pointers unrecoverable, exceeding threshold %d: %s",
-		e.Uploaded, len(e.Paths), e.Threshold, strings.Join(e.Paths, ", "))
+	return fmt.Sprintf("refusing LFS reconcile: uploaded %d; %d pointers unrecoverable, exceeding threshold %d: %s; set %s=1 on the daemon to accept the loss and remove them",
+		e.Uploaded, len(e.Paths), e.Threshold, strings.Join(e.Paths, ", "), sacred.OverrideEnv)
 }
 
 // Changed reports whether the reconcile rewrote anything a push retry can
@@ -296,7 +296,12 @@ func reconcilePointers(ctx context.Context, ledgerPath string, logger *slog.Logg
 			paths = append(paths, p.relPath)
 			logger.Warn("lfs reconcile: unrecoverable pointer not replaced", "path", p.relPath, "oid", p.ref.OID)
 		}
-		return result, &UnrecoverablePointersError{Uploaded: result.RecoveredUploads, Paths: paths, Threshold: sacred.MassDeleteThreshold}
+		// same explicit opt-in the commit-time guard honors, so a user who has
+		// accepted the loss can release a wedged Ledger
+		if os.Getenv(sacred.OverrideEnv) != "1" {
+			return result, &UnrecoverablePointersError{Uploaded: result.RecoveredUploads, Paths: paths, Threshold: sacred.MassDeleteThreshold}
+		}
+		logger.Info(fmt.Sprintf("lfs reconcile: sacred mass-delete override set, replacing %d unrecoverable pointers", len(replaceable)), "override_env", sacred.OverrideEnv)
 	}
 
 	if len(replaceable) == 0 {
