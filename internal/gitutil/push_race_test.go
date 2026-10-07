@@ -139,13 +139,45 @@ func TestPushWithRetry_RebaseTimeoutLeavesRepoClean(t *testing.T) {
 		t.Skip("short: git push with retry")
 	}
 	repo := divergedRepo(t)
-	installFakeGit(t, "rebasehang")
+	logPath := installFakeGit(t, "rebasehang")
 
 	start := time.Now()
 	err := PushWithRetry(context.Background(), repo, PushOpts{MaxRetries: 3, OpTimeout: 2 * time.Second})
-	require.Error(t, err)
+	require.ErrorIs(t, err, ErrNeedsPullCycle)
 	assert.Less(t, time.Since(start), 20*time.Second, "hung rebase must be cut off by the pull budget")
 	assert.False(t, IsRebaseInProgress(repo))
+
+	calls, readErr := os.ReadFile(logPath)
+	require.NoError(t, readErr)
+	assert.Contains(t, string(calls), "rebase --autostash", "the hang must have been in the rebase step")
+}
+
+// A force-pushed upstream drops commits we already pushed once. Rebasing
+// without fork-point detection would replay them and push them back.
+func TestPushWithRetry_ForcePushedUpstreamDoesNotResurrectDroppedCommits(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git push with retry")
+	}
+	repo, bare := initBareRemoteRepo(t)
+	addCommit(t, repo, "dropped.txt", "x", "to be dropped upstream")
+	run(t, repo, "git", "push", "--quiet")
+	run(t, repo, "git", "fetch", "--quiet", "origin")
+
+	second := filepath.Join(t.TempDir(), "second")
+	run(t, "", "git", "clone", "--quiet", bare, second)
+	run(t, second, "git", "config", "user.email", "test@test.local")
+	run(t, second, "git", "config", "user.name", "Test")
+	run(t, second, "git", "reset", "--hard", "--quiet", "HEAD~1")
+	addCommit(t, second, "kept.txt", "y", "rewritten upstream")
+	run(t, second, "git", "push", "--force", "--quiet")
+
+	addCommit(t, repo, "local.txt", "z", "local work")
+
+	err := PushWithRetry(context.Background(), repo, PushOpts{MaxRetries: 3, OpTimeout: 10 * time.Second})
+	require.NoError(t, err)
+	assert.FileExists(t, filepath.Join(repo, "kept.txt"))
+	assert.FileExists(t, filepath.Join(repo, "local.txt"))
+	assert.NoFileExists(t, filepath.Join(repo, "dropped.txt"))
 }
 
 func TestPushWithRetry_NoUpstreamFallsBackToOriginBranch(t *testing.T) {
@@ -173,6 +205,9 @@ func TestUpstreamRefs_DetachedHeadErrors(t *testing.T) {
 }
 
 func TestFetchUpstream_CancelDuringLockWait(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: waits out a context deadline")
+	}
 	repo := divergedRepo(t)
 	installFakeGit(t, "lockfail")
 	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
@@ -206,7 +241,7 @@ func TestPushWithRetry_RebasesExplicitRefNotFetchHead(t *testing.T) {
 	calls, err := os.ReadFile(logPath)
 	require.NoError(t, err)
 	assert.NotContains(t, string(calls), "pull")
-	assert.Contains(t, string(calls), "rebase --autostash --quiet refs/remotes/origin/"+branch)
+	assert.Contains(t, string(calls), "rebase --autostash --fork-point --quiet refs/remotes/origin/"+branch)
 }
 
 func TestPushWithRetry_RetriesFetchOnCannotLockRef(t *testing.T) {

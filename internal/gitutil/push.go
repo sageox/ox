@@ -361,7 +361,7 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 					pullCancel()
 					return fmt.Errorf("git fetch failed during retry: %s: %w", fetchOut, fetchErr)
 				}
-				pullOut, pullErr := RunGit(pullCtx, repoPath, "rebase", "--autostash", "--quiet", target)
+				pullOut, pullErr := RunGit(pullCtx, repoPath, "rebase", "--autostash", "--fork-point", "--quiet", target)
 				timedOut := PullTimedOut(pullCtx, pullErr)
 				pullCancel()
 				if timedOut {
