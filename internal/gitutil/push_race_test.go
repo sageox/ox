@@ -45,6 +45,11 @@ case "` + mode + `:$sub" in
       echo "error: cannot lock ref 'refs/remotes/origin/main': is at aaa but expected bbb" >&2
       exit 1
     fi;;
+  rebasehang:rebase)
+    exec sleep 30;;
+  fetchfail:fetch)
+    echo "fatal: unable to access remote" >&2
+    exit 128;;
   fetchhead:pull)
     echo "fatal: Cannot rebase onto multiple branches." >&2
     exit 128;;
@@ -108,6 +113,73 @@ func TestPushWithRetry_RebasesOntoRenamedTrackingRef(t *testing.T) {
 	require.NoError(t, err)
 	assert.FileExists(t, filepath.Join(repo, "b.txt"))
 	assert.FileExists(t, filepath.Join(repo, "c.txt"))
+}
+
+func TestPushWithRetry_FetchFailureIsReportedWithoutRebase(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git push with retry")
+	}
+	repo := divergedRepo(t)
+	logPath := installFakeGit(t, "fetchfail")
+
+	err := PushWithRetry(context.Background(), repo, PushOpts{MaxRetries: 3, OpTimeout: 10 * time.Second})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "git fetch failed during retry")
+	assert.NotErrorIs(t, err, ErrNeedsPullCycle)
+	assert.False(t, IsRebaseInProgress(repo))
+
+	calls, readErr := os.ReadFile(logPath)
+	require.NoError(t, readErr)
+	assert.Equal(t, 1, strings.Count(string(calls), "fetch --quiet"), "non-lock failures are not retried")
+	assert.NotContains(t, string(calls), "rebase")
+}
+
+func TestPushWithRetry_RebaseTimeoutLeavesRepoClean(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git push with retry")
+	}
+	repo := divergedRepo(t)
+	installFakeGit(t, "rebasehang")
+
+	start := time.Now()
+	err := PushWithRetry(context.Background(), repo, PushOpts{MaxRetries: 3, OpTimeout: 2 * time.Second})
+	require.Error(t, err)
+	assert.Less(t, time.Since(start), 20*time.Second, "hung rebase must be cut off by the pull budget")
+	assert.False(t, IsRebaseInProgress(repo))
+}
+
+func TestPushWithRetry_NoUpstreamFallsBackToOriginBranch(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git push with retry")
+	}
+	repo := divergedRepo(t)
+	run(t, repo, "git", "config", "push.default", "current")
+	run(t, repo, "git", "branch", "--unset-upstream")
+
+	err := PushWithRetry(context.Background(), repo, PushOpts{MaxRetries: 3, OpTimeout: 10 * time.Second})
+	require.NoError(t, err)
+	assert.FileExists(t, filepath.Join(repo, "b.txt"))
+}
+
+func TestUpstreamRefs_DetachedHeadErrors(t *testing.T) {
+	repo, _ := initBareRemoteRepo(t)
+	run(t, repo, "git", "checkout", "--quiet", "--detach")
+
+	_, _, _, err := upstreamRefs(context.Background(), repo)
+	require.Error(t, err)
+
+	_, _, fetchErr := fetchUpstream(context.Background(), repo)
+	require.Error(t, fetchErr)
+}
+
+func TestFetchUpstream_CancelDuringLockWait(t *testing.T) {
+	repo := divergedRepo(t)
+	installFakeGit(t, "lockfail")
+	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
+	defer cancel()
+
+	_, _, err := fetchUpstream(ctx, repo)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
 }
 
 func currentBranch(t *testing.T, repo string) string {

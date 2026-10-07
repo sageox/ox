@@ -358,12 +358,8 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 				// fetch can rewrite ("Cannot rebase onto multiple branches").
 				target, fetchOut, fetchErr := fetchUpstream(pullCtx, repoPath)
 				if fetchErr != nil {
-					timedOut := PullTimedOut(pullCtx, fetchErr)
 					pullCancel()
-					if timedOut {
-						return fmt.Errorf("git fetch timed out after %s with %d commits ahead: %w", PullBudget(ahead), ahead, fetchErr)
-					}
-					return fmt.Errorf("git fetch failed during retry: %s", fetchOut)
+					return fmt.Errorf("git fetch failed during retry: %s: %w", fetchOut, fetchErr)
 				}
 				pullOut, pullErr := RunGit(pullCtx, repoPath, "rebase", "--autostash", "--quiet", target)
 				timedOut := PullTimedOut(pullCtx, pullErr)
