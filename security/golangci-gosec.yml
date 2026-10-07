@@ -28,6 +28,9 @@ linters:
         - G702 # command injection via taint
         - G703 # path traversal via taint
         - G704 # SSRF via taint
+        # Unchecked errors belong to errcheck in the lint gate (.config/golangci.yml),
+        # which is curated for a CLI and honors //nolint:errcheck; G104 ignores both.
+        - G104 # errors unhandled
 
 issues:
   max-issues-per-linter: 0

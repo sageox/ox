@@ -1074,6 +1074,33 @@ def gosec_findings(path: Path, root: Path, touched) -> list:
     return found
 
 
+HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+
+
+def parse_changed_lines(diff: str) -> dict:
+    """{path: {line numbers added or changed}} from `git diff -U0` output."""
+    changed, path = {}, None
+    for line in diff.splitlines():
+        if line.startswith("+++ "):
+            target = line[4:].strip()
+            path = target[2:] if target.startswith("b/") else None
+        elif path and (m := HUNK_RE.match(line)):
+            start, count = int(m.group(1)), int(m.group(2) if m.group(2) is not None else 1)
+            if count:
+                changed.setdefault(path, set()).update(range(start, start + count))
+    return changed
+
+
+def changed_lines(root: Path, since: str) -> dict:
+    """Lines the change touches, diffed the way deterministic.sh lists touched files."""
+    for rev in (f"{since}...HEAD", since):
+        r = subprocess.run(["git", "-C", str(root), "-c", "core.quotePath=false", "diff", "-U0", "--no-color",
+                            "--no-ext-diff", rev], capture_output=True, text=True)
+        if r.returncode == 0:
+            return parse_changed_lines(r.stdout)
+    return {}
+
+
 def cmd_det_merge(a) -> int:
     out, root = Path(a.out), Path(a.root).resolve()
     touched_list = [line.strip() for line in read_text(a.touched).splitlines() if line.strip()]
@@ -1098,6 +1125,13 @@ def cmd_det_merge(a) -> int:
         got = collect() if tools[tool]["status"] == "ran" else []
         tools[tool]["findings"] = len(got)
         findings.extend(got)
+    if a.scope == "diff":
+        # A hit in a touched file is not necessarily the change's: mark whether it is on a changed line.
+        changed = changed_lines(root, a.since)
+        for f in findings:
+            loc = next((l for l in f.get("locations") or [] if l.get("file")), None)
+            if loc and finding_line(loc):
+                f["in_diff"] = finding_line(loc) in changed.get(loc["file"], ())
     ran = [t for t, v in tools.items() if v["status"] == "ran"]
     failed = [t for t, v in tools.items() if v["status"] == "failed"]
     level = "none" if not ran else ("full" if len(ran) == len(tools) else "partial")
@@ -1329,6 +1363,7 @@ def scanner_report_findings(det, ai_findings: list) -> list:
             "line": line,
             "message": (f.get("message") or "").strip().replace("\n", " "),
             "reachable": bool(f.get("reachable")),
+            "in_diff": f.get("in_diff"),
         })
     found.sort(key=lambda f: (SCANNER_ORDER.get(f["tool"], 4), f["level"] != "error", f["file"], f["line"]))
     return found
@@ -1378,6 +1413,19 @@ def scanner_table(scan: list) -> list:
     return md
 
 
+def scanner_sections(scan: list) -> list:
+    """Scanner findings with the ones off the changed lines set apart: a hit elsewhere
+    in a touched file is existing code, and listing it first reads as the change's."""
+    main = [f for f in scan if f.get("in_diff") is not False]
+    elsewhere = [f for f in scan if f.get("in_diff") is False]
+    md = scanner_table(main) if main else ["No scanner findings on the changed lines."]
+    if elsewhere:
+        md += ["", "<details>",
+               f"<summary>Elsewhere in touched files (existing code): {len(elsewhere)} finding(s)</summary>",
+               ""] + scanner_table(elsewhere) + ["", "</details>"]
+    return md
+
+
 def render_det_summary(doc: dict) -> str:
     """The fast tier's report: what each scanner did and what it found. CI appends it
     to the job summary, so it must never read as clean when nothing was scanned."""
@@ -1402,7 +1450,7 @@ def render_det_summary(doc: dict) -> str:
     scan = scanner_report_findings(doc, [])
     md.append("")
     if scan:
-        md += scanner_table(scan)
+        md += scanner_sections(scan)
     elif ran:
         md.append("No scanner findings.")
     return "\n".join(md) + "\n"
@@ -1540,7 +1588,7 @@ def render_findings(s: dict, cov: dict, counts: dict) -> str:
             if f.get(key):
                 md += [f"**{label}**: {_fmt(f[key])}", ""]
     if scan:
-        md += ["## Scanner findings (not validated by the AI tier)", ""] + scanner_table(scan) + [""]
+        md += ["## Scanner findings (not validated by the AI tier)", ""] + scanner_sections(scan) + [""]
     md += ["## Coverage", "", "| Stage | Result |", "|---|---|"]
     md += [f"| {stage} | {text} |" for stage, text in coverage_rows(s)]
     if cov["notes"] and cov["level"] != "empty":
