@@ -49,6 +49,15 @@ Feature: Initializing a Repository for SageOx
       And `ox init` fails, so `ox init && git add .sageox/` stops there
       And the repository stays un-initialized
 
+  Rule: Init without a team sends the coworker to create one
+
+    Scenario: Devon has no team and chooses to create one on the dashboard
+      Given Devon is signed in, belongs to no team yet, and is in an un-initialized git repository
+      When Devon runs `ox init` and chooses to create a team on the dashboard
+      Then ox opens the dashboard's new-team page and tells Devon to re-run `ox init` afterwards
+      And `ox init` fails, so nothing counts the repository as initialized
+      And the repository stays un-initialized
+
   Rule: The team commits the .sageox directory to share the setup
 
     Scenario: Devon commits the SageOx configuration for the team
