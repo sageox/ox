@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -360,6 +361,9 @@ func TestResolveRebaseAcceptTheirs_CancellationStopsBetweenSteps(t *testing.T) {
 func TestResolveRebaseAcceptTheirs_CancellationReachesActiveStep(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: git rebase operations")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("the blocking git wrapper is a POSIX shell script")
 	}
 	_, repo := setupDivergentRepos(t, "sessions/s1/meta.json", `{"local":true}`, `{"remote":true}`)
 
