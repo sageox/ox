@@ -35,6 +35,21 @@ type ReconcileResult struct {
 	ReplacedFiles    []string // relative paths of removed pointer artifacts, sorted
 }
 
+// UnrecoverablePointersError reports pointers whose blobs are missing from the
+// remote and cannot be restored from local recovery content, in numbers too
+// large for reconcile to replace automatically. Recoverable blobs were already
+// uploaded when it is returned.
+type UnrecoverablePointersError struct {
+	Uploaded  int
+	Paths     []string
+	Threshold int
+}
+
+func (e *UnrecoverablePointersError) Error() string {
+	return fmt.Sprintf("refusing LFS reconcile: uploaded %d; %d pointers unrecoverable, exceeding threshold %d: %s",
+		e.Uploaded, len(e.Paths), e.Threshold, strings.Join(e.Paths, ", "))
+}
+
 // Changed reports whether the reconcile rewrote anything a push retry can
 // benefit from: it restored a blob, removed pointer artifacts, or rewrote
 // unpushed history.
@@ -263,12 +278,6 @@ func reconcilePointers(ctx context.Context, ledgerPath string, logger *slog.Logg
 		if err := validateUnpushedTip(ctx, ledgerPath, set.upstream); err != nil {
 			return result, fmt.Errorf("validate unpushed Ledger before LFS reconcile: %w", err)
 		}
-		if err := preflightSacredDeletions(ctx, ledgerPath, set.upstream, replaceable); err != nil {
-			return result, err
-		}
-	} else if len(replaceable) > sacred.MassDeleteThreshold {
-		return result, fmt.Errorf("refusing LFS reconcile: would delete %d sacred files, exceeding threshold %d",
-			len(replaceable), sacred.MassDeleteThreshold)
 	}
 
 	for _, upload := range recoverable {
@@ -277,6 +286,18 @@ func reconcilePointers(ctx context.Context, ledgerPath string, logger *slog.Logg
 		}
 	}
 	result.RecoveredUploads = len(recoverable)
+
+	// the mass-delete guard covers only the replacements reconcile itself is
+	// about to make, and runs after the recoverable uploads so a few
+	// unrecoverable pointers never block restoring the rest
+	if len(replaceable) > sacred.MassDeleteThreshold {
+		paths := make([]string, 0, len(replaceable))
+		for _, p := range replaceable {
+			paths = append(paths, p.relPath)
+			logger.Warn("lfs reconcile: unrecoverable pointer not replaced", "path", p.relPath, "oid", p.ref.OID)
+		}
+		return result, &UnrecoverablePointersError{Uploaded: result.RecoveredUploads, Paths: paths, Threshold: sacred.MassDeleteThreshold}
+	}
 
 	if len(replaceable) == 0 {
 		if result.HistoryOnly == 0 {
@@ -792,27 +813,6 @@ func isLedgerContentFile(name string) bool {
 		}
 	}
 	return false
-}
-
-func preflightSacredDeletions(ctx context.Context, ledgerPath, upstream string, replaceable []pointerEntry) error {
-	deletedOut, err := gitPlumbing(ctx, ledgerPath, nil, "diff-tree", "-r", "--name-only", "--diff-filter=D", upstream, "HEAD")
-	if err != nil {
-		return fmt.Errorf("preflight sacred deletions: %w", err)
-	}
-	paths := strings.Fields(string(deletedOut))
-	for _, entry := range replaceable {
-		paths = append(paths, filepath.ToSlash(entry.relPath))
-	}
-	deleted := sacred.Filter(paths)
-	seen := make(map[string]bool, len(deleted))
-	for _, path := range deleted {
-		seen[path] = true
-	}
-	if len(seen) <= sacred.MassDeleteThreshold {
-		return nil
-	}
-	return fmt.Errorf("refusing LFS reconcile: would delete %d files under sacred paths, exceeding threshold %d",
-		len(seen), sacred.MassDeleteThreshold)
 }
 
 // pointerSizedBlobs filters oids to blobs small enough to be an LFS pointer, so
