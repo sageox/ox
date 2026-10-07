@@ -116,6 +116,12 @@ func (o *PushOpts) pushBreaker() *pushBreaker {
 // rejected push and repair. Match it with errors.Is.
 var ErrPushWedged = errors.New("ledger push wedged")
 
+// ErrNeedsPullCycle is returned (wrapped) by PushWithRetry when the retry's
+// rebase stopped and was aborted (typically content conflicts). The tree is
+// back to its pre-retry state; the next pull cycle, which owns the conflict
+// resolution ladder, can reconcile it before the following push.
+var ErrNeedsPullCycle = errors.New("rebase needs pull cycle")
+
 const (
 	// pushWedgeBackoffBase is how long the breaker stays open after it first
 	// trips. Each further trip without an intervening successful push doubles it.
@@ -420,7 +426,7 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 								abortCtx, abortCancel := context.WithTimeout(ctx, opTimeout)
 								_, _ = RunGit(abortCtx, repoPath, "rebase", "--abort")
 								abortCancel()
-								return fmt.Errorf("git rebase failed during retry: %s", pullOut)
+								return fmt.Errorf("%w: git rebase failed during retry: %s", ErrNeedsPullCycle, pullOut)
 							}
 						} else {
 							log.Info("auto-resolved rebase conflicts", "strategy", "accept-theirs")
@@ -430,7 +436,7 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 						abortCtx, abortCancel := context.WithTimeout(ctx, opTimeout)
 						_, _ = RunGit(abortCtx, repoPath, "rebase", "--abort")
 						abortCancel()
-						return fmt.Errorf("git rebase failed during retry: %s", pullOut)
+						return fmt.Errorf("%w: git rebase failed during retry: %s", ErrNeedsPullCycle, pullOut)
 					}
 				}
 				// A successful pull (or rebase --continue) can still leave conflicts

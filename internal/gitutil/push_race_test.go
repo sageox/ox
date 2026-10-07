@@ -71,6 +71,27 @@ func divergedRepo(t *testing.T) string {
 	return repo
 }
 
+func TestPushWithRetry_ConflictAbortsAndNeedsPullCycle(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git push with retry")
+	}
+	repo, bare := initBareRemoteRepo(t)
+	second := filepath.Join(t.TempDir(), "second")
+	run(t, "", "git", "clone", "--quiet", bare, second)
+	run(t, second, "git", "config", "user.email", "test@test.local")
+	run(t, second, "git", "config", "user.name", "Test")
+	addCommit(t, second, "meta.json", `{"from":"second"}`, "second meta")
+	run(t, second, "git", "push", "--quiet")
+	addCommit(t, repo, "meta.json", `{"from":"first"}`, "first meta")
+
+	err := PushWithRetry(context.Background(), repo, PushOpts{MaxRetries: 3, OpTimeout: 10 * time.Second})
+	require.ErrorIs(t, err, ErrNeedsPullCycle)
+	assert.False(t, IsRebaseInProgress(repo), "rebase must be aborted")
+	content, readErr := os.ReadFile(filepath.Join(repo, "meta.json"))
+	require.NoError(t, readErr)
+	assert.JSONEq(t, `{"from":"first"}`, string(content), "local commit preserved")
+}
+
 func currentBranch(t *testing.T, repo string) string {
 	t.Helper()
 	out, err := exec.Command("git", "-C", repo, "branch", "--show-current").Output()
