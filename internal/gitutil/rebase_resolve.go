@@ -87,8 +87,9 @@ func ResolveRebaseAcceptTheirs(ctx context.Context, repoPath string, safePrefixe
 // daemon runs in the background band (efficiency cores, throttled I/O), the
 // Ledger index has 130k+ entries, and one replayed commit can touch hundreds of
 // files. Per step, so a whole replay is bounded by steps x this, never by the
-// caller's single operation budget.
-const resolveStepTimeout = 2 * time.Minute
+// caller's single operation budget. Measured 2026-10-07: with rename detection
+// off a step is seconds; ten minutes is headroom for a starved daemon, not a plan.
+var resolveStepTimeout = 10 * time.Minute // var: tests shorten it
 
 // probeRetries is how many times listUnmergedEntries re-runs a probe that hit
 // its deadline before giving up. A slow probe is load, not a broken index; the
@@ -301,6 +302,9 @@ func advanceNonConflictRebaseStep(ctx context.Context, repoPath string) (done bo
 	// "nothing to commit" in its own output, and that would have overridden the
 	// structural check and silently dropped a genuine commit. `--skip` DISCARDS
 	// work, so the only tolerable error direction here is refusing to skip.
+	if errors.Is(contErr, context.DeadlineExceeded) || errors.Is(contErr, context.Canceled) {
+		return false, fmt.Errorf("rebase --continue did not finish within the step budget: %w", contErr)
+	}
 	if !rebaseStepIsEmpty(ctx, repoPath) {
 		return false, fmt.Errorf("rebase halted with nothing to resolve: %s",
 			SanitizeOutput(strings.TrimSpace(contOut)))
@@ -342,10 +346,21 @@ func rebaseStepIsEmpty(ctx context.Context, repoPath string) bool {
 // Matters more now that this runs in a loop that can fire hundreds of times.
 func runRebaseStep(ctx context.Context, repoPath, arg string) (string, error) {
 	cmd := commandContext(ctx, "git", "-C", repoPath,
-		"-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", "rebase", arg)
+		"-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false",
+		// Ledger content never renames (session and plan dirs are immutable
+		// paths), but git still ran inexact rename detection over 47k-65k paths
+		// on EVERY replayed step; on 2026-10-07 that alone put a step past two
+		// minutes in the background band. Off, a step is seconds.
+		"-c", "merge.renames=false", "-c", "diff.renames=false",
+		"rebase", arg)
 	cmd.Dir = repoPath
 	cmd.Env = append(cmd.Environ(), "GIT_EDITOR=true", "LC_ALL=C", "LANG=C")
 	out, err := cmd.CombinedOutput()
+	if err != nil && ctx.Err() != nil {
+		// a killed git prints nothing; say what actually happened instead of
+		// letting the caller read an empty output as "halted with nothing to resolve"
+		return string(out), fmt.Errorf("git rebase %s: %w", arg, ctx.Err())
+	}
 	return string(out), err
 }
 

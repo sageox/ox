@@ -918,7 +918,8 @@ func (s *SyncScheduler) fetchAndPullLocked(ctx context.Context, opts ManagedRepo
 		// --- Pull ---
 		_, pullSpan := perf.Start(ctx, "git_pull_rebase")
 		pullArgs := append([]string{"-C", path}, gitHTTPTimeoutFlags()...)
-		pullArgs = append(pullArgs, "pull", "--rebase", "--autostash", "--quiet")
+		// no rename detection: Ledger paths never rename and the scan cost minutes per step (2026-10-07)
+		pullArgs = append(pullArgs, "-c", "merge.renames=false", "-c", "diff.renames=false", "pull", "--rebase", "--autostash", "--quiet")
 		ahead = gitutil.CommitsAhead(ctx, path)
 		pullCtx, pullCancel := gitutil.PullContext(ctx, ahead, s.ctx)
 		pullCmd := gitutil.NewNetworkCmd(pullCtx, pullArgs...)
