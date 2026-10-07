@@ -700,6 +700,9 @@ func commitUnrecoverablePointers(t *testing.T, ledger string, n int) (*Client, [
 }
 
 func TestReconcile_OverThresholdWithoutOverrideNamesEnvVar(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping git-backed reconcile test in short mode")
+	}
 	t.Setenv(sacred.OverrideEnv, "")
 	ledger, _ := initLedgerWithRemote(t)
 	client, _ := commitUnrecoverablePointers(t, ledger, sacred.MassDeleteThreshold+2)
@@ -713,6 +716,9 @@ func TestReconcile_OverThresholdWithoutOverrideNamesEnvVar(t *testing.T) {
 }
 
 func TestReconcile_OverThresholdWithOverrideReplacesPointers(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping git-backed reconcile test in short mode")
+	}
 	t.Setenv(sacred.OverrideEnv, "1")
 	ledger, _ := initLedgerWithRemote(t)
 	n := sacred.MassDeleteThreshold + 2
