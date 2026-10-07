@@ -5,7 +5,6 @@ package daemon
 import (
 	"errors"
 	"os"
-	"runtime"
 	"strconv"
 	"syscall"
 )
@@ -44,15 +43,12 @@ const daemonNiceness = 5
 // refuse it, and the daemon is fully functional either way. The error is
 // returned so the caller can log it at debug level.
 func lowerDaemonPriority() error {
-	if runtime.GOOS == "linux" {
-		return lowerPriorityAllThreads(daemonNiceness)
-	}
-	return syscall.Setpriority(syscall.PRIO_PROCESS, 0, daemonNiceness)
+	return lowerPriorityAllThreads(daemonNiceness)
 }
 
 // lowerPriorityAllThreads applies nice to every thread listed in
 // /proc/self/task, falling back to the calling thread when procfs is not
-// available.
+// available (macOS and the BSDs, where nice is per process anyway).
 func lowerPriorityAllThreads(nice int) error {
 	entries, err := os.ReadDir("/proc/self/task")
 	if err != nil {
