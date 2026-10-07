@@ -276,7 +276,7 @@ func TestPushTeamContext_ConflictRetry(t *testing.T) {
 	runGit(t, otherClone, "push")
 
 	// pushTeamContext should handle non-fast-forward with rebase retry
-	err := pushTeamContext(context.Background(), clonePath, "https://test.invalid")
+	err := pushTeamContext(context.Background(), clonePath, "https://test.invalid", 0)
 	require.NoError(t, err, "pushTeamContext should succeed after rebase retry")
 
 	// verify both commits on remote
@@ -305,7 +305,7 @@ func TestPushTeamContext_AuthFailure(t *testing.T) {
 	// git repository" which exhausts retries quickly (no network timeout)
 	runGit(t, clonePath, "remote", "set-url", "origin", "/nonexistent/bare/repo.git")
 
-	err := pushTeamContext(context.Background(), clonePath, "https://test.invalid")
+	err := pushTeamContext(context.Background(), clonePath, "https://test.invalid", 0)
 	require.Error(t, err, "should fail when remote is unreachable")
 
 	// local commit preserved
@@ -359,9 +359,9 @@ func TestImportDedup_SameContentDifferentFilename(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(docDir, "metadata.json"), metaData, 0o644))
 
 	// dedup should find existing doc by OID regardless of original filename
-	docID, found := findExistingDocByOID(dir, ref.OID)
+	metaPath, found := findExistingDocByOID(dir, ref.OID)
 	assert.True(t, found, "should find existing doc by OID")
-	assert.Equal(t, existingID, docID)
+	assert.Equal(t, filepath.Join(docDir, "metadata.json"), metaPath)
 }
 
 // --- LFS FileRef tests ---

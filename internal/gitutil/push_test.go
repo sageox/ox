@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -320,13 +322,21 @@ func TestPushWithRetry_PermanentErrorShortCircuits(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: git push with retry")
 	}
+	t.Setenv("GIT_ALLOW_PROTOCOL", "file:http")
 	repo, _ := initBareRemoteRepo(t)
 	addCommit(t, repo, "a.txt", "hello", "add a")
 
-	// point at a remote URL that requires auth, producing "Authentication failed"
+	// A loopback authentication challenge produces "Authentication failed"
 	// or "could not read Username" — both are permanent patterns
-	run(t, repo, "git", "remote", "set-url", "origin",
-		"https://invalid-user:invalid-pass@github.com/nonexistent-org-abc123xyz/nonexistent-repo-abc123xyz.git")
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.Header().Set("WWW-Authenticate", `Basic realm="test"`)
+		http.Error(w, "Authentication failed", http.StatusUnauthorized)
+	}))
+	t.Cleanup(server.Close)
+	run(t, repo, "git", "remote", "set-url", "origin", server.URL+"/requires-auth.git")
+	run(t, repo, "git", "config", "http.proxy", "")
 
 	// set GIT_TERMINAL_PROMPT=0 so git doesn't hang waiting for credentials
 	t.Setenv("GIT_TERMINAL_PROMPT", "0")
@@ -339,6 +349,7 @@ func TestPushWithRetry_PermanentErrorShortCircuits(t *testing.T) {
 	})
 
 	assert.Error(t, err)
+	assert.Positive(t, requests.Load(), "Git must receive the loopback authentication challenge")
 	// git should produce "Authentication failed" which matches a permanent pattern
 	assert.Contains(t, err.Error(), "not retryable")
 }
