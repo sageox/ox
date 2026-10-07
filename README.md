@@ -38,7 +38,7 @@ recorded to your team's shared, queryable history.
 
 ## Latest Project Activity
 
-[![SageOx Glance](https://sageox.ai/visual/INW3ryYmUdAYw05Pvp3sMP0-N9LzGJvOFHwfDL-EAI4/img)](https://sageox.ai/visual/INW3ryYmUdAYw05Pvp3sMP0-N9LzGJvOFHwfDL-EAI4)
+[![SageOx Glance](https://sageox.ai/visual/INW3ryYmUdAYw05Pvp3sMP0-N9LzGJvOFHwfDL-EAI4/img)](https://sageox.ai/team/team_jihjpfkt8b)
 
 ---
 
