@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/logger"
 	"github.com/sageox/ox/internal/useragent"
 )
@@ -223,6 +224,9 @@ func (c *Client) doRequest(ctx context.Context, method, path string, result inte
 	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode == http.StatusNotFound {
+			return rl, fmt.Errorf("github api status %d: %s: %w", resp.StatusCode, string(body), ledger.ErrGitHubNotFound)
+		}
 		return rl, fmt.Errorf("github api status %d: %s", resp.StatusCode, string(body))
 	}
 

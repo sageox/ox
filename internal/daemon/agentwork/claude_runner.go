@@ -214,11 +214,13 @@ func (r *ClaudeRunner) Run(ctx context.Context, req RunRequest) (*RunResult, err
 	}
 
 	exitCode := 0
+	failure := ""
 	if waitErr != nil {
 		var exitErr *exec.ExitError
 		if errors.As(waitErr, &exitErr) {
 			exitCode = exitErr.ExitCode()
-			r.logger.Warn("claude exited with non-zero status", "exit_code", exitCode, "stderr", stderrBuf.String())
+			failure = failureDetail(stderrBuf.String(), string(stdoutBuf.Bytes()))
+			r.logger.Warn("claude exited with non-zero status", "exit_code", exitCode, "output", failure)
 		} else {
 			return nil, fmt.Errorf("wait claude: %w", waitErr)
 		}
@@ -240,11 +242,15 @@ func (r *ClaudeRunner) Run(ctx context.Context, req RunRequest) (*RunResult, err
 	const claudeFamily = "claude"
 
 	if pr.err != nil && pr.msg == nil {
-		return &RunResult{
+		result := &RunResult{
 			Duration:  elapsed,
 			ExitCode:  exitCode,
 			ModelUsed: claudeFamily,
-		}, fmt.Errorf("parse claude output: %w", pr.err)
+		}
+		if exitCode != 0 {
+			return result, fmt.Errorf("parse claude output (exit_code=%d output=%q): %w", exitCode, failure, pr.err)
+		}
+		return result, fmt.Errorf("parse claude output: %w", pr.err)
 	}
 
 	res := &RunResult{

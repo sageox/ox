@@ -1320,6 +1320,7 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 				"session", filepath.Base(payload.SessionDir),
 				"exit_code", result.ExitCode,
 				"output_len", len(llmOutput),
+				"output", failureDetail("", llmOutput),
 			)
 			return nil
 		}
