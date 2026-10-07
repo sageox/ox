@@ -222,3 +222,20 @@ func TestEvaluatePlanPointers_IncompleteStoreResponseKeepsWarning(t *testing.T) 
 	assert.NotContains(t, result.message, "backed by the store")
 	assert.Contains(t, result.detail, "omitted plan blob")
 }
+
+// a failed initial inspection cannot mean healthy plans or authorize repair.
+func TestEvaluatePlanPointers_UnavailableStoreCannotReportHealthy(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	pointers := []planPointer{{Name: "pending", ref: lfs.NewFileRef([]byte("original plan"))}}
+	result := evaluatePlanPointers(lfs.NewClient(server.URL, "oauth2", "token"), pointers, true, func() (*lfs.ReconcileResult, error) {
+		t.Fatal("repair attempted without a successful inspection")
+		return nil, nil
+	})
+	assert.True(t, result.warning)
+	assert.Contains(t, result.message, "could not verify")
+	assert.Contains(t, result.detail, "503")
+	assert.NotContains(t, result.message, "backed by the store")
+}
