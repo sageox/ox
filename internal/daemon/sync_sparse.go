@@ -41,8 +41,8 @@ func applySparseFromManifest(ctx context.Context, repoPath string, cfg *manifest
 	args := append([]string{"sparse-checkout", "set", "--no-cone"}, paths...)
 	_, err := gitutil.RunGit(ctx, repoPath, args...)
 	if err != nil && gitutil.IsIndexLockContention(err.Error()) {
-		// a git process that died mid-write leaves info/sparse-checkout.lock
-		// behind and every later pass fails on it; clear stale locks and retry once
+		// clear only locks eligible for automatic recovery and retry once;
+		// ownerless sparse-checkout locks are preserved regardless of age
 		if removed, _ := gitutil.RemoveStaleLockFiles(filepath.Join(repoPath, ".git")); len(removed) > 0 {
 			if logger != nil {
 				logger.Warn("sparse-checkout: removed stale lock files, retrying", "path", repoPath, "removed", removed)

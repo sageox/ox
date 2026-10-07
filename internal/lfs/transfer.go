@@ -210,6 +210,7 @@ func putObject(action *Action, content []byte) error {
 func isConnectionReset(err error) bool {
 	return errors.Is(err, syscall.ECONNRESET) ||
 		errors.Is(err, syscall.EPIPE) ||
+		errors.Is(err, net.ErrClosed) ||
 		errors.Is(err, io.ErrUnexpectedEOF) ||
 		errors.Is(err, io.EOF) ||
 		strings.Contains(err.Error(), "connection reset") ||

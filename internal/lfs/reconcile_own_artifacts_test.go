@@ -2,7 +2,9 @@ package lfs
 
 import (
 	"context"
+	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -70,4 +72,25 @@ func TestReconcile_RefusesTeammateStagedPlainArtifact(t *testing.T) {
 	assert.Contains(t, err.Error(), "sessions/theirs/raw.jsonl")
 	assert.Equal(t, content, mustReadFile(t, rawPath), "the teammate's file is untouched")
 	assert.NotContains(t, store.stored, NewFileRef(content).BareOID())
+}
+
+// metadata disappearing during the real upload must not panic, manufacture new
+// metadata, or replace either staged or working content with a pointer.
+func TestReconcile_MetadataDisappearsDuringOwnArtifactUpload(t *testing.T) {
+	ledger, _ := initLedgerWithRemote(t)
+	content := []byte("recording retained during a concurrent removal\n")
+	rawPath := stagePlainSession(t, ledger, "own", "person-a", content)
+	metaPath := filepath.Join(filepath.Dir(rawPath), "meta.json")
+	client, store := newFakeUploadStore(t, false, false)
+	store.beforeStore = func() { require.NoError(t, os.Remove(metaPath)) }
+	ctx := withReconcileOwner(context.Background(), "person-a")
+	_, err := uploadOwnStagedPlainArtifacts(ctx, ledger, client, slog.Default())
+	require.ErrorContains(t, err, "meta.json for own disappeared")
+	assert.NoFileExists(t, metaPath)
+	assert.Equal(t, content, mustReadFile(t, rawPath))
+	staged, readErr := exec.Command("git", "-C", ledger, "show", ":sessions/own/raw.jsonl").Output()
+	require.NoError(t, readErr)
+	assert.Equal(t, content, staged)
+	assert.Equal(t, content, mustReadFile(t, filepath.Join(ledger, ".sageox", "cache", "sessions", "own", "raw.jsonl")))
+	assert.Equal(t, content, store.stored[NewFileRef(content).BareOID()])
 }

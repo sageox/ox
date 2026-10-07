@@ -25,6 +25,7 @@ package plan
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -57,6 +58,10 @@ const (
 	// directly. Only genuinely large renders past 1MiB cross to LFS to keep the
 	// git tree from bloating.
 	htmlLFSThreshold = 1024 * 1024
+
+	// HTMLLFSThreshold lets CLI snapshot callers apply the same upload policy
+	// before committing an earlier uncommitted render.
+	HTMLLFSThreshold = htmlLFSThreshold
 )
 
 // PlanStatus is the plan's own lifecycle, independent of the producing
@@ -669,7 +674,10 @@ func liveDirNamed(plansDir, name string) (dir string, prior Meta, found bool, er
 	candidate := filepath.Join(plansDir, name)
 	m, merr := readMeta(candidate)
 	if merr != nil {
-		return "", Meta{}, false, nil // not a saved plan directory
+		if errors.Is(merr, os.ErrNotExist) {
+			return "", Meta{}, false, nil // a directory without meta.json is not a saved plan
+		}
+		return "", Meta{}, false, fmt.Errorf("read existing plan directory %q: %w", name, merr)
 	}
 	if isClosedStatus(CurrentStatus(candidate)) {
 		return "", Meta{}, false, fmt.Errorf("plan directory %q is %s, not open to revision; save under a new --slug", name, CurrentStatus(candidate))

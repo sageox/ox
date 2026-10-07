@@ -431,7 +431,7 @@ func savePlanArtifacts(gitRoot string, in plan.Input, result plan.Result, html [
 	if target, rerr := plan.ResolveSaveDir(gitRoot, meta); rerr == nil {
 		if _, serr := os.Stat(filepath.Join(target, "meta.json")); serr == nil {
 			if err := snapshotPriorRevision(gitRoot, target); err != nil {
-				report.Err = fmt.Errorf("prior revision of %s is uncommitted and could not be snapshotted, so it was NOT overwritten (fix the ledger with `ox doctor`, then save again): %w", filepath.Base(target), err)
+				report.Err = fmt.Errorf("prior revision of %s is uncommitted and could not be snapshotted, so it was NOT overwritten (resolve the error below, then re-run `ox plan save`): %w", filepath.Base(target), err)
 				slog.Warn("plan: refused revision, prior revision could not be snapshotted", "error", err, "dir", target)
 				return ""
 			}

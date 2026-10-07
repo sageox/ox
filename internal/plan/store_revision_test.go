@@ -3,6 +3,7 @@ package plan
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -374,6 +375,47 @@ func TestResolveSaveDir_MatchesSave(t *testing.T) {
 	withLedger(t, "")
 	if _, err := ResolveSaveDir("/fake/git/root", meta); err == nil {
 		t.Error("no ledger must be an error, not a guessed dir")
+	}
+}
+
+func TestSave_ExactNamedPlanWithUnreadableMetadataRefusesDuplicate(t *testing.T) {
+	for _, corrupt := range []bool{false, true} {
+		t.Run(fmt.Sprintf("malformed_%v", corrupt), func(t *testing.T) {
+			ledger := t.TempDir()
+			withLedger(t, ledger)
+			day := time.Date(2026, 9, 21, 9, 0, 0, 0, time.UTC)
+			dir := saveWithSlug(t, "existing", day, "original")
+			path := filepath.Join(dir, planMetaFile)
+			if corrupt {
+				if err := os.WriteFile(path, []byte("{broken"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+				// a directory fails reads even when tests run as root
+				if err := os.Mkdir(path, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, err := os.ReadFile(filepath.Join(dir, planMDFile))
+			if err != nil {
+				t.Fatal(err)
+			}
+			meta := Meta{Topic: "Updated", Slug: filepath.Base(dir), CreatedAt: day.AddDate(0, 0, 1)}
+			if _, _, err := Save("/fake/git/root", Input{Raw: "replacement"}, Result{}, nil, meta); err == nil {
+				t.Fatal("exact named plan with unreadable metadata was treated as a new plan")
+			}
+			entries, err := os.ReadDir(filepath.Dir(dir))
+			if err != nil || len(entries) != 1 {
+				t.Fatalf("save minted a duplicate: entries=%v error=%v", entries, err)
+			}
+			after, err := os.ReadFile(filepath.Join(dir, planMDFile))
+			if err != nil || string(after) != string(before) {
+				t.Fatalf("save changed original plan: error=%v", err)
+			}
+		})
 	}
 }
 

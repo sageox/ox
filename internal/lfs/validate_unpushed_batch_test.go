@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -17,6 +18,9 @@ import (
 // reporting how many invocations used the named subcommand.
 func countGitSpawns(t *testing.T) func(subcommand string) int {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("git PATH wrapper needs a POSIX shell")
+	}
 	realGit, err := exec.LookPath("git")
 	require.NoError(t, err)
 	binDir := t.TempDir()

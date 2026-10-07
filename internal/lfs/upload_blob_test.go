@@ -2,7 +2,9 @@ package lfs
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -23,6 +25,7 @@ type fakeUploadStore struct {
 	stored        map[string][]byte
 	putAttempts   int
 	chunkedPuts   int
+	beforeStore   func()
 	contentLength []int64
 }
 
@@ -89,6 +92,9 @@ func (s *fakeUploadStore) handlePut(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	if s.beforeStore != nil {
+		s.beforeStore()
+	}
 	body, _ := io.ReadAll(r.Body)
 	if !s.acceptButDrop {
 		s.mu.Lock()
@@ -127,3 +133,37 @@ func TestUploadBlob_FailsWhenStoreDoesNotHoldObjectAfterUpload(t *testing.T) {
 	assert.Contains(t, err.Error(), "not found on the store after upload")
 	assert.Equal(t, 1, store.putAttempts)
 }
+
+// the transport can report a connection reset as net.ErrClosed during a large
+// write; retry must replay the same complete bytes through the real store.
+func TestUploadBlob_RetriesClosedConnection(t *testing.T) {
+	client, store := newFakeUploadStore(t, false, false)
+	previous := lfsHTTPClient
+	transport := previous.Transport
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	puts := 0
+	retryClient := *previous
+	retryClient.Transport = uploadRetryTransport(func(r *http.Request) (*http.Response, error) {
+		if r.Method == http.MethodPut {
+			puts++
+			if puts == 1 {
+				return nil, fmt.Errorf("write request: %w", net.ErrClosed)
+			}
+		}
+		return transport.RoundTrip(r)
+	})
+	lfsHTTPClient = &retryClient
+	t.Cleanup(func() { lfsHTTPClient = previous })
+	content := []byte(strings.Repeat("large plan data\n", 70000))
+	uploaded, err := UploadBlob(client, content)
+	require.NoError(t, err)
+	assert.Equal(t, 2, puts)
+	assert.Equal(t, content, store.stored[uploaded.BareOID()])
+	assert.Equal(t, []int64{int64(len(content))}, store.contentLength)
+}
+
+type uploadRetryTransport func(*http.Request) (*http.Response, error)
+
+func (f uploadRetryTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

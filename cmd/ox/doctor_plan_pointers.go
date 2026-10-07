@@ -24,8 +24,7 @@ func init() {
 		Slug:     CheckSlugPlanPointersMissing,
 		Name:     planPointersCheckName,
 		Category: "Plans",
-		// Suggested, not Auto: the fix rewrites unpushed history (blank + squash).
-		// A bare `ox doctor` must not do that unasked.
+		// repair contacts the content store, so require an explicit fix request.
 		FixLevel:    FixLevelSuggested,
 		Description: "Detects captured plans whose plan.html LFS pointer has no blob in the store (which wedges the ledger push)",
 		Run:         checkPlanPointersMissing,
@@ -53,9 +52,8 @@ type planPointer struct {
 // commits. This check walks data/plans/ so an operator can SEE the wedge, and
 // `--fix` runs the (now plan-aware) reconcile to clear it.
 //
-// A missing-blob plan pointer is unrecoverable — the bytes were never stored
-// anywhere — so the only repair is to blank the dead pointer and squash it out of
-// the push pack, which is exactly what the reconcile does.
+// reconcile uploads any recoverable cached bytes; missing pointers are kept
+// intact and continue to block publication until their content is restored.
 func checkPlanPointersMissing(fix bool) checkResult {
 	ledgerPath := getLedgerPath()
 	if ledgerPath == "" {
@@ -84,7 +82,10 @@ func checkPlanPointersMissing(fix bool) checkResult {
 // Split out so the warn/fix wiring is testable with a fake LFS client and a fake
 // reconcile, without a live ledger remote.
 func evaluatePlanPointers(client *lfs.Client, pointers []planPointer, fix bool, reconcile func() (*lfs.ReconcileResult, error)) checkResult {
-	missing := planPointersMissingOnRemote(client, pointers)
+	missing, verifyErr := planPointersMissingOnRemote(client, pointers)
+	if verifyErr != nil {
+		return WarningCheck(planPointersCheckName, "could not verify plan blobs", verifyErr.Error())
+	}
 	if len(missing) == 0 {
 		return PassedCheck(planPointersCheckName, fmt.Sprintf("all %d plan pointer(s) backed by the store", len(pointers)))
 	}
@@ -100,8 +101,15 @@ func evaluatePlanPointers(client *lfs.Client, pointers []planPointer, fix bool, 
 			detail:  err.Error(),
 		}
 	}
+	remaining, verifyErr := planPointersMissingOnRemote(client, pointers)
+	if verifyErr != nil {
+		return WarningCheck(planPointersCheckName, "could not verify plan blobs after reconciliation", verifyErr.Error())
+	}
+	if len(remaining) > 0 {
+		return planPointersWarning(remaining)
+	}
 	return PassedCheck(planPointersCheckName,
-		fmt.Sprintf("restored %d plan pointer blob(s); ledger push unblocked", res.RecoveredUploads))
+		fmt.Sprintf("all %d plan pointer(s) backed by the store after reconciliation (%d recovered uploads)", len(pointers), res.RecoveredUploads))
 }
 
 // collectPlanHTMLPointers finds every data/plans/<dir>/plan.html that is an LFS
@@ -134,11 +142,9 @@ func collectPlanHTMLPointers(plansDir, ledgerPath string) []planPointer {
 const planHTMLFileName = "plan.html"
 
 // planPointersMissingOnRemote batch-checks which pointer OIDs are absent from the
-// remote store. Only a 404 proves absence — a transient 401/429/5xx says nothing,
-// so those are treated as "present" rather than false-alarming (mirrors the
-// reconcile's guard). On any batch error it returns nil (optimistic: never invent
-// a wedge that isn't confirmed).
-func planPointersMissingOnRemote(client *lfs.Client, pointers []planPointer) []planPointer {
+// remote store. Only a 404 proves absence; incomplete or failed inspections
+// return an error so doctor never reports an unverifiable pointer as healthy.
+func planPointersMissingOnRemote(client *lfs.Client, pointers []planPointer) ([]planPointer, error) {
 	oidToIdx := make(map[string][]int, len(pointers))
 	var objs []lfs.BatchObject
 	for i, p := range pointers {
@@ -158,14 +164,24 @@ func planPointersMissingOnRemote(client *lfs.Client, pointers []planPointer) []p
 		}
 		resp, err := client.BatchDownload(objs[start:end])
 		if err != nil {
-			return nil
+			return nil, err
 		}
+		seen := make(map[string]bool)
 		for _, obj := range resp.Objects {
+			seen[obj.OID] = true
+			if obj.Error != nil && obj.Error.Code != http.StatusNotFound {
+				return nil, fmt.Errorf("verify plan blob %s: HTTP %d", obj.OID, obj.Error.Code)
+			}
 			if obj.Error == nil || obj.Error.Code != http.StatusNotFound {
 				continue
 			}
 			for _, idx := range oidToIdx[obj.OID] {
 				missingIdx[idx] = true
+			}
+		}
+		for _, obj := range objs[start:end] {
+			if !seen[obj.OID] {
+				return nil, fmt.Errorf("content store omitted plan blob %s", obj.OID)
 			}
 		}
 	}
@@ -174,14 +190,13 @@ func planPointersMissingOnRemote(client *lfs.Client, pointers []planPointer) []p
 	for idx := range missingIdx {
 		out = append(out, pointers[idx])
 	}
-	return out
+	return out, nil
 }
 
 func planPointersWarning(missing []planPointer) checkResult {
 	var sb strings.Builder
 	sb.WriteString("These captured plans have a plan.html LFS pointer whose blob is missing from the content store.\n")
-	sb.WriteString("The bytes were never uploaded (a pre-fix `ox plan save` of a render above 1MiB), so the render is ")
-	sb.WriteString("unrecoverable — and the missing blob makes the ledger reject every push.\n")
+	sb.WriteString("The store cannot supply these renders, which blocks ledger pushes. Cached original bytes may still be recoverable.\n")
 	shown := min(len(missing), 5)
 	for _, p := range missing[:shown] {
 		fmt.Fprintf(&sb, "  %s\n", p.Name)
@@ -189,7 +204,7 @@ func planPointersWarning(missing []planPointer) checkResult {
 	if len(missing) > shown {
 		fmt.Fprintf(&sb, "  ... and %d more\n", len(missing)-shown)
 	}
-	sb.WriteString("\nRun `ox doctor --fix` to blank the dead pointers and unblock the push.")
+	sb.WriteString("\nRun `ox doctor --fix-slug plan-pointers-missing` to upload recoverable cached blobs. Missing pointers are preserved; restore their original content before retrying the push.")
 	return checkResult{
 		name:    planPointersCheckName,
 		warning: true,

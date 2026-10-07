@@ -73,6 +73,9 @@ func uploadOwnStagedPlainArtifacts(ctx context.Context, ledgerPath string, clien
 		}
 		ref := uploaded.Ref()
 		err = MutateSessionMeta(ctx, sessionDir, func(m *SessionMeta) (*SessionMeta, error) {
+			if m == nil {
+				return nil, fmt.Errorf("meta.json for %s disappeared", sessionID)
+			}
 			if m.Files == nil {
 				m.Files = map[string]FileRef{}
 			}

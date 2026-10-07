@@ -38,10 +38,9 @@ func newSparseLockRepo(t *testing.T) (repo string, cfg *manifest.ManifestConfig)
 	return repo, cfg
 }
 
-// A 0-byte info/sparse-checkout.lock left by a dead git process blocked team
-// sync until it was removed by hand. The re-apply must clear a stale one and
-// succeed in the same pass.
-func TestApplySparseFromManifest_ClearsStaleSparseCheckoutLock(t *testing.T) {
+// an old ownerless sparse lock is uncertain: leave it intact and report the
+// blocked update instead of permitting a second Git writer.
+func TestApplySparseFromManifest_KeepsOldSparseCheckoutLock(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: real git operations")
 	}
@@ -49,13 +48,14 @@ func TestApplySparseFromManifest_ClearsStaleSparseCheckoutLock(t *testing.T) {
 	lock := filepath.Join(repo, ".git", "info", "sparse-checkout.lock")
 	require.NoError(t, os.MkdirAll(filepath.Dir(lock), 0o755))
 	require.NoError(t, os.WriteFile(lock, nil, 0o644))
-	old := time.Now().Add(-(gitutil.StaleLockAge + time.Minute))
+	old := time.Now().Add(-(gitutil.AbandonedLockAge * 24))
 	require.NoError(t, os.Chtimes(lock, old, old))
 
 	err := applySparseFromManifest(context.Background(), repo, cfg, manifest.RepoKindTeamContext, nil)
 
-	require.NoError(t, err)
-	assert.NoFileExists(t, lock)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "sparse-checkout.lock")
+	assert.FileExists(t, lock)
 }
 
 // A fresh lock may belong to a live git; it is left alone and the failure is

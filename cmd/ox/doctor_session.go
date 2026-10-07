@@ -190,11 +190,19 @@ func (opts doctorOptions) runSessionRepairs() []checkResult {
 // the registered checks, so the registry entry is the one thing --fix-slug
 // validates and the one thing the Sessions phase runs.
 func checkSessionUncommittedViaRegistry(opts doctorOptions) checkResult {
-	return GetDoctorCheck(CheckSlugSessionUncommitted).Run(opts.shouldFix(CheckSlugSessionUncommitted))
+	check := GetDoctorCheck(CheckSlugSessionUncommitted)
+	if check == nil {
+		return SkippedCheck(CheckSlugSessionUncommitted, "check is not registered", "")
+	}
+	return check.Run(opts.shouldFix(CheckSlugSessionUncommitted))
 }
 
 func checkSessionDraftOrphanViaRegistry(opts doctorOptions) checkResult {
-	return GetDoctorCheck(CheckSlugSessionDraftOrphan).Run(opts.shouldFix(CheckSlugSessionDraftOrphan))
+	check := GetDoctorCheck(CheckSlugSessionDraftOrphan)
+	if check == nil {
+		return SkippedCheck(CheckSlugSessionDraftOrphan, "check is not registered", "")
+	}
+	return check.Run(opts.shouldFix(CheckSlugSessionDraftOrphan))
 }
 
 // convertDoctorResult converts a doctor.CheckResult to the CLI's checkResult format.
