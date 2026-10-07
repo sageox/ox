@@ -934,7 +934,7 @@ func openOrCreateBleveIndex(root, path, name string) (bleve.Index, error) {
 		return idx, nil
 	}
 	if errors.Is(err, bleve.ErrorIndexPathDoesNotExist) {
-		return createBleveSubIndex(path, name)
+		return createBleveSubIndexLocked(root, path, name)
 	}
 
 	// Before treating as corruption, check if the bbolt file exists.
@@ -973,7 +973,9 @@ func openOrCreateBleveIndex(root, path, name string) (bleve.Index, error) {
 		// an entry Bleve skips while selecting a usable snapshot. Route the
 		// definitive Bleve error through the locked recheck instead of relabeling
 		// it as contention; the recheck still refuses to nuke a live-held index.
-		if IsBleveMappingParseError(err) {
+		// Missing metadata also needs that locked check: a healthy Bolt alone
+		// does not establish a complete, reopenable Bleve index.
+		if IsBleveMappingParseError(err) || errors.Is(err, bleve.ErrorIndexMetaMissing) {
 			return selfHealBleveSubIndex(root, path, name, err)
 		}
 		return nil, fmt.Errorf("bleve index appears to be in use (lock contention): %w", err)
@@ -985,6 +987,23 @@ func openOrCreateBleveIndex(root, path, name string) (bleve.Index, error) {
 	// A healer may be recreating this directory. Recheck under its lock before
 	// treating absent metadata or a broken store path as our own repair.
 	return selfHealBleveSubIndex(root, path, name, err)
+}
+
+// createBleveSubIndexLocked shares the healer's lock, including its temporary
+// absent-directory window. Recheck after acquiring it: another opener may have
+// finished creating or repairing the index while we waited.
+func createBleveSubIndexLocked(root, path, name string) (bleve.Index, error) {
+	fl, locked, lockErr := acquireSubIndexHealLockFn(path)
+	if !locked {
+		return nil, fmt.Errorf("bleve sub-index %s creation deferred (heal lock unavailable): %w", name, errors.Join(bleve.ErrorIndexPathDoesNotExist, lockErr))
+	}
+	defer func() { _ = fl.Unlock() }()
+	if _, err := os.Lstat(path); os.IsNotExist(err) {
+		return createBleveSubIndex(path, name)
+	} else if err != nil {
+		return nil, fmt.Errorf("stat bleve sub-index %s: %w", path, err)
+	}
+	return applyRebuildVerdict(root, path, name, false, bleve.ErrorIndexPathDoesNotExist)
 }
 
 // selfHealBleveSubIndex recovers from proven mapping/snapshot corruption by
@@ -1136,6 +1155,17 @@ func reclassifyUnderLock(path, name string, requireVersion bool) (bleve.Index, h
 			return nil, healNuke // proven on-disk corruption
 		}
 		return nil, healDefer // held by a live writer, or transient — never nuke
+	}
+	// Bleve cannot reopen without its metadata even if Bolt is healthy. Only an
+	// actually absent entry licenses repair: unreadable metadata or a dangling
+	// symlink remains an uncertain state. Check while holding the Bolt lock so
+	// a live writer's partially written metadata cannot be destroyed.
+	if _, metaErr := os.Lstat(filepath.Join(path, "index_meta.json")); os.IsNotExist(metaErr) {
+		_ = db.Close()
+		return nil, healNuke
+	} else if metaErr != nil {
+		_ = db.Close()
+		return nil, healDefer
 	}
 	// We hold the exclusive lock: the index is healthy AND free. Release it and
 	// hand back a real bleve handle to adopt. There is a narrow window between the
