@@ -362,13 +362,38 @@ func TestResolveRebaseAcceptTheirs_CancellationReachesActiveStep(t *testing.T) {
 		t.Skip("short: git rebase operations")
 	}
 	_, repo := setupDivergentRepos(t, "sessions/s1/meta.json", `{"local":true}`, `{"remote":true}`)
+
+	// a `git` wrapper first on PATH makes the step's `rebase --continue` block
+	// until the test releases it (git does not run pre-commit for a rebase
+	// continue, so a hook cannot serve as the barrier): deterministic, no timing
+	realGit, err := exec.LookPath("git")
+	require.NoError(t, err)
+	signals := t.TempDir()
+	enteredPath := filepath.Join(signals, "entered")
+	releasePath := filepath.Join(signals, "release")
+	wrapper := "#!/bin/sh\ncase \"$*\" in *'rebase --continue'*) touch '" + enteredPath + "'; while [ ! -f '" + releasePath + "' ]; do sleep 0.01; done;; esac\nexec '" + realGit + "' \"$@\"\n"
+	binDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "git"), []byte(wrapper), 0o755))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Cleanup(func() { _ = os.WriteFile(releasePath, nil, 0o644) })
+
 	ctx, cancel := context.WithCancel(context.Background())
-	// cancel while the first step is running: the step's git commands must see it
-	go func() { time.Sleep(20 * time.Millisecond); cancel() }()
-	start := time.Now()
-	err := ResolveRebaseAcceptTheirs(ctx, repo, []string{"sessions/"})
-	if err == nil {
-		return // the step finished before the cancel landed; nothing to assert
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- ResolveRebaseAcceptTheirs(ctx, repo, []string{"sessions/"}) }()
+
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(enteredPath)
+		return err == nil
+	}, 10*time.Second, 10*time.Millisecond, "the step must reach rebase --continue")
+	cancel()
+	// the blocked git child must be killed by the forwarded cancellation, not by
+	// the step budget: assert well inside resolveStepTimeout
+	select {
+	case err := <-done:
+		require.Error(t, err, "cancellation during the active step must surface as an error")
+	case <-time.After(resolveStepTimeout / 2):
+		t.Fatal("cancellation did not reach the active step; it waited on the step budget")
 	}
-	assert.Less(t, time.Since(start), resolveStepTimeout/2, "cancellation must not wait out the step budget")
+	_ = os.WriteFile(releasePath, nil, 0o644)
 }
