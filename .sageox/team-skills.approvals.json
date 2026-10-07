@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "approvals": [
+    {
+      "name": "attio-log",
+      "digest": "sha256:e2b0be745ad551d61794341155d547e9dc5e43a0082b58abaf0f943383c7a4e1",
+      "approved_at": "2026-10-07T19:58:40.642626Z",
+      "capabilities": [
+        "bundled-script"
+      ],
+      "allow_scripts": true
+    }
+  ]
+}
