@@ -328,6 +328,8 @@ def code_files(source, identities):
             text = src.read_bytes().decode("utf-8")
         except UnicodeDecodeError:
             raise Refused("code/%s is not UTF-8 text, so it cannot be checked; remove it from the repo first" % rel)
+        if "\x00" in text:  # UTF-16 without a byte-order mark still decodes, a NUL between letters
+            raise Refused("code/%s holds NUL bytes, so it cannot be checked as text; remove it from the repo first" % rel)
         check_private("code/" + rel, text, identities)
         files.append((parts, src))
     return files

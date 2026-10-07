@@ -162,6 +162,7 @@ class Testbed(unittest.TestCase):
             "a symlink": ("link.cfg", lambda p: p.symlink_to(secret), "symlink"),
             "a name naming the author": ("Dana Real notes.md", lambda p: p.write_text("scores\n"), "the name code/"),
             "bytes that aren't UTF-8": ("logo.bin", lambda p: p.write_bytes(b"\xff\xfe\x00D\x00a\x00n\x00a"), "not UTF-8"),
+            "UTF-16 without a byte-order mark": ("notes16.txt", lambda p: p.write_bytes("Dana Real".encode("utf-16-le")), "NUL bytes"),
         }
         for label, (name, make, expected) in cases.items():
             with self.subTest(label):
