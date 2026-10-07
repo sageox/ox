@@ -308,6 +308,37 @@ def capture(args):
     return 0
 
 
+def read_in_repo(root, rel):
+    """Reads root/rel without following a symlink at any step, so no path swapped in
+    after the listing can redirect the read outside the repo. Returns (bytes, mode),
+    or None when the path is gone or is not a regular file."""
+    names = rel.split("/")
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for name in names[:-1]:
+            try:
+                nxt = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            except FileNotFoundError:
+                return None
+            except OSError:  # a symlink (ELOOP) or a file where a folder should be (ENOTDIR)
+                raise Refused("code/%s sits under a symlink; the fixture copies only regular files" % rel)
+            os.close(fd)
+            fd = nxt
+        try:
+            leaf = os.open(names[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+        except FileNotFoundError:
+            return None
+        except OSError:
+            raise Refused("code/%s is a symlink; the fixture copies only regular files" % rel)
+        with os.fdopen(leaf, "rb") as f:
+            info = os.fstat(f.fileno())
+            if not stat.S_ISREG(info.st_mode):
+                return None
+            return f.read(), stat.S_IMODE(info.st_mode)
+    finally:
+        os.close(fd)
+
+
 def code_files(source, identities):
     """The repo's own files for the fixture, each checked like a session."""
     listed = subprocess.run(["git", "-C", str(source), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
@@ -317,18 +348,16 @@ def code_files(source, identities):
     for rel in sorted(filter(None, listed)):
         if rel.startswith(OX_MANAGED) or rel in OX_MANAGED_FILES or JUNK.search(rel):
             continue
-        src = source / rel
         # A link anywhere along the path, the file or a folder above it, can point
         # anywhere on the machine; copying would publish its target.
-        if os.path.realpath(src) != os.path.join(real_source, *rel.split("/")):
-            raise Refused("code/%s is or sits under a symlink; the fixture copies only regular files" % rel)
-        if not src.is_file():
+        read = read_in_repo(real_source, rel)
+        if read is None:
             continue
+        data, mode = read
         # A nested .gitignore or .gitattributes would apply to the fixture inside the ox repo.
         parts = rel.split("/")
         parts[-1] = "dot-" + parts[-1][1:] if parts[-1] in (".gitignore", ".gitattributes") else parts[-1]
         check_private("the name code/" + rel, rel, identities)
-        data = src.read_bytes()
         try:
             text = data.decode("utf-8")
         except UnicodeDecodeError:
@@ -338,7 +367,7 @@ def code_files(source, identities):
         check_private("code/" + rel, text, identities)
         # The fixture gets these exact bytes, never a second read of a file that
         # may have changed since it was checked.
-        files.append((parts, data, stat.S_IMODE(src.stat().st_mode)))
+        files.append((parts, data, mode))
     return files
 
 
