@@ -1,7 +1,8 @@
 name: Security review
 
 # Fast tier only (no AI tier — explicitly deferred)
-# Runs deterministic OSS scanners on PRs and pushes to main.
+# Runs deterministic OSS scanners on PRs that touch sensitive paths. Findings go to
+# the job summary and the run's security-findings artifact, not the Security tab.
 # Advisory only — never blocks merge.
 
 on:
@@ -12,7 +13,6 @@ on:
 
 permissions:
   contents: read
-  security-events: write   # for SARIF upload
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -35,6 +35,12 @@ jobs:
           filters: |
             sensitive:
               - 'security/rules/**'   # so an edited rule is parsed by the real scanner
+              # so a change to the fast tier itself runs it
+              - 'security/scripts/deterministic.sh'
+              - 'security/scripts/pipeline.py'
+              - 'security/scripts/install-bins.sh'
+              - 'security/golangci-gosec.yml'
+              - '.github/workflows/security-review.yml'
               - 'internal/auth/**'
               - 'internal/session/**'
               - 'internal/daemon/**'
@@ -68,7 +74,8 @@ jobs:
   # =============================================================================
   security-fast:
     needs: changes
-    if: needs.changes.outputs.sensitive == 'true'
+    # PRs only: on a push to main the diff vs origin/main is empty, so it scanned nothing.
+    if: github.event_name == 'pull_request' && needs.changes.outputs.sensitive == 'true'
     runs-on: ubuntu-latest
     continue-on-error: true   # never block merge
     steps:
@@ -100,13 +107,14 @@ jobs:
           export PATH="${GITHUB_WORKSPACE}/bin:${PATH}"
           make sec-fast
 
-      - name: Upload SARIF to GitHub Security tab
+      - name: Write findings to the job summary
         if: always()
-        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
-        with:
-          sarif_file: security/.output/findings.sarif
-          category: ox-security-fast
-        continue-on-error: true   # don't fail if SARIF is malformed
+        run: |
+          if [ -f security/.output/det-summary.md ]; then
+            cat security/.output/det-summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "**NO COVERAGE**: the deterministic scan wrote no summary; see the step log above." >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Upload findings as artifact
         if: always()
@@ -114,4 +122,5 @@ jobs:
         with:
           name: security-findings-${{ github.run_id }}
           path: security/.output/
+          include-hidden-files: true   # .output/ is a dot-directory, skipped by default
           retention-days: 14
