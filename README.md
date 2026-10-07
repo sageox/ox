@@ -157,6 +157,22 @@ If you're offline or an upload fails, the session stays cached and
 `ox doctor --fix` retries it later. Cached sessions persist until uploaded or
 removed; there's no TTL or automatic pruning.
 
+Occasionally a Ledger ends up with history the server refuses: a session file committed
+with Git conflict markers, or a session artifact committed as full content instead of its
+LFS pointer. The daemon then pauses uploads and keeps your work local until the history is
+clean. `ox doctor` reports what is in the way, and two targeted repairs fix it. A repair that changes at least one file
+adds exactly one commit; one with nothing to fix adds none. Neither rewrites existing history.
+
+| Step | Command | What it does |
+|------|---------|--------------|
+| 1 | `ox doctor` | Reports what blocks the push and names the repair to run. |
+| 2 | `ox doctor --fix-slug=session-conflict-markers` | Resolves conflict markers committed into session files, keeping the version your team already has. |
+| 3 | `ox doctor --fix-slug=session-pointer-restore` | Replaces session artifacts committed as full content with their LFS pointers, uploads your own never-uploaded sessions, and leaves teammates' sessions untouched. |
+| 4 | `ox status` | Shows uncommitted Ledger changes; it does not show commits awaiting push. The daemon log reports when the push succeeds. |
+
+If a repair reports files it could not fix, it names each one and the reason, and changes
+nothing for those files.
+
 `ox uninstall` removes local session data and config. Sessions already synced are
 not deleted; add `--local-only` to skip notifying the server.
 
