@@ -167,6 +167,7 @@ class ScannerStatusTest(unittest.TestCase):
             return pipeline.scanner_status(out, tool)
 
     def test_statuses(self):
+        """Verify scanner statuses and reasons, including tool-specific install hints."""
         sarif = json.dumps({"runs": [{"results": []}]})
         gosec_ok = json.dumps({"Issues": None, "Report": {}})
         gosec_typecheck = json.dumps({"Issues": [{"FromLinter": "typecheck",
