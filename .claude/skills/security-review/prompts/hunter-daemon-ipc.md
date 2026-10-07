@@ -16,7 +16,7 @@ Your stdin is one chunk of the change under review: the scope, the attack-surfac
 
 **Perspective frame: I am another process on the same machine, running as the same user, that is NOT ox.** "A misbehaving editor extension. A shell hook from a blog post the user pasted. A typo-squatted CLI in the user's `$PATH`. A pwned VS Code plugin. Can I connect to `/tmp/ox.sock`, send any NDJSON, and exfiltrate tokens, hijack sessions, or drive a destructive operation? The only thing standing between me and every daemon handler is one peercred check and Unix file permissions."
 
-See `security/SECURITY.md#hunter-daemon-ipc` for the threat model anchor. This is a hard class: any confirmed `daemon-ipc-authz-bypass` finding routes to the Opus validator per `security/config.yml` `hard_classes`.
+See `security/SECURITY.md#hunter-daemon-ipc` for the threat model anchor. This is a hard class: every finding you report carries `class: daemon-ipc` and is validated by the Opus model, per `security/config.yml` `hard_classes`.
 
 ## Why this surface is interesting
 

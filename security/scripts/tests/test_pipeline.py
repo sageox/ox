@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import sys
 import tempfile
+import textwrap
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -457,8 +459,62 @@ class ScannerFindingsTest(unittest.TestCase):
         self.assertEqual(results["gosec/G204"]["properties"], {"source": "gosec", "validated": False})
 
 
+class ValidatorRoutingTest(unittest.TestCase):
+    CONFIG = textwrap.dedent(
+        """\
+        models:
+          validator_model: model-default   # most findings
+          validator_hard_class_model: model-hard
+
+        hard_classes:
+          - daemon-ipc        # peer-cred, payload validation
+          - supply-chain
+
+        hunters:
+          - cli-input
+        """
+    )
+
+    def route(self, finding, config=CONFIG):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg, f = Path(tmp) / "config.yml", Path(tmp) / "finding"
+            if config is not None:
+                cfg.write_text(config)
+            f.write_text(json.dumps(finding))
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                pipeline.main(["validator-model", "--config", str(cfg), "--finding", str(f)])
+            return buf.getvalue().strip()
+
+    def test_hard_class_gets_the_hard_class_model(self):
+        self.assertEqual(self.route({"class": "daemon-ipc"}), "model-hard")
+        self.assertEqual(self.route({"class": " Supply-Chain "}), "model-hard")
+
+    def test_other_classes_get_the_default_validator_model(self):
+        for finding in ({"class": "cli-input"}, {"class": "daemon-ipc-authz"}, {"class": ""}, {}):
+            with self.subTest(finding=finding):
+                self.assertEqual(self.route(finding), "model-default")
+
+    def test_missing_keys_fall_back_to_sonnet_and_opus(self):
+        self.assertEqual(self.route({"class": "daemon-ipc"}, "hard_classes:\n  - daemon-ipc\n"), "claude-opus-5-5")
+        self.assertEqual(self.route({"class": "daemon-ipc"}, None), "claude-sonnet-5")
+
+    def test_every_hard_class_is_a_class_an_active_hunter_reports(self):
+        """The bug this guards: hard_classes named classes no hunter emits, so nothing reached Opus."""
+        repo = Path(__file__).resolve().parents[3]
+        config = repo / "security/config.yml"
+        reported = {}
+        for hunter in pipeline.config_list(config, "hunters"):
+            playbook = (repo / ".claude/skills/security-review/prompts" / f"hunter-{hunter}.md").read_text()
+            reported[hunter] = re.findall(r'"class":\s*"([^"]+)"', playbook)
+        hard = pipeline.config_list(config, "hard_classes")
+        self.assertTrue(hard, "no hard classes configured: no finding would reach the hard-class model")
+        self.assertLessEqual(set(hard), {c for classes in reported.values() for c in classes},
+                             f"hard_classes {hard} vs the classes active hunters report {reported}")
+
+
 class ValidatorResultTest(unittest.TestCase):
-    def merge(self, finding, output=None, unvalidated=""):
+    def merge(self, finding, output=None, unvalidated="", model=""):
         with tempfile.TemporaryDirectory() as tmp:
             f, o = Path(tmp) / "finding", Path(tmp) / "output"
             f.write_text(json.dumps(finding))
@@ -467,6 +523,8 @@ class ValidatorResultTest(unittest.TestCase):
             args = ["validator-result", "--finding", str(f), "--output", str(o)]
             if unvalidated:
                 args += ["--unvalidated", unvalidated]
+            if model:
+                args += ["--model", model]
             buf = io.StringIO()
             with redirect_stdout(buf):
                 pipeline.main(args)
@@ -485,6 +543,13 @@ class ValidatorResultTest(unittest.TestCase):
                 got = self.merge({"title": "t"}, output)
                 self.assertEqual(got["verdict"], "unvalidated")
                 self.assertIn(reason, got["verdict_reason"])
+
+    def test_records_the_model_that_judged_it(self):
+        got = self.merge({"title": "t"}, json.dumps({"class": "daemon-ipc", "verdict": "confirmed"}),
+                         model="claude-opus-5-5")
+        self.assertEqual(got["validator_model"], "claude-opus-5-5")
+        capped = self.merge({"title": "t"}, '{"verdict": "cap", "reason": "x"}', model="claude-opus-5-5")
+        self.assertNotIn("validator_model", capped, "no model judged a finding the cap stopped")
 
 
 if __name__ == "__main__":

@@ -27,7 +27,7 @@ You are the last line before a finding lands in `FINDINGS.md`. **Be stricter tha
 You will be invoked at one of two model tiers:
 
 - **Sonnet (default ~90%)** — for most findings. Sufficient for reasoning about a single file/function and the immediate code around it.
-- **Opus (the hard classes)** — `secrets-redaction-bypass`, `daemon-ipc-authz-bypass`, `supply-chain-tampering`. These need cross-function reasoning, threat-model awareness, or adversarial creativity that justifies the cost. The orchestrator picks the model per finding from `class` (via `security/config.yml` `hard_classes`) and from any `needs_validation` annotation in the dedup output.
+- **Opus (the hard classes)** — findings whose `class` is `secrets-redaction`, `daemon-ipc` or `supply-chain`. These need cross-function reasoning, threat-model awareness, or adversarial creativity that justifies the cost. The orchestrator picks the model per finding from its `class`, using `security/config.yml` `hard_classes`.
 
 If you find yourself reasoning beyond what your model tier comfortably handles (deep call-graph traversal, novel attack chain, ambiguous business-logic question), set `verdict: "needs-escalation"` and let the human decide whether to re-run with Opus.
 

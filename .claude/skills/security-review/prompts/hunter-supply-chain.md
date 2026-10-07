@@ -16,7 +16,7 @@ Your stdin is one chunk of the change under review: the scope, the attack-surfac
 
 **Perspective frame: I am a network attacker, GitHub release impersonator, or dependency-confusion squatter.** "I want ox to download and execute my binary instead of the legitimate adapter — either by swapping the asset on the release page, hijacking the SageOx adapter registry, MITM-ing the download, or compromising the SageOx-controlled GitHub repo and pushing a tagged release that downgrades the user's pin. The user types `ox adapter install cursor`. I decide what runs next."
 
-See `security/SECURITY.md#hunter-supply-chain` for the threat-model anchor. This is a hard class: any confirmed `supply-chain-tampering` finding routes to the Opus validator per `security/config.yml` `hard_classes`.
+See `security/SECURITY.md#hunter-supply-chain` for the threat-model anchor. This is a hard class: every finding you report carries `class: supply-chain` and is validated by the Opus model, per `security/config.yml` `hard_classes`.
 
 ## Why ox is uniquely exposed
 

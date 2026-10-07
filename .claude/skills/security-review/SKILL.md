@@ -29,7 +29,7 @@ The orchestrator drives all six phases:
 2. **Map** — run `security/scripts/deterministic.sh` (parallel OSS scanners; each reports `ran` / `skipped` / `failed`) + one Cartographer call (Haiku) per chunk, reading the diff, to map entry points (CLI commands, daemon IPC handlers) to sinks. Writes `security/.output/surface.md`.
 3. **Hunt** — per chunk, 5 hunter subagents in parallel (Sonnet), each reading the diff, the surface map and scope. Each has an explicit perspective frame (`cli-input` / `secrets-redaction` / `daemon-ipc` / `supply-chain` / `llm-trust`) to fight finding convergence. Writes `security/.output/findings-raw.jsonl`.
 4. **Dedup** — single Sonnet pass merges hunter findings + deterministic findings by root cause. Writes `security/.output/findings-deduped.jsonl`.
-5. **Validate** — one call per finding, **model split**: Sonnet for ~90%, Opus for the hard classes (`secrets-redaction-bypass`, `daemon-ipc-authz-bypass`, `supply-chain-tampering`). Stricter than hunters; traces real call paths; checks existing mitigations.
+5. **Validate** — one call per finding, **model split**: Sonnet for ~90%, Opus for findings in the hard classes (`secrets-redaction`, `daemon-ipc`, `supply-chain`; `security/config.yml` `hard_classes`). Stricter than hunters; traces real call paths; checks existing mitigations.
 6. **Aggregate** — apply the coverage gate, drop false-positives, rank by severity, emit `security/.output/FINDINGS.md` (markdown) + `security/.output/findings.sarif` (machine).
 
 Subagents get the read-only `Read`/`Grep`/`Glob` tools and nothing else.

@@ -296,6 +296,42 @@ class OrchestrateE2ETest(unittest.TestCase):
         self.assertIn("| gosec | G304 | `cmd/ox/upload.go:11` |", report, self.explain(result))
         self.assertIn("gosec/G304", self.repo.output("findings.sarif"))
 
+    def validator_models(self) -> dict:
+        """The model each validation ran on, keyed by the class of the finding it judged."""
+        models = {}
+        for call in self.repo.calls("validator"):
+            for cls in ("cli-input", "daemon-ipc"):
+                if f'"class": "{cls}"' in call["stdin"]:
+                    models[cls] = call["model"]
+        return models
+
+    def test_hard_class_finding_is_validated_by_the_hard_class_model(self):
+        """Devon's change also touches daemon IPC; that finding goes to Opus, the argv one to Sonnet."""
+        self.repo.plant_feature()
+        self.repo.install("claude", "golangci-lint")
+        result = self.repo.run("orchestrate.sh", FAKE_DAEMON_FINDING="1")
+
+        self.assertEqual(self.validator_models(), {"daemon-ipc": "claude-opus-5-5", "cli-input": "claude-sonnet-5"},
+                         self.explain(result))
+        report = self.repo.output("FINDINGS.md")
+        self.assertIn("- **validated by**: `claude-opus-5-5`", report, self.explain(result))
+        self.assertIn("- **validated by**: `claude-sonnet-5`", report)
+
+    def test_model_edits_in_config_reach_every_phase(self):
+        """Quinn changes every model in security/config.yml; each phase runs on the one configured."""
+        keys = ("cartographer_model", "hunter_model", "dedup_model", "validator_model", "validator_hard_class_model")
+        self.repo.plant_feature()
+        for key in keys:
+            self.repo.set_config(key, f"configured-{key}")
+        self.repo.install("claude", "golangci-lint")
+        result = self.repo.run("orchestrate.sh", FAKE_DAEMON_FINDING="1")
+
+        for role in ("cartographer", "hunter", "dedup"):
+            used = {call["model"] for call in self.repo.calls(role)}
+            self.assertEqual(used, {f"configured-{role}_model"}, role + self.explain(result))
+        self.assertEqual(self.validator_models(), {"daemon-ipc": "configured-validator_hard_class_model",
+                                                   "cli-input": "configured-validator_model"}, self.explain(result))
+
     def test_stale_clean_report_is_replaced_when_claude_is_missing(self):
         """Last week's report said "ran clean"; this run cannot reach claude."""
         self.repo.plant_feature()

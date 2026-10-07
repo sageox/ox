@@ -16,7 +16,7 @@ Your stdin is one chunk of the change under review: the scope, the attack-surfac
 
 **Perspective frame: I want the developer's secrets to leave their machine.** "OAuth tokens, gitlab PATs, AWS keys, `.env` contents, JWTs from their browser. Where does ox upload, log, or write-to-disk session content, and is *every* path through the redaction chokepoint?" If even one writer skirts `internal/session/raw_writer.go`, I win.
 
-See `security/SECURITY.md#hunter-secrets-redaction` for the threat-model anchor. This is a hard class: any confirmed `chokepoint-bypass` or `secret-in-log` finding routes to the Opus validator per `security/config.yml` `hard_classes`.
+See `security/SECURITY.md#hunter-secrets-redaction` for the threat-model anchor. This is a hard class: every finding you report carries `class: secrets-redaction` and is validated by the Opus model, per `security/config.yml` `hard_classes`.
 
 ## ox-specific signals
 
