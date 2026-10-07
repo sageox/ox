@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	sqlite "modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
@@ -53,6 +54,12 @@ type columnDDL struct {
 	ddl  string
 }
 
+const schemaBusyAttempts = 3
+
+// testMigrationBusyHook lets lock-contention tests release a real writer only
+// after the migration has received SQLITE_BUSY. Sequential tests only.
+var testMigrationBusyHook func(error)
+
 // addColumnsIfMissing adds each of cols to table that is not already present.
 // It reads the current column set once, then issues ALTERs only for the columns
 // still missing. This makes a multi-column migration resumable: a process that
@@ -86,8 +93,22 @@ func addColumnsIfMissing(db *sql.DB, table string, cols []columnDDL) (added bool
 		// migration is doing real work.
 		added = true
 		addColumnRaceHook(c.name)
-		if _, execErr := db.Exec(c.ddl); execErr != nil && !isDuplicateColumnError(execErr, c.name) {
-			return added, fmt.Errorf("add column %s.%s: %w", table, c.name, execErr)
+		// Each Exec is its own transaction. A BUSY_SNAPSHOT cannot be repaired
+		// by retrying inside the same read transaction; these attempts obtain a
+		// fresh statement snapshot instead. Another opener may finish the ALTER
+		// while we wait, in which case the exact duplicate-column result wins.
+		for attempt := range schemaBusyAttempts {
+			_, execErr := db.Exec(c.ddl)
+			if execErr == nil || isDuplicateColumnError(execErr, c.name) {
+				break
+			}
+			if !IsSQLiteBusy(execErr) || attempt == schemaBusyAttempts-1 {
+				return added, fmt.Errorf("add column %s.%s: %w", table, c.name, execErr)
+			}
+			if testMigrationBusyHook != nil {
+				testMigrationBusyHook(execErr)
+			}
+			time.Sleep(20 * time.Millisecond)
 		}
 	}
 	return added, nil
