@@ -95,24 +95,42 @@ func uploadOwnStagedPlainArtifacts(ctx context.Context, ledgerPath string, clien
 		default:
 			return refused, fmt.Errorf("refusing to overwrite unstaged content at %s: worktree differs from the staged bytes (uploaded as %s)", path, ref.OID)
 		}
+		unchanged := func() bool {
+			now, err := os.Stat(worktreePath)
+			return err == nil && os.SameFile(before, now) && now.ModTime().Equal(before.ModTime()) && now.Size() == before.Size()
+		}
+		// refuse before touching metadata: a coworker editing the copy wins
+		if !unchanged() {
+			return refused, fmt.Errorf("refusing to overwrite unstaged content at %s: the worktree copy changed during reconcile", path)
+		}
 		err = MutateSessionMeta(ctx, sessionDir, recordFileRef(sessionID, name, ref))
 		if err != nil {
 			return refused, fmt.Errorf("record %s in meta.json: %w", path, err)
 		}
+		// Stage the validated pointer bytes directly into the index (hash-object +
+		// update-index), never "whatever is in the worktree at add time": the
+		// worktree can change between the write and a `git add`, and the index
+		// must only ever hold the pointer that was verified above.
+		pointerBytes := []byte(FormatPointer(uploaded.Ref().OID, uploaded.Ref().Size))
+		blob, err := gitPlumbing(ctx, ledgerPath, pointerBytes, "hash-object", "-w", "--stdin")
+		if err != nil {
+			return refused, fmt.Errorf("store pointer blob for %s: %w", path, err)
+		}
+		if _, err := gitPlumbing(ctx, ledgerPath, nil, "update-index", "--add", "--cacheinfo", "100644,"+strings.TrimSpace(string(blob))+","+path); err != nil {
+			return refused, fmt.Errorf("stage pointer for %s: %w", path, err)
+		}
 		if !pointerShaped(worktree) {
-			// the comparison above and the write here must see the same file: a
-			// coworker editing it in between wins, so re-check identity (inode,
-			// mtime, size) right before writing and refuse on any change
-			now, statErr := os.Stat(worktreePath)
-			if statErr != nil || !os.SameFile(before, now) || !now.ModTime().Equal(before.ModTime()) || now.Size() != before.Size() {
+			// the comparison above and the write here must see the same file:
+			// re-check identity (inode, mtime, size) right before writing
+			if !unchanged() {
 				return refused, fmt.Errorf("refusing to overwrite unstaged content at %s: the worktree copy changed during reconcile", path)
 			}
 			if err := WritePointerFile(worktreePath, uploaded); err != nil {
 				return refused, fmt.Errorf("write pointer for %s: %w", path, err)
 			}
 		}
-		if _, err := gitutil.RunGit(ctx, ledgerPath, "add", "--sparse", "--", path, "sessions/"+sessionID+"/meta.json"); err != nil {
-			return refused, fmt.Errorf("stage pointer for %s: %w", path, err)
+		if _, err := gitutil.RunGit(ctx, ledgerPath, "add", "--sparse", "--", "sessions/"+sessionID+"/meta.json"); err != nil {
+			return refused, fmt.Errorf("stage meta.json for %s: %w", path, err)
 		}
 		logger.Info("lfs reconcile: uploaded own staged session artifact and staged its pointer", "path", path, "oid", ref.OID)
 	}
