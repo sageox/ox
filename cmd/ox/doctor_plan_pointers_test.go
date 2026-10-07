@@ -41,9 +41,10 @@ func TestPlanPointersMissingOnRemote_Only404IsMissing(t *testing.T) {
 			Message string `json:"message"`
 		}
 		type obj struct {
-			OID   string `json:"oid"`
-			Size  int64  `json:"size"`
-			Error *oerr  `json:"error,omitempty"`
+			OID     string         `json:"oid"`
+			Size    int64          `json:"size"`
+			Error   *oerr          `json:"error,omitempty"`
+			Actions map[string]any `json:"actions,omitempty"`
 		}
 		resp := struct {
 			Transfer string `json:"transfer"`
@@ -53,6 +54,8 @@ func TestPlanPointersMissingOnRemote_Only404IsMissing(t *testing.T) {
 			ob := obj{OID: o.OID, Size: o.Size}
 			if code := codes[o.OID]; code != 0 {
 				ob.Error = &oerr{Code: code, Message: "x"}
+			} else {
+				ob.Actions = map[string]any{"download": map[string]any{"href": "http://example.invalid/objects/" + o.OID}}
 			}
 			resp.Objects = append(resp.Objects, ob)
 		}
@@ -116,9 +119,10 @@ func newFakeDownloadServer(t *testing.T, codeByOID map[string]int) *lfs.Client {
 			Message string `json:"message"`
 		}
 		type obj struct {
-			OID   string `json:"oid"`
-			Size  int64  `json:"size"`
-			Error *oerr  `json:"error,omitempty"`
+			OID     string         `json:"oid"`
+			Size    int64          `json:"size"`
+			Error   *oerr          `json:"error,omitempty"`
+			Actions map[string]any `json:"actions,omitempty"`
 		}
 		resp := struct {
 			Transfer string `json:"transfer"`
@@ -128,6 +132,8 @@ func newFakeDownloadServer(t *testing.T, codeByOID map[string]int) *lfs.Client {
 			ob := obj{OID: o.OID, Size: o.Size}
 			if code := codeByOID[o.OID]; code != 0 {
 				ob.Error = &oerr{Code: code, Message: "x"}
+			} else {
+				ob.Actions = map[string]any{"download": map[string]any{"href": "http://example.invalid/objects/" + o.OID}}
 			}
 			resp.Objects = append(resp.Objects, ob)
 		}
@@ -238,4 +244,20 @@ func TestEvaluatePlanPointers_UnavailableStoreCannotReportHealthy(t *testing.T) 
 	assert.Contains(t, result.message, "could not verify")
 	assert.Contains(t, result.detail, "503")
 	assert.NotContains(t, result.message, "backed by the store")
+}
+
+// seeing an OID without a usable download action is uncertainty, not durable content.
+func TestEvaluatePlanPointers_ActionlessObjectCannotReportHealthy(t *testing.T) {
+	ref := lfs.NewFileRef([]byte("unavailable render"))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.git-lfs+json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"objects": []map[string]any{{"oid": ref.BareOID(), "size": ref.Size}}})
+	}))
+	defer server.Close()
+	result := evaluatePlanPointers(lfs.NewClient(server.URL, "oauth2", "token"), []planPointer{{Name: "unavailable", ref: ref}}, true, func() (*lfs.ReconcileResult, error) {
+		t.Fatal("repair cannot start from an inconclusive probe")
+		return nil, nil
+	})
+	assert.True(t, result.warning)
+	assert.Contains(t, result.detail, "omitted download action")
 }

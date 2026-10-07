@@ -172,7 +172,10 @@ func planPointersMissingOnRemote(client *lfs.Client, pointers []planPointer) ([]
 			if obj.Error != nil && obj.Error.Code != http.StatusNotFound {
 				return nil, fmt.Errorf("verify plan blob %s: HTTP %d", obj.OID, obj.Error.Code)
 			}
-			if obj.Error == nil || obj.Error.Code != http.StatusNotFound {
+			if obj.Error == nil {
+				if obj.Actions == nil || obj.Actions.Download == nil || obj.Actions.Download.Href == "" {
+					return nil, fmt.Errorf("content store omitted download action for plan blob %s", obj.OID)
+				}
 				continue
 			}
 			for _, idx := range oidToIdx[obj.OID] {

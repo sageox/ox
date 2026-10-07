@@ -20,7 +20,7 @@ func TestReconcile_OwnArtifactFailuresKeepOriginalState(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: repeated full reconciliation against real Git repositories")
 	}
-	for _, mode := range []string{"cache_parent_not_directory", "conflicting_cache", "store_drops_upload", "already_pointer", "registered_git_content"} {
+	for _, mode := range []string{"cache_parent_not_directory", "conflicting_cache", "store_drops_upload", "already_pointer", "registered_git_content", "unstaged_pointer", "unstaged_empty", "worktree_removed"} {
 		t.Run(mode, func(t *testing.T) {
 			ledger, bare := initLedgerWithRemote(t)
 			planDir := filepath.Join(ledger, "data", "plans", "blocked-plan")
@@ -37,6 +37,18 @@ func TestReconcile_OwnArtifactFailuresKeepOriginalState(t *testing.T) {
 				artifact = []byte(FormatPointer(ref.OID, ref.Size))
 			}
 			rawPath := stagePlainSession(t, ledger, "own", "person-a", artifact)
+			worktree := artifact
+			switch mode {
+			case "unstaged_pointer":
+				other := NewFileRef([]byte("a separate unstaged recording"))
+				worktree = []byte(FormatPointer(other.OID, other.Size))
+				require.NoError(t, os.WriteFile(rawPath, worktree, 0o644))
+			case "unstaged_empty":
+				worktree = []byte{}
+				require.NoError(t, os.WriteFile(rawPath, worktree, 0o644))
+			case "worktree_removed":
+				require.NoError(t, os.Remove(rawPath))
+			}
 			metaPath := filepath.Join(filepath.Dir(rawPath), "meta.json")
 			if mode == "already_pointer" || mode == "registered_git_content" {
 				meta, err := ReadSessionMeta(filepath.Dir(rawPath))
@@ -79,24 +91,39 @@ func TestReconcile_OwnArtifactFailuresKeepOriginalState(t *testing.T) {
 				assert.ErrorContains(t, err, "not found on the store after upload")
 				assert.Equal(t, 1, store.putAttempts)
 				assert.Equal(t, content, mustReadFile(t, cachePath))
+			case "unstaged_pointer", "unstaged_empty", "worktree_removed":
+				assert.ErrorContains(t, err, "upload own staged session artifacts before LFS reconcile")
+				if mode == "worktree_removed" {
+					assert.ErrorContains(t, err, "inspect worktree")
+				} else {
+					assert.ErrorContains(t, err, "refusing to overwrite unstaged content")
+				}
+				assert.Equal(t, content, mustReadFile(t, cachePath))
+				assert.Equal(t, content, store.stored[ref.BareOID()])
 			case "already_pointer", "registered_git_content":
 				var blocked *UnrecoverablePointersError
 				require.True(t, errors.As(err, &blocked), "registered artifacts should reach the original missing-plan verdict: %v", err)
 				assert.Zero(t, store.putAttempts, "an existing pointer or Git artifact needs no upload")
 				assert.NoFileExists(t, cachePath)
 			}
-			assert.Equal(t, artifact, mustReadFile(t, rawPath))
+			if mode == "worktree_removed" {
+				assert.NoFileExists(t, rawPath)
+			} else {
+				assert.Equal(t, worktree, mustReadFile(t, rawPath))
+			}
 			assert.Equal(t, originalMeta, mustReadFile(t, metaPath))
 			staged, readErr := exec.Command("git", "-C", ledger, "show", ":sessions/own/raw.jsonl").Output()
 			require.NoError(t, readErr)
 			assert.Equal(t, artifact, staged)
-			assert.Equal(t, mode == "already_pointer", IsPointerFile(rawPath))
+			assert.Equal(t, mode == "already_pointer" || mode == "unstaged_pointer", IsPointerFile(rawPath))
 			if existingCache != nil {
 				assert.Equal(t, existingCache, mustReadFile(t, cachePath))
 			}
 			assert.Equal(t, localHead, git(t, ledger, "rev-parse", "HEAD"))
 			assert.Equal(t, remoteHead, git(t, bare, "rev-parse", "HEAD"))
-			assert.Empty(t, store.stored, "failed or skipped repairs cannot invent durable content")
+			if mode != "unstaged_pointer" && mode != "unstaged_empty" && mode != "worktree_removed" {
+				assert.Empty(t, store.stored, "failed or skipped repairs cannot invent durable content")
+			}
 		})
 	}
 }

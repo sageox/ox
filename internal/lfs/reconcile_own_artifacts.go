@@ -1,9 +1,11 @@
 package lfs
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -72,6 +74,14 @@ func uploadOwnStagedPlainArtifacts(ctx context.Context, ledgerPath string, clien
 			return refused, fmt.Errorf("upload staged %s: %w", path, err)
 		}
 		ref := uploaded.Ref()
+		pointerPath := filepath.Join(ledgerPath, filepath.FromSlash(path))
+		existing, readErr := os.ReadFile(pointerPath)
+		if readErr != nil {
+			return refused, fmt.Errorf("inspect worktree %s: %w", path, readErr)
+		}
+		if !bytes.Equal(existing, staged) && !bytes.Equal(existing, []byte(FormatPointer(ref.OID, ref.Size))) {
+			return refused, fmt.Errorf("refusing to overwrite unstaged content %s", path)
+		}
 		err = MutateSessionMeta(ctx, sessionDir, func(m *SessionMeta) (*SessionMeta, error) {
 			if m == nil {
 				return nil, fmt.Errorf("meta.json for %s disappeared", sessionID)
@@ -85,7 +95,7 @@ func uploadOwnStagedPlainArtifacts(ctx context.Context, ledgerPath string, clien
 		if err != nil {
 			return refused, fmt.Errorf("record %s in meta.json: %w", path, err)
 		}
-		if err := WritePointerFile(filepath.Join(ledgerPath, filepath.FromSlash(path)), uploaded); err != nil {
+		if err := WritePointerFile(pointerPath, uploaded); err != nil {
 			return refused, fmt.Errorf("write pointer for %s: %w", path, err)
 		}
 		if _, err := gitutil.RunGit(ctx, ledgerPath, "add", "--sparse", "--", path, "sessions/"+sessionID+"/meta.json"); err != nil {
