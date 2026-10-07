@@ -101,7 +101,7 @@ type ConfirmRecordingUploadResponse struct {
 }
 
 // HTTPStatusError is a non-2xx answer from a SageOx API route. Code and
-// Message are the server's own, unmodified, so a 403 or a 409
+// Message are the server's own, unmodified, so a 403 or a 422
 // upload_checksum_mismatch reaches the person as the server wrote it.
 type HTTPStatusError struct {
 	StatusCode int
