@@ -348,8 +348,13 @@ func rearmInlineSummaryLocked(ctx context.Context, ledgerPath, username string, 
 		if readErr != nil || meta == nil || !strings.EqualFold(meta.Username, username) {
 			continue
 		}
+		metaPath := path.Join("sessions", e.Name(), "meta.json")
+		if metaDiffersFromHead(ctx, ledgerPath, metaPath) {
+			// restoreRearmedMetas would discard these edits on a failed commit
+			continue
+		}
 		if lfs.ResetInlineSummaryEligible(sessionDir, false, lfsClient, ledgerPath) {
-			resetPaths = append(resetPaths, path.Join("sessions", e.Name(), "meta.json"))
+			resetPaths = append(resetPaths, metaPath)
 		}
 	}
 	if len(resetPaths) == 0 {
@@ -365,6 +370,16 @@ func rearmInlineSummaryLocked(ctx context.Context, ledgerPath, username string, 
 		Status:  StatusFixed,
 		Summary: fmt.Sprintf("reset %d sessions for inline-prompt re-summarization", len(resetPaths)),
 	}
+}
+
+// metaDiffersFromHead reports whether the file is untracked or has staged or
+// unstaged edits. Fails closed: any git error counts as dirty.
+func metaDiffersFromHead(ctx context.Context, ledgerPath, relPath string) bool {
+	if _, err := gitutil.RunGit(ctx, ledgerPath, "ls-files", "--error-unmatch", "--", relPath); err != nil {
+		return true
+	}
+	_, err := gitutil.RunGit(ctx, ledgerPath, "diff", "--quiet", "HEAD", "--", relPath)
+	return err != nil
 }
 
 func commitRearmedMetas(ctx context.Context, ledgerPath, msg string, paths []string) error {
