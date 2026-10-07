@@ -2,9 +2,11 @@ package gitutil
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // ResolveRebaseAcceptTheirs attempts to resolve a rebase conflict by accepting
@@ -48,7 +50,29 @@ func ResolveRebaseAcceptTheirs(ctx context.Context, repoPath string, safePrefixe
 		if pass >= maxResolvePasses {
 			return fmt.Errorf("rebase did not converge after %d resolve passes", maxResolvePasses)
 		}
-		done, err := resolveOneRebaseStep(ctx, repoPath, safePrefixes, denyPrefixes...)
+		// An explicit cancellation of the caller ends the loop between steps; the
+		// caller's DEADLINE does not. A 700-commit replay cannot fit a 60-second
+		// operation budget, and the daemon runs in macOS's background band where
+		// one `git ls-files` can take seconds under load, so each step gets its
+		// own budget (resolveStepTimeout) instead of whatever is left of the
+		// caller's. 2026-10-07: every retry died with "git ls-files --unmerged:
+		// context deadline exceeded" after a few steps, aborted the rebase, and
+		// minted another rescue branch — 22 in one morning, for conflicts the
+		// rules below resolve without help.
+		if err := ctx.Err(); err != nil && !errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
+		stepCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), resolveStepTimeout)
+		// an explicit cancellation (daemon shutdown) still reaches the active
+		// step's git commands; only the caller's deadline is ignored
+		stopForward := context.AfterFunc(ctx, func() {
+			if errors.Is(ctx.Err(), context.Canceled) {
+				cancel()
+			}
+		})
+		done, err := resolveOneRebaseStep(stepCtx, repoPath, safePrefixes, denyPrefixes...)
+		stopForward()
+		cancel()
 		if err != nil {
 			return err
 		}
@@ -57,6 +81,22 @@ func ResolveRebaseAcceptTheirs(ctx context.Context, repoPath string, safePrefixe
 		}
 	}
 }
+
+// resolveStepTimeout bounds ONE rebase step: the unmerged-index probe, that
+// step's checkouts and adds, and `rebase --continue`. Generous on purpose: the
+// daemon runs in the background band (efficiency cores, throttled I/O), the
+// Ledger index has 130k+ entries, and one replayed commit can touch hundreds of
+// files. Per step, so a whole replay is bounded by steps x this, never by the
+// caller's single operation budget.
+const resolveStepTimeout = 2 * time.Minute
+
+// probeRetries is how many times listUnmergedEntries re-runs a probe that hit
+// its deadline before giving up. A slow probe is load, not a broken index; the
+// old behavior turned one slow `git ls-files` into an aborted rebase.
+const (
+	probeRetries    = 3
+	probeRetryDelay = 2 * time.Second
+)
 
 // resolveOneRebaseStep resolves the conflicts of the current rebase step and
 // continues. Returns done=true when the whole rebase has finished.
@@ -426,7 +466,19 @@ func HasUnmergedEntries(ctx context.Context, repoPath string) (bool, error) {
 // rename/delete, and content conflicts — unlike git diff --diff-filter=U
 // which can miss files in rename conflict scenarios.
 func listUnmergedEntries(ctx context.Context, repoPath string) ([]unmergedEntry, error) {
-	out, err := RunGit(ctx, repoPath, "ls-files", "--unmerged")
+	var out string
+	var err error
+	for attempt := 1; attempt <= probeRetries; attempt++ {
+		out, err = RunGit(ctx, repoPath, "ls-files", "--unmerged")
+		if err == nil || ctx.Err() != nil || !errors.Is(err, context.DeadlineExceeded) || attempt == probeRetries {
+			break // success, a canceled caller, a real git failure, or out of retries
+		}
+		// a probe that merely ran out of time under load is retried, not reported
+		select {
+		case <-time.After(probeRetryDelay):
+		case <-ctx.Done():
+		}
+	}
 	if err != nil {
 		// Tag every probe FAILURE so callers can tell it from a probe RESULT.
 		// The most likely error here is context cancellation (laptop sleep, VPN
