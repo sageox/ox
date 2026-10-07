@@ -17,6 +17,9 @@ import (
 // the commits endpoint, and the backfill pass asked again every sync cycle
 // (37 identical warnings in one day).
 func TestBackfillPRCommits_DoesNotRefetchPRThatReturned404(t *testing.T) {
+	ledger.ResetPRCommitsNotFound()
+	t.Cleanup(ledger.ResetPRCommitsNotFound)
+
 	var deadRequests, liveRequests atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {

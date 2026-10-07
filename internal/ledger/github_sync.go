@@ -497,6 +497,12 @@ var ErrGitHubNotFound = errors.New("github resource not found")
 // it, costing one retry per PR.
 var prCommitsNotFound sync.Map
 
+// ResetPRCommitsNotFound clears the 404 memo so tests do not share
+// process-wide state.
+func ResetPRCommitsNotFound() {
+	prCommitsNotFound.Clear()
+}
+
 func fetchPRCommits(ctx context.Context, fetcher GitHubFetcher, owner, repo string, number int, logger *slog.Logger) []PRCommit {
 	key := fmt.Sprintf("%s/%s#%d", owner, repo, number)
 	if _, gone := prCommitsNotFound.Load(key); gone {
