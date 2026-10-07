@@ -38,7 +38,7 @@ recorded to your team's shared, queryable history.
 
 ## Latest Project Activity
 
-![SageOx — latest project activity](https://www.sageox.ai/api/v1/public/mural/vio0F88wcSd9grV3piwmisVtNA_rWF-ta8gpGJ_tf1g)
+[![SageOx Glance](https://sageox.ai/visual/INW3ryYmUdAYw05Pvp3sMP0-N9LzGJvOFHwfDL-EAI4/img)](https://sageox.ai/visual/INW3ryYmUdAYw05Pvp3sMP0-N9LzGJvOFHwfDL-EAI4)
 
 ---
 
