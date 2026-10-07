@@ -1358,14 +1358,19 @@ def gather_state(out: Path, a) -> dict:
     }
 
 
+def _cell(text) -> str:
+    """Text safe inside a Markdown table cell: GFM splits a row on any unescaped
+    pipe, even inside a code span, and a newline ends the row."""
+    return str(text).replace("|", "\\|").replace("\r", " ").replace("\n", " ")
+
+
 def scanner_table(scan: list) -> list:
     """Markdown rows for scanner findings, at most SCANNER_ROWS of them."""
     md = ["| Tool | Rule | Where | Message |", "|---|---|---|---|"]
     for f in scan[:SCANNER_ROWS]:
         where = f"`{f['file']}:{f['line']}`" if f["file"] and f["line"] else (f"`{f['file']}`" if f["file"] else "dependency")
         rule = f["rule"] + (" (reachable)" if f["reachable"] else "")
-        message = f["message"].replace("|", "\\|")[:160]
-        md.append(f"| {f['tool']} | {rule} | {where} | {message} |")
+        md.append(f"| {_cell(f['tool'])} | {_cell(rule)} | {_cell(where)} | {_cell(f['message'][:160])} |")
     if len(scan) > SCANNER_ROWS:
         md += ["", f"… {len(scan) - SCANNER_ROWS} more in `findings-deterministic.json`."]
     return md
@@ -1391,7 +1396,7 @@ def render_det_summary(doc: dict) -> str:
             result = f"ran: {v.get('findings', 0)} finding(s)"
         else:
             result = f"{v.get('status', '?')}: {v.get('reason') or 'no reason recorded'}"
-        md.append(f"| {tool} | {result} |")
+        md.append(f"| {_cell(tool)} | {_cell(result)} |")
     scan = scanner_report_findings(doc, [])
     md.append("")
     if scan:

@@ -465,6 +465,17 @@ class ScannerFindingsTest(unittest.TestCase):
         self.assertIn("| govulncheck | GO-2026-0001 (reachable) | dependency | bad parse |", md)
         self.assertIn("| gosec | G204 | `cmd/ox/b.go:3` | subprocess with variable |", md)
 
+    def test_pipes_in_any_cell_are_escaped(self):
+        """A file path the PR controls, or a scanner's failure reason, must not split a column."""
+        doc = {"findings": [{"tool": "gosec", "ruleId": "G304", "level": "warning", "message": "read",
+                             "locations": [{"file": "cmd/ox/a|b.go", "line": 4}]}],
+               "coverage": "partial", "scope": "diff", "since": "origin/main", "touched_files": 1,
+               "tools": {"gosec": {"status": "ran", "findings": 1},
+                         "grype": {"status": "failed", "reason": "exit 2 | db stale"}}}
+        md = pipeline.render_det_summary(doc)
+        self.assertIn("| gosec | G304 | `cmd/ox/a\\|b.go:4` | read |", md)
+        self.assertIn("| grype | failed: exit 2 \\| db stale |", md)
+
     def test_det_summary_never_reads_clean_without_coverage(self):
         doc = {"findings": [], "coverage": "none", "scope": "diff", "since": "origin/main", "touched_files": 1,
                "tools": {t: {"status": "skipped", "reason": "not installed"} for t in pipeline.SCANNERS}}
