@@ -464,6 +464,14 @@ func TestDaemonStart_UnwritableRestartHistoryIsNonFatal(t *testing.T) {
 }
 
 func TestStartDaemonProcess(t *testing.T) {
+	// LogPath() derives from paths.TempDir(), which is keyed on $USER: without this
+	// the subtests below RemoveAll the developer's REAL daemon log directory
+	// (/tmp/<user>/sageox/logs) and every running daemon loses its log file
+	// (2026-10-07: the directory vanished twice, each time while this package's
+	// tests ran). Point the whole test at a throwaway identity and prove it.
+	t.Setenv("USER", "ox-test-"+filepath.Base(t.TempDir()))
+	t.Setenv("USERNAME", os.Getenv("USER"))
+	require.Contains(t, LogPath(), "ox-test-", "LogPath must point at the isolated test identity, never the developer's")
 	singleflightEnv(t)
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
