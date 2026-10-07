@@ -532,6 +532,9 @@ func optionsFromCommand(t *testing.T, command string) importOptions {
 			agent, ok := parseImportAgent(fields[i])
 			require.True(t, ok, command)
 			opts.summarizer = agent
+		case "--from-test-data":
+			i++
+			opts.testData = strings.Trim(fields[i], "'") // shell-quoted; test paths hold no spaces
 		default:
 			t.Fatalf("unexpected argument %q in %q", fields[i], command)
 		}

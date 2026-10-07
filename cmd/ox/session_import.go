@@ -70,6 +70,9 @@ func addSessionImportFlags(f *pflag.FlagSet) {
 	f.StringSlice("session", nil, "import exactly these sessions, by native session ID or a unique prefix of 8+ characters")
 	f.String("summarizer", "", "summarize with this CLI instead of each session's own: claude or codex")
 	f.Bool("dry-run", false, "preview only; never upload")
+	// Test-only: <dir>/claude stands in for ~/.claude and <dir>/codex for ~/.codex.
+	f.String("from-test-data", "", "read sessions from this test-data directory instead of this machine's Claude Code and Codex stores")
+	_ = f.MarkHidden("from-test-data")
 }
 
 // importCandidate is one native session, its classification and, after a
@@ -108,6 +111,7 @@ type importOptions struct {
 	yes        bool
 	jsonOut    bool
 	agentCtx   bool
+	testData   string // absolute; stands in for this machine's native stores when set
 }
 
 type importDestination struct {
@@ -183,6 +187,9 @@ func runSessionImport(cmd *cobra.Command, _ []string) error {
 	}
 	env.deps = productionImportDeps(ctx, env)
 	env.progress = cmd.ErrOrStderr()
+	if opts.testData != "" {
+		fmt.Fprintln(cmd.ErrOrStderr(), "Reading sessions from test data in "+opts.testData)
+	}
 	return runSessionImportFlow(ctx, out, opts, env, dest)
 }
 
@@ -199,6 +206,13 @@ func parseImportOptions(cmd *cobra.Command) (importOptions, *importFailure) {
 	o.sessions, _ = cmd.Flags().GetStringSlice("session")
 	bad := func(msg string) (importOptions, *importFailure) {
 		return o, &importFailure{Code: importErrBadFlag, Message: msg}
+	}
+	if dir, _ := cmd.Flags().GetString("from-test-data"); dir != "" {
+		abs, err := filepath.Abs(dir)
+		if err != nil {
+			return bad(fmt.Sprintf("--from-test-data %q: %v", dir, err))
+		}
+		o.testData = abs
 	}
 	agent, _ := cmd.Flags().GetString("agent")
 	var ok bool
@@ -677,6 +691,29 @@ type discoveredSession struct {
 	problem string
 }
 
+// importStoreRoots returns where to find the Claude Code projects and the Codex
+// home: this machine's stores, or a test-data directory standing in for them.
+// A test-data directory holding neither is refused, never read as empty.
+func importStoreRoots(opts importOptions) (claude, codex func() (string, error), err error) {
+	if opts.testData == "" {
+		return nativeimport.ClaudeProjectsDir, nativeimport.CodexHome, nil
+	}
+	claudeDir := filepath.Join(opts.testData, "claude", "projects")
+	codexDir := filepath.Join(opts.testData, "codex")
+	if !isImportDir(claudeDir) && !isImportDir(codexDir) {
+		return nil, nil, fmt.Errorf("no test data in %s: expected claude/projects or codex inside it", opts.testData)
+	}
+	fixed := func(dir string) func() (string, error) {
+		return func() (string, error) { return dir, nil }
+	}
+	return fixed(claudeDir), fixed(codexDir), nil
+}
+
+func isImportDir(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
 // discoverImportSessions reads every native store and keeps this repo's
 // sessions, one per native session: the longest of any duplicate copies.
 func discoverImportSessions(opts importOptions, scope *nativeimport.Scope, ignored *importIgnored) ([]discoveredSession, error) {
@@ -685,8 +722,12 @@ func discoverImportSessions(opts importOptions, scope *nativeimport.Scope, ignor
 		path  string
 	}
 	var files []nativeFile
+	claudeDir, codexDir, err := importStoreRoots(opts)
+	if err != nil {
+		return nil, err
+	}
 	if opts.agent == "" || opts.agent == nativeimport.AgentClaude {
-		dir, err := nativeimport.ClaudeProjectsDir()
+		dir, err := claudeDir()
 		if err != nil {
 			return nil, err
 		}
@@ -700,7 +741,7 @@ func discoverImportSessions(opts importOptions, scope *nativeimport.Scope, ignor
 		}
 	}
 	if opts.agent == "" || opts.agent == nativeimport.AgentCodex {
-		home, err := nativeimport.CodexHome()
+		home, err := codexDir()
 		if err != nil {
 			return nil, err
 		}
@@ -826,13 +867,22 @@ func importUploadCommand(opts importOptions, selected []*importCandidate) string
 	for _, c := range selected {
 		ids = append(ids, c.Session.NativeID)
 	}
-	return "ox session import --yes" + summarizerFlag(opts) + " --session " + strings.Join(ids, ",")
+	return "ox session import --yes" + summarizerFlag(opts) + testDataFlag(opts) + " --session " + strings.Join(ids, ",")
 }
 
 // importRetryCommand retries one session by its full ID: two Codex sessions
 // started within a minute share their first eight characters.
 func importRetryCommand(opts importOptions, c *importCandidate) string {
-	return "ox session import --session " + c.Session.NativeID + summarizerFlag(opts)
+	return "ox session import --session " + c.Session.NativeID + summarizerFlag(opts) + testDataFlag(opts)
+}
+
+// testDataFlag keeps a printed command reading the same test data; without it
+// the command would read this machine's stores and find none of the sessions.
+func testDataFlag(opts importOptions) string {
+	if opts.testData == "" {
+		return ""
+	}
+	return " --from-test-data " + shellQuote(opts.testData)
 }
 
 func summarizerFlag(opts importOptions) string {
