@@ -168,7 +168,7 @@ adds exactly one commit; one with nothing to fix adds none. Neither rewrites exi
 | 1 | `ox doctor` | Reports what blocks the push and names the repair to run. |
 | 2 | `ox doctor --fix-slug=session-conflict-markers` | Resolves conflict markers committed into session files, keeping the version your team already has. |
 | 3 | `ox doctor --fix-slug=session-pointer-restore` | Replaces session artifacts committed as full content with their LFS pointers, uploads your own never-uploaded sessions, and leaves teammates' sessions untouched. |
-| 4 | `ox status` | Shows the backlog shrinking once the daemon's next push succeeds. |
+| 4 | `ox status` | Shows uncommitted Ledger changes; it does not show commits awaiting push. The daemon log reports when the push succeeds. |
 
 If a repair reports files it could not fix, it names each one and the reason, and changes
 nothing for those files.
