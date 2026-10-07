@@ -7,6 +7,7 @@ Run: cd scripts && python3 -m unittest -v session_import_testbed_test.py
 import io
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import time
@@ -151,6 +152,29 @@ class Testbed(unittest.TestCase):
         self.assertEqual(1, code)
         self.assertIn("code/NOTES.md", text)
         self.assertFalse(out.exists() and any(out.iterdir()), "nothing is written when the code is refused")
+
+    # Failure prevented: a repo file that names the author, links outside the
+    # repo, or can't be read as text reaching a published fixture unchecked.
+    def test_capture_refuses_code_it_cannot_vouch_for(self):
+        secret = self.tmp / "private.cfg"
+        secret.write_text("token = abc\n")
+        cases = {
+            "a symlink": ("link.cfg", lambda p: p.symlink_to(secret), "symlink"),
+            "a name naming the author": ("Dana Real notes.md", lambda p: p.write_text("scores\n"), "the name code/"),
+            "bytes that aren't UTF-8": ("logo.bin", lambda p: p.write_bytes(b"\xff\xfe\x00D\x00a\x00n\x00a"), "not UTF-8"),
+        }
+        for label, (name, make, expected) in cases.items():
+            with self.subTest(label):
+                path = self.source / name
+                make(path)
+                try:
+                    code, text, out = self.capture()
+                    self.assertEqual(1, code, text)
+                    self.assertIn(expected, text)
+                    self.assertFalse(out.exists() and any(out.iterdir()), "nothing is written")
+                finally:
+                    path.unlink()
+                    shutil.rmtree(self.tmp / "fixture", ignore_errors=True)
 
     # Failure prevented: a session file cut off mid-line crashing capture with a
     # traceback instead of saying which file to wait for.

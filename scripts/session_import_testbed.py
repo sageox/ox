@@ -315,12 +315,20 @@ def code_files(source, identities):
         if rel.startswith(OX_MANAGED) or rel in OX_MANAGED_FILES or JUNK.search(rel):
             continue
         src = source / rel
+        # A link can point anywhere on the machine; copying would publish its target.
+        if src.is_symlink():
+            raise Refused("code/%s is a symlink; the fixture copies only regular files" % rel)
         if not src.is_file():
             continue
         # A nested .gitignore or .gitattributes would apply to the fixture inside the ox repo.
         parts = rel.split("/")
         parts[-1] = "dot-" + parts[-1][1:] if parts[-1] in (".gitignore", ".gitattributes") else parts[-1]
-        check_private("code/" + rel, src.read_bytes().decode("utf-8", errors="ignore"), identities)
+        check_private("the name code/" + rel, rel, identities)
+        try:
+            text = src.read_bytes().decode("utf-8")
+        except UnicodeDecodeError:
+            raise Refused("code/%s is not UTF-8 text, so it cannot be checked; remove it from the repo first" % rel)
+        check_private("code/" + rel, text, identities)
         files.append((parts, src))
     return files
 
