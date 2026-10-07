@@ -63,7 +63,15 @@ func ResolveRebaseAcceptTheirs(ctx context.Context, repoPath string, safePrefixe
 			return err
 		}
 		stepCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), resolveStepTimeout)
+		// an explicit cancellation (daemon shutdown) still reaches the active
+		// step's git commands; only the caller's deadline is ignored
+		stopForward := context.AfterFunc(ctx, func() {
+			if errors.Is(ctx.Err(), context.Canceled) {
+				cancel()
+			}
+		})
 		done, err := resolveOneRebaseStep(stepCtx, repoPath, safePrefixes, denyPrefixes...)
+		stopForward()
 		cancel()
 		if err != nil {
 			return err
@@ -84,7 +92,7 @@ const resolveStepTimeout = 2 * time.Minute
 
 // probeRetries is how many times listUnmergedEntries re-runs a probe that hit
 // its deadline before giving up. A slow probe is load, not a broken index; the
-// old behaviour turned one slow `git ls-files` into an aborted rebase.
+// old behavior turned one slow `git ls-files` into an aborted rebase.
 const (
 	probeRetries    = 3
 	probeRetryDelay = 2 * time.Second
@@ -463,7 +471,7 @@ func listUnmergedEntries(ctx context.Context, repoPath string) ([]unmergedEntry,
 	for attempt := 1; attempt <= probeRetries; attempt++ {
 		out, err = RunGit(ctx, repoPath, "ls-files", "--unmerged")
 		if err == nil || ctx.Err() != nil || !errors.Is(err, context.DeadlineExceeded) || attempt == probeRetries {
-			break // success, a cancelled caller, a real git failure, or out of retries
+			break // success, a canceled caller, a real git failure, or out of retries
 		}
 		// a probe that merely ran out of time under load is retried, not reported
 		select {

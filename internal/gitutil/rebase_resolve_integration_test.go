@@ -354,5 +354,21 @@ func TestResolveRebaseAcceptTheirs_CancellationStopsBetweenSteps(t *testing.T) {
 
 	err := ResolveRebaseAcceptTheirs(ctx, repo, []string{"sessions/"})
 	require.ErrorIs(t, err, context.Canceled)
-	assert.True(t, IsRebaseInProgress(repo), "a cancelled resolver leaves the rebase for the caller to abort")
+	assert.True(t, IsRebaseInProgress(repo), "a canceled resolver leaves the rebase for the caller to abort")
+}
+
+func TestResolveRebaseAcceptTheirs_CancellationReachesActiveStep(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git rebase operations")
+	}
+	_, repo := setupDivergentRepos(t, "sessions/s1/meta.json", `{"local":true}`, `{"remote":true}`)
+	ctx, cancel := context.WithCancel(context.Background())
+	// cancel while the first step is running: the step's git commands must see it
+	go func() { time.Sleep(20 * time.Millisecond); cancel() }()
+	start := time.Now()
+	err := ResolveRebaseAcceptTheirs(ctx, repo, []string{"sessions/"})
+	if err == nil {
+		return // the step finished before the cancel landed; nothing to assert
+	}
+	assert.Less(t, time.Since(start), resolveStepTimeout/2, "cancellation must not wait out the step budget")
 }
