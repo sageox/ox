@@ -160,6 +160,9 @@ func TestPlanSaveFile_FailedHTMLUploadCommitsNothingAndKeepsPlainFile(t *testing
 }
 
 func TestPlanSaveFile_FailedHTMLUploadRetryPreservesPriorRevision(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: repeated real Git saves and LFS uploads")
+	}
 	for _, offline := range []bool{false, true} {
 		t.Run(fmt.Sprintf("offline_retry_%v", offline), func(t *testing.T) {
 			root := newPlanCaptureTestRepo(t)
