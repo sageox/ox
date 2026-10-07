@@ -313,6 +313,7 @@ func runImport(cmd *cobra.Command, args []string) error {
 	if err == nil {
 		err = os.Mkdir(docDir, 0o755)
 	}
+	createdDocDir := err == nil
 	if errors.Is(err, fs.ErrExist) && importFlags.force {
 		err = nil
 	}
@@ -334,7 +335,10 @@ func runImport(cmd *cobra.Command, args []string) error {
 		pointerFiles["extracted.md"] = textRef
 	}
 	// AssertUploaded: srcRef/textRef blobs were uploaded via BatchUpload/UploadAll above.
-	if _, err := lfs.WritePointerFiles(docDir, lfs.AssertUploadedManifest(pointerFiles)); err != nil {
+	if _, err := writeDocPointerFiles(docDir, lfs.AssertUploadedManifest(pointerFiles)); err != nil {
+		if createdDocDir {
+			discardDocDir(docDir)
+		}
 		return fmt.Errorf("write pointer files: %w", err)
 	}
 
@@ -376,6 +380,9 @@ func runImport(cmd *cobra.Command, args []string) error {
 	}
 	metaPath := filepath.Join(docDir, "metadata.json")
 	if err := os.WriteFile(metaPath, metaData, 0o644); err != nil {
+		if createdDocDir {
+			discardDocDir(docDir, metaPath, srcPointerPath, textPointerPath)
+		}
 		return fmt.Errorf("write metadata.json: %w", err)
 	}
 
@@ -384,6 +391,21 @@ func runImport(cmd *cobra.Command, args []string) error {
 	}
 
 	return finishDocImport(cmd, jsonOutput, tc.TeamID, ep, meta)
+}
+
+// writeDocPointerFiles is a test seam: retry tests swap it to fail a write after docDir exists.
+var writeDocPointerFiles = lfs.WritePointerFiles
+
+// discardDocDir removes a document directory this run created when a later write fails,
+// so the retry is not refused as a concurrent import. os.Remove, not RemoveAll: a file
+// this run did not write keeps the directory, and is never deleted.
+func discardDocDir(docDir string, written ...string) {
+	for _, path := range written {
+		_ = os.Remove(path)
+	}
+	if err := os.Remove(docDir); err != nil {
+		slog.Warn("could not remove incomplete import directory", "path", docDir, "error", err)
+	}
 }
 
 // finishDocImport reports a published import using its saved manifest.
@@ -556,7 +578,10 @@ func resumeDocImport(ctx context.Context, tcPath, ep, metaPath string, source lf
 			}
 		}
 		if tracked == len(files) {
-			return nil
+			// under the lock: a daemon pull mid-rebase detaches HEAD and would fail the check
+			published, err := docImportPublished(ctx, tcPath, files)
+			resumed = err == nil && !published
+			return err
 		}
 		if tracked != 0 {
 			return fmt.Errorf("document is only partially committed; leaving it unchanged: %s", metaPath)
@@ -567,37 +592,37 @@ func resumeDocImport(ctx context.Context, tcPath, ep, metaPath string, source lf
 		resumed = true
 		return nil
 	})
-	if err == nil && !resumed {
-		var published bool
-		published, err = docImportPublished(ctx, tcPath, files)
-		resumed = err == nil && !published
+	if err != nil {
+		return meta, false, fmt.Errorf("%w (nothing was published; fix the cause and rerun ox import, or use --force to import a fresh copy)", err)
 	}
-	if err == nil && resumed {
-		// A retry must not fetch and rebase away the saved import before publishing it.
-		err = pushTeamContext(ctx, tcPath, ep, 1)
-		if err == nil {
-			err = gitutil.WithRepoLock(ctx, tcPath, func() error {
-				for path, expected := range files {
-					content, found, err := docImportGitBlob(ctx, tcPath, "HEAD", path)
-					if err != nil {
-						return err
-					}
-					matches := false
-					if found {
-						matches, err = docImportMatchesBlob(ctx, tcPath, path, expected, content)
-						if err != nil {
-							return err
-						}
-					}
-					if !matches {
-						return fmt.Errorf("document changed while publishing; cannot report a successful import: %s", path)
-					}
+	if !resumed {
+		return meta, false, nil
+	}
+	// The normal fetch-and-rebase retry is safe: a document committed here that upstream
+	// later removed was already refused by docImportPublished, so a rebase cannot revive it.
+	if err := pushTeamContext(ctx, tcPath, ep); err != nil {
+		return meta, true, fmt.Errorf("import is committed locally but not published (run `ox sync`, then rerun ox import): %w", err)
+	}
+	err = gitutil.WithRepoLock(ctx, tcPath, func() error {
+		for path, expected := range files {
+			content, found, err := docImportGitBlob(ctx, tcPath, "HEAD", path)
+			if err != nil {
+				return err
+			}
+			matches := false
+			if found {
+				matches, err = docImportMatchesBlob(ctx, tcPath, path, expected, content)
+				if err != nil {
+					return err
 				}
-				return nil
-			})
+			}
+			if !matches {
+				return fmt.Errorf("document changed while publishing; cannot report a successful import: %s", path)
+			}
 		}
-	}
-	return meta, resumed, err
+		return nil
+	})
+	return meta, true, err
 }
 
 // docImportPublished checks the native push tracking ref for a previously published document.
@@ -614,46 +639,14 @@ func docImportPublished(ctx context.Context, tcPath string, files map[string][]b
 	if remote == "" {
 		return false, fmt.Errorf("cannot determine import publication: push remote is unknown")
 	}
-	if _, configured, err := docImportGitConfig(ctx, tcPath, "--get-all", "remote."+remote+".push"); err != nil {
-		return false, err
-	} else if configured {
-		return false, fmt.Errorf("cannot determine import publication with an explicit push refspec")
-	}
-	if mirror, _, err := docImportGitConfig(ctx, tcPath, "--bool", "--get", "remote."+remote+".mirror"); err != nil {
-		return false, err
-	} else if mirror == "true" {
-		return false, fmt.Errorf("cannot determine import publication for a mirror remote")
-	}
-	if mode, configured, err := docImportGitConfig(ctx, tcPath, "--get", "push.default"); err != nil {
-		return false, err
-	} else if configured && mode != "simple" && mode != "current" && mode != "upstream" && mode != "tracking" {
-		return false, fmt.Errorf("cannot determine import publication for push.default=%s", mode)
-	}
+	// @{push} already honors push.default, push refspecs and pushRemote, so it is the
+	// tracking ref of wherever `git push` publishes this branch.
 	pushRef, err := gitutil.RunGit(ctx, tcPath, "rev-parse", "--symbolic-full-name", "@{push}")
 	if err != nil {
 		return false, fmt.Errorf("cannot determine import publication ref: %w", err)
 	}
 	if !strings.HasPrefix(pushRef, "refs/remotes/"+remote+"/") {
 		return false, fmt.Errorf("cannot determine import publication: push tracking ref is unknown")
-	}
-
-	var urls [2]string
-	for i, flags := range [][]string{{"--all"}, {"--push", "--all"}} {
-		args := append([]string{"-C", tcPath, "remote", "get-url"}, flags...)
-		args = append(args, remote)
-		cmd := gitutil.NewNetworkCmd(ctx, args...)
-		cmd.Dir = tcPath
-		out, err := cmd.Output()
-		if err != nil {
-			return false, fmt.Errorf("cannot determine import publication URL: %w", err)
-		}
-		urls[i] = strings.TrimSpace(string(out))
-		if urls[i] == "" || strings.Contains(urls[i], "\n") {
-			return false, fmt.Errorf("cannot determine import publication with multiple remote URLs")
-		}
-	}
-	if urls[0] != urls[1] {
-		return false, fmt.Errorf("cannot determine import publication when fetch and push URLs differ")
 	}
 
 	matched := 0
@@ -696,19 +689,6 @@ func docImportPublished(ctx context.Context, tcPath string, files map[string][]b
 		}
 	}
 	return false, nil
-}
-
-// docImportGitConfig treats only Git's missing-value exit code as an absent setting.
-func docImportGitConfig(ctx context.Context, tcPath string, args ...string) (string, bool, error) {
-	out, err := gitutil.RunGit(ctx, tcPath, append([]string{"config"}, args...)...)
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
-		return "", false, nil
-	}
-	if err != nil {
-		return "", false, fmt.Errorf("cannot determine import publication configuration: %w", err)
-	}
-	return out, true, nil
 }
 
 // readDocImport accepts only a complete manifest and the pointers it describes.
@@ -1000,7 +980,7 @@ func commitAndPushDocImport(tcPath, ep, docID, metaPath, srcPointerPath, textPoi
 		return err
 	}
 
-	return pushTeamContext(context.Background(), tcPath, ep, 0)
+	return pushTeamContext(context.Background(), tcPath, ep)
 }
 
 // commitDocImportSnapshot stages only validated files and leaves unrelated index entries alone.
@@ -1065,6 +1045,11 @@ func prepareDocImportAttributes(ctx context.Context, tcPath string, files map[st
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("read import .gitattributes: %w", err)
 	}
+	if headExists && !currentExists {
+		// a team context whose sparse checkout predates root-level files; rewriting the file
+		// from scratch here would drop the team's attributes on the next push
+		return fmt.Errorf("%s is committed but missing from the checkout; run `ox doctor` to repair the team context, then rerun ox import", path)
+	}
 	unchanged := currentExists == headExists
 	owned := false
 	if currentExists {
@@ -1080,7 +1065,7 @@ func prepareDocImportAttributes(ctx context.Context, tcPath string, files map[st
 		}
 	}
 	if !unchanged && !owned {
-		return fmt.Errorf("unrelated .gitattributes changes; leaving them unchanged")
+		return fmt.Errorf("%s has uncommitted changes ox did not make; commit or discard them, then rerun ox import", path)
 	}
 	index, indexExists, err := docImportGitBlob(ctx, tcPath, "", path)
 	if err != nil {
@@ -1095,7 +1080,7 @@ func prepareDocImportAttributes(ctx context.Context, tcPath string, files map[st
 		}
 	}
 	if !unchanged && !owned {
-		return fmt.Errorf("unrelated staged .gitattributes changes; leaving them unchanged")
+		return fmt.Errorf("%s has staged changes ox did not make; commit or unstage them, then rerun ox import", path)
 	}
 	if err := ensureMetadataGitattributes(tcPath); err != nil {
 		return fmt.Errorf("update import .gitattributes: %w", err)
@@ -1118,10 +1103,8 @@ func prepareDocImportAttributes(ctx context.Context, tcPath string, files map[st
 // pushTeamContext pushes team context changes to remote with conflict retry.
 // Takes endpoint explicitly since team context path lacks .sageox/ for discovery.
 // No auto-resolve — team context conflicts require manual resolution.
-// A zero maxRetries preserves the default policy used by new imports.
-func pushTeamContext(ctx context.Context, tcPath, ep string, maxRetries int) error {
+func pushTeamContext(ctx context.Context, tcPath, ep string) error {
 	return gitutil.PushWithRetry(ctx, tcPath, gitutil.PushOpts{
-		MaxRetries: maxRetries,
 		PrePush: func(repoPath string) error {
 			if ep != "" {
 				if err := gitserver.RefreshRemoteCredentials(repoPath, ep); err != nil {
