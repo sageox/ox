@@ -495,6 +495,17 @@ class ValidatorRoutingTest(unittest.TestCase):
             with self.subTest(finding=finding):
                 self.assertEqual(self.route(finding), "model-default")
 
+    def test_quoted_items_and_flow_lists_are_parsed_as_yaml(self):
+        """Valid YAML spellings of hard_classes must not silently fall back to the default."""
+        for config in ('hard_classes:\n  - "daemon-ipc"\n  - \'supply-chain\'\n',
+                       "hard_classes: [daemon-ipc, 'supply-chain']\n",
+                       'hard_classes: ["daemon-ipc", supply-chain]  # flow style\n'):
+            with self.subTest(config=config):
+                self.assertEqual(pipeline.config_list_from_text(config, "hard_classes"), ["daemon-ipc", "supply-chain"])
+                self.assertEqual(self.route({"class": "daemon-ipc"}, config), "claude-opus-5-5")
+        quoted_models = 'models:\n  validator_hard_class_model: "model-hard"\nhard_classes:\n  - daemon-ipc\n'
+        self.assertEqual(self.route({"class": "daemon-ipc"}, quoted_models), "model-hard")
+
     def test_missing_keys_fall_back_to_sonnet_and_opus(self):
         self.assertEqual(self.route({"class": "daemon-ipc"}, "hard_classes:\n  - daemon-ipc\n"), "claude-opus-5-5")
         self.assertEqual(self.route({"class": "daemon-ipc"}, None), "claude-sonnet-5")

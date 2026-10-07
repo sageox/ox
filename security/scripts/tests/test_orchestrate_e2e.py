@@ -322,7 +322,7 @@ class OrchestrateE2ETest(unittest.TestCase):
         keys = ("cartographer_model", "hunter_model", "dedup_model", "validator_model", "validator_hard_class_model")
         self.repo.plant_feature()
         for key in keys:
-            self.repo.set_config(key, f"configured-{key}")
+            self.repo.set_config(key, f'"configured-{key}"')  # quoted, as YAML allows
         self.repo.install("claude", "golangci-lint")
         result = self.repo.run("orchestrate.sh", FAKE_DAEMON_FINDING="1")
 

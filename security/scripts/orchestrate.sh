@@ -73,12 +73,15 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# config_value <key> <default> — first `key: value` line in config.yml, at any indent.
+# config_value <key> <default> — first `key: value` line in config.yml, at any indent,
+# without the quotes YAML allows around a scalar.
 config_value() {
   local v=""
   if [[ -f "$CONFIG" ]]; then
     v="$(awk -v k="$1" '$1 == k":" {print $2; exit}' "$CONFIG" 2>/dev/null || true)"
   fi
+  v="${v#[\"\']}"
+  v="${v%[\"\']}"
   echo "${v:-$2}"
 }
 if [[ -z "$CAP_USD" ]]; then

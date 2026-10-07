@@ -763,28 +763,46 @@ DEFAULT_VALIDATOR_MODEL = "claude-sonnet-5"
 DEFAULT_HARD_CLASS_MODEL = "claude-opus-5-5"
 
 
+def unquote(value: str) -> str:
+    """A YAML scalar without its surrounding quotes, if it has a matching pair."""
+    v = value.strip()
+    if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+        return v[1:-1].strip()
+    return v
+
+
 def config_scalar(config, key: str, default: str) -> str:
     """The first `key: value` line in config.yml, at any indent (orchestrate.sh's
     config_value, for the keys pipeline.py reads)."""
     for line in read_text(config).splitlines():
         k, sep, v = line.split("#", 1)[0].strip().partition(":")
-        if sep and k == key and v.strip():
-            return v.strip()
+        if sep and k == key and unquote(v):
+            return unquote(v)
     return default
 
 
-def config_list(config, key: str) -> list:
-    """The items of the top-level `key:` block list in config.yml."""
+def config_list_from_text(text: str, key: str) -> list:
+    """The items of the top-level `key:` list, as a block (`- item` lines) or in
+    flow style (`key: [a, b]`), quoted or not. Empty items are dropped."""
     items, inside = [], False
-    for line in read_text(config).splitlines():
-        text = line.split("#", 1)[0].rstrip()
-        if not text.strip():
+    for line in text.splitlines():
+        code = line.split("#", 1)[0].rstrip()
+        if not code.strip():
             continue
         if not line[0].isspace():
-            inside = text == f"{key}:"
-        elif inside and text.lstrip().startswith("- "):
-            items.append(text.lstrip()[2:].strip())
-    return items
+            k, _, rest = code.partition(":")
+            rest = rest.strip()
+            inside = k.strip() == key and not rest
+            if k.strip() == key and rest.startswith("[") and rest.endswith("]"):
+                items += [unquote(i) for i in rest[1:-1].split(",")]
+        elif inside and code.lstrip().startswith("- "):
+            items.append(unquote(code.lstrip()[2:]))
+    return [i for i in items if i]
+
+
+def config_list(config, key: str) -> list:
+    """The items of the top-level `key:` list in config.yml."""
+    return config_list_from_text(read_text(config), key)
 
 
 def validator_model(finding: dict, config) -> str:
