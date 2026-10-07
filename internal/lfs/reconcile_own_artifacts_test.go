@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -93,4 +94,66 @@ func TestReconcile_MetadataDisappearsDuringOwnArtifactUpload(t *testing.T) {
 	assert.Equal(t, content, staged)
 	assert.Equal(t, content, mustReadFile(t, filepath.Join(ledger, ".sageox", "cache", "sessions", "own", "raw.jsonl")))
 	assert.Equal(t, content, store.stored[NewFileRef(content).BareOID()])
+}
+
+// A coworker editing the worktree copy while its bytes are being uploaded must
+// win: the file is left alone, metadata is untouched, and the bytes are still
+// safe in the cache and on the store.
+func TestReconcile_WorktreeEditedDuringOwnArtifactUploadIsRefused(t *testing.T) {
+	ledger, _ := initLedgerWithRemote(t)
+	content := []byte("recording edited mid-upload\n")
+	rawPath := stagePlainSession(t, ledger, "own", "person-a", content)
+	metaPath := filepath.Join(filepath.Dir(rawPath), "meta.json")
+	originalMeta := mustReadFile(t, metaPath)
+	edited := append(append([]byte{}, content...), []byte("a late edit\n")...)
+	client, store := newFakeUploadStore(t, false, false)
+	store.beforeStore = func() {
+		require.NoError(t, os.WriteFile(rawPath, edited, 0o644))
+		future := time.Now().Add(2 * time.Second)
+		require.NoError(t, os.Chtimes(rawPath, future, future))
+	}
+	ctx := withReconcileOwner(context.Background(), "person-a")
+	_, err := uploadOwnStagedPlainArtifacts(ctx, ledger, client, slog.Default())
+	require.ErrorContains(t, err, "worktree differs from the staged bytes")
+	assert.Equal(t, edited, mustReadFile(t, rawPath), "the coworker's edit survives")
+	assert.Equal(t, originalMeta, mustReadFile(t, metaPath), "metadata is not touched after a refusal")
+	assert.Equal(t, content, store.stored[NewFileRef(content).BareOID()], "the staged bytes still reached the store")
+}
+
+func TestPointerMatches_RejectsGarbageAndMismatch(t *testing.T) {
+	ref := NewFileRef([]byte("x"))
+	assert.False(t, pointerMatches([]byte("not a pointer"), ref))
+	other := NewFileRef([]byte("y"))
+	assert.False(t, pointerMatches([]byte(FormatPointer(other.OID, other.Size)), ref))
+	assert.True(t, pointerMatches([]byte(FormatPointer(ref.OID, ref.Size)), ref))
+}
+
+// A worktree copy that vanished during the upload is reported, not recreated.
+func TestReconcile_WorktreeRemovedDuringOwnArtifactUploadIsReported(t *testing.T) {
+	ledger, _ := initLedgerWithRemote(t)
+	content := []byte("recording removed mid-upload\n")
+	rawPath := stagePlainSession(t, ledger, "own", "person-a", content)
+	client, store := newFakeUploadStore(t, false, false)
+	store.beforeStore = func() { require.NoError(t, os.Remove(rawPath)) }
+	ctx := withReconcileOwner(context.Background(), "person-a")
+	_, err := uploadOwnStagedPlainArtifacts(ctx, ledger, client, slog.Default())
+	require.ErrorContains(t, err, "inspect worktree copy")
+	assert.NoFileExists(t, rawPath, "nothing is written back over a removed copy")
+}
+
+// A path that became a directory during the upload cannot be read as the
+// staged file: reported, nothing written.
+func TestReconcile_WorktreeReplacedByDirectoryDuringOwnArtifactUploadIsReported(t *testing.T) {
+	ledger, _ := initLedgerWithRemote(t)
+	content := []byte("recording replaced mid-upload\n")
+	rawPath := stagePlainSession(t, ledger, "own", "person-a", content)
+	client, store := newFakeUploadStore(t, false, false)
+	store.beforeStore = func() {
+		require.NoError(t, os.Remove(rawPath))
+		require.NoError(t, os.Mkdir(rawPath, 0o755))
+	}
+	ctx := withReconcileOwner(context.Background(), "person-a")
+	_, err := uploadOwnStagedPlainArtifacts(ctx, ledger, client, slog.Default())
+	require.ErrorContains(t, err, "inspect worktree copy")
+	assert.DirExists(t, rawPath)
 }

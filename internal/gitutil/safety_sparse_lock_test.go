@@ -3,6 +3,7 @@ package gitutil
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -62,4 +63,45 @@ func TestRemoveStaleLockFiles_NeverRemovesLockRecreatedAfterInspection(t *testin
 	data, err := os.ReadFile(lock)
 	require.NoError(t, err)
 	assert.Equal(t, "live writer", string(data))
+}
+
+// A lock that disappears between the inspection and the re-stat is simply gone:
+// nothing is removed, nothing is reported as an error.
+func TestRemoveStaleLockFiles_LockVanishesBeforeRemoval(t *testing.T) {
+	gitDir := t.TempDir()
+	lock := filepath.Join(gitDir, "index.lock")
+	require.NoError(t, os.WriteFile(lock, nil, 0o644))
+	old := time.Now().Add(-2 * AbandonedLockAge)
+	require.NoError(t, os.Chtimes(lock, old, old))
+	saved := beforeLockRemoveHook
+	beforeLockRemoveHook = func(path string) { _ = os.Remove(path) }
+	t.Cleanup(func() { beforeLockRemoveHook = saved })
+	removed, errs := RemoveStaleLockFiles(gitDir)
+	assert.Empty(t, removed)
+	assert.Empty(t, errs)
+}
+
+// A re-stat that fails for any reason other than "gone" is reported and the
+// lock is left alone: an unreadable answer is never treated as abandonment.
+func TestRemoveStaleLockFiles_RestatErrorIsReportedNotRemoved(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("relies on directory permissions denying stat")
+	}
+	gitDir := t.TempDir()
+	lock := filepath.Join(gitDir, "index.lock")
+	require.NoError(t, os.WriteFile(lock, nil, 0o644))
+	old := time.Now().Add(-2 * AbandonedLockAge)
+	require.NoError(t, os.Chtimes(lock, old, old))
+	saved := beforeLockRemoveHook
+	beforeLockRemoveHook = func(string) { require.NoError(t, os.Chmod(gitDir, 0o000)) }
+	t.Cleanup(func() {
+		beforeLockRemoveHook = saved
+		_ = os.Chmod(gitDir, 0o755)
+	})
+	removed, errs := RemoveStaleLockFiles(gitDir)
+	require.NoError(t, os.Chmod(gitDir, 0o755))
+	assert.Empty(t, removed)
+	require.Len(t, errs, 1)
+	assert.ErrorContains(t, errs[0], "re-stat")
+	assert.FileExists(t, lock)
 }

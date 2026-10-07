@@ -78,3 +78,22 @@ func TestEvaluatePlanPointers_RecheckInspectionErrorIsInconclusive(t *testing.T)
 	assert.True(t, res.warning, "an unverifiable recheck is inconclusive, never a pass")
 	assert.Contains(t, res.message, "could not be re-verified")
 }
+
+// Once the upload succeeds the page is a pointer and no longer pending.
+func TestPlanHTMLAwaitingUpload_SuccessfulUploadClearsPending(t *testing.T) {
+	root := newPlanCaptureTestRepo(t)
+	initPlanTestLedger(t, root)
+	planDir := filepath.Join(t.TempDir(), "2026-10-07-uploaded")
+	require.NoError(t, os.MkdirAll(planDir, 0o755))
+	writeLargeAuthoredPage(t, filepath.Join(planDir, "plan.html"), "Uploaded")
+
+	prevClient, prevDehydrate := planLFSClientFn, planDehydrateHTML
+	planLFSClientFn = func(string) *lfs.Client { return lfs.NewClient("http://127.0.0.1:1", "oauth2", "t") }
+	planDehydrateHTML = func(dir string, _ *lfs.Client) (bool, error) {
+		ref := lfs.NewFileRef([]byte("uploaded"))
+		return true, os.WriteFile(filepath.Join(dir, "plan.html"), []byte(lfs.FormatPointer(ref.OID, ref.Size)), 0o644)
+	}
+	t.Cleanup(func() { planLFSClientFn, planDehydrateHTML = prevClient, prevDehydrate })
+
+	assert.False(t, planHTMLAwaitingUpload(planDir), "a dehydrated page is not pending")
+}
