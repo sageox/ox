@@ -92,7 +92,7 @@ The CI workflow at `.github/workflows/security-review.yml` runs the fast determi
 
 - **Cost-DoS risk.** Any contributor who can land a PR can label one as `needs-security-review`; ~$4/run × N labels drains the budget.
 - **Public finding disclosure.** SARIF uploaded to a public repo's Security tab is world-readable. A real exploitable finding becomes a 0-day announcement before it can be patched.
-- **Prompt injection via PR content.** A diff can carry adversarial strings that hijack the hunter prompts.
+- **Prompt injection via PR content.** A diff can carry adversarial strings that hijack the hunter prompts. Locally, the branch's commit messages, branch name, `CLAUDE.md`, rules and project hooks are kept out of every subagent; the diff itself can't be ([what reaches a subagent](SECURITY.md#review-pipeline-subagents)).
 - **Marginal value.** Maintainers can run `make sec` locally for free via the Claude Code subsidy.
 
 If a maintainer or fork wants the AI tier in CI, it's a small addition: a label-gated job conditional on `secrets.ANTHROPIC_API_KEY != ''`. Open an issue if you have a use case for it.
