@@ -36,10 +36,11 @@ You don't usually interact with this directory directly — `ox` commands manage
   coworkers/               ← legacy location for agents/, commands/ (still read for backward compat)
   discussions/             ← archived team meetings, transcripts, keyframes
   memory/                  ← daily / weekly / monthly distilled summaries
-  documents/               ← imported docs (via `ox import`)
   agent-context/
     distilled-discussions.md  ← AI-focused synthesis of recent discussions
   data/
+    docs/                  ← documents from `ox import` (LFS-backed, outside the sparse checkout;
+                             audio/video imports become recordings instead)
     murmurs/               ← transient WIP coordination signals (24h TTL)
   bulletin/<board>/posts/  ← team bulletin board: time-limited notes from teammates (read on demand)
 ```

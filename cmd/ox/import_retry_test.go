@@ -33,8 +33,9 @@ type importRetryFixture struct {
 	text        string // --text path, empty for none
 	batchFails  atomic.Bool
 	uploadFails atomic.Bool
-	uploads     atomic.Int32           // successful object uploads
-	onUpload    atomic.Pointer[func()] // runs inside an object upload, e.g. to simulate a concurrent import
+	uploads     atomic.Int32                 // successful object uploads
+	onUpload    atomic.Pointer[func()]       // runs inside an object upload, e.g. to simulate a concurrent import
+	api         atomic.Pointer[http.Handler] // serves every non-LFS path when set (SageOx API, presigned storage)
 }
 
 // newImportRetryFixture builds the fixture: a team context clone, an LFS test server and a source document.
@@ -112,6 +113,10 @@ func (f *importRetryFixture) serveLFS(w http.ResponseWriter, r *http.Request) {
 		f.uploads.Add(1)
 		w.WriteHeader(http.StatusOK)
 	default:
+		if h := f.api.Load(); h != nil {
+			(*h).ServeHTTP(w, r)
+			return
+		}
 		http.NotFound(w, r)
 	}
 }
