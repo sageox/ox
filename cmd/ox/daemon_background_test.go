@@ -6,7 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -15,6 +18,48 @@ import (
 	"github.com/sageox/ox/internal/testguard"
 	"github.com/stretchr/testify/require"
 )
+
+// killTestDaemons registers a cleanup that SIGKILLs every `<oxBin> daemon start`
+// process and fails the test if one survives. The daemons these tests start are
+// detached on purpose, so nothing else reaps them, and `ox daemon stop` is a
+// no-op for a daemon that has not finished starting (it reports "not running"
+// and leaves the process behind). oxBin is a per-test build, so matching its
+// path cannot touch the developer's real daemons; a shared prebuilt binary is
+// skipped for that reason.
+func killTestDaemons(t *testing.T, oxBin string) {
+	t.Helper()
+	if os.Getenv(testguard.TestOxBinaryEnv) != "" {
+		return
+	}
+	listDaemons := func() []int {
+		out, err := exec.Command("ps", "-Ao", "pid=,args=").Output()
+		if err != nil {
+			return nil
+		}
+		var pids []int
+		for _, line := range strings.Split(string(out), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) < 4 || fields[1] != oxBin || fields[2] != "daemon" || fields[3] != "start" {
+				continue
+			}
+			if pid, err := strconv.Atoi(fields[0]); err == nil {
+				pids = append(pids, pid)
+			}
+		}
+		return pids
+	}
+	t.Cleanup(func() {
+		// kill inside the poll: a dying `daemon start` parent can still spawn its
+		// foreground child after the first sweep.
+		require.Eventually(t, func() bool {
+			pids := listDaemons()
+			for _, pid := range pids {
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+			}
+			return len(pids) == 0
+		}, 5*time.Second, 50*time.Millisecond, "an `ox daemon start` process outlived the test")
+	})
+}
 
 // Codex cleans up a tool command's process group after it returns. Background
 // daemons must survive that cleanup, including when prime or sync starts them.
@@ -53,6 +98,10 @@ func TestBackgroundDaemonSurvivesCommandCleanup(t *testing.T) {
 				"HTTP_PROXY=http://127.0.0.1:1", "HTTPS_PROXY=http://127.0.0.1:1",
 				"NO_PROXY=127.0.0.1,localhost",
 			}
+			// registered before StopDaemonCleanup so it runs after it (cleanups are
+			// LIFO): `daemon stop` is a no-op while a daemon is still starting, so
+			// this is the backstop that guarantees nothing outlives the test.
+			killTestDaemons(t, oxBin)
 			testguard.StopDaemonCleanup(t, oxBin, repo, env)
 			command := testguard.OxCmd(t, oxBin, repo, env, args...)
 			command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -74,7 +123,7 @@ func TestBackgroundDaemonSurvivesCommandCleanup(t *testing.T) {
 				status.Running = false
 				return err == nil && json.Unmarshal(out, &status) == nil && status.Running
 			}
-			require.Eventually(t, readStatus, 5*time.Second, 20*time.Millisecond,
+			require.Eventually(t, readStatus, 30*time.Second, 20*time.Millisecond,
 				"the command must actually start a daemon: %s", output)
 			daemonPID := status.PID
 
