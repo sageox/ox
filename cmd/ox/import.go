@@ -338,6 +338,8 @@ func runImport(cmd *cobra.Command, args []string) error {
 	// AssertUploaded: srcRef/textRef blobs were uploaded via BatchUpload/UploadAll above.
 	if _, err := writeDocPointerFiles(docDir, lfs.AssertUploadedManifest(pointerFiles)); err != nil {
 		if createdDocDir {
+			// the pointer writer rolls back owned bytes; returned error paths can
+			// contain a later writer's content and must not be blindly removed
 			discardDocDir(docDir)
 		}
 		return fmt.Errorf("write pointer files: %w", err)

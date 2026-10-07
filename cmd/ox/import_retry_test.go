@@ -1031,6 +1031,38 @@ func TestImport_WriteFailureAfterUploadDoesNotBlockRetry(t *testing.T) {
 	}
 }
 
+// Failed pointer rollback reports paths that may now belong to another writer.
+// Import cleanup must preserve those bytes instead of assuming it owns the paths.
+func TestImport_FailedPointerRollbackPreservesLaterWriter(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real import with a failed pointer rollback")
+	}
+	f := newImportRetryFixture(t)
+	tcPath := filepath.Join(paths.TeamsDataDir(f.endpoint), importRetryTeamID)
+	remoteBefore := runGit(t, f.bare, "show-ref")
+	indexBefore := runGit(t, tcPath, "ls-files", "--stage")
+	prior := writeDocPointerFiles
+	t.Cleanup(func() { writeDocPointerFiles = prior })
+	var retained string
+	writeDocPointerFiles = func(dir string, files map[string]lfs.UploadedRef) ([]string, error) {
+		written, err := lfs.WritePointerFiles(dir, files)
+		require.NoError(t, err)
+		require.NotEmpty(t, written)
+		retained = written[0]
+		require.NoError(t, os.WriteFile(retained, []byte("later writer's draft\n"), 0o644))
+		// this is the documented result of a rollback that discovers changed bytes
+		return []string{retained}, errors.New("destination changed during pointer preparation")
+	}
+	_, err := f.importDoc(false)
+	require.ErrorContains(t, err, "destination changed during pointer preparation")
+	content, err := os.ReadFile(retained)
+	require.NoError(t, err)
+	assert.Equal(t, "later writer's draft\n", string(content))
+	assert.Equal(t, remoteBefore, runGit(t, f.bare, "show-ref"))
+	assert.Equal(t, indexBefore, runGit(t, tcPath, "ls-files", "--stage"))
+	assert.NoFileExists(t, filepath.Join(f.docDir(), "metadata.json"))
+}
+
 // TestImport_MissingCommittedAttributesPointsToDoctor verifies an import never rewrites attributes it cannot see.
 // Without this, an old sparse checkout publishes a replacement .gitattributes that drops the team's attributes.
 func TestImport_MissingCommittedAttributesPointsToDoctor(t *testing.T) {

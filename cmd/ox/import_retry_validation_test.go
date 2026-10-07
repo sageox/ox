@@ -20,8 +20,8 @@ const validationDocPath = "data/docs/2026/09/19/q3-plan"
 // pendingValidationImport leaves a real import commit behind after a remote rejection.
 func pendingValidationImport(t *testing.T) (*importRetryFixture, string) {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX shell hook fixture")
+	if runtime.GOOS == "windows" || testing.Short() {
+		t.Skip("POSIX shell hooks and real import recovery")
 	}
 	t.Setenv("GIT_ALLOW_PROTOCOL", "file")
 	f := newImportRetryFixture(t)
