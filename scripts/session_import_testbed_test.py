@@ -143,6 +143,29 @@ class Testbed(unittest.TestCase):
         self.assertIn("pat@corp.example", text)
         self.assertFalse(out.exists() and any(out.iterdir()), "nothing is written when the gate refuses")
 
+    # Failure prevented: the repo's own files carrying the author's identity into
+    # a published fixture, past the checks the sessions get.
+    def test_capture_refuses_code_that_names_its_author(self):
+        (self.source / "NOTES.md").write_text("Ask Dana Real before changing the scoring.\n")
+        code, text, out = self.capture()
+        self.assertEqual(1, code)
+        self.assertIn("code/NOTES.md", text)
+        self.assertFalse(out.exists() and any(out.iterdir()), "nothing is written when the code is refused")
+
+    # Failure prevented: a session file cut off mid-line crashing capture with a
+    # traceback instead of saying which file to wait for.
+    def test_capture_refuses_a_line_that_is_not_json(self):
+        path = self.claude / "projects" / "-home-work-game" / (CLAUDE_ID + ".jsonl")
+        with open(path, "a", encoding="utf-8") as f:
+            f.write('{"type": "user", "message": {"role": "us')
+        past = time.time() - 3600
+        os.utime(path, (past, past))
+        code, text, out = self.capture()
+        self.assertEqual(1, code)
+        self.assertIn("not JSON", text)
+        self.assertIn(CLAUDE_ID, text)
+        self.assertFalse(out.exists() and any(out.iterdir()))
+
     # Failure prevented: capturing half of a session that is still running.
     def test_capture_refuses_a_session_still_running(self):
         now = time.time()

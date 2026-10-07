@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -124,6 +125,47 @@ func seedCapturedSessions(t *testing.T, fixture, repo string) string {
 		}
 	}
 	return testData
+}
+
+// The flag as a coworker types it: a relative path is resolved to an absolute
+// one, and the run says on stderr which directory it reads instead of this
+// machine's stores.
+//
+// Failure prevented: a relative --from-test-data that names another directory
+// once a printed command is rerun from elsewhere, or a test run that reads
+// test data without saying so.
+func TestImportCommand_FromTestDataIsResolvedAndAnnounced(t *testing.T) {
+	p := newImportCmdProject(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(p.root, "td"), 0o755))
+	root, out := importCommand("--json", "--from-test-data", "td", "--dry-run")
+	stderr := &bytes.Buffer{}
+	root.SetErr(stderr)
+
+	err := root.Execute()
+
+	assert.ErrorIs(t, err, cli.ErrSilent)
+	assert.Equal(t, importErrNativeUnreadable, decodeRefusal(t, out)["error"], "an empty test-data directory is refused")
+	announced := strings.TrimSpace(strings.TrimPrefix(stderr.String(), "Reading sessions from test data in "))
+	require.NotEqual(t, strings.TrimSpace(stderr.String()), announced, stderr.String())
+	assert.True(t, filepath.IsAbs(announced), "resolved to an absolute path: %q", announced)
+	assert.Equal(t, "td", filepath.Base(announced))
+}
+
+// Every command an import prints carries the test-data directory, the retry of
+// a failed session included.
+//
+// Failure prevented: a retry that reads this machine's stores and reports the
+// failed session as gone.
+func TestImportCommands_CarryTheTestDataDirectory(t *testing.T) {
+	c := &importCandidate{Session: nativeimport.Session{NativeID: e2eCodexA}}
+	for name, cmd := range map[string]string{
+		"upload": importUploadCommand(importOptions{testData: "/tmp/td"}, []*importCandidate{c}),
+		"retry":  importRetryCommand(importOptions{testData: "/tmp/td"}, c),
+	} {
+		assert.Contains(t, cmd, "--from-test-data '/tmp/td'", name)
+		assert.Equal(t, "/tmp/td", optionsFromCommand(t, cmd).testData, name)
+	}
+	assert.NotContains(t, importRetryCommand(importOptions{}, c), "--from-test-data", "absent unless set")
 }
 
 // A test-data directory that holds no sessions is refused rather than read as

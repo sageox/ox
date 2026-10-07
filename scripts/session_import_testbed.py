@@ -225,8 +225,9 @@ def native_roots():
     return claude, codex
 
 
-def gate(name, text, identities):
-    """Refuses a cleaned session that still names its author or is too large."""
+def check_private(name, text, identities):
+    """Refuses text that still names its author, holds an unlisted email, or
+    carries SageOx context. Runs on cleaned sessions and on copied code alike."""
     for real, _ in identities:
         if word(real).search(text):
             raise Refused("%s still contains %r; pass it to --identity or fix the cleaning rules" % (name, real))
@@ -237,6 +238,11 @@ def gate(name, text, identities):
         raise Refused("%s contains email addresses %s; pass them to --identity" % (name, ", ".join(stray)))
     if PRIME_LEFT.search(text):
         raise Refused("%s still holds SageOx context from an <ox-prime> block" % name)
+
+
+def gate(name, text, identities):
+    """Refuses a cleaned session that is not private, out of scope, or too large."""
+    check_private(name, text, identities)
     if REPO not in text:
         raise Refused("%s never mentions the repo; it would not be in scope after create" % name)
     if len(text.encode()) > FILE_CAP:
@@ -274,27 +280,37 @@ def capture(args):
             for raw in f:
                 if not raw.strip():
                     continue
-                record = clean(strip_prime(json.loads(raw)))
+                try:
+                    parsed = json.loads(raw)
+                except ValueError:
+                    raise Refused("%s has a line that is not JSON; is it still being written?" % path)
+                record = clean(strip_prime(parsed))
                 if record is not None:
                     lines.append(scrub(json.dumps(record, ensure_ascii=False, separators=(",", ":")), replacements))
         text = "\n".join(lines) + "\n"
         name = "%s/%s" % (agent, path.name)
         gate(name, text, identities)
         cleaned.append((agent, path.name, text, len(lines)))
+    code = code_files(source, identities)  # checked before anything is written
 
     for agent, filename, text, _ in cleaned:
         dest = out / agent / filename
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(text, encoding="utf-8")
-    copy_code(source, out / "code")
+    for parts, src in code:
+        target = (out / "code").joinpath(*parts)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, target)
     write_provenance(out, source, cleaned)
     print("Captured %d sessions into %s. Review them and PROVENANCE.md before committing." % (len(cleaned), out))
     return 0
 
 
-def copy_code(source, dest):
+def code_files(source, identities):
+    """The repo's own files for the fixture, each checked like a session."""
     listed = subprocess.run(["git", "-C", str(source), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
                             capture_output=True, check=True).stdout.decode().split("\0")
+    files = []
     for rel in sorted(filter(None, listed)):
         if rel.startswith(OX_MANAGED) or rel in OX_MANAGED_FILES or JUNK.search(rel):
             continue
@@ -304,9 +320,9 @@ def copy_code(source, dest):
         # A nested .gitignore or .gitattributes would apply to the fixture inside the ox repo.
         parts = rel.split("/")
         parts[-1] = "dot-" + parts[-1][1:] if parts[-1] in (".gitignore", ".gitattributes") else parts[-1]
-        target = dest.joinpath(*parts)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, target)
+        check_private("code/" + rel, src.read_bytes().decode("utf-8", errors="ignore"), identities)
+        files.append((parts, src))
+    return files
 
 
 def write_provenance(out, source, cleaned):
