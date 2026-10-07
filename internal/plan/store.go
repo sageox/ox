@@ -25,6 +25,7 @@ package plan
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -57,6 +58,10 @@ const (
 	// directly. Only genuinely large renders past 1MiB cross to LFS to keep the
 	// git tree from bloating.
 	htmlLFSThreshold = 1024 * 1024
+
+	// HTMLLFSThreshold lets CLI snapshot callers apply the same upload policy
+	// before committing an earlier uncommitted render.
+	HTMLLFSThreshold = htmlLFSThreshold
 )
 
 // PlanStatus is the plan's own lifecycle, independent of the producing
@@ -577,6 +582,16 @@ func ResolveSaveDir(gitRoot string, meta Meta) (string, error) {
 func resolveSaveDir(ledger string, meta Meta) (string, Meta, error) {
 	plansDir := paths.LedgerPlansDir(ledger)
 	if meta.Slug != "" {
+		// The full dated directory name is the one spelling an AmbiguousSlugError
+		// tells the author to pass, so it must resolve to exactly that plan.
+		// Checked before slug matching: a directory name is unique, a slug is not.
+		if dir, prior, found, err := liveDirNamed(plansDir, meta.Slug); err != nil {
+			return "", meta, err
+		} else if found {
+			meta.Slug = prior.Slug
+			meta.CreatedAt = prior.CreatedAt
+			return dir, meta, nil
+		}
 		matches := livePlanDirsForSlug(plansDir, meta.Slug)
 		switch len(matches) {
 		case 0:
@@ -645,6 +660,29 @@ func isClosedStatus(s PlanStatus) bool {
 		return true
 	}
 	return false
+}
+
+// liveDirNamed resolves name as the exact directory name of a saved plan that is
+// still open to revision. found=false means no directory carries that name, so
+// the caller treats name as an ordinary slug. A directory that exists but is
+// closed (superseded, abandoned, realized) is an error: falling through would
+// mint a new plan whose slug begins with the closed plan's date.
+func liveDirNamed(plansDir, name string) (dir string, prior Meta, found bool, err error) {
+	if plansDir == "" || name == "" || name != filepath.Base(name) || name == "." || name == ".." {
+		return "", Meta{}, false, nil
+	}
+	candidate := filepath.Join(plansDir, name)
+	m, merr := readMeta(candidate)
+	if merr != nil {
+		if errors.Is(merr, os.ErrNotExist) {
+			return "", Meta{}, false, nil // a directory without meta.json is not a saved plan
+		}
+		return "", Meta{}, false, fmt.Errorf("read existing plan directory %q: %w", name, merr)
+	}
+	if isClosedStatus(CurrentStatus(candidate)) {
+		return "", Meta{}, false, fmt.Errorf("plan directory %q is %s, not open to revision; save under a new --slug", name, CurrentStatus(candidate))
+	}
+	return candidate, m, true, nil
 }
 
 // livePlanDirsForSlug lists every saved plan dir named by slug (meta.json slug

@@ -18,7 +18,6 @@ import (
 	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/lfs/pointer"
-	"github.com/sageox/ox/internal/sacred"
 )
 
 // CheckSlugSessionPointerRestore finds session artifacts that unpushed Ledger
@@ -184,12 +183,9 @@ func restoreUnpushedSessionPointers(ctx context.Context, ledgerPath string, fix 
 		if len(report.Untracked) > 0 {
 			msg = fmt.Sprintf("doctor: restore LFS pointers / untrack draft artifacts for %d session artifacts", len(repairable)+len(report.Untracked))
 		}
-		if len(report.Untracked) > sacred.MassDeleteThreshold {
-			// a deliberate bulk removal: every untracked artifact's bytes are already in the cache,
-			// and none of them was ever pushed, so the sacred mass-delete guard has nothing to protect
-			defer allowSacredMassDelete()()
-		}
-		committed, err := gitutil.CommitLedgerSnapshot(ctx, ledgerPath, msg, pathspecs...)
+		// each untracked artifact's bytes were written to the cache by untrackDraftArtifact; the
+		// commit helper re-verifies that by hash, and only these exact paths leave the deletion count
+		committed, err := gitutil.CommitLedgerSnapshotPreserving(ctx, ledgerPath, msg, report.Untracked, pathspecs...)
 		if err != nil {
 			return fmt.Errorf("commit restored pointers: %w", err)
 		}
@@ -249,20 +245,6 @@ func restoreOne(ctx context.Context, ledgerPath, upstream string, raw rawSession
 		return "working copy differs from the committed content (uncommitted local edit); commit or discard it first", ""
 	}
 	return "", metaPath
-}
-
-// allowSacredMassDelete sets the guard's documented override for the duration of one
-// commit and returns the function that restores the previous value.
-func allowSacredMassDelete() func() {
-	previous, had := os.LookupEnv(sacred.OverrideEnv)
-	_ = os.Setenv(sacred.OverrideEnv, "1")
-	return func() {
-		if had {
-			_ = os.Setenv(sacred.OverrideEnv, previous)
-		} else {
-			_ = os.Unsetenv(sacred.OverrideEnv)
-		}
-	}
 }
 
 // untrackDraftArtifact removes an artifact a draft session directory must never track.

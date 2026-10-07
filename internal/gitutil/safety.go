@@ -26,6 +26,7 @@ var knownLockFiles = []string{
 	"shallow.lock",
 	"config.lock",
 	"HEAD.lock",
+	"info/sparse-checkout.lock",
 }
 
 // knownLockGlobs are lock-file patterns whose exact name isn't predictable.
@@ -174,6 +175,11 @@ const AbandonedLockAge = 1 * time.Hour
 // Returns the names of files removed and any removal errors encountered.
 func RemoveStaleLockFiles(gitDir string) (removed []string, errs []error) {
 	for _, lock := range lockFilesIn(gitDir) {
+		// sparse-checkout holds this ownerless lock while updating the worktree.
+		// age cannot prove abandonment, and unlinking may remove a replacement.
+		if lock == "info/sparse-checkout.lock" {
+			continue
+		}
 		path := filepath.Join(gitDir, lock)
 		info, err := os.Stat(path)
 		if err != nil {

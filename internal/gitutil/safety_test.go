@@ -32,6 +32,7 @@ func TestHasLockFiles(t *testing.T) {
 		require.NoError(t, os.MkdirAll(gitDir, 0755))
 
 		for _, lock := range knownLockFiles {
+			require.NoError(t, os.MkdirAll(filepath.Dir(filepath.Join(gitDir, lock)), 0755))
 			require.NoError(t, os.WriteFile(filepath.Join(gitDir, lock), []byte{}, 0644))
 		}
 
@@ -48,6 +49,7 @@ func TestHasLockFiles(t *testing.T) {
 
 		// create all, then remove one
 		for _, lock := range knownLockFiles {
+			require.NoError(t, os.MkdirAll(filepath.Dir(filepath.Join(gitDir, lock)), 0755))
 			require.NoError(t, os.WriteFile(filepath.Join(gitDir, lock), []byte{}, 0644))
 		}
 		require.NoError(t, os.Remove(filepath.Join(gitDir, "index.lock")))
