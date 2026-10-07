@@ -1403,6 +1403,7 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 		// ledger repos don't have a sync.manifest — use the manifest defaults
 		// (data/) which cover all idempotent import paths (github, linear, murmurs).
 		return s.pullManagedRepo(ctx, ManagedRepoPullOpts{
+			ImmutablePaths:     true, // the Ledger: session and plan dirs never move
 			RepoPath:           s.config.LedgerPath,
 			RepoName:           "ledger",
 			ProjectRoot:        s.config.ProjectRoot,
@@ -1741,6 +1742,7 @@ func (s *SyncScheduler) pushMurmurCommits(ctx context.Context, ledgerPath string
 
 	ep := s.workspaceRegistry.GetEndpoint()
 	if err := gitutil.PushWithRetry(ctx, ledgerPath, gitutil.PushOpts{
+		ImmutablePaths:      true, // the Ledger never renames paths
 		AutoResolvePrefixes: ledger.AutoResolvePrefixes,
 		Logger:              s.logger,
 		SuspendWhenWedged:   true,
@@ -2031,6 +2033,7 @@ func (s *SyncScheduler) pushSessionDraftCommits(ctx context.Context, ledgerPath 
 
 	ep := s.workspaceRegistry.GetEndpoint()
 	if err := gitutil.PushWithRetry(ctx, ledgerPath, gitutil.PushOpts{
+		ImmutablePaths:      true, // the Ledger never renames paths
 		AutoResolvePrefixes: ledger.AutoResolvePrefixes,
 		Logger:              s.logger,
 		SuspendWhenWedged:   true,

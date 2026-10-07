@@ -401,3 +401,71 @@ func TestResolveRebaseAcceptTheirs_CancellationReachesActiveStep(t *testing.T) {
 	}
 	_ = os.WriteFile(releasePath, nil, 0o644)
 }
+
+// Failure prevented (2026-10-07): every replayed rebase step ran inexact rename
+// detection over 47k-65k Ledger paths (311 occurrences in one daemon log), which
+// put a single `rebase --continue` past the step budget in the background band.
+// The kill left an empty output that read as "halted with nothing to resolve".
+func TestRunRebaseStep_DisablesRenameDetection(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git rebase operations")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("the recording git wrapper is a POSIX shell script")
+	}
+	_, repo := setupDivergentRepos(t, "sessions/s1/meta.json", `{"local":true}`, `{"remote":true}`)
+	realGit, err := exec.LookPath("git")
+	require.NoError(t, err)
+	argsLog := filepath.Join(t.TempDir(), "args")
+	wrapper := "#!/bin/sh\necho \"$*\" >> '" + argsLog + "'\nexec '" + realGit + "' \"$@\"\n"
+	binDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "git"), []byte(wrapper), 0o755))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	require.NoError(t, ResolveRebaseAcceptTheirs(WithImmutablePaths(context.Background()), repo, []string{"sessions/"}))
+	logged, err := os.ReadFile(argsLog)
+	require.NoError(t, err)
+	continueLine := ""
+	for _, line := range strings.Split(strings.TrimSpace(string(logged)), "\n") {
+		if strings.Contains(line, "rebase --continue") {
+			continueLine = line
+			break
+		}
+	}
+	require.NotEmpty(t, continueLine, "no rebase --continue invocation recorded")
+	assert.Contains(t, continueLine, "merge.renames=false", "a Ledger rebase step must skip rename detection")
+	assert.Contains(t, continueLine, "diff.renames=false")
+
+	// a repository that is NOT marked immutable keeps rename detection on
+	_, repo2 := setupDivergentRepos(t, "docs/a.md", "local", "remote")
+	require.NoError(t, os.WriteFile(argsLog, nil, 0o644))
+	require.NoError(t, ResolveRebaseAcceptTheirs(context.Background(), repo2, []string{"docs/"}))
+	logged, err = os.ReadFile(argsLog)
+	require.NoError(t, err)
+	assert.NotContains(t, string(logged), "merge.renames=false", "only immutable-path repositories skip rename detection")
+}
+
+func TestAdvanceNonConflictRebaseStep_ReportsStepTimeout(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git rebase operations")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("the blocking git wrapper is a POSIX shell script")
+	}
+	_, repo := setupDivergentRepos(t, "sessions/s1/meta.json", `{"local":true}`, `{"remote":true}`)
+	realGit, err := exec.LookPath("git")
+	require.NoError(t, err)
+	// block only `rebase --continue` for longer than the (shortened) step budget
+	wrapper := "#!/bin/sh\ncase \"$*\" in *'rebase --continue'*) sleep 5;; esac\nexec '" + realGit + "' \"$@\"\n"
+	binDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "git"), []byte(wrapper), 0o755))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	saved := resolveStepTimeout
+	resolveStepTimeout = 500 * time.Millisecond
+	t.Cleanup(func() { resolveStepTimeout = saved })
+
+	err = ResolveRebaseAcceptTheirs(context.Background(), repo, []string{"sessions/"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "did not finish within the step budget", "a killed continue must not read as 'nothing to resolve'")
+	assert.NotContains(t, err.Error(), "halted with nothing to resolve")
+}

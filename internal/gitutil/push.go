@@ -13,6 +13,12 @@ import (
 
 // PushOpts configures push behavior for PushWithRetry.
 type PushOpts struct {
+	// ImmutablePaths declares that paths in this repository never move (a
+	// Ledger). The retry rebase and its conflict resolver then skip git's rename
+	// detection, which is pure cost on such a tree. Leave false for repositories
+	// where a rename can race an add under the old name.
+	ImmutablePaths bool
+
 	// AutoResolvePrefixes lists path prefixes where accept-theirs conflict
 	// resolution is safe (e.g., "data/github/", "data/murmurs/").
 	// Empty means no auto-resolve — rebase failures abort immediately.
@@ -275,6 +281,9 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 		}
 	}
 
+	if opts.ImmutablePaths {
+		ctx = WithImmutablePaths(ctx)
+	}
 	maxRetries := opts.maxRetries()
 	opTimeout := opts.opTimeout()
 	var lastOut string
@@ -398,7 +407,7 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 					pullCancel()
 					return fmt.Errorf("git fetch failed during retry: %s: %w", fetchOut, fetchErr)
 				}
-				pullOut, pullErr := RunGit(pullCtx, repoPath, "rebase", "--autostash", "--fork-point", "--quiet", target)
+				pullOut, pullErr := RunGit(pullCtx, repoPath, append(RenameDetectionFlags(pullCtx), "rebase", "--autostash", "--fork-point", "--quiet", target)...)
 				timedOut := PullTimedOut(pullCtx, pullErr)
 				pullCancel()
 				if timedOut {
