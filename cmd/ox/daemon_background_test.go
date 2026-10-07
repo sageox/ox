@@ -31,34 +31,41 @@ func killTestDaemons(t *testing.T, oxBin string) {
 	if os.Getenv(testguard.TestOxBinaryEnv) != "" {
 		return
 	}
-	listDaemons := func() []int {
-		out, err := exec.Command("ps", "-Ao", "pid=,args=").Output()
-		if err != nil {
-			return nil
-		}
-		var pids []int
-		for _, line := range strings.Split(string(out), "\n") {
-			fields := strings.Fields(line)
-			if len(fields) < 4 || fields[1] != oxBin || fields[2] != "daemon" || fields[3] != "start" {
-				continue
-			}
-			if pid, err := strconv.Atoi(fields[0]); err == nil {
-				pids = append(pids, pid)
-			}
-		}
-		return pids
-	}
 	t.Cleanup(func() {
 		// kill inside the poll: a dying `daemon start` parent can still spawn its
 		// foreground child after the first sweep.
+		var discoveryErr error
 		require.Eventually(t, func() bool {
-			pids := listDaemons()
+			pids, err := listTestDaemons(oxBin)
+			if err != nil {
+				discoveryErr = err
+				return true
+			}
 			for _, pid := range pids {
 				_ = syscall.Kill(pid, syscall.SIGKILL)
 			}
 			return len(pids) == 0
 		}, 5*time.Second, 50*time.Millisecond, "an `ox daemon start` process outlived the test")
+		require.NoError(t, discoveryErr, "cannot verify test daemon cleanup")
 	})
+}
+
+func listTestDaemons(oxBin string) ([]int, error) {
+	out, err := exec.Command("ps", "-Ao", "pid=,args=").Output()
+	if err != nil {
+		return nil, err
+	}
+	var pids []int
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 4 || fields[1] != oxBin || fields[2] != "daemon" || fields[3] != "start" {
+			continue
+		}
+		if pid, err := strconv.Atoi(fields[0]); err == nil {
+			pids = append(pids, pid)
+		}
+	}
+	return pids, nil
 }
 
 // Codex cleans up a tool command's process group after it returns. Background
@@ -138,4 +145,49 @@ func TestBackgroundDaemonSurvivesCommandCleanup(t *testing.T) {
 			require.Equal(t, daemonPID, status.PID, "the original daemon must survive")
 		})
 	}
+}
+
+// Process discovery must distinguish an unavailable ps from a successful empty list.
+func TestTestDaemonDiscoveryReportsFailure(t *testing.T) {
+	for _, tt := range []struct {
+		name, script string
+		wantError    bool
+		want         []int
+	}{
+		{name: "discovery failure", script: "#!/bin/sh\nexit 1\n", wantError: true},
+		{name: "empty success", script: "#!/bin/sh\nexit 0\n"},
+		{name: "only owned daemon", script: "#!/bin/sh\nprintf '%s\\n' '123 /tmp/test-ox daemon start --foreground' '456 /tmp/other-ox daemon start' '789 /tmp/test-ox version'\n", want: []int{123}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			bin := t.TempDir()
+			require.NoError(t, os.WriteFile(filepath.Join(bin, "ps"), []byte(tt.script), 0o755))
+			t.Setenv("PATH", bin)
+			pids, err := listTestDaemons("/tmp/test-ox")
+			if tt.wantError {
+				require.Error(t, err)
+				require.Nil(t, pids)
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, tt.want, pids)
+			}
+		})
+	}
+}
+
+// A failed process listing must fail cleanup itself, even when no PIDs were returned.
+func TestDaemonCleanupFailsWhenProcessDiscoveryFails(t *testing.T) {
+	const childEnv = "GO_TEST_DAEMON_DISCOVERY_FAILURE"
+	if os.Getenv(childEnv) == "1" {
+		killTestDaemons(t, "/tmp/test-ox")
+		return
+	}
+	bin := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "ps"), []byte("#!/bin/sh\nexit 1\n"), 0o755))
+	cmd := exec.Command(os.Args[0], "-test.run=^TestDaemonCleanupFailsWhenProcessDiscoveryFails$")
+	cmd.Env = []string{childEnv + "=1", "PATH=" + bin, "HOME=" + t.TempDir()}
+	out, err := cmd.CombinedOutput()
+	var exitErr *exec.ExitError
+	require.ErrorAs(t, err, &exitErr)
+	require.Equal(t, 1, exitErr.ExitCode())
+	require.Contains(t, string(out), "cannot verify test daemon cleanup")
 }
