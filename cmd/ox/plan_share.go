@@ -3,15 +3,12 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/gitutil"
-	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/plan"
 )
 
@@ -160,17 +157,18 @@ func snapshotPriorRevision(gitRoot, planDir string) error {
 	if err := gitutil.IsSafeForGitOps(ledgerPath); err != nil {
 		return fmt.Errorf("ledger not safe to snapshot prior revision: %w", err)
 	}
-	// a failed upload leaves its large render plain and dirty. Do not commit
-	// that render through the prior-revision path on the next save.
-	client := planLFSClientFn(gitRoot)
-	if client == nil {
-		htmlPath := filepath.Join(planDir, "plan.html")
-		if info, err := os.Stat(htmlPath); err == nil && info.Size() > plan.HTMLLFSThreshold && !lfs.IsPointerFile(htmlPath) {
-			return fmt.Errorf("prior plan.html needs uploading, but the LFS client is unavailable; restore connectivity and re-run ox plan save")
+	// a failed upload left a large plain plan.html behind; finish the upload before
+	// the snapshot, and refuse the save if it still fails rather than lose or
+	// commit that render
+	if plan.HasLargePlainHTML(planDir) {
+		client := planLFSClientFn(gitRoot)
+		if client == nil {
+			// a nil client makes dehydration a no-op, which is not an upload
+			return fmt.Errorf("prior plan.html is awaiting upload and no content store is reachable")
 		}
-	}
-	if _, err := planDehydrateHTML(planDir, client); err != nil {
-		return fmt.Errorf("prior plan.html upload failed; re-run ox plan save to retry: %w", err)
+		if _, err := planDehydrateHTML(planDir, client); err != nil {
+			return fmt.Errorf("prior plan.html is awaiting upload: %w", err)
+		}
 	}
 	return commitPlanLocal(ledgerPath, planDir, "plan: prior revision of ")
 }

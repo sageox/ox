@@ -74,34 +74,90 @@ func uploadOwnStagedPlainArtifacts(ctx context.Context, ledgerPath string, clien
 			return refused, fmt.Errorf("upload staged %s: %w", path, err)
 		}
 		ref := uploaded.Ref()
-		pointerPath := filepath.Join(ledgerPath, filepath.FromSlash(path))
-		existing, readErr := os.ReadFile(pointerPath)
+		// The bytes are now safe in the cache and on the store. Only replace the
+		// worktree copy if it still holds exactly what was staged: a coworker
+		// may have edited or removed it since, and a pointer written over their
+		// unstaged work would silently discard it.
+		worktreePath := filepath.Join(ledgerPath, filepath.FromSlash(path))
+		before, statErr := os.Stat(worktreePath)
+		if statErr != nil {
+			return refused, fmt.Errorf("inspect worktree copy of %s: %w", path, statErr)
+		}
+		worktree, readErr := os.ReadFile(worktreePath)
 		if readErr != nil {
-			return refused, fmt.Errorf("inspect worktree %s: %w", path, readErr)
+			return refused, fmt.Errorf("inspect worktree copy of %s: %w", path, readErr)
 		}
-		if !bytes.Equal(existing, staged) && !bytes.Equal(existing, []byte(FormatPointer(ref.OID, ref.Size))) {
-			return refused, fmt.Errorf("refusing to overwrite unstaged content %s", path)
+		switch {
+		case bytes.Equal(worktree, staged):
+			// the common case: the plain copy is replaced by its pointer below
+		case pointerShaped(worktree) && pointerMatches(worktree, ref):
+			// a previous pass wrote the pointer but failed to stage it: resume
+		default:
+			return refused, fmt.Errorf("refusing to overwrite unstaged content at %s: worktree differs from the staged bytes (uploaded as %s)", path, ref.OID)
 		}
-		err = MutateSessionMeta(ctx, sessionDir, func(m *SessionMeta) (*SessionMeta, error) {
-			if m == nil {
-				return nil, fmt.Errorf("meta.json for %s disappeared", sessionID)
-			}
-			if m.Files == nil {
-				m.Files = map[string]FileRef{}
-			}
-			m.Files[name] = ref
-			return m, nil
-		})
+		unchanged := func() bool {
+			now, err := os.Stat(worktreePath)
+			return err == nil && os.SameFile(before, now) && now.ModTime().Equal(before.ModTime()) && now.Size() == before.Size()
+		}
+		// refuse before touching metadata: a coworker editing the copy wins
+		if !unchanged() {
+			return refused, fmt.Errorf("refusing to overwrite unstaged content at %s: the worktree copy changed during reconcile", path)
+		}
+		err = MutateSessionMeta(ctx, sessionDir, recordFileRef(sessionID, name, ref))
 		if err != nil {
 			return refused, fmt.Errorf("record %s in meta.json: %w", path, err)
 		}
-		if err := WritePointerFile(pointerPath, uploaded); err != nil {
-			return refused, fmt.Errorf("write pointer for %s: %w", path, err)
+		// Stage the validated pointer bytes directly into the index (hash-object +
+		// update-index), never "whatever is in the worktree at add time": the
+		// worktree can change between the write and a `git add`, and the index
+		// must only ever hold the pointer that was verified above.
+		pointerBytes := []byte(FormatPointer(uploaded.Ref().OID, uploaded.Ref().Size))
+		blob, err := gitPlumbing(ctx, ledgerPath, pointerBytes, "hash-object", "-w", "--stdin")
+		if err != nil {
+			return refused, fmt.Errorf("store pointer blob for %s: %w", path, err)
 		}
-		if _, err := gitutil.RunGit(ctx, ledgerPath, "add", "--sparse", "--", path, "sessions/"+sessionID+"/meta.json"); err != nil {
+		if _, err := gitPlumbing(ctx, ledgerPath, nil, "update-index", "--add", "--cacheinfo", "100644,"+strings.TrimSpace(string(blob))+","+path); err != nil {
 			return refused, fmt.Errorf("stage pointer for %s: %w", path, err)
+		}
+		if !pointerShaped(worktree) {
+			// the comparison above and the write here must see the same file:
+			// re-check identity (inode, mtime, size) right before writing
+			if !unchanged() {
+				return refused, fmt.Errorf("refusing to overwrite unstaged content at %s: the worktree copy changed during reconcile", path)
+			}
+			if err := WritePointerFile(worktreePath, uploaded); err != nil {
+				return refused, fmt.Errorf("write pointer for %s: %w", path, err)
+			}
+		}
+		if _, err := gitutil.RunGit(ctx, ledgerPath, "add", "--sparse", "--", "sessions/"+sessionID+"/meta.json"); err != nil {
+			return refused, fmt.Errorf("stage meta.json for %s: %w", path, err)
 		}
 		logger.Info("lfs reconcile: uploaded own staged session artifact and staged its pointer", "path", path, "oid", ref.OID)
 	}
 	return refused, nil
+}
+
+// recordFileRef registers one uploaded artifact in a session's manifest. A nil
+// meta means meta.json vanished between the ownership read and the lock; that is
+// an error, never a fresh manifest, because the session is no longer ours to describe.
+func recordFileRef(sessionID, name string, ref FileRef) func(*SessionMeta) (*SessionMeta, error) {
+	return func(m *SessionMeta) (*SessionMeta, error) {
+		if m == nil {
+			return nil, fmt.Errorf("meta.json for %s disappeared", sessionID)
+		}
+		if m.Files == nil {
+			m.Files = map[string]FileRef{}
+		}
+		m.Files[name] = ref
+		return m, nil
+	}
+}
+
+// pointerMatches reports whether a worktree pointer names exactly the uploaded blob.
+func pointerMatches(worktree []byte, ref FileRef) bool {
+	oid, size, err := ParsePointer(string(worktree))
+	if err != nil {
+		return false
+	}
+	return strings.TrimPrefix(oid, "sha256:") == ref.BareOID() && size == ref.Size
 }

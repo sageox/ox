@@ -206,13 +206,13 @@ func putObject(action *Action, content []byte) error {
 }
 
 // isConnectionReset reports a transport failure that happened mid-request
-// (reset, broken pipe, premature EOF) rather than a server verdict on the object.
+// (reset, broken pipe, premature EOF, or a connection the peer closed while the body was still being written, which Linux surfaces as net.ErrClosed) rather than a server verdict on the object.
 func isConnectionReset(err error) bool {
 	return errors.Is(err, syscall.ECONNRESET) ||
 		errors.Is(err, syscall.EPIPE) ||
-		errors.Is(err, net.ErrClosed) ||
 		errors.Is(err, io.ErrUnexpectedEOF) ||
 		errors.Is(err, io.EOF) ||
+		errors.Is(err, net.ErrClosed) ||
 		strings.Contains(err.Error(), "connection reset") ||
 		strings.Contains(err.Error(), "broken pipe")
 }
