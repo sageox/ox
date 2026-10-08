@@ -111,3 +111,31 @@ func TestSquashBudget_ScalesWithDeltaSize(t *testing.T) {
 	assert.Greater(t, squashBudget(6282), 5*time.Minute, "the measured delta gets minutes, not seconds")
 	assert.Equal(t, 15*time.Minute, squashBudget(1_000_000), "capped")
 }
+
+// The caller's context dying between the soft reset and the snapshot commit
+// must not leave HEAD at upstream with the whole delta merely staged. Measured
+// 2026-10-08 02:35: the GitHub-sync context expired mid-validation, the
+// commit was killed, the rollback ran on the same dead context and failed,
+// and the Ledger sat at upstream with 6,308 files staged until a human moved
+// HEAD back. Once the pre-checks pass, the reset+commit section and its
+// rollback run detached from the caller's cancellation, on their own budget.
+func TestSquashUnpushed_FinishesWhenCallerContextDiesMidSquash(t *testing.T) {
+	repo, _ := initBareRemoteRepo(t)
+	addCommit(t, repo, "one.txt", "1", "one")
+	addCommit(t, repo, "two.txt", "2", "two")
+	original := strings.TrimSpace(gitOut(t, repo, "rev-parse", "HEAD"))
+	treeBefore := strings.TrimSpace(gitOut(t, repo, "rev-parse", "HEAD^{tree}"))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	saved := beforeSquashCommitHook
+	beforeSquashCommitHook = cancel
+	t.Cleanup(func() { beforeSquashCommitHook = saved; cancel() })
+
+	err := SquashUnpushed(ctx, repo, "squash")
+	require.NoError(t, err)
+	head := strings.TrimSpace(gitOut(t, repo, "rev-parse", "HEAD"))
+	assert.NotEqual(t, original, head, "the squash commit landed")
+	assert.Equal(t, "1", strings.TrimSpace(gitOut(t, repo, "rev-list", "--count", "@{upstream}..HEAD")))
+	assert.Equal(t, treeBefore, strings.TrimSpace(gitOut(t, repo, "rev-parse", "HEAD^{tree}")), "same tree")
+	assert.Empty(t, strings.TrimSpace(gitOut(t, repo, "diff", "--cached", "--name-only")), "nothing left merely staged")
+}
