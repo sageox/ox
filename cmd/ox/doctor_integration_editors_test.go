@@ -401,7 +401,7 @@ func TestCheckOpenCodeHooks_ProjectConfigNoHooks(t *testing.T) {
 	if result.passed {
 		t.Error("expected passed=false when project config exists but hooks not installed")
 	}
-	if !strings.Contains(result.detail, "ox hooks install") {
+	if !strings.Contains(result.detail, "`ox integrate install --opencode`") {
 		t.Errorf("expected detail to suggest installation, got: %s", result.detail)
 	}
 }
@@ -423,7 +423,7 @@ func TestCheckGeminiHooks_ProjectConfigNoHooks(t *testing.T) {
 	if result.passed {
 		t.Error("expected passed=false when project config exists but hooks not installed")
 	}
-	if !strings.Contains(result.detail, "ox hooks install") {
+	if !strings.Contains(result.detail, "`ox integrate install --gemini`") {
 		t.Errorf("expected detail to suggest installation, got: %s", result.detail)
 	}
 }
