@@ -121,19 +121,9 @@ func (action *Action) setRequestHeaders(req *http.Request) error {
 	return nil
 }
 
-// isLoopbackHost returns true for IP literals that name the local host.
-// Used by validateActionHref to permit http:// for httptest URLs.
-func isLoopbackHost(h string) bool {
-	if h == "" {
-		return false
-	}
-	ip := net.ParseIP(h)
-	if ip == nil {
-		// hostnames like "localhost" — accept the well-known name
-		return strings.EqualFold(h, "localhost")
-	}
-	return ip.IsLoopback()
-}
+// isLoopbackHost delegates to the shared definition so LFS and the git
+// credential helper agree on where plain http is allowed.
+func isLoopbackHost(h string) bool { return gitserver.IsLoopbackHost(h) }
 
 // ComputeOID computes the SHA256 hex digest of content (the LFS OID).
 func ComputeOID(content []byte) string {

@@ -572,7 +572,7 @@ func runLockedImport(ctx context.Context, out io.Writer, opts importOptions, env
 	}
 	for _, c := range pending { // the last push failed
 		fail("session push failed", pushErr)
-		c.Outcome, c.Detail = "committed", "committed locally but not pushed ("+pushErr.Error()+"); the next import pushes it first"
+		c.Outcome, c.Detail = "committed", "committed locally but not pushed ("+pushErr.Error()+"); rerun `ox session import` to push it"
 	}
 	if err := renderImportResult(out, opts, dest, cands, ignored); err != nil {
 		return err
