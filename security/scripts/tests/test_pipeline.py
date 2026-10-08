@@ -244,6 +244,19 @@ class ScannerStatusTest(unittest.TestCase):
         self.assertEqual(findings[0]["message"], "bad parse")
         self.assertTrue(findings[0]["reachable"], "a symbol-level trace means the code is called")
 
+    def test_advisory_collectors_keep_aliases_and_the_package(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gv, osv = Path(tmp) / "gv.json", Path(tmp) / "osv.json"
+            gv.write_text('{"osv": {"id": "GO-2026-0002", "summary": "s", "aliases": ["GHSA-aaaa-bbbb-cccc"]}}\n'
+                          '{"finding": {"osv": "GO-2026-0002", "trace": [{"module": "golang.org/x/crypto"}]}}\n')
+            osv.write_text(json.dumps({"results": [{"source": {"path": str(Path(tmp) / "go.mod")}, "packages": [
+                {"package": {"name": "github.com/docker/docker", "version": "v28.5.2"},
+                 "vulnerabilities": [{"id": "GO-2026-4887", "aliases": ["GHSA-x86f-5xw2-fm2r"], "summary": "bypass"}]}]}]}))
+            g = pipeline.govulncheck_findings(gv)[0]
+            o = pipeline.osv_findings(osv, Path(tmp))[0]
+        self.assertEqual((g["aliases"], g["package"]), (["GHSA-aaaa-bbbb-cccc"], "golang.org/x/crypto"))
+        self.assertEqual((o["aliases"], o["package"]), (["GHSA-x86f-5xw2-fm2r"], "github.com/docker/docker"))
+
 
 def full_state() -> dict:
     """State of a run where every stage ran: the baseline each case mutates."""
@@ -513,6 +526,41 @@ class ScannerFindingsTest(unittest.TestCase):
         self.assertIn("| grype | CVE-1 | dependency | dep |", head)
         self.assertIn("| gosec | G104 | `a.go:90` | old |", tail)
         self.assertNotIn("G104", head)
+
+    ADVISORIES = [
+        {"tool": "govulncheck", "ruleId": "GO-2026-6355", "level": "error", "message": "DoS in ssh", "locations": [],
+         "reachable": True, "aliases": ["GHSA-aaaa-bbbb-cccc"], "package": "golang.org/x/crypto"},
+        {"tool": "osv-scanner", "ruleId": "GHSA-aaaa-bbbb-cccc", "level": "warning", "message": "DoS in ssh (osv)",
+         "locations": [{"file": "go.mod", "line": 0}], "aliases": ["GO-2026-6355"], "package": "golang.org/x/crypto"},
+        {"tool": "grype", "ruleId": "GO-2026-6355-golang.org/x/crypto", "level": "error",
+         "message": "A high vulnerability in go-module package: golang.org/x/crypto, version v0.54.0 was found at: /go.mod",
+         "locations": [{"file": "/go.mod", "line": 1}]},
+        {"tool": "grype", "ruleId": "GHSA-dddd-eeee-ffff-github.com/docker/docker", "level": "warning",
+         "message": "A medium vulnerability in go-module package: github.com/docker/docker, version v28.5.2 was found at: /go.mod",
+         "locations": [{"file": "/go.mod", "line": 1}]},
+    ]
+
+    def advisory_doc(self, dependency_change):
+        return {"findings": self.ADVISORIES, "coverage": "partial", "scope": "diff", "since": "origin/main",
+                "touched_files": 1, "dependency_change": dependency_change,
+                "tools": {"govulncheck": {"status": "ran", "findings": 1}, "osv-scanner": {"status": "ran", "findings": 1},
+                          "grype": {"status": "ran", "findings": 2}}}
+
+    def test_one_row_per_vulnerability_across_scanners(self):
+        md = pipeline.render_det_summary(self.advisory_doc(True))
+        self.assertIn("| govulncheck, grype, osv-scanner | GO-2026-6355 (reachable) | `golang.org/x/crypto` | DoS in ssh |", md)
+        self.assertEqual(md.count("GO-2026-6355"), 1, md)
+        self.assertIn("| grype | GHSA-dddd-eeee-ffff | `github.com/docker/docker` |", md)
+        self.assertNotIn("go.mod:1", md, "grype's line 1 is a placeholder, not a location")
+
+    def test_unreachable_advisories_collapse_unless_dependencies_changed(self):
+        md = pipeline.render_det_summary(self.advisory_doc(False))
+        head, marker, tail = md.partition("Dependency advisories without a known call path from ox code: 1")
+        self.assertTrue(marker, md)
+        self.assertIn("GO-2026-6355 (reachable)", head, "a reachable advisory always stays visible")
+        self.assertIn("github.com/docker/docker", tail)
+        md = pipeline.render_det_summary(self.advisory_doc(True))
+        self.assertNotIn("without a known call path", md, "a dependency change shows every advisory")
 
     def test_det_summary_never_reads_clean_without_coverage(self):
         doc = {"findings": [], "coverage": "none", "scope": "diff", "since": "origin/main", "touched_files": 1,

@@ -990,7 +990,7 @@ def sarif_findings(path: Path, tool: str, root: Path) -> list:
 
 def govulncheck_findings(path: Path) -> list:
     msgs = [m for m in json_stream(path) if isinstance(m, dict)]
-    summaries = {m["osv"].get("id"): m["osv"].get("summary", "") for m in msgs if isinstance(m.get("osv"), dict)}
+    osvs = {m["osv"].get("id"): m["osv"] for m in msgs if isinstance(m.get("osv"), dict)}
     by_id = {}
     for m in msgs:
         f = m.get("finding")
@@ -1005,8 +1005,10 @@ def govulncheck_findings(path: Path) -> list:
                 "tool": "govulncheck",
                 "ruleId": osv,
                 "level": "error" if called else "warning",
-                "message": summaries.get(osv, ""),
+                "message": (osvs.get(osv) or {}).get("summary", ""),
                 "locations": [],
+                "aliases": (osvs.get(osv) or {}).get("aliases") or [],
+                "package": (trace[0].get("module", "") if trace and isinstance(trace[0], dict) else ""),
                 # Only a symbol-level trace means the vulnerable code is called.
                 "reachable": called,
                 "fixed_version": f.get("fixed_version", ""),
@@ -1028,6 +1030,8 @@ def osv_findings(path: Path, root: Path) -> list:
                         "level": "warning",
                         "message": v.get("summary", ""),
                         "locations": [{"file": source, "line": 0}],
+                        "aliases": v.get("aliases") or [],
+                        "package": (pkg.get("package") or {}).get("name", ""),
                     }
                 )
     return found
@@ -1150,6 +1154,8 @@ def cmd_det_merge(a) -> int:
         "since": a.since,
         "touched_files": len(touched_list),
         "coverage": level,
+        # Advisories cover the whole module; they are the change's only if it edits go.mod or go.sum.
+        "dependency_change": a.scope != "diff" or any(Path(t).name in ("go.mod", "go.sum") for t in touched_list),
     }
     (out / "findings-deterministic.json").write_text(json.dumps(doc, indent=2) + "\n")
     (out / "det-summary.md").write_text(render_det_summary(doc))
@@ -1348,6 +1354,23 @@ def ledger_total(path: Path) -> float:
 
 # Dependency advisories first (a reachable CVE leads), then code findings.
 SCANNER_ORDER = {"govulncheck": 0, "osv-scanner": 1, "grype": 1, "opengrep": 2, "gosec": 3}
+ADVISORY_SCANNERS = ("govulncheck", "osv-scanner", "grype")
+# grype names a rule "<advisory id>-<package>" and its message says the package.
+ADVISORY_ID_RE = re.compile(r"^(GHSA(?:-[0-9a-z]{4}){3}|GO-\d{4}-\d+|CVE-\d{4}-\d+)", re.I)
+GRYPE_PACKAGE_RE = re.compile(r"package: ([^,\s]+), version")
+
+
+def advisory_identity(f: dict) -> dict:
+    """For a dependency advisory: every ID it is known by, and its package."""
+    if f.get("tool") not in ADVISORY_SCANNERS:
+        return {"advisory": False}
+    rule, package = f.get("ruleId") or "", f.get("package") or ""
+    if f.get("tool") == "grype":
+        m = ADVISORY_ID_RE.match(rule)
+        rule = m.group(1) if m else rule
+        pm = GRYPE_PACKAGE_RE.search(f.get("message") or "")
+        package = package or (pm.group(1) if pm else "")
+    return {"advisory": True, "ids": [rule] + list(f.get("aliases") or []), "package": package}
 
 
 def scanner_report_findings(det, ai_findings: list) -> list:
@@ -1371,6 +1394,7 @@ def scanner_report_findings(det, ai_findings: list) -> list:
             "message": (f.get("message") or "").strip().replace("\n", " "),
             "reachable": bool(f.get("reachable")),
             "in_diff": f.get("in_diff"),
+            **advisory_identity(f),
         })
     found.sort(key=lambda f: (SCANNER_ORDER.get(f["tool"], 4), f["level"] != "error", f["file"], f["line"]))
     return found
@@ -1384,6 +1408,7 @@ def gather_state(out: Path, a) -> dict:
     findings, dropped, malformed = read_validated(out / "findings-validated.jsonl")
     return {
         "scanner_findings": scanner_report_findings(det, findings),
+        "dependency_change": det.get("dependency_change", True) if isinstance(det, dict) else True,
         "manifest": load_json(out / "review" / "manifest.json"),
         "tools": det.get("tools") if isinstance(det, dict) else None,
         "surface": surface if isinstance(surface, dict) else None,
@@ -1412,7 +1437,10 @@ def scanner_table(scan: list) -> list:
     """Markdown rows for scanner findings, at most SCANNER_ROWS of them."""
     md = ["| Tool | Rule | Where | Message |", "|---|---|---|---|"]
     for f in scan[:SCANNER_ROWS]:
-        where = f"`{f['file']}:{f['line']}`" if f["file"] and f["line"] else (f"`{f['file']}`" if f["file"] else "dependency")
+        if f.get("advisory"):
+            where = f"`{f['package']}`" if f.get("package") else "dependency"
+        else:
+            where = f"`{f['file']}:{f['line']}`" if f["file"] and f["line"] else (f"`{f['file']}`" if f["file"] else "dependency")
         rule = f["rule"] + (" (reachable)" if f["reachable"] else "")
         md.append(f"| {_cell(f['tool'])} | {_cell(rule)} | {_cell(where)} | {_cell(f['message'][:160])} |")
     if len(scan) > SCANNER_ROWS:
@@ -1420,12 +1448,45 @@ def scanner_table(scan: list) -> list:
     return md
 
 
-def scanner_sections(scan: list) -> list:
-    """Scanner findings with the ones off the changed lines set apart: a hit elsewhere
-    in a touched file is existing code, and listing it first reads as the change's."""
-    main = [f for f in scan if f.get("in_diff") is not False]
-    elsewhere = [f for f in scan if f.get("in_diff") is False]
+def merge_advisories(rows: list) -> list:
+    """One row per vulnerability: three scanners report the same advisory, under its GO-,
+    GHSA- or CVE- ID. Rows that share any ID merge; the row names every scanner."""
+    groups = []
+    for r in rows:
+        ids = {i.upper() for i in r.get("ids") or [] if i}
+        hits = [g for g in groups if g[0] & ids]
+        for g in hits:
+            groups.remove(g)
+        groups.append((ids.union(*(g[0] for g in hits)), [r] + [x for g in hits for x in g[1]]))
+    merged = []
+    for ids, rs in groups:
+        rs.sort(key=lambda r: (SCANNER_ORDER.get(r["tool"], 9), r["tool"]))
+        tools = list(dict.fromkeys(r["tool"] for r in rs))
+        shown = {i.upper(): i for r in rs for i in r.get("ids") or [] if i}  # matching ignores case; display does not
+        primary = next((shown[i] for prefix in ("GO-", "GHSA-", "CVE-") for i in sorted(ids) if i.startswith(prefix)), "")
+        best = next((r for r in rs if r["tool"] != "grype" and r["message"]), rs[0])
+        merged.append({"tool": ", ".join(tools), "rule": primary or best["rule"], "file": "", "line": 0,
+                       "message": best["message"], "reachable": any(r["reachable"] for r in rs),
+                       "package": next((r["package"] for r in rs if r.get("package")), ""), "advisory": True})
+    merged.sort(key=lambda r: (not r["reachable"], r["package"], r["rule"]))
+    return merged
+
+
+def scanner_sections(scan: list, dependency_change: bool = True) -> list:
+    """Scanner findings, most relevant first. Advisories are merged to one row per
+    vulnerability; those with no known call path from ox code are collapsed unless
+    the change touches go.mod/go.sum. Code hits off the changed lines are existing
+    code, so they are set apart too: listing them first reads as the change's."""
+    advisories = merge_advisories([f for f in scan if f.get("advisory")])
+    quiet = [] if dependency_change else [a for a in advisories if not a["reachable"]]
+    code = [f for f in scan if not f.get("advisory")]
+    main = [a for a in advisories if a not in quiet] + [f for f in code if f.get("in_diff") is not False]
+    elsewhere = [f for f in code if f.get("in_diff") is False]
     md = scanner_table(main) if main else ["No scanner findings on the changed lines."]
+    if quiet:
+        md += ["", "<details>",
+               f"<summary>Dependency advisories without a known call path from ox code: {len(quiet)}</summary>",
+               ""] + scanner_table(quiet) + ["", "</details>"]
     if elsewhere:
         md += ["", "<details>",
                f"<summary>Elsewhere in touched files (existing code): {len(elsewhere)} finding(s)</summary>",
@@ -1457,7 +1518,7 @@ def render_det_summary(doc: dict) -> str:
     scan = scanner_report_findings(doc, [])
     md.append("")
     if scan:
-        md += scanner_sections(scan)
+        md += scanner_sections(scan, doc.get("dependency_change", True))
     elif ran:
         md.append("No scanner findings.")
     return "\n".join(md) + "\n"
@@ -1595,7 +1656,8 @@ def render_findings(s: dict, cov: dict, counts: dict) -> str:
             if f.get(key):
                 md += [f"**{label}**: {_fmt(f[key])}", ""]
     if scan:
-        md += ["## Scanner findings (not validated by the AI tier)", ""] + scanner_sections(scan) + [""]
+        md += ["## Scanner findings (not validated by the AI tier)", ""] + \
+            scanner_sections(scan, s.get("dependency_change", True)) + [""]
     md += ["## Coverage", "", "| Stage | Result |", "|---|---|"]
     md += [f"| {stage} | {text} |" for stage, text in coverage_rows(s)]
     if cov["notes"] and cov["level"] != "empty":
