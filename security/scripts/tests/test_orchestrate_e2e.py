@@ -292,6 +292,19 @@ class OrchestrateE2ETest(unittest.TestCase):
         self.assertIn("| gosec | G304 | `cmd/ox/upload.go:19` |", summary, self.explain(new))
         self.assertNotIn("Elsewhere in touched files", summary)
 
+    def test_fast_tier_records_whether_the_change_touches_dependencies(self):
+        """Dependency advisories collapse unless the change edits go.mod or go.sum, so det-merge must say which."""
+        self.repo.plant_feature()
+        self.repo.install("golangci-lint")
+        self.repo.run("deterministic.sh")
+        self.assertIs(json.loads(self.repo.output("findings-deterministic.json"))["dependency_change"], False)
+
+        self.repo.write("go.mod", "module example.com/scratch\n\ngo 1.26\n")
+        self.repo.commit("add go.mod")
+        result = self.repo.run("deterministic.sh")
+        self.assertIs(json.loads(self.repo.output("findings-deterministic.json"))["dependency_change"], True,
+                      self.explain(result))
+
     def test_reported_cost_is_tracked_and_the_cap_stops_later_phases(self):
         """Quinn caps a run at $0.50; each call reports $0.20 in total_cost_usd."""
         self.repo.plant_feature()
