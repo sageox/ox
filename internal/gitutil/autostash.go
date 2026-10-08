@@ -50,7 +50,7 @@ func RestoreLeftoverAutostash(ctx context.Context, repoPath string) (bool, error
 		_, storeErr := RunGit(storeCtx, repoPath, "stash", "store", "-m", leftoverAutostashMessage, sha)
 		storeCancel()
 		if storeErr != nil {
-			return true, fmt.Errorf("leftover autostash %s did not apply (%v) and could not be stored: %w", sha[:12], applyErr, storeErr)
+			return true, fmt.Errorf("leftover autostash %s did not apply (%w) and could not be stored: %w", sha[:12], applyErr, storeErr)
 		}
 	}
 	delCtx, delCancel := context.WithTimeout(ctx, 10*time.Second)
