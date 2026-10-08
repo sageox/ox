@@ -479,6 +479,41 @@ class ScannerFindingsTest(unittest.TestCase):
         self.assertIn("| gosec | G304 | `cmd/ox/a\\|b.go:4` | read |", md)
         self.assertIn("| grype | failed: exit 2 \\| db stale |", md)
 
+    def test_changed_lines_come_from_added_hunk_ranges(self):
+        diff = ("diff --git a/a.go b/a.go\n--- a/a.go\n+++ b/a.go\n"
+                "@@ -10,0 +11,2 @@\n+x\n+y\n@@ -20 +22 @@\n-old\n+new\n@@ -30,3 +33,0 @@\n-gone\n"
+                "diff --git a/old.go b/old.go\n--- a/old.go\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-a\n-b\n")
+        self.assertEqual(pipeline.parse_changed_lines(diff), {"a.go": {11, 12, 22}})
+
+    def test_a_failed_diff_marks_nothing_as_existing_code(self):
+        """If the diff cannot be read, no finding may be moved out of the main table."""
+        with tempfile.TemporaryDirectory() as tmp:  # not a git repo: both diff attempts fail
+            changed = pipeline.changed_lines(Path(tmp), "origin/main")
+        self.assertIsNone(changed)
+        findings = [{"tool": "gosec", "locations": [{"file": "a.go", "line": 3}]}]
+        pipeline.mark_in_diff(findings, changed)
+        self.assertNotIn("in_diff", findings[0])
+        pipeline.mark_in_diff(findings, {"a.go": {3}})
+        self.assertTrue(findings[0]["in_diff"])
+
+    def test_findings_off_the_changed_lines_are_set_apart(self):
+        """A hit in a touched file but not on a changed line is existing code, not the change's."""
+        doc = {"findings": [
+                   {"tool": "gosec", "ruleId": "G304", "level": "warning", "message": "new", "in_diff": True,
+                    "locations": [{"file": "a.go", "line": 3}]},
+                   {"tool": "gosec", "ruleId": "G104", "level": "warning", "message": "old", "in_diff": False,
+                    "locations": [{"file": "a.go", "line": 90}]},
+                   {"tool": "grype", "ruleId": "CVE-1", "level": "error", "message": "dep", "locations": []}],
+               "coverage": "full", "scope": "diff", "since": "origin/main", "touched_files": 1,
+               "tools": {"gosec": {"status": "ran", "findings": 2}, "grype": {"status": "ran", "findings": 1}}}
+        md = pipeline.render_det_summary(doc)
+        head, marker, tail = md.partition("Elsewhere in touched files (existing code): 1 finding(s)")
+        self.assertTrue(marker, md)
+        self.assertIn("| gosec | G304 | `a.go:3` | new |", head)
+        self.assertIn("| grype | CVE-1 | dependency | dep |", head)
+        self.assertIn("| gosec | G104 | `a.go:90` | old |", tail)
+        self.assertNotIn("G104", head)
+
     def test_det_summary_never_reads_clean_without_coverage(self):
         doc = {"findings": [], "coverage": "none", "scope": "diff", "since": "origin/main", "touched_files": 1,
                "tools": {t: {"status": "skipped", "reason": "not installed"} for t in pipeline.SCANNERS}}

@@ -275,6 +275,23 @@ class OrchestrateE2ETest(unittest.TestCase):
         self.assertIn("| gosec | G304 | `cmd/ox/upload.go:11` |", summary)
         self.assertIn("**PARTIAL COVERAGE**", summary)
 
+    def test_fast_tier_sets_apart_findings_off_the_changed_lines(self):
+        """Ryan's change appends to upload.go; a gosec hit on an untouched line of that file is existing
+        code, not his, and must not be listed as if the change introduced it."""
+        self.repo.plant_feature()
+        self.repo.install("golangci-lint")
+        old = self.repo.run("deterministic.sh", FAKE_GOSEC="issue")  # line 11: not changed by the feature
+        head, marker, tail = self.repo.output("det-summary.md").partition(
+            "Elsewhere in touched files (existing code): 1 finding(s)")
+        self.assertTrue(marker, self.explain(old))
+        self.assertIn("`cmd/ox/upload.go:11`", tail)
+        self.assertNotIn("upload.go:11", head)
+
+        new = self.repo.run("deterministic.sh", FAKE_GOSEC="issue", FAKE_GOSEC_LINE="19")  # the planted line
+        summary = self.repo.output("det-summary.md")
+        self.assertIn("| gosec | G304 | `cmd/ox/upload.go:19` |", summary, self.explain(new))
+        self.assertNotIn("Elsewhere in touched files", summary)
+
     def test_reported_cost_is_tracked_and_the_cap_stops_later_phases(self):
         """Quinn caps a run at $0.50; each call reports $0.20 in total_cost_usd."""
         self.repo.plant_feature()

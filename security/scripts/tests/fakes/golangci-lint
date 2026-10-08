@@ -4,7 +4,7 @@
 Rejects the v1 --out-format flag the way v2 does (exit 3, empty output), and
 otherwise writes a JSON report to --output.json.path. FAKE_GOSEC picks it:
   ok         no issues, exit 0 (default)
-  issue      one gosec issue in cmd/ox/upload.go, exit 1
+  issue      one gosec issue in cmd/ox/upload.go (line FAKE_GOSEC_LINE, default 11), exit 1
   typecheck  only typecheck issues — what a Go toolchain mismatch produces;
              gosec analyzed nothing — exit 1
   crash      exit 3 without a report
@@ -28,7 +28,7 @@ def main():
     issues = []
     if mode == "issue":
         issues = [{"FromLinter": "gosec", "Text": "G304: Potential file inclusion via variable",
-                   "Pos": {"Filename": "cmd/ox/upload.go", "Line": 11}}]
+                   "Pos": {"Filename": "cmd/ox/upload.go", "Line": int(os.environ.get("FAKE_GOSEC_LINE", "11"))}}]
     elif mode == "typecheck":
         issues = [{"FromLinter": "typecheck",
                    "Text": "could not import fmt (cannot decode \"internal/goarch\", export data version 4 is "
