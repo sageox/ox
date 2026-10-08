@@ -27,8 +27,10 @@ from __future__ import annotations
 import argparse
 import json
 import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import xml.etree.ElementTree as ET
 from collections import Counter
@@ -41,6 +43,7 @@ WEIGHT_FLOOR_SECONDS = 0.5
 MAX_RUN_BYTES = 100_000
 RUNNABLE_PREFIXES = ("Test", "Example", "Fuzz")
 JUNIT_SUM_ATTRIBUTES = ("tests", "failures", "errors", "skipped", "time")
+DIAGNOSTIC_OUTPUT_BYTES = 64 * 1024
 
 
 def parse_list_output(text: str) -> list[str]:
@@ -221,40 +224,63 @@ def gotestsum_command(gotestsum: list[str], job_paths: Job, go_flags: list[str],
     ]
 
 
+def _test_event_records(path: Path):
+    """Read one JSONL event at a time, tolerating a producer's partial record."""
+    with path.open(encoding="utf-8", newline="") as stream:
+        for line in stream:
+            try:
+                yield line, json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+
 def finalize_test_events(path: Path, failed: bool) -> str:
-    """Keep full failed-shard evidence; compact passing shards to timing events.
+    """Preserve failed artifacts and return at most 64 KiB of diagnostic output.
 
     gotestsum can attribute a race or background error to a test that passes,
-    then report only a package failure. Its failure summary omits that test's
-    output. Preserve the original stream in the existing uploaded artifact and
-    return non-frame output from such packages for the console diagnosis.
+    then report only a package failure. Scan twice to find these packages and
+    show bounded context; the full original stream remains in the artifact.
+    Passing shards are compacted with an atomic replacement after streaming
+    terminal events to a temporary file, so failed compaction preserves input.
     """
     if not path.is_file():
         return ""
-    records = []
-    for line in path.read_text(encoding="utf-8").splitlines(keepends=True):
-        try:
-            records.append((line, json.loads(line)))
-        except json.JSONDecodeError:
-            # A killed producer may leave a partial final record. Failed
-            # artifacts stay byte-for-byte intact, including that evidence.
-            continue
     if not failed:
-        path.write_text("".join(line for line, event in records if event.get("Action") in {"pass", "fail", "skip"}), encoding="utf-8")
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", newline="", dir=path.parent,
+                                             prefix=path.name + ".", delete=False) as stream:
+                temporary = Path(stream.name)
+                for line, event in _test_event_records(path):
+                    if event.get("Action") in {"pass", "fail", "skip"}:
+                        stream.write(line)
+            temporary.replace(path)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
         return ""
 
-    package_failures = {event.get("Package") for _, event in records if event.get("Action") == "fail" and not event.get("Test")}
-    test_failures = {event.get("Package") for _, event in records if event.get("Action") == "fail" and event.get("Test")}
+    package_failures, test_failures = set(), set()
+    for _, event in _test_event_records(path):
+        if event.get("Action") == "fail":
+            failures = test_failures if event.get("Test") else package_failures
+            failures.add(event.get("Package"))
     package_only = package_failures - test_failures
-    output = []
-    for _, event in records:
+    output = bytearray()
+    for _, event in _test_event_records(path):
         if event.get("Package") not in package_only or event.get("Action") != "output":
             continue
         text = event.get("Output", "")
         if text.lstrip().startswith(("=== RUN", "=== PAUSE", "=== CONT", "--- PASS:", "--- SKIP:")):
             continue
-        output.append(text)
-    return "".join(output)
+        remaining = DIAGNOSTIC_OUTPUT_BYTES - len(output)
+        # Slice before encoding so even a huge individual event cannot grow
+        # the retained excerpt beyond the byte budget.
+        snippet = text[:remaining + 1].encode("utf-8")
+        output.extend(snippet[:remaining])
+        if len(snippet) > remaining:
+            return output.decode("utf-8", errors="ignore") + f"\n[Diagnostic output truncated at {DIAGNOSTIC_OUTPUT_BYTES} bytes; full events: {path}]\n"
+    return output.decode("utf-8")
 
 
 class Layout:
@@ -382,10 +408,11 @@ def run(args: argparse.Namespace) -> int:
     if args.junit:
         merge_junit([job.junit for job in jobs if job.junit.is_file() and job.junit.stat().st_size], Path(args.junit))
     if args.timings:
-        with Path(args.timings).open("w", encoding="utf-8") as out:
+        with Path(args.timings).open("w", encoding="utf-8", newline="") as out:
             for job in jobs:
                 if job.timings.is_file():
-                    out.write(job.timings.read_text(encoding="utf-8"))
+                    with job.timings.open(encoding="utf-8", newline="") as source:
+                        shutil.copyfileobj(source, out)
 
     if failed:
         print(f"\ntest-split: {len(failed)} of {len(jobs)} processes failed: {', '.join(failed)}", file=sys.stderr)

@@ -1,8 +1,10 @@
 import contextlib
+import hashlib
 import io
 import json
 import sys
 import tempfile
+import tracemalloc
 import unittest
 from unittest import mock
 import xml.etree.ElementTree as ET
@@ -182,6 +184,90 @@ class DiagnosticArtifactsTest(unittest.TestCase):
         self.assertEqual("", diagnostic)
         self.assertNotIn("WARNING", self.path.read_text(encoding="utf-8"))
 
+    def test_large_stream_has_bounded_memory_and_preserves_failed_artifact(self):
+        """Process multi-megabyte shards without retaining their event history."""
+        for failed in (False, True):
+            with self.subTest(failed=failed):
+                events = self.events(failed=failed)
+                noise = json.dumps({"Action": "output", "Package": events[0]["Package"], "Output": "noise " * 1024}) + "\n"
+                original_hash = hashlib.sha256()
+                with self.path.open("wb") as stream:
+                    for event in events[:-1]:
+                        line = (json.dumps(event) + "\n").encode()
+                        stream.write(line)
+                        original_hash.update(line)
+                    for _ in range(1024):
+                        stream.write(noise.encode())
+                        original_hash.update(noise.encode())
+                    line = (json.dumps(events[-1]) + "\n").encode()
+                    stream.write(line)
+                    original_hash.update(line)
+                self.assertGreater(self.path.stat().st_size, 5 * 1024 * 1024)
+                tracemalloc.start()
+                try:
+                    diagnostic = test_split.finalize_test_events(self.path, failed=failed)
+                    _, peak = tracemalloc.get_traced_memory()
+                finally:
+                    tracemalloc.stop()
+                self.assertLess(peak, 2 * 1024 * 1024, "streaming must not retain the whole shard")
+                if failed:
+                    retained_hash = hashlib.sha256()
+                    with self.path.open("rb") as stream:
+                        for block in iter(lambda: stream.read(64 * 1024), b""):
+                            retained_hash.update(block)
+                    self.assertEqual(original_hash.digest(), retained_hash.digest())
+                    self.assertIn("DATA RACE", diagnostic)
+                    self.assertIn("truncated", diagnostic)
+                    self.assertIn(str(self.path), diagnostic)
+                else:
+                    with self.path.open(encoding="utf-8") as stream:
+                        retained = [json.loads(line) for line in stream]
+                    self.assertEqual([event for event in events if event["Action"] == "pass"], retained)
+                    self.assertEqual("", diagnostic)
+
+    def test_unicode_diagnostic_is_bounded_and_empty_events_do_not_fill_budget(self):
+        """Bound console bytes across multibyte output while preserving evidence."""
+        events = self.events()
+        package = events[0]["Package"]
+        events[2:2] = [{"Action": "output", "Package": package, "Output": ""}] * 2048 + [
+            {"Action": "output", "Package": package, "Output": "é" * test_split.DIAGNOSTIC_OUTPUT_BYTES},
+            {"Action": "output", "Package": package, "Output": "unshown trailing evidence\n"},
+        ]
+        original = self.write_events(events)
+        diagnostic = test_split.finalize_test_events(self.path, failed=True)
+        excerpt, notice = diagnostic.split("\n[Diagnostic output truncated", 1)
+        self.assertLessEqual(len(excerpt.encode()), test_split.DIAGNOSTIC_OUTPUT_BYTES)
+        self.assertIn("full events: " + str(self.path), notice)
+        self.assertNotIn("unshown trailing evidence", diagnostic)
+        self.assertEqual(original, self.path.read_text(encoding="utf-8"))
+
+    def test_failed_compaction_leaves_original_intact_and_removes_temporary(self):
+        """Read, write, or rename errors never replace the full source artifact."""
+        for stage in ("read", "write", "replace"):
+            with self.subTest(stage=stage):
+                original = self.write_events(self.events(failed=False))
+                if stage == "read":
+                    def interrupted_records(path):
+                        """Fail after writing a terminal event into the temporary file."""
+                        yield json.dumps({"Action": "pass"}) + "\n", {"Action": "pass"}
+                        raise OSError("read failed")
+                    patch = mock.patch.object(test_split, "_test_event_records", side_effect=interrupted_records)
+                elif stage == "write":
+                    create_temporary = tempfile.NamedTemporaryFile
+
+                    def unwritable_temporary(*args, **kwargs):
+                        """Inject a real temporary file whose write reports disk failure."""
+                        stream = create_temporary(*args, **kwargs)
+                        stream.write = mock.Mock(side_effect=OSError("write failed"))
+                        return stream
+                    patch = mock.patch.object(test_split.tempfile, "NamedTemporaryFile", side_effect=unwritable_temporary)
+                else:
+                    patch = mock.patch.object(Path, "replace", side_effect=OSError("replace failed"))
+                with patch, self.assertRaisesRegex(OSError, stage + " failed"):
+                    test_split.finalize_test_events(self.path, failed=False)
+                self.assertEqual(original, self.path.read_text(encoding="utf-8"))
+                self.assertEqual([self.path], list(self.root.iterdir()))
+
     def test_failed_group_prints_only_the_package_without_a_failed_test(self):
         """Avoid replaying passed packages or ordinary assertion summaries."""
         events = self.events() + [
@@ -231,7 +317,16 @@ class DiagnosticArtifactsTest(unittest.TestCase):
         args = test_split.argparse.Namespace(go="go", gotestsum="fake", work_dir=str(work), split=[], group=[], weights=None,
                                             only="rest", go_flags=[], packages=[], coverprofile=str(self.root / "cover.out"), junit=None, timings=str(self.path))
         console, errors = io.StringIO(), io.StringIO()
-        with mock.patch.object(test_split, "build_jobs", return_value=[job]), contextlib.redirect_stdout(console), contextlib.redirect_stderr(errors):
+        original_read_text = Path.read_text
+
+        def bounded_reads(path, *read_args, **read_kwargs):
+            """Reject whole-file timing reads during finalization and merge."""
+            if path == job.timings:
+                raise AssertionError("full timing artifacts must be streamed")
+            return original_read_text(path, *read_args, **read_kwargs)
+
+        with mock.patch.object(test_split, "build_jobs", return_value=[job]), mock.patch.object(Path, "read_text", new=bounded_reads), \
+                contextlib.redirect_stdout(console), contextlib.redirect_stderr(errors):
             result = test_split.run(args)
         self.assertEqual(1, result)
         self.assertIn("Package-level failure context", console.getvalue())
