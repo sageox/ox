@@ -414,7 +414,7 @@ func TestWalkthroughUnreadableTranscript(t *testing.T) {
 // error — it says it has no screen data and points at the transcript.
 func TestWalkthroughOnAudioDiscussion(t *testing.T) {
 	env, d := readWalkthrough(t, desktopWalkRoot, desktopAudioCnv, WalkthroughOptions{})
-	if d.ScreenRecording || len(d.Moments) != 0 || !hasNote(d, "Not a screen walkthrough") {
+	if d.ScreenRecording || len(d.Moments) != 0 || !hasNote(d, "No screen evidence on disk") {
 		t.Errorf("audio = %+v", d)
 	}
 	if !strings.Contains(env.Guidance, "ox conversation transcript") {
@@ -432,7 +432,7 @@ func TestShowNamesWalkthroughForLayersOnlyRecording(t *testing.T) {
 		t.Fatal(err)
 	}
 	env := New(root, time.Time{}).Show(desktopWalkCnv)
-	if !strings.Contains(env.Guidance, "ox conversation walkthrough "+desktopWalkCnv) {
+	if !strings.Contains(env.Guidance, "ox walkthrough "+desktopWalkCnv) {
 		t.Errorf("show guidance = %q", env.Guidance)
 	}
 	audio := New(root, time.Time{}).Show(desktopAudioCnv)
@@ -719,7 +719,7 @@ func TestWalkthroughMarksWithOnlyTheHintsLayer(t *testing.T) {
 	if !d.ScreenRecording {
 		t.Fatalf("a hints layer with marks is screen data; notes = %q", d.Notes)
 	}
-	if hasNote(d, "Not a screen walkthrough") {
+	if hasNote(d, "No screen evidence on disk") {
 		t.Errorf("notes = %q", d.Notes)
 	}
 	marks := 0
@@ -732,7 +732,7 @@ func TestWalkthroughMarksWithOnlyTheHintsLayer(t *testing.T) {
 		t.Errorf("marks = %d, want 3", marks)
 	}
 	show := New(root, time.Time{}).Show(areaWalkCnv)
-	if !strings.Contains(show.Guidance, "ox conversation walkthrough") {
+	if !strings.Contains(show.Guidance, "ox walkthrough") {
 		t.Errorf("show guidance must name walkthrough, got %q", show.Guidance)
 	}
 }

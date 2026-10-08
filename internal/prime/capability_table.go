@@ -116,7 +116,7 @@ func OxCapabilities() []Capability {
 				},
 				{
 					Cue:     `A pasted sageox.ai recording link (…/c/rec_…, …/recordings/rec_…)`,
-					Command: "`ox conversation show <link>` — never web-fetch it (sign-in wall). Requires `ox login` and team membership; on `not_authenticated` / `no_team_access`, stop and tell the user. A screen walkthrough: then `ox conversation walkthrough <link>` (what was on screen, clicked, and pointed at, with keyframes).",
+					Command: "`ox conversation show <link>` — never web-fetch it (sign-in wall). Requires `ox login` and team membership; on `not_authenticated` / `no_team_access`, stop and tell the user. A screen walkthrough: then `ox walkthrough <link>` (source words and image evidence; read all source pages, inspect pixels, and follow bounded recovery guidance).",
 				},
 			},
 		},
@@ -175,11 +175,11 @@ func OxCapabilities() []Capability {
 		// deterministic floor for citation-walking is prime's KB guidance,
 		// which names `ox conversation` for every adapter).
 		{ID: "ox-cli-conversation", MechanismClass: MechanismSkill, Supports: CapabilitySupport{Slash: true, AutoActivate: true}},
-		// ox-cli-walkthrough is a fat playbook: reading a screen walkthrough
-		// spans walkthrough, transcript, and ox fetch plus opening images,
-		// which no single subcommand backs. Its deterministic floor is the
+		// ox-cli-walkthrough activates the live evidence reader. Its JSON guidance
+		// owns transcript paging, image inspection and bounded server recovery,
+		// including actions outside the CLI. Its deterministic floor is the
 		// consult-first recording-link route above, which names
-		// `ox conversation walkthrough` for every adapter.
+		// `ox walkthrough` for every adapter.
 		{ID: "ox-cli-walkthrough", MechanismClass: MechanismSkill, Supports: CapabilitySupport{Slash: true, AutoActivate: true}},
 	}
 }

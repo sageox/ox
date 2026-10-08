@@ -136,7 +136,7 @@ func (r *Reader) listRow(root *os.Root, rw row) ConversationRow {
 // screenHint points a screen recording at its screen data: the walkthrough
 // view first (moments as first-class data), the per-cue interleave second.
 func screenHint(conversationID string) string {
-	return fmt.Sprintf("Screen walkthrough: ox conversation walkthrough %s lists what was on screen, clicked, and pointed at, plus the keyframes; transcript --frames shows the same per cue.", conversationID)
+	return fmt.Sprintf("Screen walkthrough: ox walkthrough %s lists what was on screen, clicked, and pointed at, plus the keyframes; transcript --frames shows the same per cue.", conversationID)
 }
 
 // guidanceShow names the L1 rung for a specific conversation; a screen

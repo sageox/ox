@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -93,7 +94,10 @@ func runFetch(cmd *cobra.Command, args []string) error {
 
 	// check cache
 	cachePath := filepath.Join(repoRoot, ".sageox", "cache", relPath)
-	if isCacheHit(cachePath, ref.Size) {
+	// Equal size is not integrity: a stale or poisoned cache can otherwise be
+	// advertised as the exact evidence image after reprocessing. Revalidate the
+	// digest on verified fetches so a reader can recover from a corrupt cache.
+	if isCacheHit(cachePath, ref.Size) && (!fetchVerifyFlag || cachedFetchDigestMatches(cachePath, oid)) {
 		if fetchStdoutFlag {
 			return streamFileToStdout(cmd, cachePath)
 		}
@@ -228,4 +232,21 @@ func streamFileToStdout(cmd *cobra.Command, path string) error {
 	defer f.Close()
 	_, err = io.Copy(cmd.OutOrStdout(), f)
 	return err
+}
+
+func cachedFetchDigestMatches(filename, oid string) bool {
+	info, err := os.Lstat(filename)
+	if err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	f, err := os.Open(filename)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	hash := sha256.New()
+	if _, err = io.Copy(hash, f); err != nil {
+		return false
+	}
+	return hex.EncodeToString(hash.Sum(nil)) == oid
 }
