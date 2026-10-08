@@ -1,0 +1,28 @@
+{
+  "name": "sageox",
+  "displayName": "SageOx",
+  "version": "1.0.0",
+  "minClientVersions": {
+    "cursor": "never"
+  },
+  "description": "Search your team's discussions, docs, and sessions, and save chats to Team Context.",
+  "author": {
+    "name": "SageOx",
+    "email": "hi@sageox.ai"
+  },
+  "homepage": "https://sageox.ai/docs/mcp",
+  "repository": "https://github.com/sageox/ox",
+  "license": "MIT",
+  "logo": "assets/logo.png",
+  "keywords": [
+    "sageox",
+    "sageox team context"
+  ],
+  "category": "integrations",
+  "tags": [
+    "sageox",
+    "mcp"
+  ],
+  "mcpServers": "./mcp.json",
+  "skills": "./skills/"
+}
