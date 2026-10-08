@@ -75,3 +75,27 @@ func TestSquashUnpushed_RestoresHeadWhenCommitIsRefused(t *testing.T) {
 	backup := strings.TrimSpace(gitOut(t, repo, "for-each-ref", "--format=%(objectname)", "refs/ox-backup/"))
 	assert.Equal(t, original, backup, "the backup ref keeps the original tip")
 }
+
+// Every git step the squash depends on reports its failure and leaves HEAD
+// where it was: a squash that silently did not happen would keep the push
+// wedged with nothing in the log.
+func TestSquashUnpushed_ReportsGitFailuresAndKeepsHead(t *testing.T) {
+	cases := []struct{ mode, want string }{
+		{"revlistfail", "count unpushed commits"},
+		{"updatereffail", "keep pre-squash tip"},
+		{"resetfail", "reset --soft"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.mode, func(t *testing.T) {
+			repo, _ := initBareRemoteRepo(t)
+			addCommit(t, repo, "one.txt", "1", "one")
+			addCommit(t, repo, "two.txt", "2", "two")
+			before := gitOut(t, repo, "rev-parse", "HEAD")
+			installFakeGit(t, tc.mode)
+
+			err := SquashUnpushed(context.Background(), repo, "squash")
+			require.ErrorContains(t, err, tc.want)
+			assert.Equal(t, before, gitOut(t, repo, "rev-parse", "HEAD"))
+		})
+	}
+}

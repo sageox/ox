@@ -19,6 +19,8 @@ import (
 //   - "lockfail": the first `fetch` fails with a cannot-lock-ref error.
 //   - "fetchhead": `pull` fails the way git does when another fetch rewrote
 //     FETCH_HEAD with several for-merge heads; fetch and rebase pass through.
+//   - "revlistfail", "updatereffail", "resetfail": that one subcommand fails,
+//     for the squash's refusal paths.
 //
 // It returns the path of the invocation log.
 func installFakeGit(t *testing.T, mode string) string {
@@ -52,6 +54,15 @@ case "` + mode + `:$sub" in
     exit 128;;
   fetchhead:pull)
     echo "fatal: Cannot rebase onto multiple branches." >&2
+    exit 128;;
+  revlistfail:rev-list)
+    echo "fatal: rev-list refused" >&2
+    exit 128;;
+  updatereffail:update-ref)
+    echo "fatal: update-ref refused" >&2
+    exit 128;;
+  resetfail:reset)
+    echo "fatal: reset refused" >&2
     exit 128;;
 esac
 exec '` + realGit + `' "$@"
