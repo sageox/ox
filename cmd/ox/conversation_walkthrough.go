@@ -136,8 +136,8 @@ func runConversationWalkthrough(cmd *cobra.Command, args []string) error {
 		if flags.Fetch || flags.Transcript || flags.Cursor != "" || flags.Extract && flags.Job != "" || flags.Prepare && (flags.Extract || flags.Job != "" || flags.Revision != "" || opts.CueFirst != 0 || opts.HasWindow) {
 			return conversationUsageExit(cmd.OutOrStdout(), format, read.ErrCodeInvalidSelector, "--prepare, --extract and --job are separate operations; prepare takes no revision/window and none accepts read/fetch modes")
 		}
-		if flags.Extract && (flags.Revision == "" || flags.MaxFrames < 1 || flags.MaxFrames > 8 || opts.CueFirst == 0 && !opts.HasWindow) {
-			return conversationUsageExit(cmd.OutOrStdout(), format, read.ErrCodeInvalidSelector, "--extract needs --revision, a cue/time window and --max-frames 1-8")
+		if flags.Extract && (flags.Revision == "" || flags.MaxFrames < 1 || flags.MaxFrames > 8 || flags.MaxWidth < 320 || flags.MaxWidth > 4096 || opts.CueFirst == 0 && !opts.HasWindow) {
+			return conversationUsageExit(cmd.OutOrStdout(), format, read.ErrCodeInvalidSelector, "--extract needs --revision, a cue/time window, --max-frames 1-8 and --max-width 320-4096")
 		}
 		return finishConversationEnvelope(cmd.OutOrStdout(), format, walkthroughRecovery(cmd, idArg, flags, opts), renderWalkthroughJob)
 	}

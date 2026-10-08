@@ -333,6 +333,11 @@ func TestWalkthroughKeyframesOnly(t *testing.T) {
 	if len(env.Warnings) != 0 {
 		t.Errorf("a missing layer is not a warning: %q", env.Warnings)
 	}
+	// Raw imports have server keyframes but no desktop telemetry. They still
+	// need a discoverable path to immutable evidence and bounded recovery.
+	if !strings.Contains(env.Guidance, "--prepare") {
+		t.Errorf("keyframes-only video lost preparation guidance: %q", env.Guidance)
+	}
 }
 
 // TestWalkthroughLayersWithoutKeyframes: the server's keyframe extraction
@@ -419,6 +424,9 @@ func TestWalkthroughOnAudioDiscussion(t *testing.T) {
 	}
 	if !strings.Contains(env.Guidance, "ox conversation transcript") {
 		t.Errorf("guidance = %q", env.Guidance)
+	}
+	if strings.Contains(env.Guidance, "--prepare") {
+		t.Errorf("audio-only guidance must not suggest paid video preparation: %q", env.Guidance)
 	}
 }
 

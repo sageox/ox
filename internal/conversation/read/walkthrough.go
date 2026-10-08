@@ -360,7 +360,11 @@ func (r *Reader) Walkthrough(rawID string, opts WalkthroughOptions) *Envelope {
 	}
 	data.Notes = walkthroughNotes(data, hasFrames, pointerLayer != nil, axLayer != nil, transcriptAbsent, cueErr != nil && !transcriptAbsent)
 	guidance := walkthroughGuidance(id.ConversationID, data)
-	guidance += fmt.Sprintf(" Legacy evidence has no immutable image revision. If this is a video and you need pinned evidence or recovery, explicitly run ox walkthrough %s --prepare --json, read its job receipt, sync, then pin the returned revision. Preparation spends bounded server compute; do not retry or poll without a budget.", id.ConversationID)
+	// Keyframes alone qualify, so raw video imports retain the recovery path
+	// without requiring desktop telemetry. Audio-only discussions need transcript guidance.
+	if data.ScreenRecording {
+		guidance += fmt.Sprintf(" Legacy evidence has no immutable image revision. If this is a video and you need pinned evidence or recovery, explicitly run ox walkthrough %s --prepare --json, read its job receipt, sync, then pin the returned revision. Preparation spends bounded server compute; do not retry or poll without a budget.", id.ConversationID)
+	}
 	if data.Transcript != nil && data.Transcript.NextCursor != "" {
 		guidance += fmt.Sprintf(" Next source page: ox walkthrough %s --transcript --cursor %s.", id.ConversationID, data.Transcript.NextCursor)
 	}

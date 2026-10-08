@@ -55,6 +55,8 @@ func TestWalkthroughCommandRecoveryModeValidation(t *testing.T) {
 		{"extract without pin", []string{"--extract", "--cues", "1"}, "--extract needs"},
 		{"extract without selector", []string{"--extract", "--revision", strings.Repeat("a", 64)}, "--extract needs"},
 		{"extract frame budget", []string{"--extract", "--revision", strings.Repeat("a", 64), "--cues", "1", "--max-frames", "9"}, "--extract needs"},
+		{"extract width too small", []string{"--extract", "--revision", strings.Repeat("a", 64), "--cues", "1", "--max-width", "319"}, "--max-width 320-4096"},
+		{"extract width too large", []string{"--extract", "--revision", strings.Repeat("a", 64), "--cues", "1", "--max-width", "4097"}, "--max-width 320-4096"},
 		{"prepare and extract", []string{"--prepare", "--extract"}, "separate operations"},
 		{"prepare with pin", []string{"--prepare", "--revision", "old"}, "separate operations"},
 		{"prepare with cues", []string{"--prepare", "--cues", "1"}, "separate operations"},

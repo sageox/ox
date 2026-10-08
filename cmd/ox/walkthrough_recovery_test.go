@@ -136,6 +136,30 @@ func TestWalkthroughCommandPrepareReturnsReceipt(t *testing.T) {
 	require.Contains(t, env.Guidance, "Do not poll in an unbounded loop")
 }
 
+func TestWalkthroughCommandAcceptsExtractionWidthBounds(t *testing.T) {
+	for _, width := range []int{320, 4096} {
+		t.Run(fmt.Sprint(width), func(t *testing.T) {
+			calls := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				var request api.WalkthroughExtractionRequest
+				require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+				require.Equal(t, width, request.MaxWidth)
+				_ = json.NewEncoder(w).Encode(api.WalkthroughJob{JobID: "job-width", Status: "queued"})
+			}))
+			defer srv.Close()
+			walkthroughRecoveryProject(t, srv.URL, true)
+			original := openConversationReader
+			t.Cleanup(func() { openConversationReader = original })
+			openConversationReader = func() (*read.Reader, *read.Error) { return read.New(t.TempDir(), time.Time{}), nil }
+			out, _, err := runConversationInProc(t, "walkthrough", shareTestWalkthroughRec, "--extract", "--revision", strings.Repeat("a", 64), "--cues", "1", "--max-width", fmt.Sprint(width))
+			require.NoError(t, err, out)
+			require.True(t, decodeConvEnvelope(t, out).Success)
+			require.Equal(t, 1, calls)
+		})
+	}
+}
+
 func TestWalkthroughFetchUsesVerifiedPointersAndBoundsAttempts(t *testing.T) {
 	oldOutput, oldStdout, oldVerify := fetchOutputFlag, fetchStdoutFlag, fetchVerifyFlag
 	t.Cleanup(func() { fetchOutputFlag, fetchStdoutFlag, fetchVerifyFlag = oldOutput, oldStdout, oldVerify })
