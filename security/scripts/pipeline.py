@@ -1102,12 +1102,19 @@ def changed_lines(root: Path, since: str):
     return None
 
 
+# Scanners whose findings point at code lines. The others report dependency advisories,
+# which have no code line (grype puts every match at line 1 of the manifest).
+CODE_SCANNERS = ("gosec", "opengrep")
+
+
 def mark_in_diff(findings: list, changed) -> None:
-    """Mark each located finding with whether its line is one the change touches.
+    """Mark each code finding with whether its line is one the change touches.
     A hit in a touched file is not necessarily the change's. Unknown diff: no marks."""
     if changed is None:
         return
     for f in findings:
+        if f.get("tool") not in CODE_SCANNERS:
+            continue
         loc = next((l for l in f.get("locations") or [] if l.get("file")), None)
         if loc and finding_line(loc):
             f["in_diff"] = finding_line(loc) in changed.get(loc["file"], ())

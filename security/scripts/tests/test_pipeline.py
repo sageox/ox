@@ -496,6 +496,14 @@ class ScannerFindingsTest(unittest.TestCase):
         pipeline.mark_in_diff(findings, {"a.go": {3}})
         self.assertTrue(findings[0]["in_diff"])
 
+    def test_dependency_advisories_are_never_marked_existing_code(self):
+        """grype puts every advisory at line 1 of the manifest, a placeholder, not a code line."""
+        findings = [{"tool": "grype", "ruleId": "CVE-1", "locations": [{"file": "go.mod", "line": 1}]},
+                    {"tool": "gosec", "ruleId": "G304", "locations": [{"file": "a.go", "line": 9}]}]
+        pipeline.mark_in_diff(findings, {"a.go": {3}})
+        self.assertNotIn("in_diff", findings[0], "an advisory must stay in the main table")
+        self.assertFalse(findings[1]["in_diff"])
+
     def test_findings_off_the_changed_lines_are_set_apart(self):
         """A hit in a touched file but not on a changed line is existing code, not the change's."""
         doc = {"findings": [
