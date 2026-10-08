@@ -22,3 +22,16 @@ func TestFetchEvidenceCacheVerifiesBytes(t *testing.T) {
 	require.True(t, isCacheHit(filename, int64(len(expected))))
 	require.False(t, cachedFetchDigestMatches(filename, oid))
 }
+
+func TestFetchEvidenceCacheRefusesMissingAndSymlinkPayload(t *testing.T) {
+	dir := t.TempDir()
+	require.False(t, cachedFetchDigestMatches(filepath.Join(dir, "missing.jpg"), validFetchOID))
+	require.False(t, cachedFetchDigestMatches(dir, validFetchOID))
+	payload := filepath.Join(dir, "target.jpg")
+	content := []byte("correct bytes")
+	sum := sha256.Sum256(content)
+	require.NoError(t, os.WriteFile(payload, content, 0644))
+	link := filepath.Join(dir, "linked.jpg")
+	require.NoError(t, os.Symlink(payload, link))
+	require.False(t, cachedFetchDigestMatches(link, hex.EncodeToString(sum[:])))
+}
