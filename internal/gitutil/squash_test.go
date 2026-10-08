@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -98,4 +99,15 @@ func TestSquashUnpushed_ReportsGitFailuresAndKeepsHead(t *testing.T) {
 			assert.Equal(t, before, gitOut(t, repo, "rev-parse", "HEAD"))
 		})
 	}
+}
+
+// The snapshot commit validates every blob the collapsed delta touches, one
+// `git cat-file` each. A flat budget killed that validation on a 6,282-file
+// delta ("git cat-file: signal: terminated"), rolled the squash back, and left
+// the Ledger wedged. The budget must grow with the delta and stay bounded.
+func TestSquashBudget_ScalesWithDeltaSize(t *testing.T) {
+	assert.Equal(t, 30*time.Second, squashBudget(0), "floor for an empty delta")
+	assert.Equal(t, 30*time.Second+100*50*time.Millisecond, squashBudget(100))
+	assert.Greater(t, squashBudget(6282), 5*time.Minute, "the measured delta gets minutes, not seconds")
+	assert.Equal(t, 15*time.Minute, squashBudget(1_000_000), "capped")
 }

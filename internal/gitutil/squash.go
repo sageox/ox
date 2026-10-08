@@ -67,13 +67,30 @@ func SquashUnpushed(ctx context.Context, repoPath, commitMsg string) error {
 		return fmt.Errorf("reset --soft: %w", err)
 	}
 
-	squashCtx, squashCancel := context.WithTimeout(ctx, 10*time.Second)
+	// the snapshot validates every blob the collapsed delta touches, one
+	// git cat-file each: give it time proportional to that delta
+	filesCtx, filesCancel := context.WithTimeout(ctx, 2*time.Minute)
+	changed, err := RunGit(filesCtx, repoPath, "diff", "--name-only", upstream, original)
+	filesCancel()
+	if err != nil {
+		return restoreSoftReset(ctx, repoPath, original, fmt.Errorf("count changed files for squash budget: %w", err))
+	}
+	squashCtx, squashCancel := context.WithTimeout(ctx, squashBudget(len(strings.Fields(changed))))
 	_, err = CommitLedgerSnapshot(squashCtx, repoPath, commitMsg)
 	squashCancel()
 	if err != nil {
 		return restoreSoftReset(ctx, repoPath, original, fmt.Errorf("validate squash or commit: %w", err))
 	}
 	return nil
+}
+
+// squashBudget is how long the collapsed snapshot commit may take: a floor
+// plus 50ms per changed file for the per-blob validation, capped so a runaway
+// still ends. 6,282 files (measured 2026-10-08) gets about five and a half
+// minutes; the flat 10s it replaced killed that validation every time.
+func squashBudget(changedFiles int) time.Duration {
+	budget := 30*time.Second + time.Duration(changedFiles)*50*time.Millisecond
+	return min(budget, 15*time.Minute)
 }
 
 // restoreSoftReset moves HEAD back to original after a failed squash so the
