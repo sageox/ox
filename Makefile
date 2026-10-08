@@ -739,7 +739,7 @@ coverage-ratchet-diff: test-all ## Enforce package + changed-line coverage vs CO
 	@python3 scripts/coverage_ratchet.py coverage.out --require-provenance coverage.out.provenance.json --diff-base $(COVERAGE_BASE)
 
 coverage-ratchet-test: ## Test the coverage ratchet parser and failure semantics
-	@cd scripts && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v coverage_ratchet_test.py test_tiers_test.py test_metrics_test.py test_split_test.py
+	@cd scripts && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v coverage_ratchet_test.py test_tiers_test.py test_metrics_test.py test_split_test.py session_import_testbed_test.py
 
 # The instrumented binary lands in its OWN directory, not shared bin/, because
 # ox discovers adapters as siblings of the running binary. In bin/ it saw every
