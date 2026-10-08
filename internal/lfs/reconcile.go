@@ -374,14 +374,18 @@ func preflightMissingPointer(ledgerPath string, p pointerEntry) ([]byte, error) 
 	// Only the paths reconcile may repair have a recovery cache: session
 	// artifacts (kept there by finalize) and plans (kept there by a restore).
 	// The OID and size check below is what makes a cached file safe to re-upload.
-	if !strings.HasPrefix(p.relPath, "sessions"+string(filepath.Separator)) &&
-		!strings.HasPrefix(p.relPath, filepath.Join("data", "plans")+string(filepath.Separator)) {
+	session := strings.HasPrefix(p.relPath, "sessions"+string(filepath.Separator))
+	plan := strings.HasPrefix(p.relPath, filepath.Join("data", "plans")+string(filepath.Separator))
+	if !session && !plan {
 		return nil, nil
 	}
 	cachePath := filepath.Join(ledgerPath, ".sageox", "cache", p.relPath)
 	info, err := os.Lstat(cachePath)
 	if err != nil {
-		if os.IsNotExist(err) {
+		// a session's cache that cannot be inspected fails closed, because
+		// finalize promised those bytes are there; a plan has no such promise
+		// and simply stays unrecoverable
+		if os.IsNotExist(err) || plan {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("inspect session recovery cache for %s: %w", p.relPath, err)
