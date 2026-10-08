@@ -1438,7 +1438,8 @@ def scanner_table(scan: list) -> list:
     md = ["| Tool | Rule | Where | Message |", "|---|---|---|---|"]
     for f in scan[:SCANNER_ROWS]:
         if f.get("advisory"):
-            where = f"`{f['package']}`" if f.get("package") else "dependency"
+            packages = f.get("packages") or ([f["package"]] if f.get("package") else [])
+            where = ", ".join(f"`{p}`" for p in packages) or "dependency"
         else:
             where = f"`{f['file']}:{f['line']}`" if f["file"] and f["line"] else (f"`{f['file']}`" if f["file"] else "dependency")
         rule = f["rule"] + (" (reachable)" if f["reachable"] else "")
@@ -1465,10 +1466,12 @@ def merge_advisories(rows: list) -> list:
         shown = {i.upper(): i for r in rs for i in r.get("ids") or [] if i}  # matching ignores case; display does not
         primary = next((shown[i] for prefix in ("GO-", "GHSA-", "CVE-") for i in sorted(ids) if i.startswith(prefix)), "")
         best = next((r for r in rs if r["tool"] != "grype" and r["message"]), rs[0])
+        # Every affected module is an upgrade target, so the row names all of them.
+        packages = sorted({r["package"] for r in rs if r.get("package")})
         merged.append({"tool": ", ".join(tools), "rule": primary or best["rule"], "file": "", "line": 0,
                        "message": best["message"], "reachable": any(r["reachable"] for r in rs),
-                       "package": next((r["package"] for r in rs if r.get("package")), ""), "advisory": True})
-    merged.sort(key=lambda r: (not r["reachable"], r["package"], r["rule"]))
+                       "packages": packages, "advisory": True})
+    merged.sort(key=lambda r: (not r["reachable"], r["packages"], r["rule"]))
     return merged
 
 

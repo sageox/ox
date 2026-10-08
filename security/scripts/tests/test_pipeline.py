@@ -553,6 +553,15 @@ class ScannerFindingsTest(unittest.TestCase):
         self.assertIn("| grype | GHSA-dddd-eeee-ffff | `github.com/docker/docker` |", md)
         self.assertNotIn("go.mod:1", md, "grype's line 1 is a placeholder, not a location")
 
+    def test_a_merged_advisory_names_every_affected_package(self):
+        """One advisory, two modules: both are upgrade targets, so both must be listed."""
+        rows = [{"tool": "osv-scanner", "ruleId": "GO-2026-7000", "level": "warning", "message": "bug",
+                 "locations": [{"file": "go.mod", "line": 0}], "aliases": [], "package": "golang.org/x/net"},
+                {"tool": "osv-scanner", "ruleId": "GO-2026-7000", "level": "warning", "message": "bug",
+                 "locations": [{"file": "go.mod", "line": 0}], "aliases": [], "package": "golang.org/x/crypto"}]
+        md = pipeline.render_det_summary({**self.advisory_doc(True), "findings": rows})
+        self.assertIn("| osv-scanner | GO-2026-7000 | `golang.org/x/crypto`, `golang.org/x/net` | bug |", md)
+
     def test_unreachable_advisories_collapse_unless_dependencies_changed(self):
         md = pipeline.render_det_summary(self.advisory_doc(False))
         head, marker, tail = md.partition("Dependency advisories without a known call path from ox code: 1")
