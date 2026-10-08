@@ -326,3 +326,20 @@ func TestReconcile_ReuploadsExactRecoveryCacheForPlan(t *testing.T) {
 	assert.Equal(t, headBefore, git(t, ledger, "rev-parse", "HEAD"))
 	assert.Equal(t, []byte(FormatPointer(ref.OID, ref.Size)), mustReadFile(t, pointerPath), "the pointer is untouched")
 }
+
+// A session's recovery cache that cannot be inspected fails closed: finalize
+// promised those bytes are there, so an unreadable cache is an error, never
+// permission to call the pointer unrecoverable.
+func TestReconcile_SessionCacheUnreadableFailsClosed(t *testing.T) {
+	ledger, _ := initLedgerWithRemote(t)
+	content := []byte("recording whose cache is obstructed\n")
+	_, _, _, ref := commitMissingSessionPointer(t, ledger, "obstructed", content)
+	require.NoError(t, os.MkdirAll(filepath.Join(ledger, ".sageox"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(ledger, ".sageox", "cache"), []byte("not a directory"), 0o644))
+	client, uploaded := recoveryLFSServer(t, map[string]bool{ref.BareOID(): true}, 0)
+
+	_, err := reconcileUnpushedPointers(context.Background(), ledger, nil, func() (*Client, error) { return client, nil })
+
+	require.ErrorContains(t, err, "inspect session recovery cache for sessions/obstructed/raw.jsonl")
+	assert.Empty(t, uploaded, "nothing is uploaded or removed on an unreadable cache")
+}
