@@ -485,6 +485,17 @@ class ScannerFindingsTest(unittest.TestCase):
                 "diff --git a/old.go b/old.go\n--- a/old.go\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-a\n-b\n")
         self.assertEqual(pipeline.parse_changed_lines(diff), {"a.go": {11, 12, 22}})
 
+    def test_a_failed_diff_marks_nothing_as_existing_code(self):
+        """If the diff cannot be read, no finding may be moved out of the main table."""
+        with tempfile.TemporaryDirectory() as tmp:  # not a git repo: both diff attempts fail
+            changed = pipeline.changed_lines(Path(tmp), "origin/main")
+        self.assertIsNone(changed)
+        findings = [{"tool": "gosec", "locations": [{"file": "a.go", "line": 3}]}]
+        pipeline.mark_in_diff(findings, changed)
+        self.assertNotIn("in_diff", findings[0])
+        pipeline.mark_in_diff(findings, {"a.go": {3}})
+        self.assertTrue(findings[0]["in_diff"])
+
     def test_findings_off_the_changed_lines_are_set_apart(self):
         """A hit in a touched file but not on a changed line is existing code, not the change's."""
         doc = {"findings": [

@@ -1091,14 +1091,26 @@ def parse_changed_lines(diff: str) -> dict:
     return changed
 
 
-def changed_lines(root: Path, since: str) -> dict:
-    """Lines the change touches, diffed the way deterministic.sh lists touched files."""
+def changed_lines(root: Path, since: str):
+    """Lines the change touches, diffed the way deterministic.sh lists touched files.
+    None if the diff cannot be read, so no finding is moved out of the main table."""
     for rev in (f"{since}...HEAD", since):
         r = subprocess.run(["git", "-C", str(root), "-c", "core.quotePath=false", "diff", "-U0", "--no-color",
                             "--no-ext-diff", rev], capture_output=True, text=True)
         if r.returncode == 0:
             return parse_changed_lines(r.stdout)
-    return {}
+    return None
+
+
+def mark_in_diff(findings: list, changed) -> None:
+    """Mark each located finding with whether its line is one the change touches.
+    A hit in a touched file is not necessarily the change's. Unknown diff: no marks."""
+    if changed is None:
+        return
+    for f in findings:
+        loc = next((l for l in f.get("locations") or [] if l.get("file")), None)
+        if loc and finding_line(loc):
+            f["in_diff"] = finding_line(loc) in changed.get(loc["file"], ())
 
 
 def cmd_det_merge(a) -> int:
@@ -1126,12 +1138,7 @@ def cmd_det_merge(a) -> int:
         tools[tool]["findings"] = len(got)
         findings.extend(got)
     if a.scope == "diff":
-        # A hit in a touched file is not necessarily the change's: mark whether it is on a changed line.
-        changed = changed_lines(root, a.since)
-        for f in findings:
-            loc = next((l for l in f.get("locations") or [] if l.get("file")), None)
-            if loc and finding_line(loc):
-                f["in_diff"] = finding_line(loc) in changed.get(loc["file"], ())
+        mark_in_diff(findings, changed_lines(root, a.since))
     ran = [t for t, v in tools.items() if v["status"] == "ran"]
     failed = [t for t, v in tools.items() if v["status"] == "failed"]
     level = "none" if not ran else ("full" if len(ran) == len(tools) else "partial")
