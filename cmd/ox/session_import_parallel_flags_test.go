@@ -8,8 +8,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Failure prevented: a zero-sized pool silently uploading nothing, or a
-// printed retry losing the coworker's chosen limit and starting more CLIs.
+// TestImportParallelOptionsSurvivePrintedCommands prevents a zero-sized pool
+// silently uploading nothing, or a printed retry losing the coworker's chosen
+// limit and starting more CLIs.
 func TestImportParallelOptionsSurvivePrintedCommands(t *testing.T) {
 	for _, tc := range []struct {
 		name string

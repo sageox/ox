@@ -66,6 +66,7 @@ func init() {
 	addSessionImportFlags(sessionImportCmd.Flags())
 }
 
+// addSessionImportFlags registers selection and publication limits shared by all import commands.
 func addSessionImportFlags(f *pflag.FlagSet) {
 	f.String("agent", "", "only sessions from this tool: claude or codex")
 	f.String("since", "", "only sessions active within this window (7d, 48h) or since a date (2026-09-01)")
@@ -197,6 +198,7 @@ func runSessionImport(cmd *cobra.Command, _ []string) error {
 	return runSessionImportFlow(ctx, out, opts, env, dest)
 }
 
+// parseImportOptions validates limits before discovery or any summarizer can run.
 func parseImportOptions(cmd *cobra.Command) (importOptions, *importFailure) {
 	var o importOptions
 	o.jsonOut, _ = cmd.Root().PersistentFlags().GetBool("json")
@@ -367,6 +369,8 @@ func fetchImportDestination(ep, repoID string, dest *importDestination) {
 	}
 }
 
+// productionImportDeps wires real services and shares one runner per vendor
+// across preparation workers. The mutex protects lazy runner initialization.
 func productionImportDeps(ctx context.Context, env *importEnv) importDeps {
 	runners := map[nativeimport.Agent]agentwork.Runner{}
 	var runnersMu sync.Mutex
@@ -407,7 +411,7 @@ func productionImportDeps(ctx context.Context, env *importEnv) importDeps {
 	}
 }
 
-// runImport is everything after preflight: discovery, classification, the
+// runSessionImportFlow is everything after preflight: discovery, classification, the
 // preview and, once confirmed, the uploads.
 func runSessionImportFlow(ctx context.Context, out io.Writer, opts importOptions, env *importEnv, dest importDestination) error {
 	if !importMayUpload(opts, env.deps.interactive()) {
@@ -450,6 +454,9 @@ func importMayUpload(opts importOptions, interactive bool) bool {
 	return opts.yes || (interactive && !opts.agentCtx && !opts.jsonOut)
 }
 
+// runLockedImport prepares sessions concurrently while one committer owns the
+// Ledger, progress output and pushes. Cancellation drains staging and pushes
+// already committed sessions using a bounded context that remains live.
 func runLockedImport(ctx context.Context, out io.Writer, opts importOptions, env *importEnv, dest importDestination) error {
 	if failure := checkImportLedgerHealth(ctx, env); failure != nil {
 		return renderImportFailure(out, opts.jsonOut, *failure)
@@ -898,6 +905,7 @@ func importRetryCommand(opts importOptions, c *importCandidate) string {
 	return "ox session import --session " + c.Session.NativeID + summarizerFlag(opts) + parallelFlag(opts) + testDataFlag(opts)
 }
 
+// parallelFlag preserves a nondefault worker limit in preview and retry commands.
 func parallelFlag(opts importOptions) string {
 	if opts.parallel <= 0 {
 		return ""

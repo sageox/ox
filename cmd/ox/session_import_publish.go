@@ -109,6 +109,7 @@ type preparedImport struct {
 	staging string
 }
 
+// cleanup releases staging after the committer publishes or holds the session.
 func (p *preparedImport) cleanup() { _ = os.RemoveAll(p.staging) }
 
 // prepareImport does the slow independent work. On success the caller owns

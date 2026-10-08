@@ -520,6 +520,7 @@ func verdictKey(s nativeimport.Session) string {
 	return key.agent + "/" + key.id
 }
 
+// lookup reads a verdict under the shared worker lock and rejects stale native files.
 func (v *importVerdicts) lookup(s nativeimport.Session) (importVerdict, bool) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -527,6 +528,8 @@ func (v *importVerdicts) lookup(s nativeimport.Session) (importVerdict, bool) {
 	return got, ok && got.Size == s.Size
 }
 
+// record serializes the in-memory update and atomic cache write so concurrent
+// preparation cannot overwrite another session's verdict.
 func (v *importVerdicts) record(s nativeimport.Session, verdict importVerdict) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()

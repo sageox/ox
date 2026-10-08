@@ -30,7 +30,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// These import tests exercise real discovery, redaction, staging, LFS upload,
+// parallelImportFixture exercises real discovery, redaction, staging, LFS upload,
 // scoped commits and pushes. The CLI test also uses the production subprocess
 // runners; only their executables and the remote LFS service are hermetic fakes.
 func parallelImportFixture(t *testing.T) *importFixture {
@@ -41,6 +41,7 @@ func parallelImportFixture(t *testing.T) *importFixture {
 	return newImportFixture(t)
 }
 
+// startParallelImport runs the full import with a deadline so tests can coordinate worker barriers.
 func startParallelImport(t *testing.T, f *importFixture, opts importOptions, configure func(*importEnv)) <-chan importRun {
 	t.Helper()
 	ctx := f.ctx
@@ -62,6 +63,7 @@ func startParallelImport(t *testing.T, f *importFixture, opts importOptions, con
 	return done
 }
 
+// finishParallelImport collects the final JSON report after every worker has drained.
 func finishParallelImport(t *testing.T, done <-chan importRun) importRun {
 	t.Helper()
 	select {
@@ -74,6 +76,7 @@ func finishParallelImport(t *testing.T, done <-chan importRun) importRun {
 	}
 }
 
+// awaitParallelEvent bounds a barrier wait to turn worker deadlocks into test failures.
 func awaitParallelEvent[T any](t *testing.T, events <-chan T) T {
 	t.Helper()
 	select {
@@ -86,8 +89,38 @@ func awaitParallelEvent[T any](t *testing.T, events <-chan T) T {
 	}
 }
 
-// A shell binary implements each vendor's capability probes, then sends its
-// stdin to a local HTTP barrier. This proves actual summary subprocesses run
+// TestImportParallelProductionRunnersAreShared verifies concurrent preparation
+// initializes one runner per vendor and does not mix runners between vendors.
+func TestImportParallelProductionRunnersAreShared(t *testing.T) {
+	env := &importEnv{projectRoot: t.TempDir(), logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	deps := productionImportDeps(context.Background(), env)
+	type lookup struct {
+		agent  nativeimport.Agent
+		runner agentwork.Runner
+	}
+	results := make(chan lookup, 32)
+	var workers sync.WaitGroup
+	for range 16 {
+		for _, agent := range []nativeimport.Agent{nativeimport.AgentClaude, nativeimport.AgentCodex} {
+			workers.Go(func() { results <- lookup{agent: agent, runner: deps.runner(agent)} })
+		}
+	}
+	workers.Wait()
+	close(results)
+	first := map[nativeimport.Agent]agentwork.Runner{}
+	for result := range results {
+		require.NotNil(t, result.runner)
+		if previous := first[result.agent]; previous != nil {
+			assert.Same(t, previous, result.runner, "same-vendor workers share the initialized runner")
+		} else {
+			first[result.agent] = result.runner
+		}
+	}
+	assert.NotSame(t, first[nativeimport.AgentClaude], first[nativeimport.AgentCodex])
+}
+
+// parallelCLIRunners installs shell binaries for vendor capability probes and
+// sends summary stdin to a local HTTP barrier. Actual summary subprocesses run
 // concurrently, rather than merely proving that a mock Runner can overlap.
 func parallelCLIRunners(t *testing.T, summarize func(context.Context, nativeimport.Agent, string) string) map[nativeimport.Agent]agentwork.Runner {
 	t.Helper()
@@ -130,6 +163,8 @@ exec /usr/bin/curl --silent --show-error --fail --data-binary @- '%s/%s'
 	}
 }
 
+// TestImportE2E_ParallelCLISummariesHonorGlobalLimit checks that real subprocess
+// summaries share one global capacity across both vendors, including capacity one.
 func TestImportE2E_ParallelCLISummariesHonorGlobalLimit(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -192,7 +227,7 @@ func TestImportE2E_ParallelCLISummariesHonorGlobalLimit(t *testing.T) {
 	}
 }
 
-// Record how many prior import commits exist when each LFS batch starts. Each
+// observeParallelPublication records prior commits at each LFS batch. Each
 // session must finish publication, including its commit, before the next batch
 // begins; per-file blob upload concurrency inside one session remains allowed.
 func observeParallelPublication(t *testing.T, f *importFixture, gate <-chan struct{}, entered chan<- struct{}) (*lfs.Client, func() []string) {
@@ -250,6 +285,8 @@ func observeParallelPublication(t *testing.T, f *importFixture, gate <-chan stru
 	}
 }
 
+// TestImportE2E_ParallelPublicationWaitsForPriorCommit prevents workers from
+// uploading another session before the single committer has finished the prior one.
 func TestImportE2E_ParallelPublicationWaitsForPriorCommit(t *testing.T) {
 	f := parallelImportFixture(t)
 	gate, entered := make(chan struct{}), make(chan struct{}, 1)
@@ -276,6 +313,8 @@ func TestImportE2E_ParallelPublicationWaitsForPriorCommit(t *testing.T) {
 	assert.Len(t, remoteSessionDirs(t, f.barePath), 3)
 }
 
+// TestImportE2E_ParallelReportsKeepPreviewOrder verifies completion order can
+// drive publication without reordering the coworker's final report.
 func TestImportE2E_ParallelReportsKeepPreviewOrder(t *testing.T) {
 	f := parallelImportFixture(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -321,6 +360,8 @@ func TestImportE2E_ParallelReportsKeepPreviewOrder(t *testing.T) {
 	assert.Equal(t, []string{e2eClaudeA, e2eCodexA, e2eClaudeB}, ids, "JSON order follows the preview, not worker completion")
 }
 
+// TestImportE2E_ParallelVerdictsAreAllRemembered prevents concurrent local-only
+// decisions from overwriting each other and triggering unnecessary summaries on rerun.
 func TestImportE2E_ParallelVerdictsAreAllRemembered(t *testing.T) {
 	f := parallelImportFixture(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -371,6 +412,8 @@ func TestImportE2E_ParallelVerdictsAreAllRemembered(t *testing.T) {
 	assert.Equal(t, 3, f.summarizer.calls(), "remembered verdicts avoid another summary")
 }
 
+// TestImportE2E_ParallelWaitingPublicationRechecksNativeFile prevents uploading
+// a session that resumed while its prepared artifacts waited for publication.
 func TestImportE2E_ParallelWaitingPublicationRechecksNativeFile(t *testing.T) {
 	f := parallelImportFixture(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -422,6 +465,8 @@ func TestImportE2E_ParallelWaitingPublicationRechecksNativeFile(t *testing.T) {
 	assert.Empty(t, strings.TrimSpace(runGit(t, f.ledgerPath, "status", "--porcelain")), "all abandoned staging and committed publication leave a clean Ledger")
 }
 
+// TestImportE2E_ParallelInterruptRetriesCommittedPushWithLiveContext verifies
+// cancellation stops new summaries while committed sessions still reach the remote.
 func TestImportE2E_ParallelInterruptRetriesCommittedPushWithLiveContext(t *testing.T) {
 	f := parallelImportFixture(t)
 	deadline, stop := context.WithTimeout(context.Background(), 15*time.Second)
@@ -486,8 +531,9 @@ func TestImportE2E_ParallelInterruptRetriesCommittedPushWithLiveContext(t *testi
 	assert.Equal(t, 3, f.summarizer.calls(), "queued work does not start after cancellation")
 }
 
-// Captured Desktop formats go through the real adapter executables and full
-// publication pipeline at both capacities. Summary models, LFS and the Git
+// TestImportE2E_ParallelCapturedMathBlitzFixture sends captured Desktop formats
+// through real adapter executables and publication at both capacities.
+// Summary models, LFS and the Git
 // remote are hermetic: this is correctness evidence, not live CLI timing.
 func TestImportE2E_ParallelCapturedMathBlitzFixture(t *testing.T) {
 	if testing.Short() {
