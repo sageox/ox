@@ -29,6 +29,7 @@ func TestSyncScheduler_Checkout_LedgerCloneLandsOverCodeDBCache(t *testing.T) {
 	tests := []struct {
 		name      string
 		prepare   func(t *testing.T, repoPath string)
+		before    bool // create the cache before Checkout starts, not mid-clone
 		wantErr   bool
 		wantCache bool // CodeDB index survives into the clone
 	}{
@@ -36,6 +37,20 @@ func TestSyncScheduler_Checkout_LedgerCloneLandsOverCodeDBCache(t *testing.T) {
 			name:      "cache appears while the clone runs (CodeDB opens mid-clone)",
 			prepare:   cacheOnly,
 			wantCache: true,
+		},
+		{
+			name:      "cache exists before Checkout starts (not moved aside as corrupt)",
+			prepare:   cacheOnly,
+			before:    true,
+			wantCache: true,
+		},
+		{
+			name: "cache is a file, not a directory: swap still fails",
+			prepare: func(t *testing.T, repoPath string) {
+				require.NoError(t, os.MkdirAll(filepath.Join(repoPath, ".sageox"), 0o755))
+				require.NoError(t, os.WriteFile(filepath.Join(repoPath, ".sageox", "cache"), []byte("x"), 0o644))
+			},
+			wantErr: true,
 		},
 		{
 			name: "cache dir with no codedb content yet",
@@ -61,7 +76,11 @@ func TestSyncScheduler_Checkout_LedgerCloneLandsOverCodeDBCache(t *testing.T) {
 
 			// fires after Checkout's early move-aside logic, i.e. while the
 			// clone is in flight — the window CodeDB hit in the field.
-			s.onBeforeCloneSem = func() { tt.prepare(t, repoPath) }
+			if tt.before {
+				tt.prepare(t, repoPath)
+			} else {
+				s.onBeforeCloneSem = func() { tt.prepare(t, repoPath) }
+			}
 
 			result, err := s.Checkout(CheckoutPayload{CloneURL: cloneURL, RepoPath: repoPath, RepoType: "ledger"}, nil)
 			if tt.wantErr {
@@ -78,6 +97,46 @@ func TestSyncScheduler_Checkout_LedgerCloneLandsOverCodeDBCache(t *testing.T) {
 			_, statErr = os.Stat(filepath.Join(repoPath, ".sageox", "cache", "codedb", "index.db"))
 			assert.Equal(t, tt.wantCache, statErr == nil, "CodeDB index carry-over")
 			assert.Empty(t, tmpCloneSiblings(t, repoPath))
+			backups, _ := filepath.Glob(repoPath + ".bak.*")
+			assert.Empty(t, backups, "a cache-only target must not be moved aside")
 		})
 	}
+}
+
+// A failed swap deletes the temp clone; the adopted CodeDB index must be handed
+// back rather than die with it, and a symlinked .sageox in the clone must never
+// receive local data.
+func TestAdoptCacheOnlyTarget_RestoreAndSymlinkGuard(t *testing.T) {
+	mk := func(t *testing.T) (tmp, target string) {
+		root := t.TempDir()
+		target = filepath.Join(root, "ledger")
+		tmp = filepath.Join(root, "ledger.tmp-1")
+		require.NoError(t, os.MkdirAll(filepath.Join(target, ".sageox", "cache", "codedb"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(target, ".sageox", "cache", "codedb", "index.db"), []byte("i"), 0o644))
+		require.NoError(t, os.MkdirAll(tmp, 0o755))
+		return tmp, target
+	}
+
+	t.Run("restore puts the cache back", func(t *testing.T) {
+		tmp, target := mk(t)
+		restore, err := adoptCacheOnlyTarget(tmp, target)
+		require.NoError(t, err)
+		_, err = os.Stat(target)
+		require.True(t, os.IsNotExist(err), "skeleton removed")
+		restore()
+		_, err = os.Stat(filepath.Join(target, ".sageox", "cache", "codedb", "index.db"))
+		assert.NoError(t, err)
+	})
+
+	t.Run("symlinked .sageox in the clone is refused", func(t *testing.T) {
+		tmp, target := mk(t)
+		outside := t.TempDir()
+		require.NoError(t, os.Symlink(outside, filepath.Join(tmp, ".sageox")))
+		_, err := adoptCacheOnlyTarget(tmp, target)
+		require.Error(t, err)
+		entries, _ := os.ReadDir(outside)
+		assert.Empty(t, entries, "nothing moved through the symlink")
+		_, err = os.Stat(filepath.Join(target, ".sageox", "cache", "codedb", "index.db"))
+		assert.NoError(t, err, "cache untouched")
+	})
 }
