@@ -1,7 +1,7 @@
 //go:build slow
 
 // conversation_e2e_walkthrough_test.go — hermetic binary-level scenarios for
-// `ox conversation walkthrough`: the real binary, behind the real access
+// `ox walkthrough`: the real binary, behind the real access
 // gate, reading a desktop-produced walkthrough out of a staged team context.
 //
 // The walkthrough folder is the read package's walkthrough-desktop fixture
@@ -61,7 +61,7 @@ func TestConversationE2E_Walkthrough(t *testing.T) {
 	out, exit := e2e.Run(t, "conversation", "show", convE2EWalkthroughCnv)
 	require.Equal(t, 0, exit, "out:\n%s", out)
 	env, _ := decodeConversationEnvelope(t, out)
-	require.Contains(t, env.Guidance, "ox conversation walkthrough "+convE2EWalkthroughCnv)
+	require.Contains(t, env.Guidance, "ox walkthrough "+convE2EWalkthroughCnv)
 
 	out, exit = e2e.Run(t, "conversation", "walkthrough", convE2EWalkthroughCnv, "--cues", "2-3")
 	require.Equal(t, 0, exit, "out:\n%s", out)
