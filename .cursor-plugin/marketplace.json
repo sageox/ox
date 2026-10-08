@@ -1,0 +1,20 @@
+{
+  "name": "sageox",
+  "owner": {
+    "name": "SageOx",
+    "email": "hi@sageox.ai"
+  },
+  "metadata": {
+    "description": "SageOx team context for AI coworkers"
+  },
+  "plugins": [
+    {
+      "name": "sageox",
+      "source": "cursor-plugin",
+      "description": "Search your team's discussions, docs, and sessions, and save chats to Team Context.",
+      "minClientVersions": {
+        "cursor": "never"
+      }
+    }
+  ]
+}
