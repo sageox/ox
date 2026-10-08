@@ -371,13 +371,18 @@ func preflightMissingPointer(ledgerPath string, p pointerEntry) ([]byte, error) 
 		return nil, fmt.Errorf("inspect working copy of %s: %w", p.relPath, err)
 	}
 
-	if !strings.HasPrefix(p.relPath, "sessions"+string(filepath.Separator)) {
-		return nil, nil
-	}
+	// Both path families reconcile may repair (the caller has already refused
+	// every other path) have a recovery cache: session artifacts, kept there by
+	// finalize, and plans, kept there by a restore. The OID and size check
+	// below is what makes a cached file safe to re-upload.
+	session := strings.HasPrefix(p.relPath, "sessions"+string(filepath.Separator))
 	cachePath := filepath.Join(ledgerPath, ".sageox", "cache", p.relPath)
 	info, err := os.Lstat(cachePath)
 	if err != nil {
-		if os.IsNotExist(err) {
+		// a session's cache that cannot be inspected fails closed, because
+		// finalize promised those bytes are there; a plan has no such promise
+		// and simply stays unrecoverable
+		if os.IsNotExist(err) || !session {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("inspect session recovery cache for %s: %w", p.relPath, err)
