@@ -21,6 +21,8 @@ import (
 //     FETCH_HEAD with several for-merge heads; fetch and rebase pass through.
 //   - "revlistfail", "updatereffail", "resetfail": that one subcommand fails,
 //     for the squash's refusal paths.
+//   - "stashstorefail": `stash store` fails while `stash apply` and `stash
+//     create` pass through, for the leftover-autostash failure path.
 //
 // It returns the path of the invocation log.
 func installFakeGit(t *testing.T, mode string) string {
@@ -64,6 +66,11 @@ case "` + mode + `:$sub" in
   resetfail:reset)
     echo "fatal: reset refused" >&2
     exit 128;;
+  stashstorefail:stash)
+    case " $* " in *" store "*)
+      echo "fatal: stash store refused" >&2
+      exit 128;;
+    esac;;
 esac
 exec '` + realGit + `' "$@"
 `
