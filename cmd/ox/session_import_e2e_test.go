@@ -230,9 +230,11 @@ type importFixture struct {
 	store          *fakeLFSStore
 	push           func(ctx context.Context, ledgerPath string) error // nil: the real pushLedger
 	pushBatch      int
-	readErr        error // every adapter read fails with it
-	unusable       bool  // no summarizer CLI is installed and logged in
-	interactive    bool  // a coworker at a terminal can answer
+	readErr        error                                  // every adapter read fails with it
+	unusable       bool                                   // no summarizer CLI is installed and logged in
+	runners        map[nativeimport.Agent]*fakeSummarizer // per-CLI summarizers; nil: summarizer serves both
+	loggedOut      map[nativeimport.Agent]bool            // CLIs installed but not logged in
+	interactive    bool                                   // a coworker at a terminal can answer
 	confirm        func(prompt string) (bool, error)
 	ctx            context.Context // the run's context; nil means context.Background()
 	progress       bytes.Buffer    // what a JSON run reports while it works
@@ -446,14 +448,19 @@ func (f *importFixture) envFor(ledgerPath string, opts importOptions) (*importEn
 	}
 	env.deps = productionImportDeps(context.Background(), env)
 	env.deps.readNative = f.readNative
-	env.deps.runner = func(nativeimport.Agent) agentwork.Runner { return f.summarizer }
+	env.deps.runner = func(agent nativeimport.Agent) agentwork.Runner {
+		if f.runners != nil {
+			return f.runners[agent]
+		}
+		return f.summarizer
+	}
 	env.deps.lfsClient = func() (*lfs.Client, error) { return f.store.client(), nil }
 	env.deps.notify = func(_ *lfs.SessionMeta, name string) {
 		f.mu.Lock()
 		f.notified = append(f.notified, name)
 		f.mu.Unlock()
 	}
-	env.deps.usable = func(nativeimport.Agent) bool { return !f.unusable }
+	env.deps.usable = func(agent nativeimport.Agent) bool { return !f.unusable && !f.loggedOut[agent] }
 	env.deps.syncLedger = func() {}
 	env.deps.interactive = func() bool { return f.interactive }
 	if f.confirm != nil {
