@@ -255,6 +255,14 @@ const lfsObjectsMissing = "LFS objects are missing"
 // auto-resolves conflicts for paths in AutoResolvePrefixes.
 // The retry pull and validated push acquire WithRepoLock; callers and callbacks
 // must not acquire that same non-reentrant lock around this call or inside a hook.
+// collapseBacklogAbove is the unpushed-commit count past which a push that
+// lost the non-fast-forward race collapses its backlog into one snapshot
+// commit before rebasing. Replaying a backlog costs O(commits) while the race
+// window is the interval between coworkers' pushes; past this size the replay
+// is slower than the team and every retry loses (#1261). The pre-collapse tip
+// is kept under refs/ox-backup/.
+const collapseBacklogAbove = 100
+
 func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 	log := opts.logger()
 	breaker := opts.pushBreaker()
@@ -487,6 +495,20 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 				defer recoveryCancel()
 				if _, err := ResolveAutostashConflicts(recoveryCtx, repoPath, opts.AutoResolvePrefixes, opts.AutoResolveDenyPrefixes); err != nil {
 					return fmt.Errorf("restore autostash after pull: %w", err)
+				}
+				// A backlog this large replays slower than coworkers push, so
+				// the next push would lose the same race (#1261). Collapse it
+				// into one snapshot commit: the next rebase replays a single
+				// commit in seconds and the push wins.
+				if ahead > collapseBacklogAbove {
+					collapseCtx, collapseCancel := context.WithTimeout(ctx, opTimeout)
+					collapseErr := SquashUnpushed(collapseCtx, repoPath, fmt.Sprintf("ledger: collapse %d unpushed commits so the push can win the rebase race", ahead))
+					collapseCancel()
+					if collapseErr != nil {
+						log.Warn("collapsing unpushed backlog failed; retrying push with full history", "commits", ahead, "error", collapseErr)
+					} else {
+						log.Info("collapsed unpushed backlog into one commit", "commits", ahead)
+					}
 				}
 				return nil
 			})

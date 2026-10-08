@@ -920,71 +920,7 @@ func gitPlumbing(ctx context.Context, repoPath string, stdin []byte, args ...str
 
 // squashUnpushed collapses all unpushed local commits into a single commit.
 func squashUnpushed(ctx context.Context, repoPath, commitMsg string) error {
-	upCtx, upCancel := context.WithTimeout(ctx, 5*time.Second)
-	upstream, err := gitutil.RunGit(upCtx, repoPath, "rev-parse", "--verify", "@{upstream}")
-	upCancel()
-	if err != nil {
-		return fmt.Errorf("no upstream tracking ref: %w", err)
-	}
-	upstream = strings.TrimSpace(upstream)
-
-	// reset --soft to an upstream that HEAD does not contain would commit the
-	// index back over the commits HEAD lacks, reverting a coworker's work. A
-	// diverged branch needs a pull, never a squash.
-	ancestorCtx, ancestorCancel := context.WithTimeout(ctx, 5*time.Second)
-	_, ancestorErr := gitutil.RunGit(ancestorCtx, repoPath, "merge-base", "--is-ancestor", upstream, "HEAD")
-	ancestorCancel()
-	if ancestorErr != nil {
-		return fmt.Errorf("upstream is not an ancestor of HEAD (branch diverged; pull first): %w", ancestorErr)
-	}
-
-	originalCtx, originalCancel := context.WithTimeout(ctx, 5*time.Second)
-	original, originalErr := gitutil.RunGit(originalCtx, repoPath, "rev-parse", "--verify", "HEAD")
-	originalCancel()
-	if originalErr != nil {
-		return fmt.Errorf("resolve original HEAD: %w", originalErr)
-	}
-	original = strings.TrimSpace(original)
-
-	countCtx, countCancel := context.WithTimeout(ctx, 5*time.Second)
-	countOut, err := gitutil.RunGit(countCtx, repoPath, "rev-list", "--count", upstream+"..HEAD")
-	countCancel()
-	if err != nil {
-		// not "nothing to squash": a caller that asked for a squash must learn
-		// it did not happen, or the push stays wedged with no error
-		return fmt.Errorf("count unpushed commits: %w", err)
-	}
-	if count := strings.TrimSpace(countOut); count == "0" || count == "1" {
-		return nil
-	}
-
-	resetCtx, resetCancel := context.WithTimeout(ctx, 5*time.Second)
-	_, err = gitutil.RunGit(resetCtx, repoPath, "reset", "--soft", upstream)
-	resetCancel()
-	if err != nil {
-		return fmt.Errorf("reset --soft: %w", err)
-	}
-
-	squashCtx, squashCancel := context.WithTimeout(ctx, 10*time.Second)
-	_, err = gitutil.CommitLedgerSnapshot(squashCtx, repoPath, commitMsg)
-	squashCancel()
-	if err != nil {
-		return rollbackSoftReset(ctx, repoPath, original, fmt.Errorf("validate squash or commit: %w", err))
-	}
-
-	return nil
-}
-
-// rollbackSoftReset restores the pre-squash branch tip after a validation or
-// commit failure. The soft reset's index already represents original's tree, so
-// restoring only HEAD preserves both the replacement commit and working copy.
-func rollbackSoftReset(ctx context.Context, repoPath, original string, cause error) error {
-	rollbackCtx, rollbackCancel := context.WithTimeout(ctx, 5*time.Second)
-	defer rollbackCancel()
-	if _, err := gitutil.RunGit(rollbackCtx, repoPath, "reset", "--soft", original); err != nil {
-		return fmt.Errorf("%w; restore original HEAD: %w", cause, err)
-	}
-	return cause
+	return gitutil.SquashUnpushed(ctx, repoPath, commitMsg)
 }
 
 // ValidateUnpushedTip reports whether HEAD's delta against upstream passes the
