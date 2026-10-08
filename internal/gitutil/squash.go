@@ -7,6 +7,10 @@ import (
 	"time"
 )
 
+// beforeSquashCommitHook runs between the soft reset and the snapshot commit.
+// Tests use it to cancel the caller's context at the worst moment.
+var beforeSquashCommitHook func()
+
 // SquashUnpushed collapses every unpushed local commit into one commit with
 // the same tree. The pre-squash tip is kept under refs/ox-backup/ so the
 // per-commit history can always be recovered. A branch that has diverged from
@@ -60,26 +64,56 @@ func SquashUnpushed(ctx context.Context, repoPath, commitMsg string) error {
 		return fmt.Errorf("keep pre-squash tip under %s: %w", backupRef, err)
 	}
 
-	resetCtx, resetCancel := context.WithTimeout(ctx, 5*time.Second)
+	// the snapshot validates every blob the collapsed delta touches, one
+	// git cat-file each: give it time proportional to that delta
+	filesCtx, filesCancel := context.WithTimeout(ctx, 2*time.Minute)
+	changed, err := RunGit(filesCtx, repoPath, "diff", "--name-only", upstream, original)
+	filesCancel()
+	if err != nil {
+		return fmt.Errorf("count changed files for squash budget: %w", err)
+	}
+
+	// From the soft reset to the commit (or its rollback) the branch is in a
+	// state only this function knows how to leave: HEAD at upstream with the
+	// whole delta staged. That section runs detached from the caller's
+	// cancellation, on its own budget, so a caller whose deadline expires
+	// mid-validation can neither kill the commit nor the rollback.
+	atomicCtx, atomicCancel := context.WithTimeout(context.WithoutCancel(ctx), squashBudget(len(strings.Fields(changed)))+10*time.Second)
+	defer atomicCancel()
+
+	resetCtx, resetCancel := context.WithTimeout(atomicCtx, 5*time.Second)
 	_, err = RunGit(resetCtx, repoPath, "reset", "--soft", upstream)
 	resetCancel()
 	if err != nil {
 		return fmt.Errorf("reset --soft: %w", err)
 	}
-
-	squashCtx, squashCancel := context.WithTimeout(ctx, 10*time.Second)
+	if beforeSquashCommitHook != nil {
+		beforeSquashCommitHook()
+	}
+	squashCtx, squashCancel := context.WithTimeout(atomicCtx, squashBudget(len(strings.Fields(changed))))
 	_, err = CommitLedgerSnapshot(squashCtx, repoPath, commitMsg)
 	squashCancel()
 	if err != nil {
-		return restoreSoftReset(ctx, repoPath, original, fmt.Errorf("validate squash or commit: %w", err))
+		return restoreSoftReset(atomicCtx, repoPath, original, fmt.Errorf("validate squash or commit: %w", err))
 	}
 	return nil
 }
 
+// squashBudget is how long the collapsed snapshot commit may take: a floor
+// plus 50ms per changed file for the per-blob validation, capped so a runaway
+// still ends. 6,282 files (measured 2026-10-08) gets about five and a half
+// minutes; the flat 10s it replaced killed that validation every time.
+func squashBudget(changedFiles int) time.Duration {
+	budget := 30*time.Second + time.Duration(changedFiles)*50*time.Millisecond
+	return min(budget, 15*time.Minute)
+}
+
 // restoreSoftReset moves HEAD back to original after a failed squash so the
-// unpushed commits are not left collapsed into the index.
+// unpushed commits are not left collapsed into the index. It never runs on a
+// context the caller can cancel: a rollback that fails leaves the branch at
+// upstream with the delta merely staged.
 func restoreSoftReset(ctx context.Context, repoPath, original string, cause error) error {
-	rollbackCtx, rollbackCancel := context.WithTimeout(ctx, 5*time.Second)
+	rollbackCtx, rollbackCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer rollbackCancel()
 	if _, err := RunGit(rollbackCtx, repoPath, "reset", "--soft", original); err != nil {
 		return fmt.Errorf("%w; restore original HEAD: %w", cause, err)
