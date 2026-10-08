@@ -212,13 +212,49 @@ def gotestsum_command(gotestsum: list[str], job_paths: Job, go_flags: list[str],
     return [
         *gotestsum,
         "--junitfile", str(job_paths.junit),
-        "--jsonfile-timing-events", str(job_paths.timings),
+        "--jsonfile", str(job_paths.timings),
         "--",
         *go_flags,
         f"-coverprofile={job_paths.cover}",
         *extra,
         *packages,
     ]
+
+
+def finalize_test_events(path: Path, failed: bool) -> str:
+    """Keep full failed-shard evidence; compact passing shards to timing events.
+
+    gotestsum can attribute a race or background error to a test that passes,
+    then report only a package failure. Its failure summary omits that test's
+    output. Preserve the original stream in the existing uploaded artifact and
+    return non-frame output from such packages for the console diagnosis.
+    """
+    if not path.is_file():
+        return ""
+    records = []
+    for line in path.read_text(encoding="utf-8").splitlines(keepends=True):
+        try:
+            records.append((line, json.loads(line)))
+        except json.JSONDecodeError:
+            # A killed producer may leave a partial final record. Failed
+            # artifacts stay byte-for-byte intact, including that evidence.
+            continue
+    if not failed:
+        path.write_text("".join(line for line, event in records if event.get("Action") in {"pass", "fail", "skip"}), encoding="utf-8")
+        return ""
+
+    package_failures = {event.get("Package") for _, event in records if event.get("Action") == "fail" and not event.get("Test")}
+    test_failures = {event.get("Package") for _, event in records if event.get("Action") == "fail" and event.get("Test")}
+    package_only = package_failures - test_failures
+    output = []
+    for _, event in records:
+        if event.get("Package") not in package_only or event.get("Action") != "output":
+            continue
+        text = event.get("Output", "")
+        if text.lstrip().startswith(("=== RUN", "=== PAUSE", "=== CONT", "--- PASS:", "--- SKIP:")):
+            continue
+        output.append(text)
+    return "".join(output)
 
 
 class Layout:
@@ -327,6 +363,11 @@ def run(args: argparse.Namespace) -> int:
             print(f"\n── {job.label}: {status} in {elapsed:.0f}s", flush=True)
             sys.stdout.write(job.log.read_text(encoding="utf-8", errors="replace"))
             sys.stdout.flush()
+            diagnostic = finalize_test_events(job.timings, job.process.returncode != 0)
+            if diagnostic:
+                print(f"Package-level failure context (full events retained in {job.timings}):", flush=True)
+                sys.stdout.write(diagnostic)
+                sys.stdout.flush()
             if job.process.returncode != 0:
                 failed.append(job.label)
         time.sleep(0.5)

@@ -1,6 +1,10 @@
+import contextlib
+import io
 import json
+import sys
 import tempfile
 import unittest
+from unittest import mock
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -123,6 +127,119 @@ class LayoutTest(unittest.TestCase):
             self.assertEqual("mode: atomic\nx.go:1.1,2.2 1 4\n", (parts / "all.out").read_text(encoding="utf-8"))
             (parts / "coverage-ox-9.out").write_text("mode: atomic\n", encoding="utf-8")
             self.assertEqual(1, test_split.merge_slots(args))
+
+
+class DiagnosticArtifactsTest(unittest.TestCase):
+    """Exercise the package-only failure that lean summaries used to hide."""
+
+    def setUp(self):
+        """Allocate isolated artifact paths for each diagnostic scenario."""
+        self.directory = tempfile.TemporaryDirectory()
+        self.root = Path(self.directory.name)
+        self.path = self.root / "test-timings.json"
+
+    def tearDown(self):
+        """Remove every synthetic test artifact."""
+        self.directory.cleanup()
+
+    def events(self, failed=True):
+        """Model a passed test whose output contains a later package failure."""
+        package = "github.com/sageox/ox/internal/daemon"
+        return [
+            {"Action": "run", "Package": package, "Test": "TestOne"},
+            {"Action": "output", "Package": package, "Test": "TestOne", "Output": "=== RUN   TestOne\n"},
+            {"Action": "output", "Package": package, "Test": "TestOne", "Output": "WARNING: DATA RACE\nbackground write at worker.go:42\n"},
+            {"Action": "pass", "Package": package, "Test": "TestOne", "Elapsed": 0.2},
+            {"Action": "output", "Package": package, "Output": "testing: race detected outside of test execution\n"},
+            {"Action": "fail" if failed else "pass", "Package": package, "Elapsed": 0.3},
+        ]
+
+    def write_events(self, events):
+        """Serialize the same full JSON stream gotestsum writes."""
+        body = "".join(json.dumps(event) + "\n" for event in events)
+        self.path.write_text(body, encoding="utf-8")
+        return body
+
+    def test_all_individual_tests_pass_but_package_failure_keeps_hidden_race(self):
+        """Keep hidden passed-test output in both the artifact and diagnosis."""
+        events = self.events()
+        original = self.write_events(events)
+        diagnostic = test_split.finalize_test_events(self.path, failed=True)
+        self.assertEqual(original, self.path.read_text(encoding="utf-8"))
+        self.assertIn("WARNING: DATA RACE", diagnostic)
+        self.assertIn("background write at worker.go:42", diagnostic)
+        self.assertIn("race detected outside of test execution", diagnostic)
+        self.assertNotIn("=== RUN", diagnostic)
+        self.assertFalse(any(event["Action"] == "fail" and event.get("Test") for event in events))
+
+    def test_passed_shard_returns_to_lean_timing_events(self):
+        """Passing shards upload the original terminal-event-only format."""
+        events = self.events(failed=False)
+        self.write_events(events)
+        diagnostic = test_split.finalize_test_events(self.path, failed=False)
+        retained = [json.loads(line) for line in self.path.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual([event for event in events if event["Action"] == "pass"], retained)
+        self.assertEqual("", diagnostic)
+        self.assertNotIn("WARNING", self.path.read_text(encoding="utf-8"))
+
+    def test_failed_group_prints_only_the_package_without_a_failed_test(self):
+        """Avoid replaying passed packages or ordinary assertion summaries."""
+        events = self.events() + [
+            {"Action": "output", "Package": "passed", "Output": "unrelated passing-package output\n"},
+            {"Action": "pass", "Package": "passed"},
+            {"Action": "output", "Package": "assertion", "Test": "TestBad", "Output": "ordinary assertion output\n"},
+            {"Action": "fail", "Package": "assertion", "Test": "TestBad"},
+            {"Action": "fail", "Package": "assertion"},
+        ]
+        original = self.write_events(events)
+        diagnostic = test_split.finalize_test_events(self.path, failed=True)
+        self.assertIn("DATA RACE", diagnostic)
+        self.assertNotIn("unrelated passing-package", diagnostic)
+        self.assertNotIn("ordinary assertion", diagnostic)
+        self.assertEqual(original, self.path.read_text(encoding="utf-8"))
+
+    def test_partial_failed_stream_is_preserved_for_postmortem(self):
+        """A producer crash must not destroy its incomplete final record."""
+        original = self.write_events(self.events()) + '{"Action":"output"'
+        self.path.write_text(original, encoding="utf-8")
+        self.assertIn("DATA RACE", test_split.finalize_test_events(self.path, failed=True))
+        self.assertEqual(original, self.path.read_text(encoding="utf-8"))
+
+    def test_missing_events_leave_the_original_process_failure_available(self):
+        """Compile failures may produce no JSON file to compact or diagnose."""
+        self.assertEqual("", test_split.finalize_test_events(self.path, failed=True))
+        self.assertFalse(self.path.exists())
+
+    def test_failed_process_uploads_full_stream_and_prints_hidden_context(self):
+        """Run a fake gotestsum process through finalization and artifact merge."""
+        work = self.root / "work"
+        job = test_split.Job("daemon-1", work, "daemon-1")
+        producer = self.root / "gotestsum.py"
+        producer.write_text(
+            "import json, pathlib, sys\n"
+            "args = sys.argv[1:]\n"
+            "events = " + repr(self.events()) + "\n"
+            "timing_only = '--jsonfile-timing-events' in args\n"
+            "flag = '--jsonfile-timing-events' if timing_only else '--jsonfile'\n"
+            "if timing_only: events = [e for e in events if e['Action'] in {'pass', 'fail', 'skip'}]\n"
+            "pathlib.Path(args[args.index(flag)+1]).write_text(''.join(json.dumps(e)+'\\n' for e in events))\n"
+            "cover = next(a.split('=',1)[1] for a in args if a.startswith('-coverprofile='))\n"
+            "pathlib.Path(cover).write_text('mode: atomic\\nx.go:1.1,1.9 1 1\\n')\n"
+            "print('FAIL package summary omits passed-test output')\n"
+            "sys.exit(1)\n", encoding="utf-8")
+        job.command = test_split.gotestsum_command([sys.executable, str(producer)], job, [], [], ["./internal/daemon"])
+        args = test_split.argparse.Namespace(go="go", gotestsum="fake", work_dir=str(work), split=[], group=[], weights=None,
+                                            only="rest", go_flags=[], packages=[], coverprofile=str(self.root / "cover.out"), junit=None, timings=str(self.path))
+        console, errors = io.StringIO(), io.StringIO()
+        with mock.patch.object(test_split, "build_jobs", return_value=[job]), contextlib.redirect_stdout(console), contextlib.redirect_stderr(errors):
+            result = test_split.run(args)
+        self.assertEqual(1, result)
+        self.assertIn("Package-level failure context", console.getvalue())
+        self.assertIn("WARNING: DATA RACE", console.getvalue())
+        self.assertIn("background write at worker.go:42", console.getvalue())
+        self.assertIn("1 of 1 processes failed", errors.getvalue())
+        retained = [json.loads(line) for line in self.path.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(self.events(), retained, "the existing CI-uploaded timing path includes full failed-shard output")
 
 
 class WeightsTest(unittest.TestCase):

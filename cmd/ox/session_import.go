@@ -905,7 +905,7 @@ func importRetryCommand(opts importOptions, c *importCandidate) string {
 	return "ox session import --session " + c.Session.NativeID + summarizerFlag(opts) + parallelFlag(opts) + testDataFlag(opts)
 }
 
-// parallelFlag preserves a nondefault worker limit in preview and retry commands.
+// parallelFlag preserves the configured worker limit in preview and retry commands.
 func parallelFlag(opts importOptions) string {
 	if opts.parallel <= 0 {
 		return ""
