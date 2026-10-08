@@ -236,10 +236,13 @@ func TestClaudeWatcherKeepsPollingAfterRetryableValidationError(t *testing.T) {
 	// the directory becomes checkable; the same watcher must pick the turn up
 	require.NoError(t, os.Remove(blocker))
 	require.NoError(t, os.MkdirAll(blocker, 0o755))
+	// The property is that capture resumes at all, not how fast: on a loaded CI
+	// runner three polls was not always enough (two unrelated PRs failed here on
+	// 2026-10-08), so the window is generous while the poll stays tight.
 	require.Eventually(t, func() bool {
 		updated, err := session.LoadRecordingStateForAgent(repo, state.AgentID)
 		return err == nil && updated != nil && updated.SourceOffset == int64(len(first)+len(second))
-	}, 3*pollInterval, 50*time.Millisecond, "capture must resume once the turn can be checked")
+	}, 10*pollInterval+5*time.Second, 50*time.Millisecond, "capture must resume once the turn can be checked")
 	mgr.StopAll()
 	assert.Equal(t, 1, countRawJSONLEntries(t, raw))
 }
