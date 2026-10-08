@@ -29,8 +29,15 @@ func TestIntegrateInstallHint_ResolvesToRealCommand(t *testing.T) {
 			if len(rest) != 1 || !strings.HasPrefix(rest[0], "--") {
 				t.Fatalf("hint %q should carry exactly one --flag, got %q", hint, rest)
 			}
-			if cmd.Flags().Lookup(strings.TrimPrefix(rest[0], "--")) == nil {
-				t.Errorf("hint %q names a flag `ox integrate install` does not have", hint)
+			flag := cmd.Flags().Lookup(strings.TrimPrefix(rest[0], "--"))
+			if flag == nil {
+				t.Fatalf("hint %q names a flag `ox integrate install` does not have", hint)
+			}
+			// The hint passes the flag bare, so it must not need a value. Checked via
+			// NoOptDefVal rather than cmd.ParseFlags: parsing would set the
+			// package-level integrate*Flag globals and leak into other tests.
+			if flag.NoOptDefVal == "" {
+				t.Errorf("hint %q passes --%s without a value, but the flag requires one", hint, flag.Name)
 			}
 		})
 	}
