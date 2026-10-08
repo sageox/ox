@@ -44,6 +44,8 @@ recorded to your team's shared, queryable history.
 
 ## Install
 
+On macOS, the CLI requires macOS 13 Ventura or later.
+
 **Homebrew (macOS / Linux):**
 
 ```bash
