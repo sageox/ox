@@ -111,10 +111,10 @@ const (
 // only thing in this codebase allowed to write summary prose, and when
 // it's not running we don't fake it.
 func MaybeBuildSkipSummary(entries []Entry) (*SummarizeResponse, bool) {
-	if len(entries) == 0 {
-		return nil, false // empty session is handled elsewhere; not our case
-	}
-
+	// Zero entries is the thinnest session of all and takes the same stub:
+	// the file-level empty-transcript check upstream covers only a copy the
+	// Ledger itself records as empty, and a prompt with no transcript is a
+	// paid LLM call that can only answer "I don't see a transcript".
 	userPrompts := collectUserPrompts(entries)
 	totalUserContent := totalLen(userPrompts)
 	hasAssistant := hasEntryOfType(entries, EntryTypeAssistant)
