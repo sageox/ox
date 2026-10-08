@@ -48,6 +48,13 @@ func TestClassifyLedgerSync(t *testing.T) {
 			want:  []string{backoff.Summary},
 		},
 		{
+			name: "failed first clone is not synced (clone_failed on the ledger)",
+			facts: ledgerSyncFacts{Issues: []daemon.DaemonIssue{
+				{Type: daemon.IssueTypeCloneFailed, Repo: "ledger", Summary: "Clone failed for ledger: file exists. Run 'ox doctor' for details."},
+			}},
+			want: []string{"Clone failed for ledger: file exists. Run 'ox doctor' for details."},
+		},
+		{
 			name: "issues for other repos and non-blocking types are ignored",
 			facts: ledgerSyncFacts{Issues: []daemon.DaemonIssue{
 				{Type: daemon.IssueTypeSyncBackoff, Repo: "team_abc", Summary: "team backoff"},
