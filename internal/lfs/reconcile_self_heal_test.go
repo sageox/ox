@@ -296,3 +296,33 @@ func mustReadFile(t *testing.T, path string) []byte {
 	require.NoError(t, err)
 	return content
 }
+
+// A plan whose LFS object vanished from the store is restored from the Ledger
+// recovery cache exactly like a session artifact: the cache bytes must match
+// the pointer's OID and size, and nothing local is mutated. Failure prevented:
+// the cache was consulted only for sessions/, so a plan with its exact bytes
+// sitting in .sageox/cache was still reported as "no blob locally" and kept
+// every push rejected.
+func TestReconcile_ReuploadsExactRecoveryCacheForPlan(t *testing.T) {
+	ledger, _ := initLedgerWithRemote(t)
+	content := []byte("<!doctype html><html><head><meta name=\"sageox:plan\" content=\"p\"></head><body>plan</body></html>\n")
+	ref := NewFileRef(content)
+	pointerPath := filepath.Join(ledger, "data", "plans", "2026-10-01-keys", "plan.html")
+	cachePath := filepath.Join(ledger, ".sageox", "cache", "data", "plans", "2026-10-01-keys", "plan.html")
+	require.NoError(t, os.MkdirAll(filepath.Dir(pointerPath), 0o755))
+	require.NoError(t, os.WriteFile(pointerPath, []byte(FormatPointer(ref.OID, ref.Size)), 0o644))
+	git(t, ledger, "add", "--sparse", "data/plans/2026-10-01-keys")
+	git(t, ledger, "commit", "-m", "plan: keys", "--no-verify")
+	require.NoError(t, os.MkdirAll(filepath.Dir(cachePath), 0o700))
+	require.NoError(t, os.WriteFile(cachePath, content, 0o600))
+	headBefore := git(t, ledger, "rev-parse", "HEAD")
+	client, uploaded := recoveryLFSServer(t, map[string]bool{ref.BareOID(): true}, 0)
+
+	result, err := reconcileUnpushedPointers(context.Background(), ledger, nil, func() (*Client, error) { return client, nil })
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.RecoveredUploads)
+	assert.Equal(t, content, uploaded[ref.BareOID()])
+	assert.Equal(t, headBefore, git(t, ledger, "rev-parse", "HEAD"))
+	assert.Equal(t, []byte(FormatPointer(ref.OID, ref.Size)), mustReadFile(t, pointerPath), "the pointer is untouched")
+}
