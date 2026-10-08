@@ -66,7 +66,13 @@ func TestMigrateLedgerCredentials_HelperScopeByRemote(t *testing.T) {
 			require.NoError(t, exec.Command("git", "-C", dir, "remote", "add", "origin", tt.remote).Run())
 			_, err := MigrateLedgerCredentials(dir, "!ox git-credential-helper")
 			require.NoError(t, err)
-			out, _ := exec.Command("git", "-C", dir, "config", "--local", "--get-regexp", `^credential\..*\.helper$`).Output()
+			out, err := exec.Command("git", "-C", dir, "config", "--local", "--get-regexp", `^credential\..*\.helper$`).Output()
+			if err != nil {
+				// exit 1 is git's "no matching key"; anything else is a failed lookup, not an empty result
+				var exitErr *exec.ExitError
+				require.ErrorAs(t, err, &exitErr)
+				require.Equal(t, 1, exitErr.ExitCode(), "git config lookup failed: %v", err)
+			}
 			if tt.wantKey == "" {
 				assert.Empty(t, strings.TrimSpace(string(out)), "no helper for %s", tt.remote)
 				return
@@ -109,8 +115,16 @@ func TestInstallCredentialHelper_LoopbackHTTPPushNeedsNoPrompt(t *testing.T) {
 	work := t.TempDir()
 	git := func(args ...string) ([]byte, error) {
 		cmd := exec.Command("git", append([]string{"-C", work}, args...)...)
-		cmd.Env = append(os.Environ(), // safe: git needs PATH; HOME and prompts are overridden below
-			"GIT_TERMINAL_PROMPT=0", "GIT_CONFIG_NOSYSTEM=1", "HOME="+t.TempDir())
+		// safe: git needs PATH etc.; askpass vars are dropped and global/system config isolated
+		var env []string
+		for _, kv := range os.Environ() {
+			if strings.HasPrefix(kv, "GIT_ASKPASS=") || strings.HasPrefix(kv, "SSH_ASKPASS=") {
+				continue
+			}
+			env = append(env, kv)
+		}
+		cmd.Env = append(env, "GIT_TERMINAL_PROMPT=0", "GIT_CONFIG_NOSYSTEM=1",
+			"GIT_CONFIG_GLOBAL="+os.DevNull, "HOME="+t.TempDir())
 		return cmd.CombinedOutput()
 	}
 	for _, a := range [][]string{
