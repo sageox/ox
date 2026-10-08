@@ -32,6 +32,9 @@ func TestFetchEvidenceCacheRefusesMissingAndSymlinkPayload(t *testing.T) {
 	sum := sha256.Sum256(content)
 	require.NoError(t, os.WriteFile(payload, content, 0644))
 	link := filepath.Join(dir, "linked.jpg")
-	require.NoError(t, os.Symlink(payload, link))
+	// Symlink creation can be unavailable on Windows without the required privilege.
+	if err := os.Symlink(payload, link); err != nil {
+		t.Skipf("symlinks unavailable on this host: %v", err)
+	}
 	require.False(t, cachedFetchDigestMatches(link, hex.EncodeToString(sum[:])))
 }

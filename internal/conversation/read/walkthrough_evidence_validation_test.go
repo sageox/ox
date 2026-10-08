@@ -156,6 +156,8 @@ func TestEvidenceImageVerificationChecksGeometryAndFileBoundary(t *testing.T) {
 	r := New(root, time.Time{})
 	data := walkthroughData(t, r.Walkthrough(walkthroughCnv, WalkthroughOptions{Revision: rev}))
 	frame := data.Moments[0].Frame
+	require.NotEmpty(t, frame.LocalImage)
+	require.True(t, r.verifiedEvidenceImage(frame.LocalImage, frame.SHA256, 3, 2))
 	require.False(t, r.verifiedEvidenceImage(frame.LocalImage, frame.SHA256, 4, 2))
 	require.False(t, r.verifiedEvidenceImage(filepath.Join(root, "missing.jpg"), frame.SHA256, 3, 2))
 	require.False(t, r.verifiedEvidenceImage(root, frame.SHA256, 3, 2))

@@ -93,7 +93,10 @@ func TestEvidenceRejectsChangedPayloadsAndDoesNotCallStubsImages(t *testing.T) {
 	require.NoError(t, os.WriteFile(outside, b, 0644))
 	imagePath := filepath.Join(root, walkthroughFolder, dir, "frame-"+f.SHA256+".jpg")
 	require.NoError(t, os.Remove(imagePath))
-	require.NoError(t, os.Symlink(outside, imagePath))
+	// Symlink creation can be unavailable on Windows without the required privilege.
+	if err := os.Symlink(outside, imagePath); err != nil {
+		t.Skipf("symlinks unavailable on this host: %v", err)
+	}
 	d = walkthroughData(t, New(root, time.Time{}).Walkthrough(walkthroughCnv, WalkthroughOptions{Revision: rev}))
 	require.Empty(t, d.Moments[0].Frame.LocalImage)
 	require.Empty(t, d.Moments[0].Frame.FetchCommand)
