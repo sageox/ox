@@ -18,6 +18,7 @@ skipped and why. Nothing is uploaded until you confirm. Each session is
 summarized on this computer by your own claude or codex CLI, in an isolated
 mode with no tools, and then uploaded once. A session the summarizer judges
 not worth sharing stays on this computer, as it would had ox recorded it.
+Up to 3 sessions are summarized at once; --parallel 1 runs one at a time.
 Running the import again uploads nothing twice: sessions already imported,
 and sessions ox recorded live, are recognized and skipped.
 
@@ -43,6 +44,7 @@ ox session import [flags]
       --agent string        only sessions from this tool: claude or codex
       --dry-run             preview only; never upload
   -h, --help                help for import
+      --parallel int        maximum sessions summarized at once (at least 1) (default 3)
       --session strings     import exactly these sessions, by native session ID or a unique prefix of 8+ characters
       --since string        only sessions active within this window (7d, 48h) or since a date (2026-09-01)
       --summarizer string   summarize with this CLI instead of each session's own: claude or codex

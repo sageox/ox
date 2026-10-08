@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -46,6 +47,7 @@ skipped and why. Nothing is uploaded until you confirm. Each session is
 summarized on this computer by your own claude or codex CLI, in an isolated
 mode with no tools, and then uploaded once. A session the summarizer judges
 not worth sharing stays on this computer, as it would had ox recorded it.
+Up to 3 sessions are summarized at once; --parallel 1 runs one at a time.
 Running the import again uploads nothing twice: sessions already imported,
 and sessions ox recorded live, are recognized and skipped.
 
@@ -69,6 +71,7 @@ func addSessionImportFlags(f *pflag.FlagSet) {
 	f.String("since", "", "only sessions active within this window (7d, 48h) or since a date (2026-09-01)")
 	f.StringSlice("session", nil, "import exactly these sessions, by native session ID or a unique prefix of 8+ characters")
 	f.String("summarizer", "", "summarize with this CLI instead of each session's own: claude or codex")
+	f.Int("parallel", importDefaultParallel, "maximum sessions summarized at once (at least 1)")
 	f.Bool("dry-run", false, "preview only; never upload")
 	// Test-only: <dir>/claude stands in for ~/.claude and <dir>/codex for ~/.codex.
 	f.String("from-test-data", "", "read sessions from this test-data directory instead of this machine's Claude Code and Codex stores")
@@ -107,6 +110,7 @@ type importOptions struct {
 	since      time.Time
 	sessions   []string
 	summarizer nativeimport.Agent
+	parallel   int
 	dryRun     bool
 	yes        bool
 	jsonOut    bool
@@ -204,8 +208,12 @@ func parseImportOptions(cmd *cobra.Command) (importOptions, *importFailure) {
 	o.yes = cli.AssumeYes()
 	o.dryRun, _ = cmd.Flags().GetBool("dry-run")
 	o.sessions, _ = cmd.Flags().GetStringSlice("session")
+	o.parallel, _ = cmd.Flags().GetInt("parallel")
 	bad := func(msg string) (importOptions, *importFailure) {
 		return o, &importFailure{Code: importErrBadFlag, Message: msg}
+	}
+	if o.parallel < 1 {
+		return bad("--parallel must be at least 1")
 	}
 	if dir, _ := cmd.Flags().GetString("from-test-data"); dir != "" {
 		abs, err := filepath.Abs(dir)
@@ -361,10 +369,13 @@ func fetchImportDestination(ep, repoID string, dest *importDestination) {
 
 func productionImportDeps(ctx context.Context, env *importEnv) importDeps {
 	runners := map[nativeimport.Agent]agentwork.Runner{}
+	var runnersMu sync.Mutex
 	projectCfg, _ := config.LoadProjectConfig(env.projectRoot)
 	return importDeps{
 		readNative: readNativeWithAdapter,
 		runner: func(agent nativeimport.Agent) agentwork.Runner {
+			runnersMu.Lock()
+			defer runnersMu.Unlock()
 			if runners[agent] == nil {
 				runners[agent] = agentwork.NewRunner(string(agent), env.logger)
 			}
@@ -484,7 +495,7 @@ func runLockedImport(ctx context.Context, out io.Writer, opts importOptions, env
 		batch = importPushBatch
 	}
 	// From here an interrupt finishes cleanly: the session being summarized
-	// stops, no new one starts, and what is already committed is still pushed.
+	// stops in every worker, no new one starts, and committed work is pushed.
 	// The first interrupt restores default handling, so a second quits at once.
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -527,23 +538,28 @@ func runLockedImport(ctx context.Context, out io.Writer, opts importOptions, env
 		pending = nil
 	}
 	interrupted := false
-	for i, c := range selected {
-		if ctx.Err() != nil {
-			if !interrupted {
-				interrupted = true
-				fmt.Fprintln(progress, "Interrupted: publishing the sessions already done. Press Ctrl-C again to quit now.")
-			}
+	noteInterrupt := func() {
+		if ctx.Err() != nil && !interrupted {
+			interrupted = true
+			fmt.Fprintln(progress, "Interrupted: publishing the sessions already done. Press Ctrl-C again to quit now.")
 			fail("import interrupted", ctx.Err())
-			c.Outcome, c.Detail, c.Retry = "failed", "not started: the import was interrupted", importRetryCommand(opts, c)
+		}
+	}
+	// This goroutine alone owns progress, outcomes, Ledger writes and pushes.
+	// Workers only prepare artifacts, and wait for their publication before
+	// taking another job, bounding staging and preserving --parallel 1.
+	for result := range prepareImportPool(ctx, env, selected, opts.parallel) {
+		noteInterrupt()
+		c := selected[result.index]
+		if result.started {
+			fmt.Fprintf(progress, "[%d/%d] summarizing %s %s…\n", result.index+1, len(selected), c.Session.Agent, nativeShortID(c.Session.NativeID))
 			continue
 		}
-		if !opts.jsonOut {
-			fmt.Fprintf(out, "[%d/%d] %s %-6s %s summarizing… ", i+1, len(selected), c.Session.StartedAt.Local().Format("2006-01-02"), c.Session.Agent, nativeShortID(c.Session.NativeID))
-		} else {
-			// stdout is one JSON document at the end; a summary can take minutes.
-			fmt.Fprintf(progress, "[%d/%d] summarizing %s %s…\n", i+1, len(selected), c.Session.Agent, nativeShortID(c.Session.NativeID))
+		skip, err := result.skip, result.err
+		if result.prepared != nil {
+			skip, err = publishPreparedImport(ctx, env, c, result.prepared)
+			result.prepared.cleanup()
 		}
-		skip, err := publishImport(ctx, env, c)
 		switch {
 		case err != nil:
 			c.Outcome, c.Detail = "failed", strings.TrimPrefix(err.Error(), errImportHeld.Error()+": ")
@@ -560,14 +576,20 @@ func runLockedImport(ctx context.Context, out io.Writer, opts importOptions, env
 			pending = append(pending, c)
 			sinceFlush++
 		}
-		if !opts.jsonOut {
-			printImportLine(out, c)
-		}
+		fmt.Fprintf(progress, "[%d/%d] %s %s ", result.index+1, len(selected), c.Session.Agent, nativeShortID(c.Session.NativeID))
+		printImportLine(progress, c)
 		if sinceFlush >= batch {
 			flush()
 		}
+		close(result.done)
 	}
-	if sinceFlush > 0 {
+	noteInterrupt()
+	for _, c := range selected {
+		if c.Outcome == "" {
+			c.Outcome, c.Detail, c.Retry = "failed", "not started: the import was interrupted", importRetryCommand(opts, c)
+		}
+	}
+	if sinceFlush > 0 || (ctx.Err() != nil && len(pending) > 0) {
 		flush()
 	}
 	for _, c := range pending { // the last push failed
@@ -867,13 +889,20 @@ func importUploadCommand(opts importOptions, selected []*importCandidate) string
 	for _, c := range selected {
 		ids = append(ids, c.Session.NativeID)
 	}
-	return "ox session import --yes" + summarizerFlag(opts) + testDataFlag(opts) + " --session " + strings.Join(ids, ",")
+	return "ox session import --yes" + summarizerFlag(opts) + parallelFlag(opts) + testDataFlag(opts) + " --session " + strings.Join(ids, ",")
 }
 
 // importRetryCommand retries one session by its full ID: two Codex sessions
 // started within a minute share their first eight characters.
 func importRetryCommand(opts importOptions, c *importCandidate) string {
-	return "ox session import --session " + c.Session.NativeID + summarizerFlag(opts) + testDataFlag(opts)
+	return "ox session import --session " + c.Session.NativeID + summarizerFlag(opts) + parallelFlag(opts) + testDataFlag(opts)
+}
+
+func parallelFlag(opts importOptions) string {
+	if opts.parallel <= 0 {
+		return ""
+	}
+	return fmt.Sprintf(" --parallel %d", opts.parallel)
 }
 
 // testDataFlag keeps a printed command reading the same test data; without it
