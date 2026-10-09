@@ -1,0 +1,93 @@
+{
+  "scenario": "CHAT-A AFTER_COMPACT_A marker turn; compaction unverified",
+  "cursor_version": "3.20.21",
+  "conversation_id": "conversation-1",
+  "generation_id_before": "generation-2",
+  "generation_id_after": "generation-5",
+  "same_conversation": true,
+  "same_session_id": true,
+  "different_generation": true,
+  "events": [
+    "beforeSubmitPrompt",
+    "afterAgentResponse",
+    "stop"
+  ],
+  "precompact_hook_captured": false,
+  "original_byte_prefix_preserved": true,
+  "old_row_count": 8,
+  "new_row_count": 11,
+  "added_rows": [
+    {
+      "role": "user",
+      "message": {
+        "content": [
+          {
+            "type": "text",
+            "text": "<timestamp>Monday, Sep 14, 2026, 11:58 AM (UTC-7)</timestamp>\n<user_query>\nReply exactly AFTER_COMPACT_A without using any tools.\n</user_query>"
+          }
+        ]
+      }
+    },
+    {
+      "role": "assistant",
+      "message": {
+        "content": [
+          {
+            "type": "text",
+            "text": "AFTER_COMPACT_A"
+          }
+        ]
+      }
+    },
+    {
+      "type": "turn_ended",
+      "status": "success"
+    }
+  ],
+  "delayed_matches_stop_snapshot": true,
+  "stable_across_observations": true,
+  "observations": [
+    {
+      "observed_at_utc": "2026-09-14T18:59:48.255983+00:00",
+      "source_path": "<HOME>/.cursor/projects/<CONTROL_PROJECT_KEY>/agent-transcripts/conversation-1/conversation-1.jsonl",
+      "stat_before": {
+        "inode": 303845246,
+        "size": 2389,
+        "mtime_ns": 1789412305061081005
+      },
+      "stat_after": {
+        "inode": 303845246,
+        "size": 2389,
+        "mtime_ns": 1789412305061081005
+      },
+      "stable_during_read": true,
+      "sha256": "628babcbbe454cd0554dad786d78281d4cc20629ac372a9bee6cb780e0d482e0",
+      "snapshot": "capture/delayed-snapshots/chat-a-after-compact-marker-20260914T185948.255764Z/01.jsonl",
+      "complete_newline": true
+    },
+    {
+      "observed_at_utc": "2026-09-14T18:59:51.259418+00:00",
+      "source_path": "<HOME>/.cursor/projects/<CONTROL_PROJECT_KEY>/agent-transcripts/conversation-1/conversation-1.jsonl",
+      "stat_before": {
+        "inode": 303845246,
+        "size": 2389,
+        "mtime_ns": 1789412305061081005
+      },
+      "stat_after": {
+        "inode": 303845246,
+        "size": 2389,
+        "mtime_ns": 1789412305061081005
+      },
+      "stable_during_read": true,
+      "sha256": "628babcbbe454cd0554dad786d78281d4cc20629ac372a9bee6cb780e0d482e0",
+      "snapshot": "capture/delayed-snapshots/chat-a-after-compact-marker-20260914T185948.255764Z/02.jsonl",
+      "complete_newline": true
+    }
+  ],
+  "limitations": [
+    "User reported AFTER_COMPACT_A but has not yet described /summarize UI outcome.",
+    "No preCompact captured. Marker name and ordinary append do not prove compaction occurred.",
+    "Probe session env marker remains empty for original resumed CHAT-A.",
+    "Snapshot stability is specific to this turn."
+  ]
+}

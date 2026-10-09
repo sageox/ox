@@ -39,12 +39,34 @@ func SessionMarkerDir() string {
 //   - Idempotency: re-priming the same session reuses the ox agent ID
 //   - Hook context: agent_hook.go reads markers to pass agent state to handlers
 type SessionMarker struct {
-	AgentID            string    `json:"agent_id"`
-	SessionID          string    `json:"session_id,omitempty"`           // ox-generated agent-instance server session ID
-	RecordingSessionID string    `json:"recording_session_id,omitempty"` // durable ses_ recording ID for resume linkage
-	AgentSessionID     string    `json:"agent_session_id"`               // coding agent's native session identifier
-	PrimedAt           time.Time `json:"primed_at"`                      // when session was primed
-	ParentPID          int       `json:"parent_pid,omitempty"`           // parent agent process ID
+	AgentID              string                `json:"agent_id"`
+	SessionID            string                `json:"session_id,omitempty"`           // ox-generated agent-instance server session ID
+	RecordingSessionID   string                `json:"recording_session_id,omitempty"` // durable ses_ recording ID for resume linkage
+	AgentSessionID       string                `json:"agent_session_id"`               // coding agent's native session identifier
+	PrimedAt             time.Time             `json:"primed_at"`                      // when session was primed
+	ParentPID            int                   `json:"parent_pid,omitempty"`           // parent agent process ID
+	CursorSourceBoundary *CursorSourceBoundary `json:"cursor_source_boundary,omitempty"`
+}
+
+// CursorSourceBoundary is the pre-prime, exact-native source decision for one
+// Cursor conversation generation. It stays in the existing session marker so
+// overlapping hooks cannot replace an earlier beforeSubmitPrompt boundary.
+// SourcePath is deterministic and may name a not-yet-created native export.
+type CursorSourceBoundary struct {
+	WorkspacePath      string `json:"workspace_path"`
+	SourcePath         string `json:"source_path"`
+	SourcePending      bool   `json:"source_pending,omitempty"`
+	GenerationID       string `json:"generation_id,omitempty"`
+	Offset             int64  `json:"offset"`
+	KnownZero          bool   `json:"known_zero,omitempty"`
+	SourcePrefixSHA256 string `json:"source_prefix_sha256,omitempty"`
+}
+
+// IsPrimed reports whether a marker represents a completed prime. Boundary-only
+// Cursor markers intentionally have neither field until a deliverable event
+// writes the normal prime marker.
+func (m *SessionMarker) IsPrimed() bool {
+	return m != nil && m.AgentID != "" && !m.PrimedAt.IsZero()
 }
 
 // AgentHookInput is an alias for agentx.HookInput.
@@ -98,6 +120,40 @@ func FindUnambiguousSessionMarkerByPID(agentPID int) *SessionMarker {
 		if marker.PrimedAt.After(found.PrimedAt) {
 			found = marker
 		}
+	}
+	return found
+}
+
+// FindUnambiguousSessionMarkerByAgentID returns a completed marker only when
+// one native conversation is associated with the requested AI coworker. Unlike
+// the PID fallback it never infers a Cursor chat from the shared desktop
+// process; manual Cursor controls use this exact AI-coworker association.
+func FindUnambiguousSessionMarkerByAgentID(agentID string) *SessionMarker {
+	if agentID == "" {
+		return nil
+	}
+	entries, err := os.ReadDir(SessionMarkerDir())
+	if err != nil {
+		return nil
+	}
+	var found *SessionMarker
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(SessionMarkerDir(), entry.Name()))
+		if err != nil {
+			continue
+		}
+		var marker SessionMarker
+		if json.Unmarshal(data, &marker) != nil || marker.AgentID != agentID || !marker.IsPrimed() {
+			continue
+		}
+		if found != nil && found.AgentSessionID != marker.AgentSessionID {
+			return nil
+		}
+		copy := marker
+		found = &copy
 	}
 	return found
 }
@@ -172,32 +228,77 @@ func ReadSessionMarker(agentSessionID string) (*SessionMarker, error) {
 	return &marker, nil
 }
 
-// WriteSessionMarker writes a session marker to disk.
-// Creates the marker directory if it doesn't exist.
-// Uses atomic write (temp file + fsync + rename + parent-dir fsync) via
-// the shared fileutil helper for consistency with every other user-touching
-// write path in this file.
+// UpdateSessionMarker serializes a bounded marker read-modify-write. It is
+// used by Cursor's pre-prime boundary handoff and ordinary prime writes so an
+// overlapping hook cannot lose a previously selected boundary.
+func UpdateSessionMarker(agentSessionID string, update func(*SessionMarker) error) (*SessionMarker, error) {
+	if agentSessionID == "" {
+		return nil, fmt.Errorf("agent session ID is required")
+	}
+	if update == nil {
+		return nil, fmt.Errorf("marker update is required")
+	}
+	if err := os.MkdirAll(SessionMarkerDir(), 0700); err != nil {
+		return nil, fmt.Errorf("failed to create marker directory: %w", err)
+	}
+
+	path := markerPath(agentSessionID)
+	lock := flock.New(path + ".lock")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	locked, err := lock.TryLockContext(ctx, 100*time.Millisecond)
+	if err != nil {
+		return nil, fmt.Errorf("failed to acquire session marker lock: %w", err)
+	}
+	if !locked {
+		return nil, fmt.Errorf("could not acquire session marker lock within timeout")
+	}
+	defer func() { _ = lock.Unlock() }()
+
+	marker := &SessionMarker{AgentSessionID: agentSessionID}
+	data, err := os.ReadFile(path)
+	if err == nil {
+		if err := json.Unmarshal(data, marker); err != nil {
+			return nil, fmt.Errorf("failed to parse marker: %w", err)
+		}
+		if marker.AgentSessionID == "" {
+			marker.AgentSessionID = agentSessionID
+		}
+		if marker.AgentSessionID != agentSessionID {
+			return nil, fmt.Errorf("marker native session identity conflict")
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("failed to read marker: %w", err)
+	}
+	if err := update(marker); err != nil {
+		return nil, err
+	}
+	if marker.AgentSessionID != agentSessionID {
+		return nil, fmt.Errorf("marker update changed native session identity")
+	}
+	data, err = json.MarshalIndent(marker, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal marker: %w", err)
+	}
+	if err := fileutil.AtomicWriteBytes(path, data, 0644); err != nil {
+		return nil, fmt.Errorf("failed to write marker: %w", err)
+	}
+	return marker, nil
+}
+
+// WriteSessionMarker writes ordinary prime data while preserving a pending
+// Cursor boundary selected by an earlier hook.
 func WriteSessionMarker(marker *SessionMarker) error {
 	if marker.AgentSessionID == "" {
 		return fmt.Errorf("agent session ID is required")
 	}
-
-	// ensure directory exists
-	if err := os.MkdirAll(SessionMarkerDir(), 0700); err != nil {
-		return fmt.Errorf("failed to create marker directory: %w", err)
-	}
-
-	path := markerPath(marker.AgentSessionID)
-
-	data, err := json.MarshalIndent(marker, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal marker: %w", err)
-	}
-
-	if err := fileutil.AtomicWriteBytes(path, data, 0644); err != nil {
-		return fmt.Errorf("failed to write marker: %w", err)
-	}
-	return nil
+	_, err := UpdateSessionMarker(marker.AgentSessionID, func(existing *SessionMarker) error {
+		boundary := existing.CursorSourceBoundary
+		*existing = *marker
+		existing.CursorSourceBoundary = boundary
+		return nil
+	})
+	return err
 }
 
 // DeleteSessionMarker removes a session marker from disk.

@@ -14,6 +14,7 @@ import (
 	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/doctor"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/fileutil"
@@ -162,6 +163,32 @@ func recoverAgentSession(inst *agentinstance.Instance, releaseQuarantine bool) e
 // recoverRecording recovers one recording, named by its state rather than
 // looked up by agent.
 func recoverRecording(inst *agentinstance.Instance, projectRoot string, state *session.RecordingState) error {
+	// Cursor caches may still contain paused rows and pending native turns.
+	// Its finalizer must prove the drain and mask before any recovery publishes
+	// or clears the marker, including when the native file has not appeared.
+	if state.AdapterName == "cursor" {
+		// The PIDless watcher can still own raw.jsonl. Stop this exact recording
+		// before waiting for ownership; its poll observes the durable marker
+		// even when daemon IPC is unavailable. Pending sources stay recoverable.
+		now := time.Now().UTC()
+		if err := session.UpdateRecordingStateAt(state.SessionPath, state.SessionID, func(current *session.RecordingState) {
+			if current.StoppedAt == nil {
+				current.StoppedAt = &now
+			}
+			current.CursorFinalDrainPending = true
+		}); err != nil {
+			return fmt.Errorf("preserve pending Cursor recovery: %w", err)
+		}
+		if err := session.MarkExplicitStop(projectRoot, state.AgentID); err != nil {
+			return fmt.Errorf("mark Cursor recovery stopped: %w", err)
+		}
+		if state.WatchMode == "tail" {
+			if client := daemon.TryConnect(); client != nil {
+				_ = client.SessionWatchStop(daemon.SessionWatchStopPayload{SessionName: filepath.Base(state.SessionPath)})
+			}
+		}
+		return recoverViaNormalStop(inst, projectRoot, state)
+	}
 	// An undiscovered source does not prove a header-only recording empty, so it
 	// waits for retry. A cache that already holds captured turns is another
 	// matter: each batch was ownership-checked as it was appended, so it
@@ -202,7 +229,7 @@ func recoverRecording(inst *agentinstance.Instance, projectRoot string, state *s
 	return outputRecoverJSON(output)
 }
 
-// recoverViaNormalStop uses the normal session stop flow when the adapter file exists.
+// recoverViaNormalStop uses the adapter's normal finalization and session stop flow.
 func recoverViaNormalStop(inst *agentinstance.Instance, projectRoot string, state *session.RecordingState) error {
 	// process session through the normal pipeline. Hold the raw.jsonl writer's
 	// file lock so this never races a hook or watcher still appending a batch

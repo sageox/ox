@@ -34,6 +34,21 @@ func notifySessionStartedAsync(projectRoot string, state *session.RecordingState
 	if attr.Session == "" {
 		return
 	}
+	notifySessionStarted(projectRoot, state, func(notification api.SessionStartedNotification) error {
+		return runSessionSignal("started", func(client *api.RepoClient, repoID string) error {
+			notification.RepoID = repoID
+			return client.NotifySessionStarted(notification)
+		}, projectRoot)
+	})
+}
+
+// notifySessionStarted contains the state transition around the network request.
+// The injected sender keeps the persistence behavior testable without auth or a
+// live server.
+func notifySessionStarted(projectRoot string, state *session.RecordingState, send func(api.SessionStartedNotification) error) {
+	if state == nil || state.SessionID == "" {
+		return
+	}
 
 	// Don't register a session the coworker never actually used. At recording
 	// start (and on subagent primes) there is no user turn yet — registering
@@ -42,8 +57,7 @@ func notifySessionStartedAsync(projectRoot string, state *session.RecordingState
 	// sessions that never happened. Defer: mark the state so the prime retry and
 	// the per-turn draft path re-fire this exactly once a real turn exists.
 	if !session.HasUserTurn(filepath.Join(state.SessionPath, "raw.jsonl")) {
-		state.LifecycleRegistrationState = "deferred"
-		persistLifecycleRegistration(state)
+		persistSessionRegistrationState(state, "deferred", "")
 		return
 	}
 
@@ -60,38 +74,39 @@ func notifySessionStartedAsync(projectRoot string, state *session.RecordingState
 		slog.Debug("session registration suppressed: session_publishing is manual", "session_id", state.SessionID)
 		return
 	}
-	err := runSessionSignal("started", func(client *api.RepoClient, repoID string) error {
-		return client.NotifySessionStarted(api.SessionStartedNotification{
-			SessionID:   state.SessionID,
-			RepoID:      repoID,
-			SessionName: session.GetSessionName(state.SessionPath),
-			AgentID:     state.AgentID,
-			AgentType:   state.AgentType,
-			Branch:      state.Branch,
-			StartedAt:   state.StartedAt.Format(time.RFC3339),
-		})
-	}, projectRoot)
+	err := send(api.SessionStartedNotification{
+		SessionID:   state.SessionID,
+		SessionName: session.GetSessionName(state.SessionPath),
+		AgentID:     state.AgentID,
+		AgentType:   state.AgentType,
+		Branch:      state.Branch,
+		StartedAt:   state.StartedAt.Format(time.RFC3339),
+	})
 	if err != nil {
-		state.LifecycleRegistrationState = "pending"
-		state.LifecycleRegistrationError = err.Error()
 		slog.Debug("session registration pending", "session_id", state.SessionID, "error", err)
+		persistSessionRegistrationState(state, "pending", err.Error())
 	} else {
-		state.LifecycleRegistrationState = "confirmed"
-		state.LifecycleRegistrationError = ""
+		persistSessionRegistrationState(state, "confirmed", "")
 	}
+}
+
+// persistSessionRegistrationState merges the notification outcome into the
+// latest durable state. A network response may arrive after the recording was
+// paused, checkpointed, stopped, removed, or replaced by a new session using
+// the same agent ID, so the caller's pre-request snapshot must never be saved
+// wholesale.
+func persistSessionRegistrationState(state *session.RecordingState, status, statusErr string) {
+	// Current callers inspect this snapshot after registration, so retain the
+	// existing in-memory outcome while treating durable state as authoritative
+	// for every other field.
+	state.LifecycleRegistrationState = status
+	state.LifecycleRegistrationError = statusErr
 	persistLifecycleRegistration(state)
 }
 
-// persistLifecycleRegistration writes ONLY the registration outcome, under the
-// state lock. The caller's copy can be up to sessionSignalWait stale by now, and
-// this runs on a live recording from the per-turn path: saving the whole copy
-// would revert any capture cursor or pending credential-redaction checkpoint a
-// hook or watcher committed while the signal was in flight.
-//
-// The outcome belongs to the session the signal was sent FOR. If the agent
-// stopped and restarted while it was in flight, the new recording sits at the
-// same minute-granular path and must not inherit it: "confirmed" would suppress
-// the new session's own registration, and its /c/ link would never resolve.
+// persistLifecycleRegistration writes only the registration outcome under the
+// state lock. The state identity prevents a late network response from
+// recreating a stopped recording or updating its replacement.
 func persistLifecycleRegistration(state *session.RecordingState) {
 	err := session.UpdateRecordingStateAt(state.SessionPath, state.SessionID, func(current *session.RecordingState) {
 		current.LifecycleRegistrationState = state.LifecycleRegistrationState

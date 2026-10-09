@@ -1,0 +1,13 @@
+sequence=0020
+event=sessionStart
+started_epoch_s=1789412121.158757
+pid=40146
+ppid=22555
+parent_executable=Cursor Helper (Plugin): extension-host fixture-control-project [1-2]
+cwd=<WORKSPACE>/.context/cursor-adapter/evidence/fixture-control-project
+cursor_version=3.20.21
+cursor_project_dir=<WORKSPACE>/.context/cursor-adapter/evidence/fixture-control-project
+probe_session_marker=
+transcript_path=
+transcript_snapshot=payload_path_absent_or_null
+finished_epoch_s=1789412121.180702

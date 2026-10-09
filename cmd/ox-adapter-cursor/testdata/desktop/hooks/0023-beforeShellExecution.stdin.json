@@ -1,0 +1,16 @@
+{
+  "conversation_id": "conversation-3",
+  "generation_id": "generation-4",
+  "model": "grok-4.6",
+  "command": "sh -c 'sleep 3; printf FIXTURE_DELAYED_OK'",
+  "cwd": "",
+  "sandbox": true,
+  "session_id": "conversation-3",
+  "hook_event_name": "beforeShellExecution",
+  "cursor_version": "3.20.21",
+  "workspace_roots": [
+    "<WORKSPACE>/.context/cursor-adapter/evidence/fixture-control-project"
+  ],
+  "user_email": "<USER_EMAIL>",
+  "transcript_path": null
+}

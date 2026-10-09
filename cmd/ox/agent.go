@@ -294,6 +294,9 @@ func runAgentDispatcher(cmd *cobra.Command, args []string) error {
 		if agentID := resolveImplicitAgentID(); agentID != "" {
 			return runWithAgentID(cmd, agentID, args)
 		}
+		if cursorRequiresExplicitAgentID() {
+			return errkind.Errorf(errkind.Other, "missing-native-identity: Cursor requires the explicit AI coworker ID from hook context: ox agent <id> %s", strings.Join(args, " "))
+		}
 		return errkind.Errorf(errkind.Other, "no agent ID: %q requires an agent ID (run 'ox agent prime' first)", firstArg)
 	}
 
@@ -319,6 +322,12 @@ func runAgentDispatcher(cmd *cobra.Command, args []string) error {
 // when different agent IDs share that process, rather than guessing among
 // unrelated or pre-clear sessions.
 func resolveImplicitAgentID() string {
+	// Cursor hosts several conversations in one process and does not export
+	// a trustworthy per-chat identity to shell tools. Its hook prime supplies
+	// the explicit ox ID to use for recording controls.
+	if cursorRequiresExplicitAgentID() {
+		return ""
+	}
 	if envID := os.Getenv("SAGEOX_AGENT_ID"); agentinstance.IsValidAgentID(envID) {
 		return envID
 	}
@@ -341,6 +350,14 @@ func resolveImplicitAgentID() string {
 		return ""
 	}
 	return marker.AgentID
+}
+
+func cursorRequiresExplicitAgentID() bool {
+	if canonicalAgentType(os.Getenv("AGENT_ENV")) == "cursor" {
+		return true
+	}
+	agent := agentx.CurrentAgent()
+	return agent != nil && agent.Type() == agentx.AgentTypeCursor
 }
 
 // renderAgentHumanHandoff directs a person who invokes bare `ox agent` to

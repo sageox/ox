@@ -251,7 +251,11 @@ var adapterSessionHandles = map[string]string{
 var adapterSessionRoots = map[string][]string{
 	"claude-code": {".claude/projects"},
 	"codex":       {".codex/sessions"},
-	"gemini":      {".gemini/tmp", ".gemini/sessions"},
+	// Cursor's native JSONL exports are under a per-workspace project key.
+	// Cursor-specific discovery additionally requires the exact nested UUID
+	// source; this root is only the daemon's initial allowlist gate.
+	"cursor": {".cursor/projects"},
+	"gemini": {".gemini/tmp", ".gemini/sessions"},
 	// Generic / non-deep adapters store recordings inside the ox cache directory
 	// under the user's home — same fail-closed root as the deep adapters.
 	"generic": {".sageox/cache/sessions", ".cache/sageox/sessions"},

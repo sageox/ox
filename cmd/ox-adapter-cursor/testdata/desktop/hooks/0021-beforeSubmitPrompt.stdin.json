@@ -1,0 +1,27 @@
+{
+  "conversation_id": "conversation-3",
+  "generation_id": "generation-4",
+  "model": "cursor-grok-4.6-medium",
+  "model_id": "grok-4.6",
+  "model_params": [
+    {
+      "id": "effort",
+      "value": "medium"
+    },
+    {
+      "id": "fast",
+      "value": "false"
+    }
+  ],
+  "composer_mode": "agent",
+  "prompt": "This is CHAT-DELAY.\n\nRun only this shell command:\nsh -c 'sleep 3; printf FIXTURE_DELAYED_OK'\n\nThen reply exactly FINAL_DELAY_NO_TOOL without another tool call.",
+  "attachments": [],
+  "session_id": "conversation-3",
+  "hook_event_name": "beforeSubmitPrompt",
+  "cursor_version": "3.20.21",
+  "workspace_roots": [
+    "<WORKSPACE>/.context/cursor-adapter/evidence/fixture-control-project"
+  ],
+  "user_email": "<USER_EMAIL>",
+  "transcript_path": null
+}

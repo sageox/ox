@@ -114,6 +114,9 @@ func runAgentHook(args []string) error {
 
 	// 3. read stdin
 	input := ReadHookInput()
+	if agentType == "cursor" {
+		return runCursorAgentHook(eventName, input, projectRoot)
+	}
 
 	// 4. map event to phase
 	phase := resolvePhase(agentType, eventName)
@@ -1052,11 +1055,12 @@ func startSessionRecordingIfConfigured(ctx *HookContext) {
 		source = ctx.Input.Source
 	}
 
-	startSessionRecording(ctx.ProjectRoot, agentID, ctx.AgentType, "", recordingSessionIDFromMarker(ctx.Marker), agentSessionID)
+	var boundary *CursorSourceBoundary
+	if ctx.Marker != nil {
+		boundary = ctx.Marker.CursorSourceBoundary
+	}
+	startSessionRecording(ctx.ProjectRoot, agentID, ctx.AgentType, "", recordingSessionIDFromMarker(ctx.Marker), agentSessionID, boundary)
 
-	// every SessionStart — startup, resume, clear, compact — reports the
-	// agent's current native session id; append it (with its reason) to the
-	// live recording so a recording that outlives a /clear lists every id it
-	// spanned, and a repeat sighting (compact) advances last_seen.
+	// Preserve native-session provenance for every observed startup.
 	recordNativeSessionForRecording(ctx.ProjectRoot, agentID, agentSessionID, source)
 }

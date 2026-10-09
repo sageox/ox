@@ -1,0 +1,93 @@
+{
+  "scenario": "CHAT-B",
+  "cursor_version": "3.20.21",
+  "conversation_id": "conversation-2",
+  "generation_id": "generation-3",
+  "distinct_conversation_from_a": true,
+  "distinct_source_from_a": true,
+  "same_workspace": true,
+  "same_hook_parent_as_reopened_a": true,
+  "context_marker_matches": true,
+  "session_marker_matches_in_after_response_and_stop": true,
+  "events": [
+    "sessionStart",
+    "beforeSubmitPrompt",
+    "afterAgentResponse",
+    "stop"
+  ],
+  "rows": [
+    {
+      "role": "user",
+      "message": {
+        "content": [
+          {
+            "type": "text",
+            "text": "<timestamp>Monday, Sep 14, 2026, 11:50 AM (UTC-7)</timestamp>\n<user_query>\nThis is CHAT-B.\n\nWithout using tools or reading files, report the exact OX_CURSOR_START_CONTEXT value already in your context. If absent, say absent; do not infer it.\n\nEnd your reply with FINAL_B_NO_TOOL.\n</user_query>"
+          }
+        ]
+      }
+    },
+    {
+      "role": "assistant",
+      "message": {
+        "content": [
+          {
+            "type": "text",
+            "text": "OX_CURSOR_START_CONTEXT=FIXTURE_MARKER_1\nFINAL_B_NO_TOOL"
+          }
+        ]
+      }
+    },
+    {
+      "type": "turn_ended",
+      "status": "success"
+    }
+  ],
+  "a_source_unchanged_since_reopen": true,
+  "delayed_matches_stop_snapshot": true,
+  "stable_across_observations": true,
+  "observations": [
+    {
+      "observed_at_utc": "2026-09-14T18:52:27.523819+00:00",
+      "source_path": "<HOME>/.cursor/projects/<CONTROL_PROJECT_KEY>/agent-transcripts/conversation-2/conversation-2.jsonl",
+      "stat_before": {
+        "inode": 303869148,
+        "size": 550,
+        "mtime_ns": 1789411857321845461
+      },
+      "stat_after": {
+        "inode": 303869148,
+        "size": 550,
+        "mtime_ns": 1789411857321845461
+      },
+      "stable_during_read": true,
+      "sha256": "655e9e96191a188b3aad86c6aa03fc8d972d56e3cfb898a249b55d7538d94748",
+      "snapshot": "capture/delayed-snapshots/chat-b-20260914T185227.523536Z/01.jsonl",
+      "complete_newline": true
+    },
+    {
+      "observed_at_utc": "2026-09-14T18:52:30.528682+00:00",
+      "source_path": "<HOME>/.cursor/projects/<CONTROL_PROJECT_KEY>/agent-transcripts/conversation-2/conversation-2.jsonl",
+      "stat_before": {
+        "inode": 303869148,
+        "size": 550,
+        "mtime_ns": 1789411857321845461
+      },
+      "stat_after": {
+        "inode": 303869148,
+        "size": 550,
+        "mtime_ns": 1789411857321845461
+      },
+      "stable_during_read": true,
+      "sha256": "655e9e96191a188b3aad86c6aa03fc8d972d56e3cfb898a249b55d7538d94748",
+      "snapshot": "capture/delayed-snapshots/chat-b-20260914T185227.523536Z/02.jsonl",
+      "complete_newline": true
+    }
+  ],
+  "limitations": [
+    "sessionStart and beforeSubmitPrompt metadata start times are identical; sequence counters do not establish native ordering.",
+    "Same configured context value across chats is expected; distinct conversation identity is proven by hook IDs and native paths.",
+    "Environment propagation is proven for the observed afterAgentResponse/stop hooks, not all hook types or restart persistence.",
+    "Delayed stability is specific to this turn."
+  ]
+}

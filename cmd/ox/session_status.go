@@ -338,6 +338,9 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 
 	// filter to current agent if --current
 	if currentOnly {
+		if cursorRequiresExplicitAgentID() {
+			return fmt.Errorf("missing-native-identity: Cursor does not expose a current conversation ID to shell commands; use 'ox session status' to list recordings")
+		}
 		agentID := os.Getenv("SAGEOX_AGENT_ID")
 		if agentID == "" {
 			if jsonOutput {
@@ -546,14 +549,17 @@ func resolveAgentLiveness(projectRoot string, states []*session.RecordingState) 
 	// collect agent IDs we care about
 	agentIDs := make(map[string]bool)
 	for _, s := range states {
-		if s.AgentID != "" {
+		if s.AgentID != "" && s.AdapterName != "cursor" {
 			agentIDs[s.AgentID] = true
 		}
+	}
+	if len(agentIDs) == 0 {
+		return result // Cursor has no trustworthy per-conversation process PID.
 	}
 
 	// source 1: recording state PID — direct from .recording.json
 	for _, s := range states {
-		if s.AgentID != "" && s.ParentPID > 0 {
+		if agentIDs[s.AgentID] && s.ParentPID > 0 {
 			result[s.AgentID] = s.IsAgentAlive()
 		}
 	}
@@ -610,7 +616,7 @@ func agentLivenessFor(livenessMap map[string]bool, agentID string) (*bool, strin
 // agentAlivePtr returns a *bool indicating agent liveness from PID.
 // Returns nil if no PID is recorded (backward compat with old recordings).
 func agentAlivePtr(state *session.RecordingState) *bool {
-	if state == nil || state.ParentPID <= 0 {
+	if state == nil || state.ParentPID <= 0 || state.AdapterName == "cursor" {
 		return nil
 	}
 	alive := state.IsAgentAlive()

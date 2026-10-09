@@ -2,7 +2,6 @@ package agentwork
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -50,6 +49,7 @@ type SessionWatcherManager struct {
 type activeWatcher struct {
 	cancel      context.CancelFunc
 	done        chan struct{}
+	drain       chan struct{} // coalesced best-effort drain requests
 	sessionName string
 	adapterName string
 	sessionFile string
@@ -110,7 +110,13 @@ func (m *SessionWatcherManager) startWatchAt(
 		return fmt.Errorf("session watcher manager is stopped")
 	}
 
-	if _, ok := m.watchers[sessionName]; ok {
+	if existing, ok := m.watchers[sessionName]; ok {
+		if existing.drain != nil {
+			select {
+			case existing.drain <- struct{}{}:
+			default:
+			}
+		}
 		m.logger.Debug("session watcher already active", "session", sessionName)
 		return nil
 	}
@@ -133,11 +139,13 @@ func (m *SessionWatcherManager) startWatchAt(
 	// reads. Resolve before trusting.
 	// keep the requested path for the error message — SafeSessionFilePath
 	// returns "" on refusal, and "refusing to watch \"\"" tells nobody anything
-	safePath, err := adapters.SafeSessionFilePath(adapterName, sessionFile, m.homeDir())
-	if err != nil {
-		return fmt.Errorf("refusing to watch %q for %s: %w", sessionFile, adapterName, err)
+	if adapterName != "cursor" {
+		safePath, err := adapters.SafeSessionFilePath(adapterName, sessionFile, m.homeDir())
+		if err != nil {
+			return fmt.Errorf("refusing to watch %q for %s: %w", sessionFile, adapterName, err)
+		}
+		sessionFile = safePath
 	}
-	sessionFile = safePath
 
 	adapter, err := resolveAdapter(adapterName)
 	if err != nil {
@@ -145,16 +153,36 @@ func (m *SessionWatcherManager) startWatchAt(
 	}
 
 	rawPath := filepath.Join(cachePath, "raw.jsonl")
-	var state session.RecordingState
-	data, err := os.ReadFile(filepath.Join(cachePath, recordingMarker))
+	recPath := filepath.Join(cachePath, recordingMarker)
+	data, err := os.ReadFile(recPath)
 	if err != nil {
 		return fmt.Errorf("read recording state: %w", err)
 	}
-	if err := json.Unmarshal(data, &state); err != nil {
+	state, err := session.ParseRecordingState(recPath, data)
+	if err != nil {
 		return fmt.Errorf("read recording state: %w", err)
+	}
+	if state.SourceRejected {
+		return fmt.Errorf("native source quarantined for manual ownership review")
+	}
+	if adapterName == "cursor" {
+		expected, err := session.ValidateCursorRecordingSource(m.homeDir(), state)
+		if err != nil {
+			return err
+		}
+		if expected != sessionFile {
+			return fmt.Errorf("invalid-source-path: Cursor watch request does not match the recording")
+		}
 	}
 	if state.StoppedAt != nil || session.HasExplicitStop(state.WorkspacePath, state.AgentID) {
 		return fmt.Errorf("session recording has stopped")
+	}
+	if state.AdapterName == "cursor" && m.cursorRecordingInactive(recPath) {
+		return fmt.Errorf("recording is inactive and awaiting Cursor finalization")
+	}
+	if state.EntryCount > 0 && state.SourceOffset <= state.StartOffset {
+		return fmt.Errorf("recording has acknowledged entries without a source cursor: entries=%d source_offset=%d start_offset=%d",
+			state.EntryCount, state.SourceOffset, state.StartOffset)
 	}
 	offset = max(offset, state.SourceOffset, state.StartOffset)
 
@@ -162,6 +190,7 @@ func (m *SessionWatcherManager) startWatchAt(
 	aw := &activeWatcher{
 		cancel:      cancel,
 		done:        make(chan struct{}),
+		drain:       make(chan struct{}, 1),
 		sessionName: sessionName,
 		adapterName: adapterName,
 		sessionFile: sessionFile,
@@ -263,8 +292,8 @@ func (m *SessionWatcherManager) DetectAndRestart(ledgerPath string) int {
 			continue
 		}
 
-		var state session.RecordingState
-		if err := json.Unmarshal(data, &state); err != nil {
+		state, err := session.ParseRecordingState(recPath, data)
+		if err != nil {
 			continue
 		}
 		if state.WatchMode != "tail" || state.StoppedAt != nil || state.SourceRejected || session.HasExplicitStop(state.WorkspacePath, state.AgentID) {
@@ -278,7 +307,23 @@ func (m *SessionWatcherManager) DetectAndRestart(ledgerPath string) int {
 		if !state.IsAgentAlive() {
 			continue
 		}
+		if state.AdapterName == "cursor" && m.cursorRecordingInactive(recPath) {
+			continue
+		}
 		if state.SessionFile == "" {
+			if state.AdapterName == "cursor" {
+				// A pending known-zero conversation can be watched before its
+				// directory exists. The shared transaction binds it only once
+				// the exact export appears, without selecting a new EOF.
+				source, err := session.ValidateCursorRecordingSource(m.homeDir(), state)
+				if err != nil {
+					continue
+				}
+				if err := m.startWatchAt(sessionName, source, state.AdapterName, ledgerPath, filepath.Join(sessionsDir, sessionName), state.SourceOffset); err == nil {
+					started++
+				}
+				continue
+			}
 			adapter, err := resolveAdapter(state.AdapterName)
 			if err != nil {
 				continue
@@ -319,7 +364,9 @@ func (m *SessionWatcherManager) DetectAndRestart(ledgerPath string) int {
 }
 
 // Cleanup stops watchers for sessions that have been stopped, whose
-// .recording.json has been removed, or whose agent PID has died.
+// .recording.json has been removed, whose agent PID has died, or whose Cursor
+// inactivity window has elapsed. StopWatch joins the writer before returning,
+// releasing raw ownership so the finalizer can drain and settle the recording.
 func (m *SessionWatcherManager) Cleanup() {
 	m.mu.Lock()
 	var toStop []string
@@ -330,11 +377,12 @@ func (m *SessionWatcherManager) Cleanup() {
 			toStop = append(toStop, name)
 			continue
 		}
-		var state session.RecordingState
-		if err := json.Unmarshal(data, &state); err != nil {
+		state, err := session.ParseRecordingState(recPath, data)
+		if err != nil {
 			continue
 		}
-		if state.StoppedAt != nil || !state.IsAgentAlive() {
+		if state.StoppedAt != nil || state.SourceRejected || !state.IsAgentAlive() ||
+			(state.AdapterName == "cursor" && m.cursorRecordingInactive(recPath)) {
 			toStop = append(toStop, name)
 		}
 	}
@@ -343,6 +391,17 @@ func (m *SessionWatcherManager) Cleanup() {
 	for _, name := range toStop {
 		m.StopWatch(name)
 	}
+}
+
+// Use exactly the finalizer's inactivity decision. Cursor has no unique parent
+// PID, and a stale watcher must not reacquire ownership ahead of finalization.
+func (m *SessionWatcherManager) cursorRecordingInactive(recPath string) bool {
+	info, err := os.Stat(recPath)
+	if err != nil {
+		return false
+	}
+	stale, _, method := isStaleRecording(recPath, info, nil, m.logger)
+	return stale && method == "cursor_inactivity"
 }
 
 // runWatcher tails the session file and appends entries to raw.jsonl.
@@ -373,12 +432,13 @@ func (m *SessionWatcherManager) runWatcher(
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		data, err := os.ReadFile(filepath.Join(aw.cachePath, recordingMarker))
+		recPath := filepath.Join(aw.cachePath, recordingMarker)
+		data, err := os.ReadFile(recPath)
 		if err != nil {
 			return err
 		}
-		var state session.RecordingState
-		if err := json.Unmarshal(data, &state); err != nil {
+		state, err := session.ParseRecordingState(recPath, data)
+		if err != nil {
 			return err
 		}
 		if state.StoppedAt != nil || state.SourceRejected || session.HasExplicitStop(state.WorkspacePath, state.AgentID) {
@@ -389,6 +449,13 @@ func (m *SessionWatcherManager) runWatcher(
 		if err := validateWatcherSource(aw, state.StartOffset); err != nil {
 			m.rejectWatcherSource(aw, err)
 			return nil
+		}
+		if aw.adapterName == "cursor" {
+			reader, ok := adapter.(adapters.IncrementalReader)
+			if !ok {
+				return fmt.Errorf("adapter-missing: Cursor adapter requires incremental reading")
+			}
+			return m.pollCursorSession(ctx, aw, reader)
 		}
 
 		// Per ox-h20u: ALL raw.jsonl writes go through session.RawWriter. The
@@ -550,6 +617,29 @@ func validateWatcherSourceFrom(aw *activeWatcher, offset int64, snapshot os.File
 
 // pollInterval is how often a session is re-read to advance its resume cursor.
 const pollInterval = 2 * time.Second
+
+// pollCursorSession retains raw-file ownership across polls. Each transaction
+// reloads its durable checkpoint; failed appends/checkpoints therefore take the
+// same reconciliation path on retry and never advance an in-memory-only cursor.
+func (m *SessionWatcherManager) pollCursorSession(ctx context.Context, aw *activeWatcher, reader adapters.IncrementalReader) error {
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+	for {
+		_, err := session.DrainCursorSource(ctx, aw.projectRoot, aw.cachePath, m.homeDir(), reader, false)
+		if errors.Is(err, session.ErrNotRecording) || errors.Is(err, context.Canceled) {
+			return nil
+		}
+		if err != nil && !errors.Is(err, session.ErrCursorSourcePending) {
+			m.logger.Warn("Cursor capture deferred", "session", aw.sessionName, "error", err)
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+		case <-aw.drain:
+		}
+	}
+}
 
 // pollSession records a session by repeatedly asking the adapter for
 // everything after the cursor it last returned.

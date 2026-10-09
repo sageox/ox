@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -97,8 +98,31 @@ func writeRawHeader(projectRoot string, state *session.RecordingState) error {
 // by hooks. Does a final drain from the source file, then generates events,
 // and summary artifacts from the already-written raw.jsonl.
 func finalizeIncrementalSession(projectRoot string, state *session.RecordingState, rawPath string, adapter adapters.Adapter, result *agentSessionResult) (*agentSessionResult, error) {
+	if state.AdapterName == "cursor" {
+		reader, ok := adapter.(adapters.IncrementalReader)
+		if !ok {
+			return nil, fmt.Errorf("adapter-missing: Cursor incremental reader is unavailable")
+		}
+		// The stop path owns these in-memory values. Its best-effort marker
+		// checkpoint may have failed, while FinalizeCursorCapture necessarily
+		// reloads the older marker to advance Cursor's durable source cursor.
+		// Keep the authoritative stop boundary across that refresh.
+		stopTrace := state.Trace
+		stopRequestedAt := state.StoppedAt
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil, err
+		}
+		latest, err := session.FinalizeCursorCapture(context.Background(), projectRoot, state.SessionPath, home, reader)
+		if err != nil {
+			return nil, err
+		}
+		latest.Trace = stopTrace
+		latest.StoppedAt = stopRequestedAt
+		state = latest
+	}
 	// final drain: read any remaining entries since last hook
-	if reader, ok := adapter.(adapters.IncrementalReader); ok && state.SessionFile != "" {
+	if reader, ok := adapter.(adapters.IncrementalReader); ok && state.SessionFile != "" && state.AdapterName != "cursor" {
 		// use StartOffset as minimum read position to skip pre-session content
 		readOffset := state.SourceOffset
 		if state.StartOffset > 0 && readOffset < state.StartOffset {

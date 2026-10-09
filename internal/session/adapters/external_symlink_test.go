@@ -245,7 +245,7 @@ func TestCanonicalAdapterName(t *testing.T) {
 		{"codex", "codex"},
 		{"Codex", "codex"},
 		{"amp", "amp"},
-		{"cursor", "generic"},
+		{"cursor", "cursor"},
 		{"windsurf", "generic"},
 		{"copilot", "generic"},
 		{"aider", "aider"},

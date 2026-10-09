@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/sageox/ox/internal/session/adapters"
+	"github.com/sageox/ox/pkg/adapterprotocol"
 )
 
 // installExternalAdapterHooks discovers the named external adapter binary and
@@ -71,9 +72,21 @@ func uninstallExternalAdapterHooks(adapterName string, user bool) error {
 // delegates hook status checking to it via the adapter protocol's check-hooks
 // subcommand.
 func checkExternalAdapterHooks(adapterName string, user bool) bool {
+	result := externalAdapterHookStatus(adapterName, user)
+	return result != nil && result.Installed
+}
+
+// hasExternalAdapterHooksToRemove also recognizes partial installations.
+// Older adapters remain compatible through the Installed fallback.
+func hasExternalAdapterHooksToRemove(adapterName string, user bool) bool {
+	result := externalAdapterHookStatus(adapterName, user)
+	return result != nil && (result.Installed || result.HasOwnedHooks)
+}
+
+func externalAdapterHookStatus(adapterName string, user bool) *adapterprotocol.CheckHooksResponse {
 	ea, err := resolveExternalAdapter(adapterName)
 	if err != nil {
-		return false
+		return nil
 	}
 
 	scope := "project"
@@ -88,10 +101,10 @@ func checkExternalAdapterHooks(adapterName string, user bool) bool {
 
 	result, err := ea.CheckHooks(repoRoot, scope)
 	if err != nil {
-		return false
+		return nil
 	}
 
-	return result.Installed
+	return result
 }
 
 // listExternalAdapterHooks returns the installation status of an external

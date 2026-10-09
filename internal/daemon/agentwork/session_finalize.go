@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -962,6 +963,7 @@ func (h *SessionFinalizeHandler) DetectOrphanedForAgent(ledgerPath, agentID stri
 			}
 
 			var state struct {
+				AdapterName    string     `json:"adapter_name"`
 				AgentID        string     `json:"agent_id"`
 				ParentPID      int        `json:"parent_pid,omitempty"`
 				StoppedAt      *time.Time `json:"stopped_at,omitempty"`
@@ -971,6 +973,12 @@ func (h *SessionFinalizeHandler) DetectOrphanedForAgent(ledgerPath, agentID stri
 				continue
 			}
 			if state.AgentID != agentID || state.SourceRejected {
+				continue
+			}
+			// Cursor hook processes are transient and the desktop PID is shared
+			// by many conversations. Ordinary detection applies its native-end
+			// or inactivity policy; a process exit cannot end a Cursor recording.
+			if state.AdapterName == "cursor" && state.StoppedAt == nil {
 				continue
 			}
 
@@ -2633,9 +2641,12 @@ func isStaleRecording(recPath string, info os.FileInfo, pidLookup func(string) i
 	}
 
 	var state struct {
-		StartedAt time.Time `json:"started_at"`
-		AgentID   string    `json:"agent_id"`
-		ParentPID int       `json:"parent_pid"`
+		StartedAt   time.Time  `json:"started_at"`
+		AgentID     string     `json:"agent_id"`
+		ParentPID   int        `json:"parent_pid"`
+		AdapterName string     `json:"adapter_name"`
+		LastHookAt  *time.Time `json:"last_hook_at,omitempty"`
+		StoppedAt   *time.Time `json:"stopped_at,omitempty"`
 	}
 	if jsonErr := json.Unmarshal(data, &state); jsonErr != nil {
 		age = time.Since(info.ModTime())
@@ -2649,6 +2660,15 @@ func isStaleRecording(recPath string, info os.FileInfo, pidLookup func(string) i
 	age = time.Since(info.ModTime())
 	if !state.StartedAt.IsZero() {
 		age = time.Since(state.StartedAt)
+	}
+	if state.AdapterName == "cursor" {
+		if state.StoppedAt != nil {
+			return true, age, "native_end_pending"
+		}
+		if state.LastHookAt != nil {
+			age = time.Since(*state.LastHookAt)
+		}
+		return age > staleRecordingThreshold, age, "cursor_inactivity"
 	}
 
 	// try PID from .recording.json first, then fall back to daemon in-memory PID
@@ -2952,6 +2972,24 @@ func stampCarrierBeforeReclaim(logger *slog.Logger, sessionDir, rawPath string, 
 	}
 }
 
+// rawCarriesRecordingState reports whether the fields that disappear with the
+// recording marker are already durable in raw.jsonl. Cursor finalization is
+// retryable after its atomic rewrite, so the retry must not append the same
+// carrier footer again. A failed first stamp still returns false and retries it.
+func rawCarriesRecordingState(rawPath string, state *session.RecordingState) bool {
+	stored, err := session.ReadSessionFromPath(rawPath)
+	if err != nil || stored == nil || stored.Meta == nil || stored.Meta.StoppedAt == nil {
+		return false
+	}
+	if state.StoppedAt != nil && !stored.Meta.StoppedAt.Equal(state.StoppedAt.UTC()) {
+		return false
+	}
+	if len(state.NativeSessions) > 0 && !slices.Equal(stored.Meta.NativeSessions, state.NativeSessions) {
+		return false
+	}
+	return state.Trace == nil || reflect.DeepEqual(stored.Meta.TraceCapture, state.Trace)
+}
+
 // sessionHeldForReview reports whether the recording marker in sessionDir says
 // its native source was quarantined. An unreadable marker is not a quarantine.
 func sessionHeldForReview(sessionDir string) bool {
@@ -2990,6 +3028,32 @@ func recoverRawFromSessionFile(logger *slog.Logger, recPath, sessionDir, rawPath
 	// An unprovable journal fails closed and defers this recovery.
 	if err := session.RecoverRawAppend(rawPath, state.SourceOffset); err != nil {
 		return false, fmt.Errorf("recover capture batch journal: %w", err)
+	}
+	if state.AdapterName == "cursor" {
+		adapter, err := adapters.GetAdapter("cursor")
+		if err != nil {
+			return false, fmt.Errorf("adapter-missing: Cursor adapter is unavailable")
+		}
+		reader, ok := adapter.(adapters.IncrementalReader)
+		if !ok {
+			return false, fmt.Errorf("adapter-missing: Cursor incremental reader is unavailable")
+		}
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return false, fmt.Errorf("resolve Cursor source home: %w", err)
+		}
+		finalState, err := session.FinalizeCursorCapture(context.Background(), state.WorkspacePath, sessionDir, home, reader)
+		if err != nil {
+			return false, err // pending native writes retain raw and marker
+		}
+		hasRaw := session.HasSubstantiveEntries(rawPath)
+		if hasRaw && !rawCarriesRecordingState(rawPath, finalState) {
+			// Cursor's final rewrite owns its durable capture boundary. Carry
+			// the native IDs, stop time, and trace snapshot before the caller
+			// removes the recording marker.
+			stampCarrierBeforeReclaim(logger, sessionDir, rawPath, finalState)
+		}
+		return hasRaw, nil
 	}
 
 	hasRaw := session.HasSubstantiveEntries(rawPath)

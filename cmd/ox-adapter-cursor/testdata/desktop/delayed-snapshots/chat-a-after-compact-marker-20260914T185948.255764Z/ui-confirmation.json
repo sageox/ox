@@ -1,0 +1,11 @@
+{
+  "recorded_at_utc": "2026-09-14T19:02:01.251024+00:00",
+  "screenshot_path": "<WORKSPACE>/.context/attachments/TMAClx/Screenshot 2026-09-14 at 12.00.01 PM.png",
+  "screenshot_sha256": "dbb6e3651899d8a03f6331b9ec679b98e6117a155d0cd44b7e742e458d5b010b",
+  "observed_ui_text": "Chat context summarized",
+  "ui_location": "Original OX_CURSOR context report chat, between RESUMED_A_NO_TOOL and AFTER_COMPACT_A",
+  "assessment": "Native desktop UI confirms manual summarization occurred. Prior observation manifest was written before this screenshot was received; its uncertainty about whether summarization occurred is resolved by this separate evidence.",
+  "source_evidence": "Hooks 0028-0030 preserve original conversation/session identity, same source path/inode, complete 2050-byte source prefix, then 3 appended rows to2389bytes.",
+  "hook_limit": "No preCompact invocation was captured. Read-only config/wrapper/recorder audit found no obvious local event-name, forwarding, or capture omission. We cannot assume preCompact availability or delivery in this tested manual summarization path.",
+  "scope_limit": "This is source capture evidence, not completed ox adapter integration qualification."
+}

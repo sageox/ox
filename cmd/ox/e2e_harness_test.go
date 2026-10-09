@@ -46,6 +46,13 @@ type oxE2E struct {
 	teams      []api.TeamMembership                 // what GET /api/v1/cli/repos reports for this user
 	initBodies []api.RepoInitRequest                // every POST /api/v1/repo/init body, in order
 	register   func(api.RepoInitRequest) (int, any) // optional override of the init reply
+	onRequest  func(*http.Request)                  // optional observation of command progress
+}
+
+func (e *oxE2E) OnRequest(fn func(*http.Request)) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.onRequest = fn
 }
 
 // SetTeams replaces the team list the stub reports on GET /api/v1/cli/repos.
@@ -97,7 +104,11 @@ func newOxE2E(t *testing.T) *oxE2E {
 	env.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		env.mu.Lock()
 		env.requests = append(env.requests, r.URL.Path)
+		onRequest := env.onRequest
 		env.mu.Unlock()
+		if onRequest != nil {
+			onRequest(r)
+		}
 
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {

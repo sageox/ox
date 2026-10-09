@@ -27,6 +27,7 @@ import (
 	"github.com/sageox/ox/internal/doctor"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/ephemeral"
+	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/flags"
 	gh "github.com/sageox/ox/internal/github"
 	"github.com/sageox/ox/internal/githubmirror"
@@ -274,6 +275,41 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		hookEventName = hookInput.HookEventName
 	}
 
+	// Resolve the type before marker lookup. Cursor's native conversation ID is
+	// required to key markers, and a GUI process can host several chats, so its
+	// PID is never a safe identity fallback.
+	if agentType == "" {
+		if agent := agentx.CurrentAgent(); agent != nil {
+			agentType = string(agent.Type())
+		}
+	}
+	agentType = canonicalAgentType(agentType)
+	isCursor := agentType == string(agentx.AgentTypeCursor)
+
+	var projectRoot string
+	var err error
+	if isCursor {
+		projectRoot, err = findProjectRoot()
+		if err != nil {
+			return fmt.Errorf("could not find project root: %w", err)
+		}
+	}
+
+	var cursorInput *cursorNativeInput
+	if isCursor && hookInput != nil {
+		homeDir, homeErr := os.UserHomeDir()
+		if homeErr != nil {
+			return fmt.Errorf("missing-native-identity: resolve Cursor home directory")
+		}
+		cursorInput, err = normalizeCursorHookInput(hookInput.RawBytes, projectRoot, homeDir)
+		if err != nil {
+			return err
+		}
+		agentSessionID = cursorInput.ConversationID
+		hookInput.SessionID = cursorInput.ConversationID
+		hookInput.RawBytes = cursorInput.NormalizedRaw
+	}
+
 	// fallback: if no session ID from hook stdin, try agent's native env var
 	// (e.g., CODEX_THREAD_ID, AMP_THREAD_URL, CLAUDE_CODE_SESSION_ID)
 	if agentSessionID == "" {
@@ -286,6 +322,15 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	var existingMarker *SessionMarker
 	if agentSessionID != "" {
 		existingMarker, _ = ReadSessionMarker(agentSessionID)
+	}
+	if cursorInput != nil && (hookEventName == string(agentx.CursorEventBeforeSubmitPrompt) || hookEventName == string(agentx.CursorEventSessionStart)) {
+		existingMarker, err = prepareCursorHookBoundary(cursorInput, hookEventName)
+		if err != nil {
+			return fmt.Errorf("persist Cursor source boundary: %w", err)
+		}
+		if hookEventName == string(agentx.CursorEventBeforeSubmitPrompt) {
+			return nil // this native channel cannot deliver prime context
+		}
 	}
 	// PID-based fallback: a second prime inside the same agent process
 	// (e.g. CLAUDE.md BLOCKING instruction running after the SessionStart
@@ -300,7 +345,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// match a stale marker from an unrelated prior session and silently
 	// cross-link identities. Requiring a live agent detection keeps the
 	// fallback limited to the scenario it was designed for.
-	if existingMarker == nil && agentx.CurrentAgent() != nil {
+	if !isCursor && existingMarker == nil && agentx.CurrentAgent() != nil {
 		if agentPID := proc.FindAgentAncestorPID(); agentPID > 0 {
 			existingMarker = FindSessionMarkerByPID(agentPID)
 			if existingMarker != nil && agentSessionID == "" {
@@ -310,19 +355,20 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 			}
 		}
 	}
-	if existingMarker != nil && idempotent {
+	if existingMarker != nil && existingMarker.IsPrimed() && idempotent {
 		// idempotent mode: session already primed, output nothing
 		// this saves ~1k tokens on redundant prime calls
 		return nil
 	}
 
-	// use detected agent as fallback when --agent not provided
-	if agentType == "" {
-		if agent := agentx.CurrentAgent(); agent != nil {
-			agentType = string(agent.Type())
+	// Keep legacy idempotent primes outside a repository working as before.
+	// Cursor resolved its root above because native workspace validation needs it.
+	if projectRoot == "" {
+		projectRoot, err = findProjectRoot()
+		if err != nil {
+			return fmt.Errorf("could not find project root: %w", err)
 		}
 	}
-	agentType = canonicalAgentType(agentType)
 
 	// enrich User-Agent for all subsequent API calls in this process
 	if agentType != "" {
@@ -354,11 +400,6 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 
 	// load attribution from user and project configs
 	attribution := loadResolvedAttribution()
-
-	projectRoot, err := findProjectRoot()
-	if err != nil {
-		return fmt.Errorf("could not find project root: %w", err)
-	}
 
 	// check if project is initialized (.sageox/ exists)
 	sageoxDir := filepath.Join(projectRoot, ".sageox")
@@ -410,13 +451,15 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		// reuse that recording's agent ID so prime stays idempotent.
 		// This handles the case where CLAUDE.md's BLOCKING instruction triggers
 		// a second prime call after the SessionStart hook already created a session.
-		if currentPID := proc.FindAgentAncestorPID(); currentPID > 0 {
-			if states, loadErr := session.LoadAllRecordingStates(projectRoot); loadErr == nil {
-				for _, s := range states {
-					if s.IsAgentAlive() && s.ParentPID > 0 && s.ParentPID == currentPID {
-						agentID = s.AgentID
-						slog.Debug("prime: reusing agent ID from active recording", "agent_id", agentID, "parent_pid", currentPID)
-						break
+		if !isCursor {
+			if currentPID := proc.FindAgentAncestorPID(); currentPID > 0 {
+				if states, loadErr := session.LoadAllRecordingStates(projectRoot); loadErr == nil {
+					for _, s := range states {
+						if s.IsAgentAlive() && s.ParentPID > 0 && s.ParentPID == currentPID {
+							agentID = s.AgentID
+							slog.Debug("prime: reusing agent ID from active recording", "agent_id", agentID, "parent_pid", currentPID)
+							break
+						}
 					}
 				}
 			}
@@ -427,7 +470,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// Covers: (a) prime called from CLAUDE.md BLOCKING instruction after /clear
 	// (CLAUDE_ENV_FILE persists the var), (b) prime subprocess called from hook
 	// with the env var passed explicitly by runPrimeForHook.
-	if agentID == "" {
+	if agentID == "" && !isCursor {
 		if states, loadErr := session.LoadAllRecordingStates(projectRoot); loadErr == nil {
 			envID := os.Getenv("SAGEOX_AGENT_ID")
 			agentID = resolveAgentIDFromStates(states, envID)
@@ -450,6 +493,22 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("failed to generate agent ID: %w", err)
 		}
 	}
+	if isCursor && agentSessionID != "" {
+		// Reserve identity before recording or network work. A bounded hook
+		// can kill prime before context delivery; its retry must reuse the
+		// first recording even though PrimedAt is still unset.
+		existingMarker, err = UpdateSessionMarker(agentSessionID, func(marker *SessionMarker) error {
+			if marker.AgentID == "" {
+				marker.AgentID = agentID
+			}
+			agentID = marker.AgentID
+			marker.ParentPID = 0
+			return nil
+		})
+		if err != nil {
+			return fmt.Errorf("persist Cursor prime identity: %w", err)
+		}
+	}
 
 	// detect parent agent early: if SAGEOX_AGENT_ID is already set, this is a subagent
 	// and the existing value identifies the parent (orchestrator inherits env vars).
@@ -469,9 +528,11 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// attempt to start session recording if enabled (local, no auth needed)
 	phaseStart = time.Now()
 	continuedFromSessionID := recordingSessionIDFromMarker(existingMarker)
-	sessionStat := startSessionRecording(projectRoot, agentID, agentType, parentAgentID, continuedFromSessionID, agentSessionID)
-	// a prime that lands on an existing recording (CLAUDE.md-driven re-prime
-	// after /clear, hookless agents) is also a native session sighting
+	var cursorBoundary *CursorSourceBoundary
+	if existingMarker != nil {
+		cursorBoundary = existingMarker.CursorSourceBoundary
+	}
+	sessionStat := startSessionRecording(projectRoot, agentID, agentType, parentAgentID, continuedFromSessionID, agentSessionID, cursorBoundary)
 	recordNativeSessionForRecording(projectRoot, agentID, agentSessionID, hookSource)
 	recordingSessionID := recordingSessionIDForMarker(projectRoot, agentID, continuedFromSessionID)
 	timing["session_start"] = time.Since(phaseStart).Milliseconds()
@@ -490,6 +551,10 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 					AgentSessionID:     agentSessionID,
 					PrimedAt:           time.Now(),
 					ParentPID:          proc.FindAgentAncestorPID(),
+				}
+				if isCursor && hookInput != nil {
+					marker.PrimedAt = time.Time{} // completed by the successful hook parent
+					marker.ParentPID = 0
 				}
 				if writeErr := WriteSessionMarker(marker); writeErr != nil {
 					slog.Warn("failed to write session marker in degraded mode", "error", writeErr)
@@ -1028,6 +1093,10 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 			PrimedAt:           time.Now(),
 			ParentPID:          proc.FindAgentAncestorPID(),
 		}
+		if isCursor && hookInput != nil {
+			marker.PrimedAt = time.Time{} // completed by the successful hook parent
+			marker.ParentPID = 0
+		}
 		if err := WriteSessionMarker(marker); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to write session marker: %v\n", err)
 		}
@@ -1258,6 +1327,11 @@ func repoSlugFromRemoteOrDir(projectRoot string) string {
 // Returns the session status for inclusion in prime output.
 // Errors are logged but not fatal - session recording is optional.
 func sessionWatchMode(agentType string) string {
+	if canonicalAgentType(agentType) == string(agentx.AgentTypeCursor) {
+		// Cursor's hook channels deliver model context, while daemon polling owns
+		// JSONL capture and final drains.
+		return "tail"
+	}
 	agent := GetAgent(agentType)
 	if agent == nil {
 		return "hook"
@@ -1292,7 +1366,31 @@ func recordingSessionIDForMarker(projectRoot, agentID, prior string) string {
 	return ""
 }
 
-func startSessionRecording(projectRoot, agentID, agentType, parentAgentID, continuedFromSessionID, agentSessionID string) *sessionStatus {
+func startSessionRecording(projectRoot, agentID, agentType, parentAgentID, continuedFromSessionID, agentSessionID string, cursorBoundaries ...*CursorSourceBoundary) *sessionStatus {
+	if canonicalAgentType(agentType) != "cursor" {
+		return startSessionRecordingUnlocked(projectRoot, agentID, agentType, parentAgentID, continuedFromSessionID, agentSessionID, cursorBoundaries...)
+	}
+	if agentSessionID == "" {
+		return startSessionRecordingUnlocked(projectRoot, agentID, agentType, parentAgentID, continuedFromSessionID, agentSessionID, cursorBoundaries...)
+	}
+	var status *sessionStatus
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err := fileutil.WithFileLock(ctx, markerPath(agentSessionID)+".recording-start", func() error {
+		status = startSessionRecordingUnlocked(projectRoot, agentID, agentType, parentAgentID, continuedFromSessionID, agentSessionID, cursorBoundaries...)
+		return nil
+	})
+	if err != nil {
+		slog.Debug("Cursor recording startup deferred", "error", err)
+	}
+	return status
+}
+
+func startSessionRecordingUnlocked(projectRoot, agentID, agentType, parentAgentID, continuedFromSessionID, agentSessionID string, cursorBoundaries ...*CursorSourceBoundary) *sessionStatus {
+	var cursorBoundary *CursorSourceBoundary
+	if len(cursorBoundaries) > 0 {
+		cursorBoundary = cursorBoundaries[0]
+	}
 	// resolve session mode from the config hierarchy. Sessions record into
 	// the project ledger; Knowledge Bubbles play no part (ox ADR-028).
 	resolved := config.ResolveSessionRecording(projectRoot)
@@ -1302,6 +1400,14 @@ func startSessionRecording(projectRoot, agentID, agentType, parentAgentID, conti
 	// "disabled" mode means no recording at all
 	if !resolved.IsAuto() {
 		return nil
+	}
+	if canonicalAgentType(agentType) == string(agentx.AgentTypeCursor) && agentSessionID == "" {
+		return &sessionStatus{
+			Recording:        false,
+			Mode:             resolved.Mode,
+			Source:           string(resolved.Source),
+			UserNotification: "[ox] Cursor recording needs a native conversation identity. Run from the Cursor Agents Window hook.",
+		}
 	}
 
 	// check if ledger is provisioned and cloned (required for session storage)
@@ -1319,7 +1425,7 @@ func startSessionRecording(projectRoot, agentID, agentType, parentAgentID, conti
 	if session.HasExplicitStop(projectRoot, agentID) {
 		// A stop in progress or awaiting retry still owns the recording.
 		// Keep its signal until processing clears the state.
-		if state, err := session.LoadRecordingStateForAgent(projectRoot, agentID); err == nil && state == nil {
+		if state, err := session.LoadRecordingStateForAgent(projectRoot, agentID); agentType != "cursor" && err == nil && state == nil {
 			session.ConsumeExplicitStop(projectRoot, agentID)
 		}
 		return nil
@@ -1352,8 +1458,30 @@ func startSessionRecording(projectRoot, agentID, agentType, parentAgentID, conti
 
 	// check if already recording
 	if existing, err := session.LoadRecordingStateForAgent(projectRoot, agentID); err == nil && existing != nil {
+		if agentType == "cursor" && (existing.AgentSessionID != agentSessionID || existing.AdapterName != "cursor" || existing.StoppedAt != nil) {
+			return nil
+		}
 		if existing.WatchMode == "tail" && existing.SessionFile == "" {
-			if agentSessionID != "" && existing.AgentSessionID != agentSessionID {
+			if canonicalAgentType(agentType) == string(agentx.AgentTypeCursor) {
+				if existing.AgentSessionID != agentSessionID {
+					slog.Warn("Cursor recording identity conflict", "agent_id", agentID)
+					return &sessionStatus{Recording: true, Mode: existing.FilterMode, Source: string(resolved.Source)}
+				}
+				if cursorBoundary != nil && !cursorBoundary.SourcePending {
+					bound, bindErr := session.BindInitialRecordingSource(projectRoot, agentID, session.InitialSourceBinding{
+						AgentSessionID:     agentSessionID,
+						SessionFile:        cursorBoundary.SourcePath,
+						StartOffset:        cursorBoundary.Offset,
+						StartOffsetKnown:   true,
+						SourcePrefixSHA256: cursorBoundary.SourcePrefixSHA256,
+					})
+					if bindErr != nil {
+						slog.Warn("failed to bind Cursor source boundary", "agent_id", agentID, "error", bindErr)
+					} else {
+						existing = bound
+					}
+				}
+			} else if agentSessionID != "" && existing.AgentSessionID != agentSessionID {
 				if err := session.UpdateRecordingStateForAgent(projectRoot, agentID, func(s *session.RecordingState) {
 					s.AgentSessionID = agentSessionID
 				}); err != nil {
@@ -1369,6 +1497,10 @@ func startSessionRecording(projectRoot, agentID, agentType, parentAgentID, conti
 			Mode:      existing.FilterMode,
 			Source:    string(resolved.Source),
 		}
+	}
+	if agentType == "cursor" && cursorBoundary == nil {
+		return &sessionStatus{Recording: false, Mode: resolved.Mode, Source: string(resolved.Source),
+			UserNotification: "[ox] Cursor recording is waiting for the next prompt to establish its source boundary."}
 	}
 
 	// generate session file path
@@ -1386,6 +1518,9 @@ func startSessionRecording(projectRoot, agentID, agentType, parentAgentID, conti
 			parentPID = parsed
 		}
 	}
+	if agentType == "cursor" {
+		parentPID = 0 // a transient hook shell is not the native conversation owner
+	}
 
 	watchMode := sessionWatchMode(agentType)
 
@@ -1402,6 +1537,25 @@ func startSessionRecording(projectRoot, agentID, agentType, parentAgentID, conti
 		WatchMode:              watchMode,
 		ContinuedFromSessionID: continuedFromSessionID,
 	}
+	if canonicalAgentType(agentType) == string(agentx.AgentTypeCursor) && cursorBoundary != nil {
+		opts.StartOffset = cursorBoundary.Offset
+		opts.StartOffsetKnown = true
+		opts.SourcePrefixSHA256 = cursorBoundary.SourcePrefixSHA256
+		if !cursorBoundary.SourcePending {
+			opts.SessionFile = cursorBoundary.SourcePath
+		}
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil
+		}
+		candidate := &session.RecordingState{AdapterName: "cursor", AgentSessionID: agentSessionID, WorkspacePath: projectRoot,
+			SessionFile: opts.SessionFile, StartOffset: opts.StartOffset, SourceOffset: opts.StartOffset,
+			StartOffsetKnown: true, SourcePrefixSHA256: opts.SourcePrefixSHA256}
+		if expected, err := session.ValidateCursorRecordingSource(home, candidate); err != nil || expected != cursorBoundary.SourcePath {
+			slog.Warn("Cursor startup source refused", "error", err)
+			return nil
+		}
+	}
 
 	// propagate parent agent info so the recording state knows this is a subagent
 	if parentAgentID != "" {
@@ -1417,6 +1571,28 @@ func startSessionRecording(projectRoot, agentID, agentType, parentAgentID, conti
 	// marker can outlive the StartRecording call; the marker itself is only
 	// cleared by explicit resume/stop/abort or daemon expiration.
 	inheritedPauseSeq, inheritedPauseAt, inheritedPause := session.PeekExplicitPause(projectRoot, agentID)
+	if agentType == "cursor" {
+		opts.BeforePublish = func(state *session.RecordingState) error {
+			if cursorBoundary != nil {
+				if err := session.InitializeCursorTurnBoundary(state, cursorBoundary.SourcePath, cursorBoundary.GenerationID); err != nil {
+					return err
+				}
+			}
+			if inheritedPause {
+				now := time.Now().UTC()
+				state.SuspendedAt = &now
+				state.InheritedPause = true
+				state.PauseCount++
+				reason := "inherited"
+				if clearInfo := parseClearNoticeEnv(); clearInfo != nil {
+					state.InheritedFromSession = clearInfo.SessionName
+					reason = "inherited-from-clear"
+				}
+				state.Lifecycle = append(state.Lifecycle, session.LifecycleEvent{Action: session.LifecycleActionPause, At: now, Seq: 0, Reason: reason})
+			}
+			return writeRawHeader(projectRoot, state)
+		}
+	}
 
 	state, err := session.StartRecording(projectRoot, opts)
 	if err != nil {
@@ -1446,7 +1622,7 @@ func startSessionRecording(projectRoot, agentID, agentType, parentAgentID, conti
 	// Done before writeRawHeader so the header reflects the suspended lifecycle
 	// from entry 0. The marker survives — it is cleared only by explicit
 	// resume/stop/abort or daemon expiration.
-	if inheritedPause {
+	if inheritedPause && agentType != "cursor" {
 		clearInfo := parseClearNoticeEnv()
 		priorSession := ""
 		// "inherited-from-clear" is only accurate when we actually saw a /clear
@@ -1484,8 +1660,10 @@ func startSessionRecording(projectRoot, agentID, agentType, parentAgentID, conti
 	}
 
 	// write raw.jsonl header immediately so incremental hooks can append entries
-	if writeErr := writeRawHeader(projectRoot, state); writeErr != nil {
-		slog.Warn("failed to write raw.jsonl header at auto-start", "error", writeErr)
+	if agentType != "cursor" {
+		if writeErr := writeRawHeader(projectRoot, state); writeErr != nil {
+			slog.Warn("failed to write raw.jsonl header at auto-start", "error", writeErr)
+		}
 	}
 
 	// register-at-start so /c/<session_id> resolves from t=0 (fire-and-forget)
@@ -1527,7 +1705,16 @@ func startSessionRecording(projectRoot, agentID, agentType, parentAgentID, conti
 func sendSessionWatchStart(state *session.RecordingState, projectRoot string) {
 	// try to discover the agent's native session file
 	sessionFile := state.SessionFile
-	if sessionFile == "" {
+	if state.AdapterName == "cursor" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return
+		}
+		sessionFile, err = session.ValidateCursorRecordingSource(home, state)
+		if err != nil {
+			return
+		}
+	} else if sessionFile == "" {
 		adapter, err := adapters.GetAdapter(state.AdapterName)
 		if err != nil {
 			return

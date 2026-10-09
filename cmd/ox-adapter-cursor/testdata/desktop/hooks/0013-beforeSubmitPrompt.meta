@@ -1,0 +1,16 @@
+sequence=0013
+event=beforeSubmitPrompt
+started_epoch_s=1789411339.079882
+pid=22940
+ppid=22555
+parent_executable=Cursor Helper (Plugin): extension-host fixture-control-project [1-2]
+cwd=<WORKSPACE>/.context/cursor-adapter/evidence/fixture-control-project
+cursor_version=3.20.21
+cursor_project_dir=<WORKSPACE>/.context/cursor-adapter/evidence/fixture-control-project
+probe_session_marker=
+transcript_path=<HOME>/.cursor/projects/<CONTROL_PROJECT_KEY>/agent-transcripts/conversation-1/conversation-1.jsonl
+transcript_inode=303845246
+transcript_size=1707
+transcript_mtime_epoch=1789410942
+transcript_sha256=f1fd7c4f71a2b08f8d892907e27acdedeec50b8f0cd8f05c0c4f4382d090d407
+finished_epoch_s=1789411339.143658

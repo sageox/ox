@@ -9,6 +9,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -45,6 +47,11 @@ var (
 )
 
 const recordingFile = ".recording.json"
+
+// writeRecordingStateAtomically is a seam for the state persistence failure
+// contract. It is deliberately kept beside the state writer rather than the
+// callers: a failed checkpoint must be observable by every capture path.
+var writeRecordingStateAtomically = fileutil.AtomicWriteJSON
 
 // LifecycleAction is the durable timeline action recorded in RecordingState.Lifecycle.
 // See ADR-019 (session entity lifecycle).
@@ -137,11 +144,24 @@ type RecordingState struct {
 	CommandRedactionVersion  int               `json:"command_redaction_version,omitempty"`
 	PendingCommandRedactions map[string]string `json:"pending_command_redactions,omitempty"`
 	StartOffset              int64             `json:"start_offset,omitempty"` // source file byte offset when recording started (entries before this are pre-session)
-	Origin                   string            `json:"origin,omitempty"`       // session origin: "human", "subagent", "agent" (from agentx.DetectOrigin)
-	CacheDir                 string            `json:"cache_dir,omitempty"`    // cache directory when recording was created (diagnostic breadcrumb)
+	// StartOffsetKnown distinguishes an intentional byte-zero boundary from
+	// older recordings whose zero offset was never bound to a source.
+	StartOffsetKnown bool `json:"start_offset_known,omitempty"`
+	// SourcePrefixSHA256 is the caller-validated hash of source bytes through
+	// SourceOffset. A known-zero pending source carries SHA-256 of empty bytes.
+	SourcePrefixSHA256 string `json:"source_prefix_sha256,omitempty"`
+	Origin             string `json:"origin,omitempty"`    // session origin: "human", "subagent", "agent" (from agentx.DetectOrigin)
+	CacheDir           string `json:"cache_dir,omitempty"` // cache directory when recording was created (diagnostic breadcrumb)
 
 	WatchMode string     `json:"watch_mode,omitempty"` // how entries are captured: "hook" (CLI-driven) or "tail" (daemon-driven)
 	StoppedAt *time.Time `json:"stopped_at,omitempty"` // set by ox session stop to signal daemon to finalize
+	// CursorFinalDrainPending keeps an ended native recording recoverable until
+	// its exported final turn is complete. It never permits automatic restart.
+	CursorFinalDrainPending bool `json:"cursor_final_drain_pending,omitempty"`
+	// Cursor prompt hooks can precede JSONL export. Count unique submissions
+	// against native terminal rows so an older terminal cannot finalize them.
+	CursorPromptGenerations []string `json:"cursor_prompt_generations,omitempty"`
+	CursorExpectedTurns     int      `json:"cursor_expected_turns,omitempty"`
 
 	// ADR-020 session pause/resume fields. Lifecycle is the durable timeline of
 	// session-entity transitions and is the source of truth for which raw.jsonl
@@ -398,7 +418,7 @@ func SaveRecordingState(projectRoot string, state *RecordingState) error {
 	statePath := recordingStatePath(state.SessionPath)
 	// Publish a complete snapshot on a new inode. Concurrent in-place writes
 	// can otherwise leave the tail of a longer JSON object after a shorter one.
-	if err := fileutil.AtomicWriteJSON(statePath, state, 0600); err != nil {
+	if err := writeRecordingStateAtomically(statePath, state, 0600); err != nil {
 		return fmt.Errorf("write recording state file=%s: %w", statePath, err)
 	}
 
@@ -746,8 +766,13 @@ func ClearRecordingState(projectRoot string) error {
 	// remove .recording.json from session folder
 	if state.SessionPath != "" {
 		statePath := recordingStatePath(state.SessionPath)
-		if err := os.Remove(statePath); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("remove recording state file=%s: %w", statePath, err)
+		if err := WithRecordingStateLock(context.Background(), state.SessionPath, func() error {
+			if err := os.Remove(statePath); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("remove recording state file=%s: %w", statePath, err)
+			}
+			return nil
+		}); err != nil {
+			return err
 		}
 
 		// clean up any stale .lock files left by crashed session log processes
@@ -1256,6 +1281,8 @@ func loadRecordingStatesFromDir(sessionsDir string) ([]*RecordingState, error) {
 
 // StartRecordingOptions contains options for starting a recording.
 type StartRecordingOptions struct {
+	// BeforePublish initializes adapter metadata before capture can discover the marker.
+	BeforePublish  func(*RecordingState) error
 	AgentID        string
 	AgentSessionID string
 	// AgentSessionSource is the agent's reason for the SessionStart that
@@ -1282,7 +1309,11 @@ type StartRecordingOptions struct {
 	ParentPID   int    // parent agent process ID for liveness detection
 	Origin      string // session origin: "human", "subagent", "agent" (from agentx.DetectOrigin)
 	StartOffset int64  // byte offset of SessionFile at recording start; entries before this are pre-session
-	WatchMode   string // "hook" or "tail" — how entries are captured
+	// StartOffsetKnown distinguishes an intentional zero start from legacy,
+	// unbound state. SourcePrefixSHA256 is calculated by the source validator.
+	StartOffsetKnown   bool
+	SourcePrefixSHA256 string
+	WatchMode          string // "hook" or "tail" — how entries are captured
 
 	// ContinuedFromSessionID is the prior durable recording identity when a
 	// native coding-agent session is reopened after its previous recording was
@@ -1295,6 +1326,9 @@ type StartRecordingOptions struct {
 func StartRecording(projectRoot string, opts StartRecordingOptions) (*RecordingState, error) {
 	if projectRoot == "" {
 		return nil, fmt.Errorf("%w: project root", ErrEmptyPath)
+	}
+	if opts.StartOffsetKnown && opts.StartOffset < 0 {
+		return nil, fmt.Errorf("known start offset must not be negative")
 	}
 
 	// A team token with no AI coworker attached would record the session under
@@ -1443,13 +1477,21 @@ func StartRecording(projectRoot string, opts StartRecordingOptions) (*RecordingS
 		ParentPID:              opts.ParentPID,
 		Origin:                 origin,
 		CacheDir:               paths.CacheDir(),
+		SourceOffset:           opts.StartOffset,
 		StartOffset:            opts.StartOffset,
+		StartOffsetKnown:       opts.StartOffsetKnown,
+		SourcePrefixSHA256:     opts.SourcePrefixSHA256,
 		WatchMode:              opts.WatchMode,
 	}
 
 	// always capture parent PID for liveness detection and ghost cleanup
-	if state.ParentPID <= 0 {
+	if state.ParentPID <= 0 && state.AdapterName != "cursor" {
 		state.ParentPID = os.Getppid()
+	}
+	if opts.BeforePublish != nil {
+		if err := opts.BeforePublish(state); err != nil {
+			return nil, fmt.Errorf("initialize recording before publication: %w", err)
+		}
 	}
 
 	// the native id that started this recording is its first observed
@@ -1487,6 +1529,102 @@ func UpdateRecordingStateAt(sessionPath, sessionID string, updateFn func(*Record
 	})
 }
 
+// InitialSourceBinding is the validated native source boundary selected before
+// capture begins. It is deliberately small: source authorization and prefix
+// hashing belong to the adapter-specific caller, while this helper makes the
+// recording-state transition atomic and idempotent.
+//
+// A known zero boundary is valid. SessionFile must name an existing regular
+// source when binding; a pending source is represented by StartRecording with
+// an empty SessionFile and is bound only once it appears.
+type InitialSourceBinding struct {
+	AgentSessionID     string
+	SessionFile        string
+	StartOffset        int64
+	StartOffsetKnown   bool
+	SourcePrefixSHA256 string
+}
+
+// BindInitialRecordingSource atomically associates an active, as-yet-uncaptured
+// recording with its validated native source. Repeating the identical binding
+// is harmless; a different identity, path, or boundary is refused so an
+// overlapping hook cannot replace the pre-prompt decision with a later EOF.
+func BindInitialRecordingSource(projectRoot, agentID string, binding InitialSourceBinding) (*RecordingState, error) {
+	if agentID == "" {
+		return nil, fmt.Errorf("%w: agent ID", ErrEmptyPath)
+	}
+	if binding.AgentSessionID == "" {
+		return nil, fmt.Errorf("native agent session ID is required")
+	}
+	if binding.SessionFile == "" {
+		return nil, fmt.Errorf("source session file is required")
+	}
+	if !binding.StartOffsetKnown {
+		return nil, fmt.Errorf("source start offset must be known")
+	}
+	if binding.StartOffset < 0 {
+		return nil, fmt.Errorf("source start offset must not be negative")
+	}
+	info, err := os.Stat(binding.SessionFile)
+	if err != nil {
+		return nil, fmt.Errorf("source session file not accessible: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("source session file is not a regular file: %s", binding.SessionFile)
+	}
+
+	state, err := LoadRecordingStateForAgent(projectRoot, agentID)
+	if err != nil {
+		return nil, fmt.Errorf("load recording state: %w", err)
+	}
+	if state == nil {
+		return nil, ErrNotRecording
+	}
+
+	statePath := recordingStatePath(state.SessionPath)
+	var bindingErr error
+	if err := updateRecordingStateAtPath(projectRoot, statePath, func(current *RecordingState) {
+		if current.AgentSessionID == "" || current.AgentSessionID != binding.AgentSessionID {
+			bindingErr = fmt.Errorf("native agent session identity conflict")
+			return
+		}
+		if current.SessionFile != "" {
+			if current.SessionFile != binding.SessionFile ||
+				current.StartOffset != binding.StartOffset ||
+				!current.StartOffsetKnown ||
+				current.SourcePrefixSHA256 != binding.SourcePrefixSHA256 {
+				bindingErr = fmt.Errorf("source boundary conflict")
+			}
+			return
+		}
+		if current.EntryCount != 0 || current.SourceOffset != 0 {
+			bindingErr = fmt.Errorf("cannot bind source after capture has begun")
+			return
+		}
+		// A pending known-zero state is already a durable boundary. A later
+		// source appearance may attach its path at that exact boundary, but
+		// must never replace it with a later EOF. Older states without an
+		// explicit boundary retain the legacy initialization path below.
+		if current.StartOffsetKnown &&
+			(current.StartOffset != binding.StartOffset ||
+				current.SourcePrefixSHA256 != binding.SourcePrefixSHA256) {
+			bindingErr = fmt.Errorf("source boundary conflict")
+			return
+		}
+		current.SessionFile = binding.SessionFile
+		current.StartOffset = binding.StartOffset
+		current.StartOffsetKnown = true
+		current.SourcePrefixSHA256 = binding.SourcePrefixSHA256
+		current.SourceOffset = binding.StartOffset
+	}); err != nil {
+		return nil, err
+	}
+	if bindingErr != nil {
+		return nil, bindingErr
+	}
+	return LoadRecordingStateForAgent(projectRoot, agentID)
+}
+
 // UpdateRecordingStateForAgent updates recording state for a specific agent.
 // Safe for concurrent use: only touches this agent's .recording.json.
 func UpdateRecordingStateForAgent(projectRoot, agentID string, updateFn func(*RecordingState)) error {
@@ -1497,8 +1635,7 @@ func UpdateRecordingStateForAgent(projectRoot, agentID string, updateFn func(*Re
 	if state == nil {
 		return ErrNotRecording
 	}
-	return MutateRecordingStateFile(recordingStatePath(state.SessionPath), func(current *RecordingState) error { updateFn(current); return nil })
-
+	return updateRecordingStateAtPath(projectRoot, recordingStatePath(state.SessionPath), updateFn)
 }
 
 // MarkSourceRejected quarantines an ambiguous recording without deleting the
@@ -1532,10 +1669,99 @@ func UpdateRecordingState(projectRoot string, updateFn func(*RecordingState)) er
 		return ErrNotRecording
 	}
 
-	return MutateRecordingStateFile(recordingStatePath(state.SessionPath), func(current *RecordingState) error {
-		updateFn(current)
+	return updateRecordingStateAtPath(projectRoot, recordingStatePath(state.SessionPath), updateFn)
+}
+
+// CheckpointRecordingState commits capture progress without replacing any
+// concurrent lifecycle state. The source offset is acknowledged only after the
+// caller has durably written the corresponding redacted raw entries.
+//
+// Callers must stop capture when this returns an error. Advancing an in-memory
+// cursor after a failed checkpoint would make a restart skip unacknowledged
+// source bytes.
+func CheckpointRecordingState(projectRoot, sessionPath string, sourceOffset int64, entryDelta int) error {
+	if sessionPath == "" {
+		return fmt.Errorf("%w: session path", ErrEmptyPath)
+	}
+	if sourceOffset < 0 {
+		return fmt.Errorf("source offset must not be negative")
+	}
+	if entryDelta < 0 {
+		return fmt.Errorf("entry delta must not be negative")
+	}
+	return updateRecordingStateAtPath(projectRoot, recordingStatePath(sessionPath), func(state *RecordingState) {
+		// A stale watcher must never move a good checkpoint backwards. A
+		// no-op offset is valid for adapters whose first complete entry ends at
+		// byte zero only when no entries are being acknowledged.
+		if sourceOffset <= state.SourceOffset {
+			return
+		}
+		state.SourceOffset = sourceOffset
+		state.EntryCount += entryDelta
+	})
+}
+
+// updateRecordingStateAtPath serializes every cooperative state read-modify-
+// write. Lifecycle commands and capture checkpoints use the same lock so a
+// checkpoint cannot write an old struct over a pause, resume, or end marker.
+func updateRecordingStateAtPath(projectRoot, statePath string, updateFn func(*RecordingState)) error {
+	if statePath == "" {
+		return fmt.Errorf("%w: recording state path", ErrEmptyPath)
+	}
+	err := MutateRecordingStateFile(statePath, func(state *RecordingState) error {
+		updateFn(state)
 		return nil
 	})
+	if errors.Is(err, os.ErrNotExist) {
+		return ErrNotRecording
+	}
+	return err
+}
+
+// validateCursorLifecycleChange runs under the shared marker lock, including
+// identity-bound updates from newer host paths.
+func validateCursorLifecycleChange(before, state *RecordingState) error {
+	if state.AdapterName != "cursor" || (reflect.DeepEqual(before.Lifecycle, state.Lifecycle) && reflect.DeepEqual(before.SuspendedAt, state.SuspendedAt)) {
+		return nil
+	}
+	if state.StoppedAt != nil {
+		return ErrNotRecording
+	}
+	if _, finalized, err := cursorCaptureHeader(filepath.Join(state.SessionPath, "raw.jsonl")); err != nil {
+		return err
+	} else if finalized {
+		return ErrNotRecording
+	}
+	// An unacknowledged raw suffix has no safe sequence for a pause/resume.
+	raw, err := os.ReadFile(filepath.Join(state.SessionPath, "raw.jsonl"))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("validate Cursor lifecycle boundary: %w", err)
+	}
+	entries, complete, err := completeRawRecords(raw)
+	if err != nil || complete != len(raw) || len(entries) != state.EntryCount {
+		return fmt.Errorf("checkpoint-pending: Cursor capture checkpoint is pending; retry the recording control after capture recovers")
+	}
+	if before.SuspendedAt != nil && state.SuspendedAt == nil {
+		// Generic marker writers must also fail closed: durable raw entries
+		// alone do not prove that all paused native rows have been captured.
+		snapshot, err := readCursorSourceSnapshot(state.SessionFile)
+		if err != nil || state.SourceOffset != int64(len(snapshot.data)) ||
+			cursorSourceHash(snapshot.data) != state.SourcePrefixSHA256 || !cursorSourceReady(state, snapshot.data) {
+			return ErrCursorFinalDrainPending
+		}
+	}
+	return nil
+}
+
+// WithRecordingStateLock serializes a recording marker transaction with
+// lifecycle writers. Capture recovery holds it from marker read through raw
+// replacement, so a pause/end update cannot land between a byte comparison and
+// rename and then be silently reverted by stale recovery work.
+func WithRecordingStateLock(ctx context.Context, sessionPath string, fn func() error) error {
+	if sessionPath == "" {
+		return fmt.Errorf("%w: session path", ErrEmptyPath)
+	}
+	return fileutil.WithFileLock(ctx, recordingStatePath(sessionPath), fn)
 }
 
 // StopRecording ends an active recording session for a specific agent.
@@ -1604,9 +1830,14 @@ func MutateRecordingStateFile(path string, update func(*RecordingState) error) e
 		if err != nil {
 			return err
 		}
+		before := *state
+		before.Lifecycle = slices.Clone(state.Lifecycle)
 		if err = update(state); err != nil {
 			return err
 		}
-		return fileutil.AtomicWriteJSON(path, state, 0600)
+		if err = validateCursorLifecycleChange(&before, state); err != nil {
+			return err
+		}
+		return writeRecordingStateAtomically(path, state, 0600)
 	})
 }

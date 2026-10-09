@@ -1,0 +1,26 @@
+{
+  "conversation_id": "conversation-2",
+  "generation_id": "",
+  "model": "cursor-grok-4.6-medium",
+  "model_id": "grok-4.6",
+  "model_params": [
+    {
+      "id": "effort",
+      "value": "medium"
+    },
+    {
+      "id": "fast",
+      "value": "false"
+    }
+  ],
+  "is_background_agent": false,
+  "composer_mode": "agent",
+  "session_id": "conversation-2",
+  "hook_event_name": "sessionStart",
+  "cursor_version": "3.20.21",
+  "workspace_roots": [
+    "<WORKSPACE>/.context/cursor-adapter/evidence/fixture-control-project"
+  ],
+  "user_email": "<USER_EMAIL>",
+  "transcript_path": null
+}
