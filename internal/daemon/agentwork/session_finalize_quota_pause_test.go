@@ -55,6 +55,9 @@ func TestParseQuotaReset(t *testing.T) {
 			time.Date(2026, 10, 8, 19, 30, 0, 0, la), true},
 		{"date already past rolls to next year", "resets Jan 2 at 12am (America/Los_Angeles)",
 			time.Date(2027, 1, 2, 0, 0, 0, 0, la), true},
+		{"dated reset that just passed is unknown", "resets Oct 8 at 12pm (America/Los_Angeles)", time.Time{}, false},
+		{"epoch suffix", "Claude AI usage limit reached|1791500000",
+			time.Unix(1791500000, 0), true},
 		{"twelve pm is noon", "resets Oct 9 at 12pm (America/Los_Angeles)",
 			time.Date(2026, 10, 9, 12, 0, 0, 0, la), true},
 		{"unknown zone", "resets 5am (Mars/Olympus)", time.Time{}, false},
@@ -82,6 +85,7 @@ func TestQuotaPauseUntil(t *testing.T) {
 	}{
 		{"parsed reset", "resets 11pm (UTC)", time.Date(2026, 10, 8, 23, 0, 0, 0, time.UTC)},
 		{"unparsable falls back to one hour", "You've hit your limit", now.Add(time.Hour)},
+		{"just-passed dated reset falls back to one hour", "resets Oct 8 at 11am (UTC)", now.Add(time.Hour)},
 		{"far reset capped at seven days", "resets Oct 30 at 7am (UTC)", now.Add(7 * 24 * time.Hour)},
 	}
 	for _, tt := range tests {
@@ -116,8 +120,10 @@ func TestQuotaExhaustionPausesSummarizationForAllSessions(t *testing.T) {
 	quotaExit := &RunResult{ExitCode: 1, Output: "You've hit your weekly limit · resets 11pm (UTC)"}
 	require.NoError(t, handler.ProcessResult(first, quotaExit))
 
+	var skippedItem *WorkItem
 	for _, name := range []string{"2026-05-04T15-00-testuser-OxQuotaB", "2026-05-04T15-00-testuser-OxQuotaC"} {
 		second := itemFor(name)
+		skippedItem = second
 		req, err = handler.BuildPrompt(second)
 		require.NoError(t, err)
 		require.True(t, req.SkipLLM, "paused: the agent must not be spawned for %s", name)
@@ -168,5 +174,9 @@ func TestQuotaExhaustionPausesSummarizationForAllSessions(t *testing.T) {
 		require.NoError(t, err)
 		require.False(t, req.SkipLLM, "pause over: the agent must run again")
 	}
+	// a session skipped during the pause is picked up again on the next cycle
+	req, err = handler.BuildPrompt(skippedItem)
+	require.NoError(t, err)
+	require.False(t, req.SkipLLM, "a session skipped during the pause must be summarized once it ends")
 	assert.Equal(t, 1, strings.Count(logs.String(), "summarization resumed: quota pause ended"))
 }

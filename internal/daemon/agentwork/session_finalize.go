@@ -1109,6 +1109,8 @@ func (h *SessionFinalizeHandler) BuildPrompt(item *WorkItem) (RunRequest, error)
 		return RunRequest{}, err
 	}
 
+	payload.llmPaused = false
+
 	// Held for ownership review: do not spend an LLM run on it. ProcessResult
 	// drops the item.
 	if sessionHeldForReview(payload.SessionDir) {

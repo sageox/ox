@@ -33,6 +33,15 @@ var quotaMarkers = []string{
 var quotaResetPattern = regexp.MustCompile(
 	`(?i)resets\s+(?:([a-z]{3})[a-z]*\s+(\d{1,2})\s+at\s+)?(\d{1,2})(?::(\d{2}))?\s*([ap]m)\s*\(([^)]+)\)`)
 
+// quotaResetEpochPattern matches the "usage limit reached|1760000000" form,
+// whose suffix is the reset as epoch seconds.
+var quotaResetEpochPattern = regexp.MustCompile(`\|(\d{9,11})\b`)
+
+// staleDatedResetWindow separates a dated reset that merely passed (a race with
+// handling time) from a December-to-January rollover: a month-day this far
+// behind now belongs to next year, anything closer is treated as unknown.
+const staleDatedResetWindow = 180 * 24 * time.Hour
+
 // classifyAgentFailure names why a non-zero agent exit happened so the log and
 // the pause logic agree on one reason.
 func classifyAgentFailure(output string) string {
@@ -48,6 +57,11 @@ func classifyAgentFailure(output string) string {
 // parseQuotaReset resolves the reset time in the message to the next future
 // occurrence in the zone the message names.
 func parseQuotaReset(output string, now time.Time) (time.Time, bool) {
+	if e := quotaResetEpochPattern.FindStringSubmatch(output); e != nil {
+		if secs, err := strconv.ParseInt(e[1], 10, 64); err == nil {
+			return time.Unix(secs, 0), true
+		}
+	}
 	m := quotaResetPattern.FindStringSubmatch(output)
 	if m == nil {
 		return time.Time{}, false
@@ -89,6 +103,11 @@ func parseQuotaReset(output string, now time.Time) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	if !reset.After(now) {
+		// a reset that passed moments ago is not next year's: report unknown so
+		// the caller uses the short fallback instead of a week-long pause
+		if now.Sub(reset) < staleDatedResetWindow {
+			return time.Time{}, false
+		}
 		reset = time.Date(local.Year()+1, month, day, hour, minute, 0, 0, loc)
 	}
 	return reset, true
