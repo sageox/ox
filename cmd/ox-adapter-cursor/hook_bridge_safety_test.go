@@ -73,6 +73,9 @@ func TestCursorBridgeBoundsPayloadAfterNativeNormalization(t *testing.T) {
 }
 
 func TestCursorBridgeDiscardsOutputFromFailedChild(t *testing.T) {
+	if testing.Short() {
+		t.Skip("exercises subprocess or multi-step recording lifecycle")
+	}
 	if runtime.GOOS == "windows" {
 		t.Skip("requires a POSIX shell executable")
 	}

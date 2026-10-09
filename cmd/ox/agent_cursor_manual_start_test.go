@@ -70,6 +70,9 @@ func writeCursorManualMarker(t *testing.T, marker *SessionMarker) {
 // Explicit start uses the current export EOF, even when prime saved an older
 // prompt boundary. Stop must preserve that choice without replaying old turns.
 func TestCursorManualStartStopUsesNativeIdentityAndExplicitBoundary(t *testing.T) {
+	if testing.Short() {
+		t.Skip("exercises subprocess or multi-step recording lifecycle")
+	}
 	for _, history := range []bool{false, true} {
 		t.Run(map[bool]string{false: "empty export", true: "previous turns"}[history], func(t *testing.T) {
 			f, inst := newCursorManualStartFixture(t)
@@ -135,6 +138,9 @@ func TestCursorManualStartStopUsesNativeIdentityAndExplicitBoundary(t *testing.T
 }
 
 func TestCursorManualStartRejectsUnresolvedIdentity(t *testing.T) {
+	if testing.Short() {
+		t.Skip("exercises subprocess or multi-step recording lifecycle")
+	}
 	for _, scenario := range []string{"no markers", "empty agent ID", "unprimed", "other coworker", "missing native ID", "ambiguous chats"} {
 		t.Run(scenario, func(t *testing.T) {
 			f, inst := newCursorManualStartFixture(t)
@@ -199,6 +205,9 @@ func TestCursorManualStartIgnoresUnrelatedMarkerFiles(t *testing.T) {
 }
 
 func TestCursorManualStartRefusesUnavailableSource(t *testing.T) {
+	if testing.Short() {
+		t.Skip("exercises subprocess or multi-step recording lifecycle")
+	}
 	for _, tc := range []struct{ name, want string }{
 		{"pending export", "source-not-found"},
 		{"incomplete export", "boundary-unavailable"},
@@ -240,6 +249,9 @@ func TestCursorManualStartRefusesUnavailableSource(t *testing.T) {
 }
 
 func TestCursorManualStartRejectsMismatchedMarkerBoundary(t *testing.T) {
+	if testing.Short() {
+		t.Skip("exercises subprocess or multi-step recording lifecycle")
+	}
 	for _, tc := range []struct{ name, want string }{
 		{"another workspace", "workspace-mismatch"},
 		{"missing boundary", "boundary-unavailable"},

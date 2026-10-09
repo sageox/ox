@@ -19,6 +19,9 @@ import (
 // The production wrapper still refuses to re-execute a test binary. These
 // children exercise the real exec, bounded buffering, delivery and marker commit.
 func TestCursorPrimeChildCommitsOnlyDeliveredContext(t *testing.T) {
+	if testing.Short() {
+		t.Skip("exercises subprocess or multi-step recording lifecycle")
+	}
 	if runtime.GOOS == "windows" {
 		t.Skip("isolated child fixture uses a POSIX shell")
 	}
@@ -155,6 +158,9 @@ func TestCursorHostPrimeFailureAndTestBinaryGuardRemainRetryable(t *testing.T) {
 type cursorHostNonIncremental struct{ adapters.Adapter }
 
 func TestCursorHostCaptureFailuresPreserveCheckpointAndReportStatus(t *testing.T) {
+	if testing.Short() {
+		t.Skip("exercises subprocess or multi-step recording lifecycle")
+	}
 	for _, tc := range []struct{ name, status string }{
 		{"pending source", "source-pending"}, {"changed source", "source-changed"},
 		{"stopped", "stopped"}, {"missing adapter", "capture-deferred"},
