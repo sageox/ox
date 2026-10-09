@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/nativeimport"
 	"github.com/stretchr/testify/require"
 )
@@ -25,6 +27,120 @@ func importTUITestCandidates() []*importCandidate {
 func importTUIKey(m *importReviewModel, code rune) tea.Cmd {
 	_, command := m.Update(tea.KeyPressMsg{Code: code})
 	return command
+}
+
+func importTUIProgramOptions(input io.Reader) importTerminalOptions {
+	return importTerminalOptions{program: []tea.ProgramOption{
+		tea.WithInput(input), tea.WithOutput(io.Discard), tea.WithoutRenderer(),
+		tea.WithoutSignalHandler(), tea.WithEnvironment([]string{"TERM=dumb", "NO_COLOR=1"}),
+	}}
+}
+
+// Run the actual input decoder, event loop and program cleanup. A cleared
+// selection must stay empty, and a skipped row must never reach the handoff.
+func TestImportTerminalProgramSelectionAndCancel(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		input    string
+		ids      []string
+		canceled bool
+	}{
+		{name: "initial exact selection", input: "\r", ids: []string{"first-session"}},
+		{name: "narrow by keyboard", input: "x\x1b[B \r", ids: []string{"second-session"}},
+		{name: "select all excludes skipped", input: "a\r", ids: []string{"first-session", "second-session"}},
+		{name: "clear remains empty", input: "x\r", ids: []string{}},
+		{name: "cancel", input: "q", ids: []string{"first-session"}, canceled: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			result, err := runImportTerminal(ctx, importDestination{}, importTUITestCandidates(), nil, importTUIProgramOptions(strings.NewReader(tc.input)))
+			require.NoError(t, err)
+			require.Equal(t, tc.ids, result.IDs)
+			require.Equal(t, tc.canceled, result.Canceled)
+		})
+	}
+}
+
+// Browser launching happens only after Bubble Tea has returned. Preserve the
+// selected IDs and original context, and propagate the browser's result/error.
+func TestImportTerminalProgramBrowserHandoff(t *testing.T) {
+	for _, browserFails := range []bool{false, true} {
+		t.Run(fmt.Sprintf("browser failure %t", browserFails), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			dest := importDestination{Team: "Math Blitz", RepoID: "repo_math_blitz", Visibility: "private"}
+			cands := importTUITestCandidates()
+			load := func(context.Context, string) (*importContentPreview, error) { return nil, nil }
+			options := importTUIProgramOptions(strings.NewReader("x\x1b[B b"))
+			launches := 0
+			launchErr := errors.New("browser could not open")
+			options.browser = func(browserCtx context.Context, browserDest importDestination, browserCands []*importCandidate, browserLoad importPreviewLoader) (importReviewResult, error) {
+				launches++
+				require.Same(t, ctx, browserCtx, "canceled preview context must not be passed to the browser")
+				require.NoError(t, browserCtx.Err())
+				require.Equal(t, dest, browserDest)
+				require.Equal(t, cands, browserCands)
+				require.Len(t, selectedCandidates(browserCands), 1)
+				require.Equal(t, "second-session", selectedCandidates(browserCands)[0].Session.NativeID)
+				require.NotNil(t, browserLoad)
+				if browserFails {
+					return importReviewResult{}, launchErr
+				}
+				return importReviewResult{IDs: []string{"first-session"}}, nil
+			}
+			result, err := runImportTerminal(ctx, dest, cands, load, options)
+			require.Equal(t, 1, launches)
+			if browserFails {
+				require.ErrorIs(t, err, launchErr)
+				require.Empty(t, result.IDs)
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, []string{"first-session"}, result.IDs, "browser choices must become the final review result")
+			}
+		})
+	}
+}
+
+// Cancel while a real preview command is running. The program and its reader
+// must stop without inventing approval or trying to launch the browser.
+func TestImportTerminalProgramContextCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started := make(chan context.Context, 2)
+	load := func(readCtx context.Context, _ string) (*importContentPreview, error) {
+		started <- readCtx
+		<-readCtx.Done()
+		return nil, readCtx.Err()
+	}
+	options := importTUIProgramOptions(nil)
+	options.browser = func(context.Context, importDestination, []*importCandidate, importPreviewLoader) (importReviewResult, error) {
+		return importReviewResult{}, errors.New("unexpected browser launch")
+	}
+	type outcome struct {
+		result importReviewResult
+		err    error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		result, err := runImportTerminal(ctx, importDestination{}, importTUITestCandidates(), load, options)
+		done <- outcome{result: result, err: err}
+	}()
+	select {
+	case readCtx := <-started:
+		require.NoError(t, readCtx.Err())
+	case <-time.After(3 * time.Second):
+		t.Fatal("preview reader did not start")
+	}
+	cancel()
+	select {
+	case got := <-done:
+		require.ErrorIs(t, got.err, context.Canceled)
+		require.ErrorIs(t, got.err, tea.ErrProgramKilled)
+		require.Empty(t, got.result.IDs)
+	case <-time.After(3 * time.Second):
+		t.Fatal("terminal review did not stop after context cancellation")
+	}
 }
 
 // A filtered invocation may start with only one ready row selected. Keyboard
@@ -136,12 +252,13 @@ func TestImportTerminalUnavailablePreview(t *testing.T) {
 
 func TestImportTerminalNarrowViewAndSafeNativeText(t *testing.T) {
 	m := newImportReviewModel(context.Background(), importDestination{Team: "test", Visibility: "private"}, importTUITestCandidates(), nil)
-	m.previews["first-session"] = &importContentPreview{
+	m.rememberPreview("first-session", &importContentPreview{
 		NativeID:       "first-session",
-		OpeningRequest: "Build 界界 game\x1b[2J\x1b]0;spoofed-title\x07\u202eevil\u2069\r\x00",
+		OpeningRequest: "Build 界界 game\x1b[2J\x1b]0;spoofed-title\x07\u202eevil\u2069\r\x00\n\tPreserve a second line.",
 		Prompts:        []importPromptAnchor{{Content: "Preserve unicode 界 and emoji 🎮"}},
 		LastReply:      strings.Repeat("A long result containing unicode 界. ", 80),
-	}
+	})
+	require.Contains(t, strings.Join(m.detailLines(120), "\n"), "\n Preserve a second line.", "readable multiline formatting must survive control stripping")
 	for _, size := range []tea.WindowSizeMsg{{Width: 120, Height: 30}, {Width: 43, Height: 24}, {Width: 12, Height: 8}, {Width: 1, Height: 1}} {
 		m.Update(size)
 		view := m.View()
@@ -162,8 +279,74 @@ func TestImportTerminalNarrowViewAndSafeNativeText(t *testing.T) {
 	require.Greater(t, m.scroll, before)
 	importTUIKey(m, tea.KeyEnd)
 	require.Contains(t, ansi.Strip(m.detailView()), "Excerpts help you choose")
+	before = m.scroll
+	importTUIKey(m, tea.KeyPgUp)
+	require.Less(t, m.scroll, before)
 	importTUIKey(m, tea.KeyHome)
 	require.Zero(t, m.scroll)
+}
+
+// Visiting many sessions must not retain their tool output or long messages.
+// Eviction keeps the opening-request label and does not alter selection.
+func TestImportTerminalExcerptCacheIsBoundedAndReloadsOnFocus(t *testing.T) {
+	cands := importTUITestCandidates()
+	for i := 0; i < 12; i++ {
+		cands = append(cands, &importCandidate{Session: nativeimport.Session{NativeID: fmt.Sprintf("extra-%d", i)}, State: stateReady})
+	}
+	m := newImportReviewModel(context.Background(), importDestination{}, cands, func(context.Context, string) (*importContentPreview, error) {
+		return nil, errors.New("reader not invoked by model scheduling test")
+	})
+	p := &importContentPreview{
+		OpeningRequest: strings.Repeat("long request ", 1000), LastReply: strings.Repeat("long reply ", 1000),
+		Entries: []session.Entry{{Type: session.EntryTypeTool, ToolOutput: strings.Repeat("large tool output ", 1000)}},
+	}
+	for i := 0; i < 100; i++ {
+		p.Prompts = append(p.Prompts, importPromptAnchor{Content: strings.Repeat("long prompt ", 1000)})
+	}
+	for _, c := range cands {
+		m.rememberPreview(c.Session.NativeID, p)
+	}
+	require.Len(t, m.previews, importTerminalPreviewLimit)
+	require.NotNil(t, m.previews["first-session"], "focused content stays available as other rows load")
+	require.Nil(t, m.previews["second-session"])
+	require.NotEmpty(t, m.labels["second-session"], "evicting excerpts must not erase a row label")
+	cached := m.previews["first-session"]
+	require.Len(t, cached.Prompts, importTerminalPromptLimit)
+	require.Equal(t, 100, cached.PromptCount)
+	require.LessOrEqual(t, len([]rune(cached.OpeningRequest)), 2049)
+	require.LessOrEqual(t, len([]rune(cached.LastReply)), 2049)
+	require.LessOrEqual(t, len([]rune(cached.Prompts[0])), 181)
+	require.Contains(t, strings.Join(m.detailLines(80), "\n"), "36 more human prompts")
+	m.width, m.height = 120, 60
+	require.Nil(t, m.Init(), "visible rows with retained labels must not repeatedly reload evicted content")
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	require.NotNil(t, cmd, "focusing an evicted row must schedule fresh content")
+	require.True(t, m.pending["second-session"])
+	require.Equal(t, []string{"first-session"}, m.selectedIDs())
+}
+
+func TestImportTerminalSkippedSessionExplanation(t *testing.T) {
+	c := importTUITestCandidates()[2]
+	c.Covered = "2026-10-01T10-30-devon-OxOLD2"
+	m := newImportReviewModel(context.Background(), importDestination{}, []*importCandidate{c}, nil)
+	m.rememberPreview(c.Session.NativeID, &importContentPreview{OpeningRequest: "Fix the scoring algorithm"})
+	detail := strings.Join(m.detailLines(80), "\n")
+	require.Contains(t, detail, "Skipped: already in the Ledger")
+	require.Contains(t, detail, "Coverage: 2026-10-01T10-30-devon-OxOLD2")
+	require.Empty(t, m.selectedIDs(), "readable skipped content must stay unselectable")
+}
+
+func TestImportTerminalPublicDestinationAndMissingExcerpts(t *testing.T) {
+	m := newImportReviewModel(context.Background(), importDestination{Team: "Math Blitz", Visibility: "public"}, importTUITestCandidates(), nil)
+	m.rememberPreview("first-session", &importContentPreview{})
+	view := ansi.Strip(m.View().Content)
+	require.Contains(t, view, "anyone can read the Ledger")
+	require.Contains(t, view, "No human request available")
+	importTUIKey(m, tea.KeyEnd)
+	require.Contains(t, ansi.Strip(m.detailView()), "No AI reply available")
+	m.Update(importPreviewLoadedMsg{id: "second-session"})
+	importTUIKey(m, tea.KeyDown)
+	require.Contains(t, ansi.Strip(m.detailView()), "session reader returned no content")
 }
 
 func TestImportTerminalEmptyHistory(t *testing.T) {

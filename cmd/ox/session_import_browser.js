@@ -9,14 +9,16 @@
     return el;
   };
   const state = { rows: [], selected: new Set(), focus: '', query: '', filter: 'all', finished: false, submitting: false, request: 0 };
-  const openings = new Map(), full = new Map(), pending = new Map(), failed = new Set();
+  // Keep only the current conversation in the DOM. The CLI owns the bounded
+  // preview cache and rechecks the source snapshot on every detail request.
+  const openings = new Map(), pending = new Map(), failed = new Set();
   const labels = { ready: 'Ready', ineligible: 'Unavailable', in_progress: 'In progress', already_imported: 'Already imported', recorded_live: 'Recorded by ox', needs_summarizer: 'Needs a summarizer', not_shared: 'Kept local' };
-  let observer;
+  let observer, detailAbort;
   const agentLabel = agent => agent === 'claude' ? 'Claude Code' : agent === 'codex' ? 'Codex' : agent;
   const dateLabel = value => value && !Number.isNaN(Date.parse(value)) ? new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', year: 'numeric' }).format(new Date(value)) : 'Date unavailable';
   const announce = message => { $('announcement').textContent = message; };
-  async function api(path, body) {
-    const response = await fetch(path, { method: body === undefined ? 'GET' : 'POST', credentials: 'omit', cache: 'no-store', headers: { 'X-Import-Token': token || '', ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+  async function api(path, body, signal) {
+    const response = await fetch(path, { method: body === undefined ? 'GET' : 'POST', credentials: 'omit', cache: 'no-store', signal, headers: { 'X-Import-Token': token || '', ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || 'The local browser could not complete this request.');
     return result;
@@ -65,18 +67,19 @@
   }
   async function focus(id) {
     if (state.finished) return;
+    detailAbort?.abort(); detailAbort = new AbortController();
     state.focus = id; const request = ++state.request;
     renderList();
     $('session-detail').replaceChildren(node('p', 'muted', 'Reading the redacted conversation…'));
     try {
-      const preview = full.get(id) || await api(`/api/preview?id=${encodeURIComponent(id)}`);
-      full.set(id, preview); openings.set(id, preview.opening_request || 'No opening request available'); failed.delete(id);
+      const preview = await api(`/api/preview?id=${encodeURIComponent(id)}`, undefined, detailAbort.signal);
+      openings.set(id, preview.opening_request || 'No opening request available'); failed.delete(id);
       if (state.focus !== id || state.request !== request || state.finished) return;
       renderList(); renderDetail(preview);
     } catch (error) {
       if (state.focus !== id || state.request !== request || state.finished) return;
       failed.add(id);
-      const retry = node('button', '', 'Retry preview'); retry.type = 'button'; retry.addEventListener('click', () => { failed.delete(id); full.delete(id); focus(id); });
+      const retry = node('button', '', 'Retry preview'); retry.type = 'button'; retry.addEventListener('click', () => { failed.delete(id); focus(id); });
       $('session-detail').replaceChildren(node('h2', '', 'Preview unavailable'), node('p', 'muted', error.message), retry);
     }
   }
@@ -99,6 +102,7 @@
     const reader = node('details'); reader.append(node('summary', '', 'Read the retained conversation'));
     const conversation = node('div', 'conversation');
     const entries = preview.entries || [];
+    const promptIndices = new Set((preview.prompts || []).map(prompt => prompt.entry_index));
     let toolGroup = null;
     for (const [i, entry] of entries.entries()) {
       if (entry.type === 'tool') {
@@ -108,7 +112,7 @@
         toolGroup.append(block); continue;
       }
       toolGroup = null;
-      if (entry.type === 'system') {
+      if (entry.type === 'system' || (entry.type === 'user' && !promptIndices.has(i))) {
         const context = node('details', 'entry'); context.append(node('summary', '', 'Session context'), node('p', 'text', entry.content || '')); conversation.append(context); continue;
       }
       const article = node('article', 'entry'); article.id = `entry-${i}`; article.append(node('div', 'eyebrow', entry.type === 'user' ? 'Human request' : entry.type === 'assistant' ? 'AI reply' : 'Session entry'), node('p', 'text', entry.content || '')); conversation.append(article);
@@ -132,7 +136,7 @@
     state.submitting = true; updateCount();
     try {
       await api(canceled ? '/api/cancel' : '/api/selection', canceled ? {} : { ids: state.rows.filter(row => state.selected.has(row.native_id)).map(row => row.native_id) });
-      state.finished = true; ++state.request; ++scanGeneration; observer?.disconnect();
+      state.finished = true; ++state.request; ++scanGeneration; observer?.disconnect(); detailAbort?.abort();
       document.querySelectorAll('button,input,select').forEach(el => { el.disabled = true; });
       announce(canceled ? 'Review canceled. Nothing was imported. You can close this tab.' : 'Your selection returned to the terminal. Review and confirm there to import. You can close this tab.');
     } catch (error) { announce(error.message + ' Your selection is still here.'); }

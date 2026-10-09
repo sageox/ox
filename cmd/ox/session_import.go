@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -104,6 +105,9 @@ type importCandidate struct {
 	Retry      string
 	URL        string
 	meta       *lfs.SessionMeta
+	// Filled only by an actual content preview, then carried across the final
+	// replan. The immutable pointer is safe for concurrent visible-row reads.
+	reviewedSnapshot atomic.Pointer[importSourceSnapshot]
 }
 
 // importIgnored counts native sessions that are not this repo's history.
@@ -471,8 +475,11 @@ func runSessionImportFlow(ctx context.Context, out io.Writer, opts importOptions
 			fmt.Fprintln(out, "Nothing was uploaded.")
 			return nil
 		}
-		opts.reviewed, err = validateImportReview(cands, result)
+		opts.reviewed, err = validateImportReview(ctx, cands, result)
 		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			return renderImportFailure(out, opts.jsonOut, importFailure{Code: importErrNativeUnreadable, Message: err.Error(), Guidance: "Rerun the review before importing."})
 		}
 		opts.sessions = result.IDs // full IDs, including an explicitly narrowed selection
@@ -555,8 +562,14 @@ func runLockedImport(ctx context.Context, out io.Writer, opts importOptions, env
 	}
 	selected := selectedCandidates(cands)
 	for _, c := range selected {
-		if snapshot, reviewed := opts.reviewed[c.Session.NativeID]; reviewed && snapshot != importSnapshot(c) {
-			return renderImportFailure(out, opts.jsonOut, importFailure{Code: importErrNativeUnreadable, Message: errImportSourceChanged.Error(), Guidance: "Rerun the review before importing."})
+		if snapshot, reviewed := opts.reviewed[c.Session.NativeID]; reviewed {
+			if !snapshotMatches(ctx, c.Session.Path, snapshot) {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				return renderImportFailure(out, opts.jsonOut, importFailure{Code: importErrNativeUnreadable, Message: errImportSourceChanged.Error(), Guidance: "Rerun the review before importing."})
+			}
+			c.reviewedSnapshot.Store(&snapshot)
 		}
 	}
 	if len(selected) == 0 {

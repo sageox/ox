@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -226,4 +227,57 @@ func TestImportBrowserChromeSourceChangeIsVisible(t *testing.T) {
 	default:
 	}
 	assert.Equal(t, http.StatusConflict, importBrowserRequest(b, "GET", "/api/preview?id="+importBrowserReadyID, "").Code)
+}
+
+// Prevents vendor bootstrap instructions, retained for fidelity, from being
+// presented as a human request after exclusion from the prompt map.
+func TestImportBrowserChromeRetainedBootstrapIsCollapsedContext(t *testing.T) {
+	ctx := importBrowserChrome(t)
+	_, link := serveImportBrowserChrome(t, func(ctx context.Context, id string) (*importContentPreview, error) {
+		preview, err := browserFixturePreview(ctx, id)
+		preview.Entries = append([]session.Entry{{Type: session.EntryTypeUser, Content: "# AGENTS.md instructions\nProject context"}}, preview.Entries...)
+		for i := range preview.Prompts {
+			preview.Prompts[i].EntryIndex++
+		}
+		return preview, err
+	})
+	require.NoError(t, chromedp.Run(ctx,
+		chromedp.Navigate(link), chromedp.WaitVisible(".quote", chromedp.ByQuery),
+		chromedp.Click("#session-detail > details > summary", chromedp.ByQuery),
+	))
+	var requests int
+	var contextCollapsed bool
+	require.NoError(t, chromedp.Run(ctx,
+		chromedp.Evaluate(`Array.from(document.querySelectorAll('.conversation > article > .eyebrow')).filter(x=>x.textContent==='Human request').length`, &requests),
+		chromedp.Evaluate(`!document.querySelector('.conversation > details:not(.tool-group)').open`, &contextCollapsed),
+	))
+	assert.Equal(t, 2, requests)
+	assert.True(t, contextCollapsed)
+	require.NoError(t, chromedp.Run(ctx, chromedp.Click(".conversation > details:not(.tool-group) > summary", chromedp.ByQuery)))
+	var contextText string
+	require.NoError(t, chromedp.Run(ctx, chromedp.Text(".conversation > details:not(.tool-group)", &contextText, chromedp.ByQuery)))
+	assert.Contains(t, contextText, "# AGENTS.md instructions")
+}
+
+// Prevents a client cache from bypassing the CLI's source snapshot check when
+// a previously visited session is focused again.
+func TestImportBrowserChromeRefocusRechecksChangedSource(t *testing.T) {
+	ctx := importBrowserChrome(t)
+	var changed atomic.Bool
+	_, link := serveImportBrowserChrome(t, func(ctx context.Context, id string) (*importContentPreview, error) {
+		if id == importBrowserReadyID && changed.Load() {
+			return nil, errImportSourceChanged
+		}
+		return browserFixturePreview(ctx, id)
+	})
+	require.NoError(t, chromedp.Run(ctx, chromedp.Navigate(link), chromedp.WaitVisible(".quote", chromedp.ByQuery)))
+	changed.Store(true)
+	require.NoError(t, chromedp.Run(ctx,
+		chromedp.Click(`[data-focus="`+importBrowserReadyID+`"]`, chromedp.ByQuery),
+		chromedp.Poll(`document.querySelector('#session-detail h2')?.textContent === 'Preview unavailable'`, nil, chromedp.WithPollingTimeout(2*time.Second)),
+	))
+	var text, count string
+	require.NoError(t, chromedp.Run(ctx, chromedp.Text("#session-detail", &text, chromedp.ByQuery), chromedp.Text("#selected-count", &count, chromedp.ByQuery)))
+	assert.Contains(t, text, "changed since you started reviewing")
+	assert.Equal(t, "2 sessions selected", count)
 }

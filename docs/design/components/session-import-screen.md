@@ -52,7 +52,7 @@ Human prompts (1)
 
 Last AI reply
 The high-score table is implemented and tests pass.
-↑/↓ browse · space toggle · a all · x clear · enter review · b browser · q cancel
+↑/↓ move · space toggle · a all · x clear · enter review · b browser · q cancel
 pgup/pgdown scroll · home/end first/last excerpt
 ```
 

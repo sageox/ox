@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -210,4 +211,79 @@ func TestImportContent_UppercasePrefixAndUnavailableContent(t *testing.T) {
 	require.NoError(t, runSessionImportFlow(context.Background(), &out, opts, env, dest))
 	assert.Contains(t, out.String(), loginPrompt)
 	assert.Zero(t, f.summarizer.calls())
+	f.readErr = errors.New("adapter unavailable")
+	out.Reset()
+	require.Error(t, runSessionImportFlow(context.Background(), &out, opts, env, dest))
+	var refusal struct {
+		Error string `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(out.Bytes(), &refusal))
+	assert.Equal(t, importErrNativeUnreadable, refusal.Error)
+	assert.NotContains(t, out.String(), "adapter unavailable")
+}
+
+func TestImportContent_TextPreviewIsSafeAndReadOnly(t *testing.T) {
+	f := newImportFixture(t)
+	f.add(t, pastSession{agent: nativeimport.AgentClaude, id: e2eClaudeA, start: time.Now().Add(-48 * time.Hour), prompt: "Fix the cookie\x1b[2J\x1b]0;spoofed\x07", reply: "Fixed."})
+	opts := importOptions{preview: true, sessions: []string{e2eClaudeA}}
+	env, dest := f.envFor(f.ledgerPath, opts)
+	var out bytes.Buffer
+	require.NoError(t, runSessionImportFlow(context.Background(), &out, opts, env, dest))
+	assert.Contains(t, out.String(), "Opening request\nFix the cookie")
+	assert.Contains(t, out.String(), "Human prompts\n1. Fix the cookie")
+	assert.Contains(t, out.String(), "Last AI reply\nFixed.")
+	assert.NotContains(t, out.String(), "\x1b")
+	assert.NotContains(t, out.String(), "spoofed")
+	assert.Zero(t, f.summarizer.calls())
+	assert.Zero(t, f.store.count())
+	_, err := os.Stat(env.stagingRoot)
+	assert.True(t, os.IsNotExist(err))
+}
+
+func TestImportContent_RefusesUnavailableUnsafeOrChangingSources(t *testing.T) {
+	for _, scenario := range []string{"unknown", "canceled before read", "reader error", "invalid policy", "changed during read", "canceled during read", "changed selection"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := newImportFixture(t)
+			path := f.add(t, pastSession{agent: nativeimport.AgentClaude, id: e2eClaudeA, start: time.Now().Add(-48 * time.Hour), prompt: loginPrompt, reply: "Fixed."})
+			env, _ := f.envFor(f.ledgerPath, importOptions{})
+			cands, _, failure := planImport(context.Background(), importOptions{}, env)
+			require.Nil(t, failure)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			id := e2eClaudeA
+			switch scenario {
+			case "unknown":
+				id = "missing-session"
+			case "canceled before read":
+				cancel()
+			case "reader error":
+				env.deps.readNative = func(nativeimport.Agent, string) ([]adapters.RawEntry, error) {
+					return nil, errors.New("secret-file-path-and-context")
+				}
+			case "invalid policy":
+				require.NoError(t, os.WriteFile(filepath.Join(f.projectRoot, ".sageox", "REDACT.md"), []byte("```redact\nregex \"[\" -> [X]\n```\n"), 0600))
+			case "changed during read", "canceled during read":
+				env.deps.readNative = func(agent nativeimport.Agent, source string) ([]adapters.RawEntry, error) {
+					raw, err := f.readNative(agent, source)
+					if scenario == "changed during read" {
+						require.NoError(t, os.Chtimes(path, time.Now(), time.Now()))
+					} else {
+						cancel()
+					}
+					return raw, err
+				}
+			case "changed selection":
+				require.NoError(t, os.Chtimes(path, time.Now(), time.Now()))
+				_, err := validateImportReview(ctx, cands, importReviewResult{IDs: []string{e2eClaudeA}})
+				require.ErrorIs(t, err, errImportSourceChanged)
+				return
+			}
+			p, err := newImportPreviewLoader(env, cands)(ctx, id)
+			require.Error(t, err)
+			assert.Nil(t, p)
+			assert.NotContains(t, err.Error(), "secret-file-path-and-context")
+			assert.Zero(t, f.summarizer.calls())
+			assert.Zero(t, f.store.count())
+		})
+	}
 }

@@ -50,7 +50,7 @@ func init() {
 				"",
 				"Last AI reply",
 				"The high-score table is implemented and tests pass.",
-				dim("↑/↓ browse · space toggle · a all · x clear · enter review · b browser · q cancel"),
+				dim("↑/↓ move · space toggle · a all · x clear · enter review · b browser · q cancel"),
 				dim("pgup/pgdown scroll · home/end first/last excerpt"),
 			}
 			for i, line := range lines {

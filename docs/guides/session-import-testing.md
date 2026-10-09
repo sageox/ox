@@ -15,7 +15,9 @@ Clearing every checkbox imports nothing. Deselection applies only to this run.
 `--preview --session <id>` prints one session's excerpts, with `--json` available
 for the full normalized retained entries. Previewing uses the same redaction as
 import, creates no staging files, and calls no summarizer. A changed source file
-requires a fresh review. Excerpts help choose a session; importing retains the
+requires a fresh review. Content actually previewed also receives a local
+SHA-256 pin, so restoring the original size and timestamp cannot bypass the
+check. Excerpts help choose a session; importing retains the
 redacted conversation and available tool activity and generates its summary
 after confirmation. The last reply does not imply the work is complete.
 
@@ -33,7 +35,8 @@ stores when `--from-test-data` is supplied.
 Find the running monorepo stack:
 
 ```sh
-cd /Users/lpavel/sageox/sageox-monorepo
+ox_import_monorepo=/path/to/sageox-monorepo
+cd "$ox_import_monorepo"
 make dev-ls
 # If needed: make dev-shared-up, make dev, then make dev-wait.
 ```
@@ -45,13 +48,13 @@ Use your stack's offset; the API and web application ports are different.
 Build the PR checkout and seed a fresh fixture repository:
 
 ```sh
-ox_import_worktree=/Users/lpavel/.codex/worktrees/session-import-preview/ox
+ox_import_worktree=/path/to/ox-pr-checkout
 ox_import_stack=http://localhost:3100
 ox_import_team='YOUR LOCAL TEAM SLUG'
 cd "$ox_import_worktree"
 make build
 ox_import_bin="$ox_import_worktree/bin/ox"
-ox_import_parent=$(mktemp -d /private/tmp/ox-import-preview.XXXXXX)
+ox_import_parent=$(mktemp -d)
 ox_import_repo="$ox_import_parent/math-blitz"
 python3 "$ox_import_worktree/scripts/session_import_testbed.py" create "$ox_import_repo"
 "$ox_import_bin" login --endpoint "$ox_import_stack"
@@ -98,8 +101,7 @@ opened URL fragment, carried in a header on subsequent local API requests.
 ## Automated checks
 
 ```sh
-make lint
-make test
+make test-preflight # lint, full and slow tiers, generated docs, and guards
 go test -race ./cmd/ox ./internal/session/nativeimport \
   -run 'TestImport|TestPreviewEntries|TestWriteRaw' -count=1
 go test -tags browser ./cmd/ox -run '^TestImportBrowser' -count=1
@@ -111,3 +113,13 @@ Browser tests require Chrome/Chromium. To capture desktop, mobile, and dark-mode
 QA images, add `-args -import-browser-screenshots=/private/tmp/ox-import-qa` to
 the browser test command. Real-adapter fixture tests build the adapter binaries
 from this checkout; fast `-short` tests omit that build.
+
+To keep the complete gate independent of saved machine credentials and shared
+data, scope fresh XDG directories to that command:
+
+```sh
+ox_import_checks=$(mktemp -d)
+XDG_CONFIG_HOME="$ox_import_checks/config" \
+XDG_DATA_HOME="$ox_import_checks/data" \
+XDG_CACHE_HOME="$ox_import_checks/cache" make test-preflight
+```

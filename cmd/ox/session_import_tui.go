@@ -12,15 +12,34 @@ import (
 	"github.com/sageox/ox/internal/cli"
 )
 
-const importPreviewConcurrency = 2
+const (
+	importPreviewConcurrency   = 2
+	importTerminalPreviewLimit = 8
+	importTerminalPromptLimit  = 64
+)
+
+// importTerminalOptions replaces IO side effects for tests while running the
+// same Bubble Tea program. The CLI uses its normal terminal and browser.
+type importTerminalOptions struct {
+	program []tea.ProgramOption
+	browser func(context.Context, importDestination, []*importCandidate, importPreviewLoader) (importReviewResult, error)
+}
 
 // runImportTerminal gathers a selection only. Upload authorization remains in
 // the terminal confirmation after this program (or the local browser) exits.
-func runImportTerminal(ctx context.Context, dest importDestination, cands []*importCandidate, load importPreviewLoader) (importReviewResult, error) {
+func runImportTerminal(ctx context.Context, dest importDestination, cands []*importCandidate, load importPreviewLoader, options ...importTerminalOptions) (importReviewResult, error) {
 	previewCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	model := newImportReviewModel(previewCtx, dest, cands, load)
-	final, err := tea.NewProgram(model, tea.WithContext(previewCtx)).Run()
+	programOptions := []tea.ProgramOption{tea.WithContext(previewCtx)}
+	browser := runImportBrowser
+	if len(options) > 0 {
+		programOptions = append(programOptions, options[0].program...)
+		if options[0].browser != nil {
+			browser = options[0].browser
+		}
+	}
+	final, err := tea.NewProgram(model, programOptions...).Run()
 	cancel()
 	if err != nil {
 		return importReviewResult{}, fmt.Errorf("review sessions in terminal: %w", err)
@@ -30,7 +49,7 @@ func runImportTerminal(ctx context.Context, dest importDestination, cands []*imp
 		for _, c := range cands {
 			c.Selected = m.selected[c.Session.NativeID] && c.State == stateReady
 		}
-		return runImportBrowser(ctx, dest, cands, load)
+		return browser(ctx, dest, cands, load)
 	}
 	return importReviewResult{IDs: m.selectedIDs(), Canceled: m.canceled}, nil
 }
@@ -41,13 +60,24 @@ type importPreviewLoadedMsg struct {
 	err     error
 }
 
+// The picker retains excerpts, never normalized conversation entries. Keeping
+// whole preview pointers here would defeat the reader's bounded content cache.
+type importTerminalPreview struct {
+	OpeningRequest string
+	Prompts        []string
+	PromptCount    int
+	LastReply      string
+}
+
 type importReviewModel struct {
 	ctx      context.Context
 	dest     importDestination
 	cands    []*importCandidate
 	load     importPreviewLoader
 	selected map[string]bool
-	previews map[string]*importContentPreview
+	previews map[string]*importTerminalPreview
+	labels   map[string]string
+	recent   []string
 	loadErrs map[string]error
 	pending  map[string]bool
 	cursor   int
@@ -62,7 +92,7 @@ type importReviewModel struct {
 func newImportReviewModel(ctx context.Context, dest importDestination, cands []*importCandidate, load importPreviewLoader) *importReviewModel {
 	m := &importReviewModel{
 		ctx: ctx, dest: dest, cands: cands, load: load,
-		selected: map[string]bool{}, previews: map[string]*importContentPreview{},
+		selected: map[string]bool{}, previews: map[string]*importTerminalPreview{}, labels: map[string]string{},
 		loadErrs: map[string]error{}, pending: map[string]bool{}, width: 80, height: 24,
 	}
 	for _, c := range cands {
@@ -87,7 +117,7 @@ func (m *importReviewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.loadErrs[msg.id] = msg.err
 		} else if msg.preview != nil {
-			m.previews[msg.id] = msg.preview
+			m.rememberPreview(msg.id, msg.preview)
 		} else {
 			m.loadErrs[msg.id] = fmt.Errorf("session reader returned no content")
 		}
@@ -108,12 +138,14 @@ func (m *importReviewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.cursor > 0 {
 				m.cursor--
 				m.scroll = 0
+				m.touchPreview(m.cands[m.cursor].Session.NativeID)
 			}
 			return m, m.loadVisible()
 		case "down", "j":
 			if m.cursor+1 < len(m.cands) {
 				m.cursor++
 				m.scroll = 0
+				m.touchPreview(m.cands[m.cursor].Session.NativeID)
 			}
 			return m, m.loadVisible()
 		case "space", " ":
@@ -153,6 +185,46 @@ func (m *importReviewModel) selectedIDs() []string {
 	return ids
 }
 
+func (m *importReviewModel) rememberPreview(id string, p *importContentPreview) {
+	preview := &importTerminalPreview{
+		OpeningRequest: importTerminalExcerpt(p.OpeningRequest, 2048),
+		LastReply:      importTerminalExcerpt(p.LastReply, 2048),
+		PromptCount:    len(p.Prompts),
+	}
+	for _, prompt := range p.Prompts[:min(len(p.Prompts), importTerminalPromptLimit)] {
+		text := strings.Join(strings.Fields(sanitizeImportText(prompt.Content)), " ")
+		preview.Prompts = append(preview.Prompts, importTerminalExcerpt(text, 180))
+	}
+	label := strings.Join(strings.Fields(sanitizeImportText(p.OpeningRequest)), " ")
+	if label == "" {
+		label = "No human request available"
+	}
+	m.labels[id] = importTerminalExcerpt(label, 180)
+	m.previews[id] = preview
+	m.touchPreview(id)
+	for len(m.recent) > importTerminalPreviewLimit {
+		i := 0
+		if len(m.cands) > 0 && m.recent[0] == m.cands[m.cursor].Session.NativeID {
+			i = 1 // keep the currently displayed excerpt while other reads finish
+		}
+		delete(m.previews, m.recent[i])
+		m.recent = append(m.recent[:i], m.recent[i+1:]...)
+	}
+}
+
+func (m *importReviewModel) touchPreview(id string) {
+	if m.previews[id] == nil {
+		return
+	}
+	for i, cachedID := range m.recent {
+		if cachedID == id {
+			m.recent = append(m.recent[:i], m.recent[i+1:]...)
+			break
+		}
+	}
+	m.recent = append(m.recent, id)
+}
+
 // Only visible rows are read. Completion of one request schedules the next,
 // keeping native-file reads bounded even for a large session history.
 func (m *importReviewModel) loadVisible() tea.Cmd {
@@ -174,6 +246,9 @@ func (m *importReviewModel) loadVisible() tea.Cmd {
 		id := m.cands[i].Session.NativeID
 		if m.previews[id] != nil || m.loadErrs[id] != nil || m.pending[id] {
 			continue
+		}
+		if i != m.cursor && m.labels[id] != "" {
+			continue // an evicted row already has its label; reload only on focus
 		}
 		m.pending[id] = true
 		commands = append(commands, func() tea.Msg {
@@ -242,7 +317,7 @@ func (m *importReviewModel) View() tea.View {
 	} else {
 		body = m.listView() + "\n" + dim.Render(strings.Repeat("─", m.width)) + "\n" + m.detailView()
 	}
-	help := "↑/↓ browse · space toggle · a all · x clear · enter review · b browser · q cancel"
+	help := "↑/↓ move · space toggle · a all · x clear · enter review · b browser · q cancel"
 	scrollHelp := "pgup/pgdown scroll · home/end first/last excerpt"
 	if m.width < 92 {
 		help = "↑/↓ browse · space toggle · enter review\na all · x clear · b browser · q cancel"
@@ -285,11 +360,8 @@ func (m *importReviewModel) listView() string {
 			check = "[x]"
 		}
 		label := "Loading request…"
-		if p := m.previews[id]; p != nil {
-			label = strings.Join(strings.Fields(sanitizeImportText(p.OpeningRequest)), " ")
-			if label == "" {
-				label = "No human request available"
-			}
+		if cachedLabel := m.labels[id]; cachedLabel != "" {
+			label = cachedLabel
 		} else if m.loadErrs[id] != nil {
 			label = "Content unavailable"
 		}
@@ -346,10 +418,12 @@ func (m *importReviewModel) detailLines(width int) []string {
 	} else if p := m.previews[id]; p != nil {
 		b.WriteString("\nOpening request\n")
 		b.WriteString(importTerminalExcerpt(p.OpeningRequest, 2048))
-		fmt.Fprintf(&b, "\n\nHuman prompts (%d)\n", len(p.Prompts))
+		fmt.Fprintf(&b, "\n\nHuman prompts (%d)\n", p.PromptCount)
 		for i, prompt := range p.Prompts {
-			text := strings.Join(strings.Fields(sanitizeImportText(prompt.Content)), " ")
-			fmt.Fprintf(&b, "%d. %s\n", i+1, importTerminalExcerpt(text, 180))
+			fmt.Fprintf(&b, "%d. %s\n", i+1, prompt)
+		}
+		if p.PromptCount > len(p.Prompts) {
+			fmt.Fprintf(&b, "%d more human prompts · open b to read them all\n", p.PromptCount-len(p.Prompts))
 		}
 		b.WriteString("\nLast AI reply\n")
 		if p.LastReply == "" {

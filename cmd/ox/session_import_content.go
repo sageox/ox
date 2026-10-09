@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +20,7 @@ import (
 type importSourceSnapshot struct {
 	Size    int64     `json:"size"`
 	ModTime time.Time `json:"mod_time"`
+	SHA256  string    `json:"-"` // local review pin; no browser or persisted wire field
 }
 
 type importPromptAnchor struct {
@@ -44,12 +47,68 @@ type importReviewResult struct {
 var errImportSourceChanged = errors.New("session changed since discovery; restart the preview")
 
 func importSnapshot(c *importCandidate) importSourceSnapshot {
+	if reviewed := c.reviewedSnapshot.Load(); reviewed != nil {
+		return *reviewed
+	}
 	return importSourceSnapshot{Size: c.Session.Size, ModTime: c.Session.ModTime}
 }
 
-func snapshotMatches(path string, snapshot importSourceSnapshot) bool {
+func snapshotMatches(ctx context.Context, path string, snapshot importSourceSnapshot) bool {
 	info, err := os.Stat(path)
-	return err == nil && info.Size() == snapshot.Size && info.ModTime().Equal(snapshot.ModTime)
+	if err != nil || info.Size() != snapshot.Size || !info.ModTime().Equal(snapshot.ModTime) {
+		return false
+	}
+	if snapshot.SHA256 == "" {
+		return ctx.Err() == nil
+	}
+	digest, err := importSourceDigest(ctx, path, snapshot)
+	return err == nil && digest == snapshot.SHA256
+}
+
+// Hash only a requested preview, with fixed memory and at most the discovered
+// file size. Stat and identity checks reject growth/truncation/replacement
+// during the stream; callers also compare the digest around adapter reads.
+func importSourceDigest(ctx context.Context, path string, snapshot importSourceSnapshot) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return "", errImportSourceChanged
+	}
+	defer file.Close()
+	before, err := file.Stat()
+	if err != nil || !before.Mode().IsRegular() || before.Size() != snapshot.Size || !before.ModTime().Equal(snapshot.ModTime) {
+		return "", errImportSourceChanged
+	}
+	hash := sha256.New()
+	buffer := make([]byte, 32*1024)
+	remaining := snapshot.Size
+	for remaining > 0 {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		amount := len(buffer)
+		if remaining < int64(amount) {
+			amount = int(remaining)
+		}
+		n, readErr := file.Read(buffer[:amount])
+		if n > 0 {
+			_, _ = hash.Write(buffer[:n])
+			remaining -= int64(n)
+		}
+		if readErr != nil && (readErr != io.EOF || remaining != 0) {
+			return "", errImportSourceChanged
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	after, err := os.Stat(path)
+	if err != nil || !os.SameFile(before, after) || after.Size() != snapshot.Size || !after.ModTime().Equal(snapshot.ModTime) {
+		return "", errImportSourceChanged
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 // The cache lives only for this review. Its entries are immutable and each
@@ -73,14 +132,11 @@ func newImportPreviewLoader(env *importEnv, cands []*importCandidate) importPrev
 			return nil, errors.New("unknown session")
 		}
 		snapshot := importSnapshot(c)
-		if !snapshotMatches(c.Session.Path, snapshot) {
+		if !snapshotMatches(ctx, c.Session.Path, importSourceSnapshot{Size: snapshot.Size, ModTime: snapshot.ModTime}) {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			return nil, errImportSourceChanged
-		}
-		mu.Lock()
-		cached := cache[id]
-		mu.Unlock()
-		if cached != nil {
-			return cached, nil
 		}
 		select {
 		case reads <- struct{}{}:
@@ -88,13 +144,22 @@ func newImportPreviewLoader(env *importEnv, cands []*importCandidate) importPrev
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
+		snapshot = importSnapshot(c)
+		digest, err := importSourceDigest(ctx, c.Session.Path, snapshot)
+		if err != nil {
+			return nil, err
+		}
+		if snapshot.SHA256 != "" && digest != snapshot.SHA256 {
+			return nil, errImportSourceChanged
+		}
+		snapshot.SHA256 = digest
 		// A concurrent visible-row/full-detail request may have filled the cache
 		// while this request waited for a reader slot.
 		mu.Lock()
-		cached = cache[id]
+		cached := cache[id]
 		mu.Unlock()
 		if cached != nil {
-			if !snapshotMatches(c.Session.Path, snapshot) {
+			if cached.Snapshot != snapshot {
 				return nil, errImportSourceChanged
 			}
 			return cached, nil
@@ -110,7 +175,13 @@ func newImportPreviewLoader(env *importEnv, cands []*importCandidate) importPrev
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if !snapshotMatches(c.Session.Path, snapshot) {
+		if !snapshotMatches(ctx, c.Session.Path, snapshot) {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			return nil, errImportSourceChanged
+		}
+		if !c.reviewedSnapshot.CompareAndSwap(nil, &snapshot) && *c.reviewedSnapshot.Load() != snapshot {
 			return nil, errImportSourceChanged
 		}
 		p := &importContentPreview{NativeID: id, Entries: entries, Snapshot: snapshot, Prompts: []importPromptAnchor{}}
@@ -196,7 +267,7 @@ func renderImportContent(out io.Writer, opts importOptions, dest importDestinati
 	return nil
 }
 
-func validateImportReview(cands []*importCandidate, result importReviewResult) (map[string]importSourceSnapshot, error) {
+func validateImportReview(ctx context.Context, cands []*importCandidate, result importReviewResult) (map[string]importSourceSnapshot, error) {
 	ready := make(map[string]*importCandidate)
 	for _, c := range cands {
 		if c.State == stateReady {
@@ -213,7 +284,10 @@ func validateImportReview(cands []*importCandidate, result importReviewResult) (
 			return nil, errors.New("selection contains a duplicate session")
 		}
 		snapshot := importSnapshot(c)
-		if !snapshotMatches(c.Session.Path, snapshot) {
+		if !snapshotMatches(ctx, c.Session.Path, snapshot) {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			return nil, errImportSourceChanged
 		}
 		snapshots[id] = snapshot

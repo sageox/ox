@@ -237,6 +237,11 @@ func TestSyncScheduler_TeamContextIntegration(t *testing.T) {
 		t.Skip("git not available")
 	}
 
+	// Isolate auth and shared team data as well as git credentials. A real
+	// bearer can trigger credential refresh even with a recent refresh time.
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+
 	// isolate from real credentials
 	prevConfigDir := gitserver.TestSetConfigDirOverride(t.TempDir())
 	prevForceFile := gitserver.TestSetForceFileStorage(true)
@@ -262,6 +267,8 @@ team_name = "Test Team"
 path = %q
 `, teamDir)
 	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "config.local.toml"), []byte(configContent), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "config.json"),
+		[]byte(`{"endpoint":"https://fake.test.invalid"}`), 0644))
 
 	cfg := DefaultConfig()
 	cfg.ProjectRoot = projectDir

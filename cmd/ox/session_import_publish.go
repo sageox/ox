@@ -120,7 +120,10 @@ func prepareImport(ctx context.Context, env *importEnv, c *importCandidate) (pre
 	if err := ctx.Err(); err != nil {
 		return nil, "", err
 	}
-	if reason := justInTimeCheck(env, c); reason != "" {
+	if reason := justInTimeCheck(ctx, env, c); reason != "" {
+		if err := ctx.Err(); err != nil {
+			return nil, "", err
+		}
 		return nil, reason, nil
 	}
 	staging := filepath.Join(env.stagingRoot, c.Name)
@@ -142,6 +145,14 @@ func prepareImport(ctx context.Context, env *importEnv, c *importCandidate) (pre
 			return nil, "", heldf("too large to import: converted output exceeds the adapter's limit")
 		}
 		return nil, "", heldf("read %s session: %v", s.Agent, err)
+	}
+	// The adapter may have read a rewritten file with unchanged size/mtime.
+	// Refuse it before any retained raw content is written to staging.
+	if reason := justInTimeCheck(ctx, env, c); reason != "" {
+		if err := ctx.Err(); err != nil {
+			return nil, "", err
+		}
+		return nil, reason, nil
 	}
 	header := nativeimport.RawHeader{
 		SessionID: c.SessionID, AgentType: adapterNameFor(s.Agent), RepoID: env.repoID,
@@ -168,7 +179,10 @@ func prepareImport(ctx context.Context, env *importEnv, c *importCandidate) (pre
 		return nil, "", err
 	}
 	// Summarizing can take minutes; a session resumed meanwhile is not final.
-	if reason := justInTimeCheck(env, c); reason != "" {
+	if reason := justInTimeCheck(ctx, env, c); reason != "" {
+		if err := ctx.Err(); err != nil {
+			return nil, "", err
+		}
 		return nil, reason, nil
 	}
 	if verdict := importVerdictFor(summary); verdict != "" {
@@ -207,7 +221,10 @@ func publishPreparedImport(ctx context.Context, env *importEnv, c *importCandida
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	if reason := justInTimeCheck(env, c); reason != "" {
+	if reason := justInTimeCheck(ctx, env, c); reason != "" {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		return reason, nil
 	}
 	staging := prepared.staging
@@ -306,7 +323,7 @@ func clipImportText(s string, limit int) string {
 
 // justInTimeCheck repeats the in-progress checks right before publishing: the
 // file must be unchanged since it was inspected, and still quiet.
-func justInTimeCheck(env *importEnv, c *importCandidate) string {
+func justInTimeCheck(ctx context.Context, env *importEnv, c *importCandidate) string {
 	info, err := os.Stat(c.Session.Path)
 	if err != nil {
 		return "native file is gone"
@@ -316,6 +333,9 @@ func justInTimeCheck(env *importEnv, c *importCandidate) string {
 	}
 	if env.deps.now().Sub(info.ModTime()) < importQuietPeriod {
 		return "became active since the preview"
+	}
+	if snapshot := c.reviewedSnapshot.Load(); snapshot != nil && !snapshotMatches(ctx, c.Session.Path, *snapshot) {
+		return "changed since the content review"
 	}
 	return ""
 }

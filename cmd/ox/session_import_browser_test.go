@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -281,5 +283,200 @@ func TestImportBrowserLaunchFailureAndCancellationCloseListener(t *testing.T) {
 		assert.Empty(t, result.IDs)
 		_, getErr := http.Get(base)
 		assert.Error(t, getErr)
+	}
+}
+
+// Prevents missing timestamp/eligibility metadata from presenting an
+// unavailable session as ready, or leaking classifier details into the reader.
+func TestImportBrowserExplainsEveryEligibilityStateAndMissingDates(t *testing.T) {
+	states := []importState{stateReady, stateAlreadyImported, stateRecordedLive, stateInProgress, stateNeedsSummarizer, stateNotShared, stateIneligible}
+	for _, state := range states {
+		t.Run(string(state), func(t *testing.T) {
+			c := importBrowserCandidates()[0]
+			c.State, c.Reason, c.Selected = state, "private raw classifier detail /private/native-session.jsonl", true
+			c.Session.StartedAt, c.Session.LastActivity = time.Time{}, time.Now().UTC().Truncate(time.Second)
+			b, err := newImportBrowser("127.0.0.1:4242", "secret", importDestination{}, []*importCandidate{c}, importBrowserTestLoader)
+			require.NoError(t, err)
+			w := importBrowserRequest(b, "GET", "/api/sessions", "")
+			require.Equal(t, http.StatusOK, w.Code)
+			var list importBrowserList
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &list))
+			require.Len(t, list.Sessions, 1)
+			row := list.Sessions[0]
+			assert.Equal(t, string(state), row.State)
+			assert.Equal(t, state == stateReady, row.Selected)
+			assert.Empty(t, row.StartedAt)
+			assert.Equal(t, c.Session.LastActivity.Format(time.RFC3339), row.LastActivity)
+			if state != stateReady {
+				assert.NotEmpty(t, row.Reason, "unavailable sessions must explain why")
+			}
+			assert.NotContains(t, w.Body.String(), "private raw classifier detail")
+			assert.NotContains(t, w.Body.String(), "/private/")
+		})
+	}
+}
+
+// Prevents cross-origin or unauthenticated callbacks on either mutation route,
+// and verifies every served asset remains local and protected by the host gate.
+func TestImportBrowserAllRoutesEnforceTheirMethodsAndCapabilities(t *testing.T) {
+	for _, route := range []string{"/api/sessions", "/api/preview?id=" + importBrowserReadyID, "/api/selection", "/api/cancel"} {
+		b := newImportBrowserTest(t, importBrowserTestLoader)
+		method := http.MethodGet
+		if route == "/api/selection" || route == "/api/cancel" {
+			method = http.MethodPost
+		}
+		for _, kind := range []string{"wrong method", "missing token", "wrong origin"} {
+			req := httptest.NewRequest(method, b.origin+route, strings.NewReader(`{"ids":[]}`))
+			req.Header.Set("X-Import-Token", b.token)
+			req.Header.Set("Origin", b.origin)
+			want := http.StatusForbidden
+			switch kind {
+			case "wrong method":
+				req.Method = http.MethodDelete
+				want = http.StatusMethodNotAllowed
+			case "missing token":
+				req.Header.Del("X-Import-Token")
+			case "wrong origin":
+				req.Header.Set("Origin", "null")
+			}
+			w := httptest.NewRecorder()
+			b.handler().ServeHTTP(w, req)
+			assert.Equal(t, want, w.Code, route+": "+kind)
+			select {
+			case result := <-b.result:
+				t.Fatalf("rejected callback changed the selection: %+v", result)
+			default:
+			}
+		}
+	}
+	b := newImportBrowserTest(t, importBrowserTestLoader)
+	for _, route := range []string{"/", "/app.css", "/app.js"} {
+		w := importBrowserRequest(b, "GET", route, "")
+		assert.Equal(t, http.StatusOK, w.Code, route)
+		assert.NotEmpty(t, w.Body.String())
+		assert.Equal(t, "no-store", w.Header().Get("Cache-Control"))
+		assert.Equal(t, "no-referrer", w.Header().Get("Referrer-Policy"))
+		assert.Contains(t, w.Header().Get("Content-Security-Policy"), "default-src 'none'")
+	}
+}
+
+// Prevents two tabs or concurrent retry/cancel requests from delivering more
+// than one terminal outcome, or deadlocking after the first callback wins.
+func TestImportBrowserConcurrentCallbacksReturnOneOutcome(t *testing.T) {
+	b := newImportBrowserTest(t, importBrowserTestLoader)
+	var wg sync.WaitGroup
+	statuses := make(chan int, 12)
+	start := make(chan struct{})
+	for i := range 12 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			path, body := "/api/selection", `{"ids":["`+importBrowserReadyID+`"]}`
+			if i%2 == 0 {
+				path, body = "/api/cancel", `{}`
+			}
+			statuses <- importBrowserRequest(b, "POST", path, body).Code
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(statuses)
+	winners := 0
+	for status := range statuses {
+		if status == http.StatusOK {
+			winners++
+		} else {
+			assert.Equal(t, http.StatusConflict, status)
+		}
+	}
+	assert.Equal(t, 1, winners)
+	result := <-b.result
+	if !result.Canceled {
+		assert.Equal(t, []string{importBrowserReadyID}, result.IDs)
+	}
+	select {
+	case extra := <-b.result:
+		t.Fatalf("second callback reached the terminal: %+v", extra)
+	default:
+	}
+}
+
+// Prevents a changed source from looking like a successful empty preview in
+// the default test suite, independent of Chrome availability.
+func TestImportBrowserSourceChangesAreExplicitWithoutRawErrors(t *testing.T) {
+	b := newImportBrowserTest(t, func(context.Context, string) (*importContentPreview, error) {
+		return nil, fmt.Errorf("sensitive native context: %w", errImportSourceChanged)
+	})
+	w := importBrowserRequest(b, "GET", "/api/preview?id="+importBrowserReadyID, "")
+	assert.Equal(t, http.StatusConflict, w.Code)
+	assert.Contains(t, w.Body.String(), "changed since you started reviewing")
+	assert.NotContains(t, w.Body.String(), "sensitive native context")
+}
+
+// Prevents an already-canceled review or invalid reader from opening a
+// browser/listener workflow that cannot produce a valid preview.
+func TestImportBrowserCanceledContextAndInvalidReaderNeverLaunch(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	result, err := runImportBrowser(ctx, importDestination{}, importBrowserCandidates(), importBrowserTestLoader)
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.Empty(t, result.IDs)
+	launched := false
+	_, err = runImportBrowserWithOpen(context.Background(), importDestination{}, importBrowserCandidates(), nil, func(string) error { launched = true; return nil })
+	assert.ErrorContains(t, err, "preview reader")
+	assert.False(t, launched)
+}
+
+// Prevents Ctrl-C from waiting on an in-flight native preview until the HTTP
+// shutdown timeout, even when the browser's own request is not canceled.
+func TestImportBrowserCancellationStopsAnActivePreview(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started, ended := make(chan struct{}), make(chan struct{})
+	requestEnded := make(chan struct{})
+	load := func(requestCtx context.Context, _ string) (*importContentPreview, error) {
+		close(started)
+		<-requestCtx.Done()
+		close(ended)
+		return nil, requestCtx.Err()
+	}
+	_, err := runImportBrowserWithOpen(ctx, importDestination{}, importBrowserCandidates(), load, func(link string) error {
+		u, err := url.Parse(link)
+		require.NoError(t, err)
+		values, err := url.ParseQuery(u.Fragment)
+		require.NoError(t, err)
+		base := u.Scheme + "://" + u.Host
+		go func() {
+			defer close(requestEnded)
+			req, err := http.NewRequest("GET", base+"/api/preview?id="+importBrowserReadyID, nil)
+			if err != nil {
+				return
+			}
+			req.Header.Set("X-Import-Token", values.Get("token"))
+			resp, err := http.DefaultClient.Do(req)
+			if err == nil {
+				_, _ = io.Copy(io.Discard, resp.Body)
+				_ = resp.Body.Close()
+			}
+		}()
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			return errors.New("preview request did not start")
+		}
+		cancel()
+		return nil
+	})
+	assert.ErrorIs(t, err, context.Canceled)
+	select {
+	case <-ended:
+	default:
+		t.Fatal("active preview did not receive the terminal cancellation")
+	}
+	select {
+	case <-requestEnded:
+	case <-time.After(time.Second):
+		t.Fatal("HTTP request remained active after the reader shut down")
 	}
 }
