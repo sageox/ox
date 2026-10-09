@@ -26,6 +26,21 @@ var knownLockFiles = []string{
 	"shallow.lock",
 	"config.lock",
 	"HEAD.lock",
+	"info/sparse-checkout.lock",
+}
+
+// SparseCheckoutLockAge is how old info/sparse-checkout.lock must be before it
+// counts as abandoned. The lock has no owner PID, and a sparse-checkout on a
+// very large checkout can legitimately hold it for many minutes while it rewrites
+// the working tree, so the five-minute StaleLockAge would displace a live writer.
+// It is still far shorter than AbandonedLockAge: the holder never waits on the
+// network, so a lock this old is a crash.
+const SparseCheckoutLockAge = 30 * time.Minute
+
+// lockMinAge overrides the ownerless-lock age threshold for locks whose holder
+// has a known, bounded lifetime shorter than AbandonedLockAge.
+var lockMinAge = map[string]time.Duration{
+	"info/sparse-checkout.lock": SparseCheckoutLockAge,
 }
 
 // knownLockGlobs are lock-file patterns whose exact name isn't predictable.
@@ -168,6 +183,10 @@ const StaleLockAge = 5 * time.Minute
 // next-index-<pid>.lock plus an index.lock sitting untouched for three months.
 const AbandonedLockAge = 1 * time.Hour
 
+// beforeLockRemoveHook runs between inspecting a lock and re-checking its identity
+// for removal. Tests use it to replace the lock the way a live writer would.
+var beforeLockRemoveHook func(path string)
+
 // RemoveStaleLockFiles removes git lock files older than StaleLockAge.
 // Safe to call at daemon startup or before pull operations — only removes
 // files that no running git process could still be holding.
@@ -194,6 +213,10 @@ func RemoveStaleLockFiles(gitDir string) (removed []string, errs []error) {
 			if age < StaleLockAge {
 				continue // owner is gone, but give a just-exited process room
 			}
+		} else if minAge, ok := lockMinAge[lock]; ok {
+			if age < minAge {
+				continue
+			}
 		} else if age < AbandonedLockAge {
 			// Ownerless lock. git's index.lock IS the lock — no PID to probe —
 			// so age is the only available signal, and it is a weak one: a slow
@@ -201,6 +224,22 @@ func RemoveStaleLockFiles(gitDir string) (removed []string, errs []error) {
 			// a threshold no plausible index operation reaches before assuming
 			// abandonment, so a live writer is never displaced.
 			continue
+		}
+		// A live writer may have replaced the lock since it was inspected (unlink
+		// plus recreate under the same name). Re-stat and remove only the exact
+		// file judged abandoned: same inode, same mtime, same size.
+		if beforeLockRemoveHook != nil {
+			beforeLockRemoveHook(path)
+		}
+		current, err := os.Stat(path)
+		if err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				errs = append(errs, fmt.Errorf("re-stat %s: %w", lock, err))
+			}
+			continue
+		}
+		if !os.SameFile(info, current) || !current.ModTime().Equal(info.ModTime()) || current.Size() != info.Size() {
+			continue // replaced by a live writer; leave it alone
 		}
 		if err := os.Remove(path); err != nil {
 			errs = append(errs, fmt.Errorf("remove %s: %w", lock, err))

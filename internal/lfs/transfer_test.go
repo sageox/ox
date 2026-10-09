@@ -529,24 +529,3 @@ func TestSharedHTTPClient_Timeout(t *testing.T) {
 	// verify the shared client has the expected timeout
 	assert.Equal(t, 5*time.Minute, lfsHTTPClient.Timeout, "shared LFS client should have 5-minute timeout")
 }
-
-func TestBytesReaderAt(t *testing.T) {
-	data := []byte("hello world")
-	r := newBytesReaderAt(data)
-
-	buf := make([]byte, 5)
-	n, err := r.ReadAt(buf, 0)
-	assert.NoError(t, err)
-	assert.Equal(t, 5, n)
-	assert.Equal(t, "hello", string(buf))
-
-	n, err = r.ReadAt(buf, 6)
-	assert.NoError(t, err)
-	assert.Equal(t, 5, n)
-	assert.Equal(t, "world", string(buf))
-
-	// read past end
-	n, err = r.ReadAt(buf, int64(len(data)))
-	assert.Equal(t, io.EOF, err)
-	assert.Equal(t, 0, n)
-}

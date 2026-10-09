@@ -344,6 +344,15 @@ func (db *DB) IndexGitHubData(ctx context.Context, ledgerPath string, progress f
 	return index.IndexGitHubData(ctx, db.store, ledgerPath, index.ProgressFunc(progress))
 }
 
+// IndexGitHubBoard indexes the team bulletin board's mirrored GitHub posts for
+// repoFullName ("owner/name") into CodeDB. Call it after IndexGitHubData: a
+// board post wins over a Ledger snapshot for the same number. alsoRepos are
+// further spellings of the same repo (GitHub's current name after a rename);
+// when posts fail to index the error wraps index.ErrBoardPostsFailed.
+func (db *DB) IndexGitHubBoard(ctx context.Context, postsDir, repoFullName string, progress func(string), alsoRepos ...string) (*index.GitHubIndexStats, error) {
+	return index.IndexGitHubBoard(ctx, db.store, postsDir, repoFullName, index.ProgressFunc(progress), alsoRepos...)
+}
+
 // Search parses and executes a query.
 func (db *DB) Search(ctx context.Context, input string) ([]search.Result, error) {
 	query, err := search.ParseQuery(input)

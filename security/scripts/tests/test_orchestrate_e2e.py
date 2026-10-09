@@ -200,6 +200,24 @@ class OrchestrateE2ETest(unittest.TestCase):
         self.assertIn("PARTIAL COVERAGE", report)  # four scanners are not installed here
         self.assertEqual(result.returncode, 0, self.explain(result))
 
+    def test_subagents_get_no_context_from_the_reviewed_branch(self):
+        """Avery reviews a stranger's PR: its commit messages, branch name, CLAUDE.md, rules and
+        project hooks are the PR author's, so none of them may reach a reviewer's context."""
+        self.repo.plant_feature()
+        self.repo.install("claude", "golangci-lint")
+        result = self.repo.run("orchestrate.sh")
+
+        calls = self.repo.calls()
+        self.assertTrue(calls, self.explain(result))
+        for call in calls:
+            with self.subTest(role=call["role"]):
+                self.assertEqual(call["setting_sources"], "user",
+                                 "project settings would run the branch's hooks and MCP servers")
+                self.assertEqual(call["env"]["CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS"], "1",
+                                 "the git status snapshot carries the branch name and its commit messages")
+                self.assertEqual(call["env"]["CLAUDE_CODE_DISABLE_CLAUDE_MDS"], "1",
+                                 "CLAUDE.md and .claude/rules files come from the branch")
+
     def test_sensitive_change_without_entry_points_reports_no_coverage(self):
         """Avery's run maps no entry points for a cmd/ox + daemon change."""
         self.repo.plant_feature()
@@ -244,6 +262,48 @@ class OrchestrateE2ETest(unittest.TestCase):
         gosec_line = next((l for l in clean.stdout.splitlines() if l.strip().startswith("gosec:")), "")
         self.assertIn("ran (1 finding(s))", gosec_line, self.explain(clean))
         self.assertEqual(clean.returncode, 0, self.explain(clean))
+
+    def test_fast_tier_writes_a_findings_summary(self):
+        """Riley's PR runs the fast tier in CI; the job summary says what each scanner found."""
+        self.repo.plant_feature()
+        self.repo.install("golangci-lint")
+        result = self.repo.run("deterministic.sh", FAKE_GOSEC="issue")
+
+        summary = self.repo.output("det-summary.md")
+        self.assertIn("| gosec | ran: 1 finding(s) |", summary, self.explain(result))
+        self.assertIn("| opengrep | skipped: not installed", summary)
+        self.assertIn("| gosec | G304 | `cmd/ox/upload.go:11` |", summary)
+        self.assertIn("**PARTIAL COVERAGE**", summary)
+
+    def test_fast_tier_sets_apart_findings_off_the_changed_lines(self):
+        """Ryan's change appends to upload.go; a gosec hit on an untouched line of that file is existing
+        code, not his, and must not be listed as if the change introduced it."""
+        self.repo.plant_feature()
+        self.repo.install("golangci-lint")
+        old = self.repo.run("deterministic.sh", FAKE_GOSEC="issue")  # line 11: not changed by the feature
+        head, marker, tail = self.repo.output("det-summary.md").partition(
+            "Elsewhere in touched files (existing code): 1 finding(s)")
+        self.assertTrue(marker, self.explain(old))
+        self.assertIn("`cmd/ox/upload.go:11`", tail)
+        self.assertNotIn("upload.go:11", head)
+
+        new = self.repo.run("deterministic.sh", FAKE_GOSEC="issue", FAKE_GOSEC_LINE="19")  # the planted line
+        summary = self.repo.output("det-summary.md")
+        self.assertIn("| gosec | G304 | `cmd/ox/upload.go:19` |", summary, self.explain(new))
+        self.assertNotIn("Elsewhere in touched files", summary)
+
+    def test_fast_tier_records_whether_the_change_touches_dependencies(self):
+        """Dependency advisories collapse unless the change edits go.mod or go.sum, so det-merge must say which."""
+        self.repo.plant_feature()
+        self.repo.install("golangci-lint")
+        self.repo.run("deterministic.sh")
+        self.assertIs(json.loads(self.repo.output("findings-deterministic.json"))["dependency_change"], False)
+
+        self.repo.write("go.mod", "module example.com/scratch\n\ngo 1.26\n")
+        self.repo.commit("add go.mod")
+        result = self.repo.run("deterministic.sh")
+        self.assertIs(json.loads(self.repo.output("findings-deterministic.json"))["dependency_change"], True,
+                      self.explain(result))
 
     def test_reported_cost_is_tracked_and_the_cap_stops_later_phases(self):
         """Quinn caps a run at $0.50; each call reports $0.20 in total_cost_usd."""
@@ -295,6 +355,42 @@ class OrchestrateE2ETest(unittest.TestCase):
         report = self.repo.output("FINDINGS.md")
         self.assertIn("| gosec | G304 | `cmd/ox/upload.go:11` |", report, self.explain(result))
         self.assertIn("gosec/G304", self.repo.output("findings.sarif"))
+
+    def validator_models(self) -> dict:
+        """The model each validation ran on, keyed by the class of the finding it judged."""
+        models = {}
+        for call in self.repo.calls("validator"):
+            for cls in ("cli-input", "daemon-ipc"):
+                if f'"class": "{cls}"' in call["stdin"]:
+                    models[cls] = call["model"]
+        return models
+
+    def test_hard_class_finding_is_validated_by_the_hard_class_model(self):
+        """Devon's change also touches daemon IPC; that finding goes to Opus, the argv one to Sonnet."""
+        self.repo.plant_feature()
+        self.repo.install("claude", "golangci-lint")
+        result = self.repo.run("orchestrate.sh", FAKE_DAEMON_FINDING="1")
+
+        self.assertEqual(self.validator_models(), {"daemon-ipc": "claude-opus-5-5", "cli-input": "claude-sonnet-5"},
+                         self.explain(result))
+        report = self.repo.output("FINDINGS.md")
+        self.assertIn("- **validated by**: `claude-opus-5-5`", report, self.explain(result))
+        self.assertIn("- **validated by**: `claude-sonnet-5`", report)
+
+    def test_model_edits_in_config_reach_every_phase(self):
+        """Quinn changes every model in security/config.yml; each phase runs on the one configured."""
+        keys = ("cartographer_model", "hunter_model", "dedup_model", "validator_model", "validator_hard_class_model")
+        self.repo.plant_feature()
+        for key in keys:
+            self.repo.set_config(key, f'"configured-{key}"')  # quoted, as YAML allows
+        self.repo.install("claude", "golangci-lint")
+        result = self.repo.run("orchestrate.sh", FAKE_DAEMON_FINDING="1")
+
+        for role in ("cartographer", "hunter", "dedup"):
+            used = {call["model"] for call in self.repo.calls(role)}
+            self.assertEqual(used, {f"configured-{role}_model"}, role + self.explain(result))
+        self.assertEqual(self.validator_models(), {"daemon-ipc": "configured-validator_hard_class_model",
+                                                   "cli-input": "configured-validator_model"}, self.explain(result))
 
     def test_stale_clean_report_is_replaced_when_claude_is_missing(self):
         """Last week's report said "ran clean"; this run cannot reach claude."""

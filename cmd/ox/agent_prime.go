@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -27,6 +28,8 @@ import (
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/ephemeral"
 	"github.com/sageox/ox/internal/flags"
+	gh "github.com/sageox/ox/internal/github"
+	"github.com/sageox/ox/internal/githubmirror"
 	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/kb"
 	"github.com/sageox/ox/internal/ledger"
@@ -1989,6 +1992,17 @@ func outputAgentPrimeText(cmd *cobra.Command, output agentPrimeOutput) error {
 			fmt.Fprintf(cmd.OutOrStdout(), "  %s\n", prime.BulletinReadingHint)
 		}
 
+		// github mirror board — only when this repo has live posts. Pointer
+		// only, like the general board above.
+		if gb := output.TeamContext.GitHubBoard; gb != nil && gb.Live > 0 {
+			fmt.Fprintln(cmd.OutOrStdout())
+			fmt.Fprintln(cmd.OutOrStdout(), "## GitHub Mirror Board (read on demand — not preloaded)")
+			fmt.Fprintln(cmd.OutOrStdout())
+			fmt.Fprintf(cmd.OutOrStdout(), "  Dir: %s\n", gb.Dir)
+			fmt.Fprintf(cmd.OutOrStdout(), "  This repo: %s (%d live)\n", gb.ThisRepo, gb.Live)
+			fmt.Fprintf(cmd.OutOrStdout(), "  %s\n", prime.GitHubBoardReadingHint)
+		}
+
 		// always emit team context guidance — may sync after prime runs
 		fmt.Fprintln(cmd.OutOrStdout())
 		fmt.Fprintln(cmd.OutOrStdout(), "**Team context available** — team-wide recorded meetings and decisions")
@@ -2241,6 +2255,9 @@ func discoverTeamContextWithFallback(projectRoot, repoSlug string, enableEphemer
 	// v4 team memory loading
 	loadTeamMemory(info, tc.Path)
 
+	// github mirror board — a pointer, only when this repo has live posts
+	loadGitHubBoard(info, tc.Path, projectRoot, getLedgerPath, time.Now())
+
 	// sync health: check staleness
 	syncState := daemon.LoadSyncState(tc.Path)
 	if syncState.IsStale(daemon.DefaultStalenessThreshold) && !syncState.LastSync.IsZero() {
@@ -2309,6 +2326,180 @@ func loadTeamMemory(info *teamContextInfo, teamDir string) {
 	info.MemoryDaily = discoverMemoryFiles(filepath.Join(teamDir, "memory", "daily"))
 	info.MemoryWeekly = discoverMemoryFiles(filepath.Join(teamDir, "memory", "weekly"))
 	info.MemoryMonthly = discoverMemoryFiles(filepath.Join(teamDir, "memory", "monthly"))
+}
+
+// loadGitHubBoard sets info.GitHubBoard when the team's github mirror board
+// holds at least one unexpired post for the repo at projectRoot.
+//
+// Prime is a hot path, so the order is cheapest-first: one directory read, and
+// only if that finds post metadata one `git remote -v` to learn which repo this
+// is, and then one local read of the relay's state file to learn what GitHub
+// currently calls it. No network, and post bodies are never opened — only the
+// small .meta.json sidecars that carry the expiry. ledgerPath is called at most
+// once, and only once the first two steps found something to resolve. Any
+// failure leaves the pointer unset: a missing pointer costs the coworker one
+// `ls`, a wrong one points it at nothing.
+func loadGitHubBoard(info *teamContextInfo, teamDir, projectRoot string, ledgerPath func() string, now time.Time) {
+	if info == nil || teamDir == "" || projectRoot == "" {
+		return
+	}
+
+	postsDir := githubmirror.PostsDir(teamDir)
+	entries, err := os.ReadDir(postsDir)
+	if err != nil {
+		return
+	}
+	hasMeta := false
+	for _, entry := range entries {
+		if isGitHubPostMeta(entry) {
+			hasMeta = true
+			break
+		}
+	}
+	if !hasMeta {
+		return // an empty or pruned board: skip the git call too
+	}
+
+	owner, name, ok := githubRemoteOf(projectRoot)
+	if !ok {
+		return
+	}
+
+	// The relay publishes under GitHub's current name, which after a rename or
+	// transfer is not what the remote says. Posts from before the rename keep
+	// the old name until they expire, so both spellings are this repo. The
+	// canonical one goes first: it is what new posts are filed under.
+	spellings := [][2]string{{owner, name}}
+	var ledger string
+	if ledgerPath != nil {
+		ledger = ledgerPath()
+	}
+	if canonicalOwner, canonicalName := githubmirror.CanonicalRepo(ledger, owner, name); !strings.EqualFold(canonicalOwner+"/"+canonicalName, owner+"/"+name) {
+		spellings = [][2]string{{canonicalOwner, canonicalName}, {owner, name}}
+	}
+
+	var slugPrefixes, keyPrefixes []string
+	for _, spelling := range spellings {
+		slugPrefix := githubmirror.SlugPrefix(spelling[0], spelling[1])
+		if slugPrefix == "" {
+			continue // nothing slug-worthy: an empty prefix would match every post
+		}
+		slugPrefixes = append(slugPrefixes, slugPrefix)
+		keyPrefixes = append(keyPrefixes, githubRepoKeyPrefix(spelling[0], spelling[1]))
+	}
+	if len(slugPrefixes) == 0 {
+		return
+	}
+
+	live, spellingLive := countLiveGitHubPosts(postsDir, entries, slugPrefixes, keyPrefixes, now)
+	if live == 0 {
+		return
+	}
+	// one glob per spelling that has live posts, so the pointer reaches every
+	// post it counts: after a rename both the new and the old name's posts
+	var globs []string
+	for i, prefix := range slugPrefixes {
+		if spellingLive[i] {
+			globs = append(globs, prefix+"*")
+		}
+	}
+	info.GitHubBoard = &prime.GitHubBoardInfo{
+		Dir:      postsDir,
+		ThisRepo: strings.Join(globs, " "),
+		Live:     live,
+	}
+}
+
+// isGitHubPostMeta reports whether a directory entry is a post's .meta.json.
+func isGitHubPostMeta(entry os.DirEntry) bool {
+	return !entry.IsDir() && strings.HasSuffix(entry.Name(), ".meta.json")
+}
+
+// githubRemoteOf returns the GitHub owner and repo of projectRoot, resolved the
+// way the daemon's GitHub sync resolves them so prime and the relay agree on
+// which repo "this repo" is.
+func githubRemoteOf(projectRoot string) (owner, name string, ok bool) {
+	urls, err := repotools.GetRemoteURLsForDir(projectRoot)
+	if err != nil {
+		return "", "", false
+	}
+	for _, url := range urls {
+		if o, n, found := gh.ParseGitHubRemote(url); found {
+			return o, n, true
+		}
+	}
+	return "", "", false
+}
+
+// githubRepoKeyPrefix is the part of a post's source_key shared by every item
+// of one repo ("github.com/{owner}/{name}/"), derived from the one function that
+// builds source keys so the two cannot drift.
+func githubRepoKeyPrefix(owner, name string) string {
+	itemKey := githubmirror.SourceKey(owner, name, githubmirror.KindPullRequest, 0)
+	return path.Dir(path.Dir(itemKey)) + "/"
+}
+
+// hasAnyPrefix reports whether s starts with any of prefixes.
+func hasAnyPrefix(s string, prefixes []string) bool {
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(s, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// countLiveGitHubPosts counts the posts in entries that belong to one repo and
+// have not expired. slugPrefixes and keyPrefixes list every spelling of the
+// repo (see loadGitHubBoard); a post matching any of them is this repo's.
+// spellingLive[i] reports whether any live post was filed under spelling i.
+// Everything is read from the server-written sidecar, never from the post. The
+// file name is only a cheap prefilter (a post file is <slug>-<sha>.meta.json,
+// so a repo's posts all start with its slug prefix). The sidecar's slug and
+// expires_at decide — plus its source_key when it has one, because a slug
+// prefix cannot tell "acme/api" from "acme/api-gateway" and the source key can.
+// A sidecar that cannot be read or decoded is skipped, not counted.
+func countLiveGitHubPosts(postsDir string, entries []os.DirEntry, slugPrefixes, keyPrefixes []string, now time.Time) (live int, spellingLive []bool) {
+	spellingLive = make([]bool, len(slugPrefixes))
+	for _, entry := range entries {
+		if !isGitHubPostMeta(entry) || !hasAnyPrefix(entry.Name(), slugPrefixes) {
+			continue
+		}
+		meta, err := githubmirror.ReadPostMeta(filepath.Join(postsDir, entry.Name()))
+		if err != nil {
+			continue
+		}
+		if !hasAnyPrefix(meta.Slug, slugPrefixes) || !meta.ExpiresAt.After(now) {
+			continue
+		}
+		spelling := postSpelling(meta, slugPrefixes, keyPrefixes)
+		if spelling < 0 {
+			continue
+		}
+		spellingLive[spelling] = true
+		live++
+	}
+	return live, spellingLive
+}
+
+// postSpelling returns the index of the repo spelling a post was filed under,
+// or -1 when it is another repo's. The source_key decides when the post has
+// one; otherwise the slug does, first match winning — spellings are ordered
+// canonical first, and a shorter old name ("acme-api-") is also a prefix of a
+// longer new one ("acme-api-v2-").
+func postSpelling(meta *githubmirror.PostMeta, slugPrefixes, keyPrefixes []string) int {
+	for i := range slugPrefixes {
+		if meta.SourceKey != "" {
+			if strings.HasPrefix(meta.SourceKey, keyPrefixes[i]) {
+				return i
+			}
+			continue
+		}
+		if strings.HasPrefix(meta.Slug, slugPrefixes[i]) {
+			return i
+		}
+	}
+	return -1
 }
 
 // discoverMemoryFiles lists .md files in a directory, sorted reverse-chronologically.

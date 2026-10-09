@@ -230,9 +230,11 @@ type importFixture struct {
 	store          *fakeLFSStore
 	push           func(ctx context.Context, ledgerPath string) error // nil: the real pushLedger
 	pushBatch      int
-	readErr        error // every adapter read fails with it
-	unusable       bool  // no summarizer CLI is installed and logged in
-	interactive    bool  // a coworker at a terminal can answer
+	readErr        error                                  // every adapter read fails with it
+	unusable       bool                                   // no summarizer CLI is installed and logged in
+	runners        map[nativeimport.Agent]*fakeSummarizer // per-CLI summarizers; nil: summarizer serves both
+	loggedOut      map[nativeimport.Agent]bool            // CLIs installed but not logged in
+	interactive    bool                                   // a coworker at a terminal can answer
 	confirm        func(prompt string) (bool, error)
 	ctx            context.Context // the run's context; nil means context.Background()
 	progress       bytes.Buffer    // what a JSON run reports while it works
@@ -446,14 +448,19 @@ func (f *importFixture) envFor(ledgerPath string, opts importOptions) (*importEn
 	}
 	env.deps = productionImportDeps(context.Background(), env)
 	env.deps.readNative = f.readNative
-	env.deps.runner = func(nativeimport.Agent) agentwork.Runner { return f.summarizer }
+	env.deps.runner = func(agent nativeimport.Agent) agentwork.Runner {
+		if f.runners != nil {
+			return f.runners[agent]
+		}
+		return f.summarizer
+	}
 	env.deps.lfsClient = func() (*lfs.Client, error) { return f.store.client(), nil }
 	env.deps.notify = func(_ *lfs.SessionMeta, name string) {
 		f.mu.Lock()
 		f.notified = append(f.notified, name)
 		f.mu.Unlock()
 	}
-	env.deps.usable = func(nativeimport.Agent) bool { return !f.unusable }
+	env.deps.usable = func(agent nativeimport.Agent) bool { return !f.unusable && !f.loggedOut[agent] }
 	env.deps.syncLedger = func() {}
 	env.deps.interactive = func() bool { return f.interactive }
 	if f.confirm != nil {
@@ -532,6 +539,13 @@ func optionsFromCommand(t *testing.T, command string) importOptions {
 			agent, ok := parseImportAgent(fields[i])
 			require.True(t, ok, command)
 			opts.summarizer = agent
+		case "--parallel":
+			i++
+			_, err := fmt.Sscan(fields[i], &opts.parallel)
+			require.NoError(t, err, command)
+		case "--from-test-data":
+			i++
+			opts.testData = strings.Trim(fields[i], "'") // shell-quoted; test paths hold no spaces
 		default:
 			t.Fatalf("unexpected argument %q in %q", fields[i], command)
 		}
@@ -1204,7 +1218,8 @@ func TestImportE2E_InteractiveRunAsksFirst(t *testing.T) {
 	r := f.run(t, importOptions{})
 	assert.ErrorIs(t, r.err, cli.ErrSilent, "a failed session fails the run")
 	assert.Contains(t, r.out, "[1/3]")
-	assert.Contains(t, r.out, "summarizing… ready")
+	assert.Contains(t, r.out, "[1/3] summarizing claude "+nativeShortID(e2eClaudeA))
+	assert.Contains(t, r.out, "[1/3] claude "+nativeShortID(e2eClaudeA)+" ready")
 	assert.Contains(t, r.out, "failed\n      summary: the model is overloaded\n      retry: ox session import --session "+e2eCodexA+"\n")
 	assert.Contains(t, r.out, "skipped: not worth sharing")
 	assert.Contains(t, r.out, "/c/ses_")
@@ -1366,7 +1381,7 @@ func TestImportE2E_EachFailureHoldsOnlyItsSession(t *testing.T) {
 		require.Equal(t, "uploaded", s.Outcome, s.Detail)
 		assert.Equal(t, "uploaded", r.session(t, e2eClaudeA).Outcome)
 		assert.Equal(t, 6, f.summarizer.calls(), "three attempts each")
-		assert.Contains(t, f.summarizer.prompts[1], "Your previous answer was rejected", "a retry says what was wrong")
+		assert.Contains(t, strings.Join(f.summarizer.prompts, "\n"), "Your previous answer was rejected", "a retry says what was wrong")
 		meta := remoteMeta(t, f.barePath, s.SessionName)
 		assert.True(t, strings.HasPrefix(meta.Title, "Every Ledger push"), "the fallback title is the first prompt: %q", meta.Title)
 		assert.Contains(t, meta.Summary, "Summary written from the session's prompts")
@@ -1432,7 +1447,7 @@ func TestImportE2E_SessionThatChangesBeforeItsTurnIsLeft(t *testing.T) {
 			appendClaudePrompt(t, later, e2eClaudeB, f.projectRoot, "one more question", start.Add(2*time.Hour))
 		}
 	}
-	r := f.run(t, importOptions{yes: true, jsonOut: true})
+	r := f.run(t, importOptions{yes: true, jsonOut: true, parallel: 1})
 	require.NoError(t, r.err, r.out)
 	assert.Equal(t, "uploaded", r.session(t, e2eClaudeA).Outcome)
 	changed := r.session(t, e2eClaudeB)

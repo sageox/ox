@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -485,9 +486,35 @@ func snapshotHoldsCommits(path string, number int) bool {
 	return json.Unmarshal(data, &stub) == nil && stub.Number == number && len(stub.Commits) > 0
 }
 
+// ErrGitHubNotFound marks a GitHub API 404. Fetchers wrap it so sync can tell a
+// resource that is gone (a merged PR whose head branch was deleted) from a
+// transient failure.
+var ErrGitHubNotFound = errors.New("github resource not found")
+
+// prCommitsNotFound remembers PRs whose commits endpoint answered 404, keyed by
+// owner/repo#number, for the life of the process. Without it the backfill pass
+// asks again for the same dead PRs on every sync cycle. A daemon restart clears
+// it, costing one retry per PR.
+var prCommitsNotFound sync.Map
+
+// ResetPRCommitsNotFound clears the 404 memo so tests do not share
+// process-wide state.
+func ResetPRCommitsNotFound() {
+	prCommitsNotFound.Clear()
+}
+
 func fetchPRCommits(ctx context.Context, fetcher GitHubFetcher, owner, repo string, number int, logger *slog.Logger) []PRCommit {
+	key := fmt.Sprintf("%s/%s#%d", owner, repo, number)
+	if _, gone := prCommitsNotFound.Load(key); gone {
+		return nil
+	}
 	fetched, err := fetcher.ListPRCommits(ctx, owner, repo, number)
 	if err != nil {
+		if errors.Is(err, ErrGitHubNotFound) {
+			prCommitsNotFound.Store(key, struct{}{})
+			logger.Warn("PR commits not found, skipping until daemon restart", "pr", number, "error", err)
+			return nil
+		}
 		logger.Warn("fetch PR commits failed", "pr", number, "error", err)
 		return nil
 	}

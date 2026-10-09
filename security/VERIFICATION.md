@@ -43,7 +43,7 @@ When `/security-review` flags an issue and you patch it, the patch is only as go
 
 **Common pitfall:** asserting the exact `[REDACTED_PATTERN_NAME]` slug. The hand-ported and generated detector layers both run, and slug assignment can shift when the gitleaks catalog updates. Assert that redaction *happened* (no plaintext) and that *some* `[REDACTED_*]` slug appears — not the exact one.
 
-**Ask for a second pair of eyes if:** the finding class is `secrets-redaction-bypass`. This is a `hard_class`; redaction bugs have shipped before that passed unit tests because the test mocked the layer that contained the bug.
+**Ask for a second pair of eyes if:** the finding class is `secrets-redaction`. This is a `hard_class`; redaction bugs have shipped before that passed unit tests because the test mocked the layer that contained the bug.
 
 ### #hunter-daemon-ipc
 
@@ -60,7 +60,7 @@ When `/security-review` flags an issue and you patch it, the patch is only as go
 
 **Common pitfall:** a test that calls `DisablePeerCredForTesting()` to make the test simpler and then asserts the handler did the right thing. That test proves the handler is correct *if* the peer-cred check is bypassed — exactly the path the attacker takes. Write at least one test without the opt-out.
 
-**Ask for a second pair of eyes if:** the finding class is `daemon-ipc-authz-bypass`. Same-UID adversary model is subtle; a reviewer who hasn't been heads-down in this hunter section may spot a gap you missed.
+**Ask for a second pair of eyes if:** the finding class is `daemon-ipc`. Same-UID adversary model is subtle; a reviewer who hasn't been heads-down in this hunter section may spot a gap you missed.
 
 ### #hunter-supply-chain
 
@@ -77,7 +77,7 @@ When `/security-review` flags an issue and you patch it, the patch is only as go
 
 **Common pitfall:** mocking the HTTP client and asserting "the correct URL was called." That doesn't prove anything about integrity; it proves your mock works. The integrity check belongs after the bytes are downloaded, against a hash, end-to-end.
 
-**Ask for a second pair of eyes if:** the finding class is `supply-chain-tampering`. The blast radius of an adapter-install RCE is every developer who installs that adapter; one wrong patch ships the vulnerability to all of them.
+**Ask for a second pair of eyes if:** the finding class is `supply-chain`. The blast radius of an adapter-install RCE is every developer who installs that adapter; one wrong patch ships the vulnerability to all of them.
 
 ### #hunter-llm-trust
 
@@ -97,7 +97,7 @@ When `/security-review` flags an issue and you patch it, the patch is only as go
 
 ## When to escalate
 
-Findings in any of these classes — `secrets-redaction-bypass`, `daemon-ipc-authz-bypass`, `supply-chain-tampering` — should not be closed on a single contributor's say-so. Tag the PR for review by a maintainer with security context, attach the regression test, and link to the original finding ID.
+Findings in any of these classes — `secrets-redaction`, `daemon-ipc`, `supply-chain` (the `hard_classes` in `security/config.yml`) — should not be closed on a single contributor's say-so. Tag the PR for review by a maintainer with security context, attach the regression test, and link to the original finding ID.
 
 If you're not sure whether a class qualifies, it probably does. Ask.
 

@@ -278,6 +278,55 @@ func TestClaudeRunner_Run_MissingResultIsError(t *testing.T) {
 	assert.Equal(t, "claude", result.ModelUsed)
 }
 
+// Failure prevented: a failing claude CLI (rate limit, not logged in) printed
+// one short line and exited non-zero, and the daemon discarded it, leaving 38
+// undiagnosable failures in two hours.
+func TestClaudeRunner_Run_NonZeroExitKeepsCLIErrorText(t *testing.T) {
+	tests := []struct {
+		name   string
+		script string
+		want   string
+		absent string
+	}{
+		{
+			name:   "stdout when stderr is empty",
+			script: "#!/bin/sh\nprintf '%s\\n' 'Claude usage limit reached'\nexit 1\n",
+			want:   "Claude usage limit reached",
+		},
+		{
+			name:   "stderr preferred and redacted",
+			script: "#!/bin/sh\nprintf '%s\\n' 'not logged in glpat-abcdef1234567890XYZ' >&2\nprintf '%s\\n' 'ignored stdout'\nexit 1\n",
+			want:   "not logged in",
+			absent: "glpat-abcdef1234567890XYZ",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			script := filepath.Join(t.TempDir(), "claude")
+			require.NoError(t, os.WriteFile(script, []byte(tt.script), 0o755))
+			r := &ClaudeRunner{binaryPath: script, logger: slog.Default()}
+
+			result, err := r.Run(context.Background(), RunRequest{Prompt: "test", TimeoutOverride: 30 * time.Second})
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.want)
+			if tt.absent != "" {
+				assert.NotContains(t, err.Error(), tt.absent)
+			}
+			require.NotNil(t, result)
+			assert.Equal(t, 1, result.ExitCode)
+		})
+	}
+}
+
+func TestFailureDetail_CapsLength(t *testing.T) {
+	t.Parallel()
+	got := failureDetail("", strings.Repeat("x", failureDetailLimit*3))
+	assert.LessOrEqual(t, len(got), failureDetailLimit+len("...(truncated)"))
+	assert.True(t, strings.HasSuffix(got, "...(truncated)"))
+}
+
 func TestClaudeRunner_Run_ExitCode(t *testing.T) {
 	script := filepath.Join(t.TempDir(), "claude")
 	require.NoError(t, os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s\\n' '{\"type\":\"result\",\"result\":\"partial\"}'\nexit 7\n"), 0o755))

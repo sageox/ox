@@ -11,6 +11,7 @@ import (
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/lfs"
+	"github.com/sageox/ox/internal/session"
 	"github.com/spf13/cobra"
 )
 
@@ -47,7 +48,16 @@ Example:
 
 // resolveSessionInDir resolves a partial session name (e.g. agent ID suffix)
 // to the full session directory name by scanning the given directory.
+//
+// The name must be a single directory entry. Most callers pass a name typed on
+// the command line (upload, download, lint, regenerate), and the exact-match
+// Stat below would otherwise resolve "..", "", or "../x" to a directory outside
+// dir, which upload then rewrites and publishes.
 func resolveSessionInDir(dir, name string) (string, error) {
+	if err := session.ValidateDraftSessionName(name); err != nil {
+		return "", err
+	}
+
 	// exact match
 	if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
 		return name, nil

@@ -200,10 +200,13 @@ func TestBuildPrompt_EmptyTranscriptRechecksLedger(t *testing.T) {
 
 	f.ledgerEntry(t, testRawContent, false)
 
-	_, err := h.BuildPrompt(items[0])
+	req, err := h.BuildPrompt(items[0])
 	require.NoError(t, err)
 	payload := items[0].Payload.(*SessionFinalizePayload)
 	assert.False(t, payload.emptyTranscript, "the worker must not settle a copy the Ledger no longer describes")
+	// the copy still holds no conversation entries: that is a prefilter stub,
+	// never a prompt with no transcript sent to the LLM
+	assert.True(t, req.SkipLLM, "zero parsed entries must not reach the LLM")
 }
 
 // TestProcessResult_SettlesEmptyLedgerDownload drives the worker end to end

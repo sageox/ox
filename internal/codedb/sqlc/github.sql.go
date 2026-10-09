@@ -66,6 +66,22 @@ func (q *Queries) GetIssueIDByNumber(ctx context.Context, number int64) (int64, 
 	return id, err
 }
 
+const getIssueSourceByNumber = `-- name: GetIssueSourceByNumber :one
+SELECT id, source_path FROM issues WHERE number = ?
+`
+
+type GetIssueSourceByNumberRow struct {
+	ID         int64          `json:"id"`
+	SourcePath sql.NullString `json:"source_path"`
+}
+
+func (q *Queries) GetIssueSourceByNumber(ctx context.Context, number int64) (GetIssueSourceByNumberRow, error) {
+	row := q.db.QueryRowContext(ctx, getIssueSourceByNumber, number)
+	var i GetIssueSourceByNumberRow
+	err := row.Scan(&i.ID, &i.SourcePath)
+	return i, err
+}
+
 const getPRIDByNumber = `-- name: GetPRIDByNumber :one
 SELECT id FROM pull_requests WHERE number = ?
 `
@@ -75,6 +91,25 @@ func (q *Queries) GetPRIDByNumber(ctx context.Context, number int64) (int64, err
 	var id int64
 	err := row.Scan(&id)
 	return id, err
+}
+
+const getPRSourceByNumber = `-- name: GetPRSourceByNumber :one
+SELECT id, source_path, merge_commit FROM pull_requests WHERE number = ?
+`
+
+type GetPRSourceByNumberRow struct {
+	ID          int64          `json:"id"`
+	SourcePath  sql.NullString `json:"source_path"`
+	MergeCommit sql.NullString `json:"merge_commit"`
+}
+
+// source_path says whether a Ledger snapshot or a board post wrote the row last;
+// merge_commit is carried across a board overwrite because a post cannot supply it.
+func (q *Queries) GetPRSourceByNumber(ctx context.Context, number int64) (GetPRSourceByNumberRow, error) {
+	row := q.db.QueryRowContext(ctx, getPRSourceByNumber, number)
+	var i GetPRSourceByNumberRow
+	err := row.Scan(&i.ID, &i.SourcePath, &i.MergeCommit)
+	return i, err
 }
 
 const insertIssue = `-- name: InsertIssue :execresult
@@ -230,6 +265,33 @@ func (q *Queries) ListFileMtimes(ctx context.Context) ([]GithubFileMtime, error)
 			return nil, err
 		}
 		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPRCommitShas = `-- name: ListPRCommitShas :many
+SELECT sha FROM pr_commits WHERE pr_id = ? ORDER BY id
+`
+
+func (q *Queries) ListPRCommitShas(ctx context.Context, prID int64) ([]string, error) {
+	rows, err := q.db.QueryContext(ctx, listPRCommitShas, prID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []string{}
+	for rows.Next() {
+		var sha string
+		if err := rows.Scan(&sha); err != nil {
+			return nil, err
+		}
+		items = append(items, sha)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err

@@ -157,6 +157,19 @@ func snapshotPriorRevision(gitRoot, planDir string) error {
 	if err := gitutil.IsSafeForGitOps(ledgerPath); err != nil {
 		return fmt.Errorf("ledger not safe to snapshot prior revision: %w", err)
 	}
+	// a failed upload left a large plain plan.html behind; finish the upload before
+	// the snapshot, and refuse the save if it still fails rather than lose or
+	// commit that render
+	if plan.HasLargePlainHTML(planDir) {
+		client := planLFSClientFn(gitRoot)
+		if client == nil {
+			// a nil client makes dehydration a no-op, which is not an upload
+			return fmt.Errorf("prior plan.html is awaiting upload and no content store is reachable")
+		}
+		if _, err := planDehydrateHTML(planDir, client); err != nil {
+			return fmt.Errorf("prior plan.html is awaiting upload: %w", err)
+		}
+	}
 	return commitPlanLocal(ledgerPath, planDir, "plan: prior revision of ")
 }
 

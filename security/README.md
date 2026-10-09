@@ -26,7 +26,7 @@ make sec           # optional, AI tier — requires ANTHROPIC_API_KEY
 make sec-test      # changing the pipeline itself? its tests — fake claude + scanners, no cost
 ```
 
-Output lands in `security/.output/FINDINGS.md`. SARIF goes to the GitHub Security tab when run from CI.
+Output lands in `security/.output/FINDINGS.md`. In CI, the fast tier writes `det-summary.md` to the job summary and saves `security/.output/` as the run's `security-findings-<run id>` artifact; nothing is uploaded to the Security tab.
 
 ## Layout
 
@@ -62,7 +62,7 @@ Read the coverage line first — the frontmatter's `coverage:` and the banner un
 | `partial` | A stage was skipped, failed, truncated, or stopped at the cost cap. Findings are real; their absence is not, for the parts listed. | 0 (skips), 1 (a failure), 2 (cap) |
 | `none` | A required stage did not run: no hunter completed, every scanner was skipped or failed, or a `cmd/ox/`, `internal/daemon/`, `internal/session/` or `internal/auth/` change produced no entry points. Zero findings means nothing; listed findings are still real. | 3 |
 
-Scanner findings for the touched files, plus dependency advisories, get their own section: unvalidated tool output, minus anything an AI finding reports at the same line. They are in `findings.sarif` too, as `<tool>/<rule>`. A `## Coverage` table at the end shows each stage: chunks reviewed, each scanner's status (`ran` / `skipped` / `failed`, with the reason), entry points mapped, hunter runs completed, findings validated, and cost.
+Scanner findings for the touched files, plus dependency advisories, get their own section: unvalidated tool output, minus anything an AI finding reports at the same line. Dependency advisories are merged to one row per vulnerability (govulncheck, osv-scanner and grype report the same advisory under GO-, GHSA- or CVE- IDs); those with no known call path from ox code are collapsed unless the change edits `go.mod` or `go.sum`. Code findings on lines the change touches come first; hits elsewhere in a touched file are existing code and sit in a collapsed "Elsewhere in touched files" list. The CI job summary renders the same sections. They are in `findings.sarif` too, as `<tool>/<rule>`. A `## Coverage` table at the end shows each stage: chunks reviewed, each scanner's status (`ran` / `skipped` / `failed`, with the reason), entry points mapped, hunter runs completed, findings validated, and cost.
 
 Findings are grouped by hunter section (`#hunter-cli-input`, `#hunter-secrets-redaction`, `#hunter-daemon-ipc`, `#hunter-supply-chain`, `#hunter-llm-trust`). Each finding has:
 
@@ -91,8 +91,8 @@ If you're running the AI tier as a routine pre-commit check on every diff, you'r
 The CI workflow at `.github/workflows/security-review.yml` runs the fast deterministic tier on every PR but **does not** run the AI tier. This is a deliberate choice:
 
 - **Cost-DoS risk.** Any contributor who can land a PR can label one as `needs-security-review`; ~$4/run × N labels drains the budget.
-- **Public finding disclosure.** SARIF uploaded to a public repo's Security tab is world-readable. A real exploitable finding becomes a 0-day announcement before it can be patched.
-- **Prompt injection via PR content.** A diff can carry adversarial strings that hijack the hunter prompts.
+- **Public finding disclosure.** CI output on a public repo is public: anyone can read a run's job summary and PR annotations, and anyone signed in to GitHub can download its artifacts. A real exploitable finding from the AI tier would become a 0-day announcement before it could be patched. (The fast tier's findings come from public scanners on public code, so the job summary carries them.)
+- **Prompt injection via PR content.** A diff can carry adversarial strings that hijack the hunter prompts. Locally, the branch's commit messages, branch name, `CLAUDE.md`, rules and project hooks are kept out of every subagent; the diff itself can't be ([what reaches a subagent](SECURITY.md#review-pipeline-subagents)).
 - **Marginal value.** Maintainers can run `make sec` locally for free via the Claude Code subsidy.
 
 If a maintainer or fork wants the AI tier in CI, it's a small addition: a label-gated job conditional on `secrets.ANTHROPIC_API_KEY != ''`. Open an issue if you have a use case for it.

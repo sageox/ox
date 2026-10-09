@@ -88,11 +88,6 @@ func Entities(paths []string) []string {
 	return out
 }
 
-// OverrideEnv, when set to "1", lets a deliberate bulk removal through the
-// commit-time guard. The detector ignores it — a historical mass deletion is
-// always worth surfacing, override or not.
-const OverrideEnv = "OX_ALLOW_SACRED_MASS_DELETE"
-
 // HasPrefix reports whether p lives under a sacred prefix.
 func HasPrefix(p string) bool {
 	for _, pre := range Prefixes {

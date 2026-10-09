@@ -116,26 +116,35 @@ type doctorOptions struct {
 	fixSlugs []string // specific check slugs to fix (empty = fix all when fix=true)
 	forceYes bool
 	verbose  bool
+
+	// sessionRepairs carries the session repair results of one run; see runSessionRepairs.
+	sessionRepairs *sessionRepairState
 }
 
 // shouldFix returns true if the check identified by slug should attempt a fix.
 // Auto-fix checks (FixLevelAuto) always return true - they fix automatically.
 // For other checks: when fixSlugs is empty, returns opts.fix (--fix applies to all).
 // When fixSlugs has entries, returns true only if slug is in the list.
+//
+// --fix-slug means "fix exactly this": once any slug is named, ONLY those slugs
+// fix, auto-fix checks included. Otherwise a repair of one Ledger issue also
+// rewrote .claude/settings.json and AGENTS.md in the project (GH #1209).
 func (opts doctorOptions) shouldFix(slug string) bool {
+	if len(opts.fixSlugs) > 0 {
+		return slices.Contains(opts.fixSlugs, slug)
+	}
 	// auto-fix checks always apply their fix (they're non-destructive and always safe)
 	if check := GetDoctorCheck(slug); check != nil && check.IsAutoFixable() {
 		return true
 	}
-	if len(opts.fixSlugs) == 0 {
-		return opts.fix
-	}
-	for _, s := range opts.fixSlugs {
-		if s == slug {
-			return true
-		}
-	}
-	return false
+	return opts.fix
+}
+
+// fixAll reports whether this run applies fixes broadly (--fix), as opposed to
+// only the named --fix-slug checks. Code that fixes without a slug of its own
+// must gate on this, not on opts.fix, which --fix-slug also sets.
+func (opts doctorOptions) fixAll() bool {
+	return opts.fix && len(opts.fixSlugs) == 0
 }
 
 // doctorState holds detected environment state for conditional check suppression
@@ -762,6 +771,7 @@ func runDoctorChecks(parent context.Context, opts doctorOptions) ([]checkCategor
 
 func runDoctorChecksWithState(parent context.Context, opts doctorOptions, state doctorState) ([]checkCategory, error) {
 	var categories []checkCategory
+	opts.sessionRepairs = &sessionRepairState{}
 	if parent == nil {
 		parent = context.Background()
 	}
@@ -1249,7 +1259,7 @@ func runDoctorChecksWithState(parent context.Context, opts doctorOptions, state 
 			name: "SageOx Service",
 			checks: []checkResult{
 				checkAPIConnectivity(),
-				checkAPIEndpoint(opts.fix),
+				checkAPIEndpoint(opts.fixAll()),
 				checkTeamRegistrationWithOpts(opts),
 				checkTeamVisibility(),
 			},
@@ -1377,6 +1387,8 @@ var ledgerGitHealthOrder = []string{
 	CheckSlugGitignoreMissing,
 	CheckSlugSessionIDsBackfilled,
 	CheckSlugGitHubDataMigration,
+	// read-only report on the daemon's GitHub mirror relay; order-independent.
+	CheckSlugGitHubMirror,
 }
 
 // checkLedgerGitHealth runs every check registered in the "Ledger Git Health"
@@ -1405,10 +1417,17 @@ func checkLedgerGitHealth(opts doctorOptions) []checkResult {
 			continue
 		}
 
+		// branch-status pushes unpushed commits; the session repairs must have run first
+		if slug == CheckSlugLedgerBranchStatus {
+			_ = opts.runSessionRepairs()
+		}
+
 		result := check.Run(opts.shouldFix(slug))
 		// the checkout .gitignore check reports "skipped" when no checkout
-		// exists; that is not a finding worth a row.
-		if result.skipped && slug == CheckSlugGitignoreMissing {
+		// exists; that is not a finding worth a row. The GitHub mirror check
+		// reports "skipped" when the mirror never ran on this machine, which
+		// is the common case and likewise not worth a row.
+		if result.skipped && (slug == CheckSlugGitignoreMissing || slug == CheckSlugGitHubMirror) {
 			continue
 		}
 		checks = append(checks, result)

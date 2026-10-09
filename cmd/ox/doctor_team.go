@@ -179,7 +179,7 @@ func checkDoubleEncodedLFSPointers(tc config.TeamContext, opts doctorOptions) ch
 		return PassedCheck(name, "no nested LFS pointers")
 	}
 
-	if opts.fix {
+	if opts.fixAll() {
 		if err := restoreRawLFSPointers(tc.Path, paths); err != nil {
 			return FailedCheck(name, "nested LFS pointers found; restore failed", err.Error())
 		}
@@ -269,14 +269,14 @@ func checkSingleTeamContext(tc config.TeamContext, opts doctorOptions) checkResu
 
 	// check for orphaned backpointers
 	if health.OrphanedCount > 0 {
-		if opts.fix {
+		if opts.fixAll() {
 			cleaned, err := config.CleanupOrphanedBackpointers(tc.Path)
 			if err == nil && cleaned > 0 {
 				return PassedCheck(name, fmt.Sprintf("cleaned %d orphaned refs", cleaned))
 			}
 		}
 		detail := fmt.Sprintf("%d workspace(s) reference deleted projects", health.OrphanedCount)
-		if !opts.fix {
+		if !opts.fixAll() {
 			detail += ". Run `ox doctor --fix` to clean up"
 		}
 		return WarningCheck(name, "orphaned references", detail)
@@ -357,7 +357,7 @@ func checkOrphanedTeamDirs(opts doctorOptions) checkResult {
 
 	detail := fmt.Sprintf("Teams with no active workspaces: %s", strings.Join(orphanedNames, ", "))
 
-	if opts.fix {
+	if opts.fixAll() {
 		removed, err := promptTeamContextCleanup(orphanedPaths, opts.forceYes)
 		if err != nil {
 			return FailedCheck("Orphaned team dirs", "cleanup error", err.Error())

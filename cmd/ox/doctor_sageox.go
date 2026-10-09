@@ -533,7 +533,7 @@ func checkTeamRegistrationWithOpts(opts doctorOptions) checkResult {
 	}
 
 	if cfg.TeamID == "" {
-		if opts.fix {
+		if opts.fixAll() {
 			// prompt user for consent (default No) unless forceYes is set
 			shouldRegister := opts.forceYes || promptOfflineMigration(opts.forceYes)
 			if shouldRegister {

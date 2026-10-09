@@ -8,8 +8,10 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
+	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/logger"
 	"github.com/sageox/ox/internal/useragent"
 )
@@ -36,6 +38,13 @@ func NewClient(token string) *Client {
 		},
 		baseURL: "https://api.github.com",
 	}
+}
+
+// WithBaseURL points the client at another GitHub API root — a GitHub
+// Enterprise Server's /api/v3, or a test server. Trailing slashes are trimmed.
+func (c *Client) WithBaseURL(baseURL string) *Client {
+	c.baseURL = strings.TrimRight(baseURL, "/")
+	return c
 }
 
 // ListPullRequests fetches pull requests for a repository with pagination.
@@ -137,6 +146,81 @@ func (c *Client) ListIssueComments(ctx context.Context, owner, repo string, numb
 	return c.paginateComments(ctx, fmt.Sprintf("/repos/%s/%s/issues/%d/comments", owner, repo, number))
 }
 
+// GetRepo fetches repository metadata. The mirror relays Private so the server
+// can enforce the team's private-repo opt-in.
+func (c *Client) GetRepo(ctx context.Context, owner, repo string) (RepoInfo, error) {
+	var info RepoInfo
+	if _, err := c.doRequest(ctx, "GET", fmt.Sprintf("/repos/%s/%s", owner, repo), &info); err != nil {
+		return RepoInfo{}, err
+	}
+	return info, nil
+}
+
+// ListPRReviews fetches every review on a pull request, oldest first.
+func (c *Client) ListPRReviews(ctx context.Context, owner, repo string, number int) ([]Review, error) {
+	var all []Review
+	page := 1
+
+	for {
+		path := fmt.Sprintf("/repos/%s/%s/pulls/%d/reviews?per_page=100&page=%d", owner, repo, number, page)
+
+		var reviews []Review
+		if _, err := c.doRequest(ctx, "GET", path, &reviews); err != nil {
+			return all, err
+		}
+
+		if len(reviews) == 0 {
+			break
+		}
+
+		all = append(all, reviews...)
+
+		if len(reviews) < 100 {
+			break
+		}
+
+		page++
+	}
+
+	return all, nil
+}
+
+// ListPRFiles returns up to limit changed file paths for a pull request and
+// whether more files exist beyond limit. It stops requesting pages as soon as it
+// has seen one file past limit, so a huge PR costs one or two calls, not dozens.
+// A PR with exactly limit files is not truncated.
+func (c *Client) ListPRFiles(ctx context.Context, owner, repo string, number, limit int) ([]string, bool, error) {
+	if limit < 1 {
+		return nil, false, fmt.Errorf("list pr files: limit must be positive, got %d", limit)
+	}
+
+	paths := make([]string, 0, min(limit, 100))
+	page := 1
+
+	for {
+		path := fmt.Sprintf("/repos/%s/%s/pulls/%d/files?per_page=100&page=%d", owner, repo, number, page)
+
+		var files []PRFile
+		if _, err := c.doRequest(ctx, "GET", path, &files); err != nil {
+			return paths, false, err
+		}
+
+		for _, f := range files {
+			if len(paths) == limit {
+				return paths, true, nil
+			}
+			paths = append(paths, f.Filename)
+		}
+
+		// a short page is the last page; a full page may be followed by an empty one
+		if len(files) < 100 {
+			return paths, false, nil
+		}
+
+		page++
+	}
+}
+
 // paginateComments fetches all comments from a paginated endpoint.
 func (c *Client) paginateComments(ctx context.Context, basePath string) ([]Comment, error) {
 	var all []Comment
@@ -223,6 +307,9 @@ func (c *Client) doRequest(ctx context.Context, method, path string, result inte
 	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode == http.StatusNotFound {
+			return rl, fmt.Errorf("github api status %d: %s: %w", resp.StatusCode, string(body), ledger.ErrGitHubNotFound)
+		}
 		return rl, fmt.Errorf("github api status %d: %s", resp.StatusCode, string(body))
 	}
 

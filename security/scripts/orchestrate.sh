@@ -4,8 +4,8 @@
 # Source: https://www.synthesia.io/post/automating-code-security-reviews-with-claude-mythos-level-capabilities
 # Phases: prep → map → hunt → dedup → validate → aggregate.
 # Right-size models per phase: Haiku (cartographer), Sonnet (hunters, dedup, default validator),
-# Opus only for the 5 hard validation classes (authz / cryptography / multi-hop-taint /
-# agent-tool-abuse / exploitability-dispute).
+# Opus only for findings in the hard classes. Every model and the hard-class list come from
+# security/config.yml (models:, hard_classes:).
 #
 # Usage:
 #   bash security/scripts/orchestrate.sh                       # diff vs origin/main, default config
@@ -73,12 +73,15 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# config_value <key> <default> — first `key: value` line in config.yml, at any indent.
+# config_value <key> <default> — first `key: value` line in config.yml, at any indent,
+# without the quotes YAML allows around a scalar.
 config_value() {
   local v=""
   if [[ -f "$CONFIG" ]]; then
     v="$(awk -v k="$1" '$1 == k":" {print $2; exit}' "$CONFIG" 2>/dev/null || true)"
   fi
+  v="${v#[\"\']}"
+  v="${v%[\"\']}"
   echo "${v:-$2}"
 }
 if [[ -z "$CAP_USD" ]]; then
@@ -86,6 +89,9 @@ if [[ -z "$CAP_USD" ]]; then
 fi
 CHUNK_BYTES="$(config_value chunk_bytes 120000)"
 MAX_CHUNKS="$(config_value max_chunks 8)"
+CARTOGRAPHER_MODEL="$(config_value cartographer_model claude-haiku-4-5)"
+HUNTER_MODEL="$(config_value hunter_model claude-sonnet-5)"
+DEDUP_MODEL="$(config_value dedup_model claude-sonnet-5)"
 
 # --- Reset per-run artifacts -------------------------------------------------
 # A run that stops early must not leave the previous run's FINDINGS.md behind:
@@ -246,9 +252,11 @@ invoke_claude() {
     # and tolerate hooks/auto-memory noise rather than no findings at all.
     #
     # --setting-sources user: only load ~/.claude/settings.json, not project
-    # .claude/settings.json. The project SessionStart hook runs `ox agent prime`, which
-    # may exit 1 in some environments and can derail subagent startup. User settings
-    # still give us OAuth/keychain auth.
+    # .claude/settings.json. The reviewed branch controls the project settings, so
+    # loading them would run its hooks and MCP servers and put its CLAUDE.md and
+    # .claude/rules in every subagent's context (security/SECURITY.md#hunter-llm-trust).
+    # It also skips the project SessionStart hook (`ox agent prime`), which can derail
+    # subagent startup. User settings still give us OAuth/keychain auth.
     --setting-sources user
     # --no-session-persistence: subagent invocations are one-shot. We don't want
     # them appearing in /resume pickers or polluting session history.
@@ -274,7 +282,15 @@ invoke_claude() {
   # $$ is the parent shell's PID, shared across the subshells of one hunt wave.
   local raw rc=0 parsed cost subtype is_error denials
   raw="$(mktemp "$OUT/.claude-raw.${BASHPID:-$$}.$(basename "$prompt").XXXXXX")"
-  claude "${cli_args[@]}" < "$input" > "$raw" 2>>"$OUT/run-log.md" || rc=$?
+  # The reviewed branch is untrusted, and so is its git metadata. Claude Code puts a
+  # git status snapshot (branch name, recent commit messages) in the system prompt,
+  # outside the diff's data framing; CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS=1 drops it
+  # (--exclude-dynamic-system-prompt-sections only moves it to the first user message).
+  # CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 keeps every CLAUDE.md and .claude/rules file out
+  # even if --setting-sources ever loads the project, and keeps the reviewer's own
+  # memory files from steering the review.
+  CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS=1 CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 \
+    claude "${cli_args[@]}" < "$input" > "$raw" 2>>"$OUT/run-log.md" || rc=$?
   # Parse the envelope whatever the exit code: a budget stop exits 1 but still
   # reports what it spent.
   parsed="$(python3 "$LIB" envelope --raw "$raw" --output "$output" ${schema:+--structured})" \
@@ -303,7 +319,7 @@ invoke_claude() {
 run_hunter() {
   local h="$1" n="$2" wave_budget="$3" nn
   nn="$(printf '%02d' "$n")"
-  invoke_claude "claude-sonnet-5" "$SKILL/prompts/hunter-${h}.md" "$OUT/review/packet-hunter-c${nn}.md" \
+  invoke_claude "$HUNTER_MODEL" "$SKILL/prompts/hunter-${h}.md" "$OUT/review/packet-hunter-c${nn}.md" \
     "$OUT/hunter-${h}-c${nn}.jsonl" "hunt:${h}:c${nn}" "$SKILL/schemas/hunter.json" "$wave_budget" || true
   python3 "$LIB" hunter-result --out "$OUT" --hunter "$h" --chunk "$n"
   sanitize_jsonl "$OUT/hunter-${h}-c${nn}.jsonl" "hunter-${h}-c${nn}"
@@ -370,7 +386,7 @@ for (( n = 1; n <= CHUNKS; n++ )); do
   python3 "$LIB" packet --role cartographer --review "$OUT/review" --chunk "$n" \
     --scope-md "$OUT/scope.md" --det "$OUT/findings-deterministic.json" \
     --out "$OUT/review/packet-cartographer-c${nn}.md"
-  invoke_claude "claude-haiku-4-5" "$SKILL/prompts/cartographer.md" "$OUT/review/packet-cartographer-c${nn}.md" \
+  invoke_claude "$CARTOGRAPHER_MODEL" "$SKILL/prompts/cartographer.md" "$OUT/review/packet-cartographer-c${nn}.md" \
     "$OUT/cartographer-c${nn}.json" "map:cartographer:c${nn}" "$SKILL/schemas/cartographer.json" || true
 done
 python3 "$LIB" surface --out "$OUT"
@@ -447,7 +463,7 @@ if [[ ! -s "$OUT/findings-raw.jsonl" ]]; then
 elif [[ ! -f "$SKILL/prompts/dedup.md" ]]; then
   python3 "$LIB" dedup-result --out "$OUT" --skipped no-prompt
 else
-  invoke_claude "claude-sonnet-5" "$SKILL/prompts/dedup.md" \
+  invoke_claude "$DEDUP_MODEL" "$SKILL/prompts/dedup.md" \
     "$OUT/findings-raw.jsonl" "$OUT/findings-deduped.jsonl" "dedup" \
     "$SKILL/schemas/dedup.json" || true
   python3 "$LIB" dedup-result --out "$OUT"
@@ -456,13 +472,13 @@ fi
 echo "       wrote $OUT/findings-deduped.jsonl ($(wc -l < "$OUT/findings-deduped.jsonl" | tr -d ' ') after dedup)"
 
 # --- Phase 5: VALIDATE -----------------------------------------------------
-# Per-finding loop. Sonnet for the default ~90%; Opus for the 5 hard classes.
+# Per-finding loop. validator_model (Sonnet) for most findings; validator_hard_class_model
+# (Opus) for a finding whose class is in config.yml hard_classes (pipeline.py validator-model).
 # Synthesia's validator is "deliberately stricter than hunters" — discards ~60% of
 # hunter findings as false positives. A finding that cannot be validated (cap hit,
 # CLI failure) is kept and marked UNVALIDATED, never dropped.
 PHASE="validate"
 echo "[5/6] validate (Sonnet ~90% / Opus on hard classes)"
-OPUS_CLASSES="authz cryptography multi-hop-taint agent-tool-abuse exploitability-dispute"
 : > "$OUT/findings-validated.jsonl"
 vi=0
 while IFS= read -r line; do
@@ -474,11 +490,9 @@ while IFS= read -r line; do
       >> "$OUT/findings-validated.jsonl"
     continue
   fi
-  cls=$(echo "$line" | jq -r '.class // ""' 2>/dev/null || echo "")
-  model="claude-sonnet-5"
-  for opus_cls in $OPUS_CLASSES; do
-    [[ "$cls" == "$opus_cls" ]] && { model="claude-opus-5-5"; break; }
-  done
+  model="$(python3 "$LIB" validator-model --config "$CONFIG" --finding "$OUT/.validate-input")" ||
+    model="$(config_value validator_model claude-sonnet-5)"
+  echo "       validate:$vi on $model"
   if ! python3 "$LIB" packet --role validator --review "$OUT/review" --finding "$OUT/.validate-input" \
       --out "$OUT/.validate-packet.md"; then
     python3 "$LIB" validator-result --finding "$OUT/.validate-input" --unvalidated "could not build the validator input" \
@@ -489,7 +503,7 @@ while IFS= read -r line; do
     "$OUT/.validate-packet.md" "$OUT/.validate-output" "validate:$vi" \
     "$SKILL/schemas/validator.json" || true
   python3 "$LIB" validator-result --finding "$OUT/.validate-input" --output "$OUT/.validate-output" \
-    >> "$OUT/findings-validated.jsonl"
+    --model "$model" >> "$OUT/findings-validated.jsonl"
 done < "$OUT/findings-deduped.jsonl"
 echo "       wrote $OUT/findings-validated.jsonl"
 

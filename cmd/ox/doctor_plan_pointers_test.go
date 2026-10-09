@@ -68,7 +68,8 @@ func TestPlanPointersMissingOnRemote_Only404IsMissing(t *testing.T) {
 		{Name: "p-flaky", ref: lfs.FileRef{Storage: "lfs", OID: "sha256:" + oidFlaky, Size: 30}},
 	}
 
-	missing := planPointersMissingOnRemote(client, pointers)
+	missing, err := planPointersMissingOnRemote(client, pointers)
+	require.NoError(t, err)
 	require.Len(t, missing, 1, "only the 404 pointer is genuinely missing; the 401 is inconclusive")
 	assert.Equal(t, "p-missing", missing[0].Name)
 }
@@ -153,7 +154,10 @@ func TestEvaluatePlanPointers_WarnThenFix(t *testing.T) {
 	pointers := collectPlanHTMLPointers(filepath.Join(ledger, "data", "plans"), ledger)
 	require.Len(t, pointers, 1)
 
-	client := newFakeDownloadServer(t, map[string]int{oid: http.StatusNotFound})
+	statuses := map[string]int{oid: http.StatusNotFound}
+	client := newFakeDownloadServer(t, statuses)
+	pointerBytes, err := os.ReadFile(htmlPath)
+	require.NoError(t, err)
 
 	// warn path (no --fix): reconcile must NOT be called.
 	warn := evaluatePlanPointers(client, pointers, false, func() (*lfs.ReconcileResult, error) {
@@ -167,12 +171,30 @@ func TestEvaluatePlanPointers_WarnThenFix(t *testing.T) {
 	called := false
 	fix := evaluatePlanPointers(client, pointers, true, func() (*lfs.ReconcileResult, error) {
 		called = true
-		require.NoError(t, os.WriteFile(htmlPath, []byte{}, 0o644)) // simulate the blank
-		return &lfs.ReconcileResult{Replaced: 1}, nil
+		statuses[oid] = http.StatusOK // the blob is back on the store; the pointer is untouched
+		return &lfs.ReconcileResult{RecoveredUploads: 1}, nil
 	})
 	assert.True(t, called, "the --fix path must invoke the reconcile")
 	assert.False(t, fix.warning, "a successful reconcile is a passed result")
-	assert.Contains(t, fix.message, "reconciled")
+	assert.Contains(t, fix.message, "restored")
+	after, err := os.ReadFile(htmlPath)
+	require.NoError(t, err)
+	assert.Equal(t, pointerBytes, after, "a repair never rewrites the plan pointer")
+	// an aggregate upload count is not proof: with the blob still absent the check must not pass
+	statuses[oid] = http.StatusNotFound
+	notProven := evaluatePlanPointers(client, pointers, true, func() (*lfs.ReconcileResult, error) {
+		return &lfs.ReconcileResult{RecoveredUploads: 1}, nil
+	})
+	assert.True(t, notProven.warning, "uploads elsewhere must not pass a still-missing plan pointer")
+	assert.Contains(t, notProven.message, "still missing")
+
+	// nothing recovered and the blob is still absent: a warning, never a pass.
+	none := evaluatePlanPointers(client, pointers, true, func() (*lfs.ReconcileResult, error) {
+		return &lfs.ReconcileResult{}, nil
+	})
+	assert.True(t, none.warning, "zero recovered uploads with the blob still missing must warn")
+	assert.Contains(t, none.message, "still missing")
+	assert.NotContains(t, none.message, "unblocked")
 
 	// reconcile-failure path: a reconcile error must surface as a warning (with
 	// the count preserved), never be swallowed into a passing result.
@@ -182,4 +204,28 @@ func TestEvaluatePlanPointers_WarnThenFix(t *testing.T) {
 	assert.True(t, failed.warning, "a reconcile error must warn, not pass")
 	assert.Contains(t, failed.message, "reconcile failed")
 	assert.Contains(t, failed.message, "1", "the missing count is preserved in the failure message")
+}
+
+// Failure prevented: a store that cannot be queried reading as "all pointers
+// backed by the store", which skipped reconciliation and hid a wedge.
+func TestEvaluatePlanPointers_InspectionErrorIsInconclusive(t *testing.T) {
+	ledger := t.TempDir()
+	planDir := filepath.Join(ledger, "data", "plans", "2026-08-24-p")
+	require.NoError(t, os.MkdirAll(planDir, 0o755))
+	oid := lfs.ComputeOID([]byte("render"))
+	require.NoError(t, os.WriteFile(filepath.Join(planDir, "plan.html"), []byte(lfs.FormatPointer("sha256:"+oid, 6)), 0o644))
+	pointers := collectPlanHTMLPointers(filepath.Join(ledger, "data", "plans"), ledger)
+	require.Len(t, pointers, 1)
+	// the Batch request itself fails (not a per-object error, which is "present")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "store unavailable", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(srv.Close)
+	client := lfs.NewClient(srv.URL, "oauth2", "token")
+	res := evaluatePlanPointers(client, pointers, true, func() (*lfs.ReconcileResult, error) {
+		t.Fatal("reconcile must not run on an inconclusive inspection")
+		return nil, nil
+	})
+	assert.True(t, res.warning, "an inspection error is inconclusive, never a pass")
+	assert.Contains(t, res.message, "inconclusive")
 }

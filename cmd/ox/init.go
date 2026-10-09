@@ -467,7 +467,8 @@ func runInit() error {
 				return fmt.Errorf("team selection canceled: %w", promptErr)
 			}
 			if !proceed {
-				return nil
+				// nothing was initialized: the person is creating a team first
+				return silentFailure(errkind.Usage, "no team yet: handed off to the dashboard", nil)
 			}
 		}
 	}

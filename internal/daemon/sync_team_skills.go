@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"log/slog"
 	"path"
 	"strings"
 	"time"
@@ -140,16 +141,7 @@ func (s *SyncScheduler) reconcileTeamSkills(changed []string) {
 		}
 	}
 
-	counts := map[teamconverge.OutcomeState]int{}
-	for _, outcome := range report.Outcomes {
-		counts[outcome.State]++
-		if outcome.State == teamconverge.StatePending || outcome.State == teamconverge.StateError || outcome.State == teamconverge.StateConflict ||
-			outcome.State == teamconverge.StateUnsupported || outcome.State == teamconverge.StatePendingApproval {
-			s.logger.Warn("team artifact not converged",
-				"repo", repoRoot, "kind", outcome.Kind, "name", outcome.Name,
-				"state", outcome.State, "detail", outcome.Detail, "commit", outcome.SourceCommit)
-		}
-	}
+	counts := logConvergenceOutcomes(s.logger, repoRoot, report)
 	s.logger.Info("team context convergence completed",
 		"repo", repoRoot,
 		"team_commit", report.Snapshot.Commit,
@@ -162,4 +154,29 @@ func (s *SyncScheduler) reconcileTeamSkills(changed []string) {
 		"conflicts", counts[teamconverge.StateConflict],
 		"errors", counts[teamconverge.StateError],
 		"converged", report.Converged())
+}
+
+// logConvergenceOutcomes reports each artifact that did not converge and
+// returns the per-state counts for the cycle summary. Error, conflict and
+// unsupported are warnings: something needs a human. Pending and
+// pending-approval are deferrals by design (an active coworker session keeps
+// the snapshot stable; an approval is awaited) and are logged at Debug: at
+// 29 skills per cycle they otherwise drown the log in WARN lines that read
+// like incidents (87 in half an hour, 2026-10-08).
+func logConvergenceOutcomes(logger *slog.Logger, repoRoot string, report teamconverge.Report) map[teamconverge.OutcomeState]int {
+	counts := map[teamconverge.OutcomeState]int{}
+	for _, outcome := range report.Outcomes {
+		counts[outcome.State]++
+		attrs := []any{
+			"repo", repoRoot, "kind", outcome.Kind, "name", outcome.Name,
+			"state", outcome.State, "detail", outcome.Detail, "commit", outcome.SourceCommit,
+		}
+		switch outcome.State {
+		case teamconverge.StateError, teamconverge.StateConflict, teamconverge.StateUnsupported:
+			logger.Warn("team artifact not converged", attrs...)
+		case teamconverge.StatePending, teamconverge.StatePendingApproval:
+			logger.Debug("team artifact deferred", attrs...)
+		}
+	}
+	return counts
 }

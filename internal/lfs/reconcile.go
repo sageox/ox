@@ -17,29 +17,53 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sageox/ox/internal/fileutil"
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/gitutil"
-	"github.com/sageox/ox/internal/sacred"
+	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/session/pipeline"
 	"github.com/sageox/ox/internal/useragent"
 )
 
 // ReconcileResult describes what ReconcileUnpushedPointers found and fixed.
 type ReconcileResult struct {
-	ScannedPointers  int      // distinct pointers examined (push-range scope) or pointer files found (whole-tree scope)
-	MissingOnRemote  int      // pointers whose LFS OIDs are not in the remote store
-	HistoryOnly      int      // missing OIDs referenced only by intermediate unpushed commits, not the tip
-	RecoveredUploads int      // missing OIDs restored from exact local recovery-cache content
-	Replaced         int      // unrecoverable pointer artifacts removed
-	Squashed         bool     // whether unpushed history was squashed
-	ReplacedFiles    []string // relative paths of removed pointer artifacts, sorted
+	ScannedPointers  int  // distinct pointers examined (push-range scope) or pointer files found (whole-tree scope)
+	MissingOnRemote  int  // pointers whose LFS OIDs are not in the remote store
+	HistoryOnly      int  // missing OIDs referenced only by intermediate unpushed commits, not the tip
+	RecoveredUploads int  // missing OIDs restored from exact local recovery-cache content
+	Squashed         bool // whether unpushed history was squashed
+}
+
+// UnrecoverablePointer is one pointer whose blob exists neither locally nor on
+// the store.
+type UnrecoverablePointer struct {
+	Path string
+	OID  string
+}
+
+// UnrecoverablePointersError reports pointers whose blobs are missing from the
+// remote and cannot be restored from local recovery content. Reconcile never
+// removes a pointer: sessions and plans cannot be regenerated, so the push stays
+// paused until the bytes are restored. Recoverable blobs were already uploaded
+// when it is returned. One unrecoverable pointer is enough.
+type UnrecoverablePointersError struct {
+	Uploaded int
+	Pointers []UnrecoverablePointer
+}
+
+func (e *UnrecoverablePointersError) Error() string {
+	listed := make([]string, 0, len(e.Pointers))
+	for _, p := range e.Pointers {
+		listed = append(listed, fmt.Sprintf("%s (%s)", p.Path, p.OID))
+	}
+	return fmt.Sprintf("refusing LFS reconcile: uploaded %d; %d pointer(s) have no blob locally or on the store and will not be removed: %s; "+
+		"restore the bytes (ox plan save --file <original> for plans) and the push resumes",
+		e.Uploaded, len(e.Pointers), strings.Join(listed, ", "))
 }
 
 // Changed reports whether the reconcile rewrote anything a push retry can
-// benefit from: it restored a blob, removed pointer artifacts, or rewrote
-// unpushed history.
+// benefit from: it restored a blob or rewrote unpushed history.
 func (r *ReconcileResult) Changed() bool {
-	return r != nil && (r.RecoveredUploads > 0 || r.Replaced > 0 || r.Squashed)
+	return r != nil && (r.RecoveredUploads > 0 || r.Squashed)
 }
 
 // ReconcileUnpushedPointers repairs a ledger whose push is blocked by
@@ -56,24 +80,18 @@ func (r *ReconcileResult) Changed() bool {
 //
 // For each in-range pointer whose blob the remote does not have (a 404 from the
 // LFS Batch API; any other answer aborts):
-//   - at the tip, under sessions/ or data/plans/: the unrecoverable artifact is
-//     removed and its meta.json reference cleared, then the replacement is
-//     committed;
+//   - at the tip, under sessions/ or data/plans/: if exact local bytes exist (a
+//     session recovery cache) they are uploaded again, pointer untouched. If
+//     none do, reconcile returns *UnrecoverablePointersError after uploading
+//     every recoverable pointer, at any count, and removes nothing: the bytes
+//     are sacred and the push stays paused until they are restored;
 //   - only in an intermediate unpushed commit: nothing at the tip to repair, so
-//     the squash alone drops it from the push pack.
+//     squashing the unpushed commits alone drops it from the push pack.
 //
-// Unpushed commits are then squashed into one, because GitLab's pre-receive hook
-// scans every commit in the pack, not just HEAD: replacing a pointer at the tip
-// does not remove it from an earlier commit.
+// Unpushed history is squashed into one commit in that last case, because
+// GitLab's pre-receive hook scans every commit in the pack, not just HEAD.
 //
-// data/plans/ is covered because a poisoned PLAN pointer wedges the push exactly
-// like a session one (the pre-fix GH #810 bug left a ledger unpushable for 43
-// commits). Post-fix the plan path never commits an un-uploaded pointer; this
-// heals the ones that predate the fix (their bytes are gone, so removing the
-// broken reference is the only recovery) and backstops any future regression.
-//
-// An exact session recovery-cache file is uploaded again without changing its
-// pointer, metadata, or cache. Ambiguous cache content fails closed. A missing
+// Ambiguous cache content fails closed. Ambiguous cache content fails closed. A missing
 // upstream or diverged branch also fails closed; callers needing a deliberate
 // whole-tree repair must use ReconcileAllPointers.
 func ReconcileUnpushedPointers(ctx context.Context, ledgerPath, endpointURL string, logger *slog.Logger) (*ReconcileResult, error) {
@@ -93,6 +111,7 @@ type reconcileFunc func(ctx context.Context, ledgerPath string, logger *slog.Log
 
 func reconcileLocked(ctx context.Context, ledgerPath, endpointURL string, logger *slog.Logger, run reconcileFunc) (*ReconcileResult, error) {
 	var result *ReconcileResult
+	ctx = withReconcileOwner(ctx, identity.AttributionDisplayName(endpointURL, config.GetDisplayName()))
 	err := gitutil.WithRepoLock(ctx, ledgerPath, func() error {
 		var err error
 		result, err = run(ctx, ledgerPath, logger, func() (*Client, error) {
@@ -244,18 +263,20 @@ func reconcilePointers(ctx context.Context, ledgerPath string, logger *slog.Logg
 		}
 	}
 
-	missingRefs := make(map[string]FileRef, len(replaceable))
-	for _, p := range replaceable {
-		missingRefs[p.relPath] = p.ref
-	}
-	metadata, err := prepareMissingPointerMetadata(ledgerPath, missingRefs)
+	// Plain content staged by a finalize whose upload failed would make the
+	// validation below refuse, and finalize waits for this very reconcile to
+	// un-wedge the push. Upload the current coworker's own staged artifacts first.
+	refused, err := uploadOwnStagedPlainArtifacts(ctx, ledgerPath, client, logger)
 	if err != nil {
-		return result, fmt.Errorf("prepare missing artifact metadata: %w", err)
+		return result, fmt.Errorf("upload own staged session artifacts before LFS reconcile: %w", err)
+	}
+	if len(refused) > 0 {
+		return result, fmt.Errorf("validate Ledger before LFS reconcile: staged session artifacts hold plain content and are not this coworker's to upload: %s", strings.Join(refused, ", "))
 	}
 
-	// Reconcile's commit is intentionally unscoped because the later soft-reset
-	// squash republishes every unpushed change. Validate both the current index
-	// and the final unpushed tip before uploading or changing local state.
+	// The squash below is unscoped and republishes every unpushed change.
+	// Validate both the current index and the final unpushed tip before
+	// uploading or changing local state.
 	if err := gitutil.ValidateStagedLedgerCommit(ctx, ledgerPath); err != nil {
 		return result, fmt.Errorf("validate Ledger before LFS reconcile: %w", err)
 	}
@@ -263,12 +284,6 @@ func reconcilePointers(ctx context.Context, ledgerPath string, logger *slog.Logg
 		if err := validateUnpushedTip(ctx, ledgerPath, set.upstream); err != nil {
 			return result, fmt.Errorf("validate unpushed Ledger before LFS reconcile: %w", err)
 		}
-		if err := preflightSacredDeletions(ctx, ledgerPath, set.upstream, replaceable); err != nil {
-			return result, err
-		}
-	} else if len(replaceable) > sacred.MassDeleteThreshold {
-		return result, fmt.Errorf("refusing LFS reconcile: would delete %d sacred files, exceeding threshold %d",
-			len(replaceable), sacred.MassDeleteThreshold)
 	}
 
 	for _, upload := range recoverable {
@@ -278,76 +293,22 @@ func reconcilePointers(ctx context.Context, ledgerPath string, logger *slog.Logg
 	}
 	result.RecoveredUploads = len(recoverable)
 
-	if len(replaceable) == 0 {
-		if result.HistoryOnly == 0 {
-			logger.Info("lfs reconcile complete", "recovered_uploads", result.RecoveredUploads)
-			return result, nil
+	// every recoverable blob is uploaded first, so unrecoverable ones never
+	// block restoring the rest; then the push stays paused, whatever the count
+	if len(replaceable) > 0 {
+		unrecoverable := make([]UnrecoverablePointer, 0, len(replaceable))
+		for _, p := range replaceable {
+			unrecoverable = append(unrecoverable, UnrecoverablePointer{Path: p.relPath, OID: p.ref.OID})
+			logger.Warn("lfs reconcile: pointer has no blob locally or on the store; not removed", "path", p.relPath, "oid", p.ref.OID)
 		}
-		return squashHistoryOnly(ctx, ledgerPath, logger, result)
+		return result, &UnrecoverablePointersError{Uploaded: result.RecoveredUploads, Pointers: unrecoverable}
 	}
 
-	logger.Info("lfs reconcile: removing unrecoverable pointer artifacts",
-		"missing", len(replaceable), "recovered_uploads", result.RecoveredUploads,
-		"history_only", result.HistoryOnly, "total_pointers", result.ScannedPointers)
-
-	// Remove missing artifacts instead of committing non-pointer bytes under
-	// LFS-listed filenames. Metadata was validated before changing any file.
-	for _, p := range replaceable {
-		absPath := filepath.Join(ledgerPath, p.relPath)
-		// absent is fine: a path outside the sparse cone has nothing on disk,
-		// and the staged removal below is what matters
-		if err := os.Remove(absPath); err != nil && !os.IsNotExist(err) {
-			return result, fmt.Errorf("remove missing pointer %s: %w", p.relPath, err)
-		}
-		addCtx, addCancel := context.WithTimeout(ctx, 5*time.Second)
-		_, addErr := gitutil.RunGit(addCtx, ledgerPath, "add", "--sparse", p.relPath)
-		addCancel()
-		if addErr != nil {
-			return result, fmt.Errorf("stage missing pointer removal %s: %w", p.relPath, addErr)
-		}
-		result.Replaced++
-		result.ReplacedFiles = append(result.ReplacedFiles, p.relPath)
-	}
-
-	metaPaths := make([]string, 0, len(metadata))
-	for relPath := range metadata {
-		metaPaths = append(metaPaths, relPath)
-	}
-	sort.Strings(metaPaths)
-	for _, relPath := range metaPaths {
-		if err := fileutil.AtomicWriteBytes(filepath.Join(ledgerPath, relPath), metadata[relPath], 0o644); err != nil {
-			return result, fmt.Errorf("update missing artifact metadata %s: %w", relPath, err)
-		}
-		if _, err := gitutil.RunGit(ctx, ledgerPath, "add", "--sparse", relPath); err != nil {
-			return result, fmt.Errorf("stage missing artifact metadata %s: %w", relPath, err)
-		}
-	}
-
-	if result.Replaced == 0 {
+	if result.HistoryOnly == 0 {
+		logger.Info("lfs reconcile complete", "recovered_uploads", result.RecoveredUploads)
 		return result, nil
 	}
-
-	// commit the replacements
-	msg := fmt.Sprintf("fix: remove %d unrecoverable LFS artifacts", result.Replaced)
-	commitCtx, commitCancel := context.WithTimeout(ctx, 10*time.Second)
-	_, commitErr := gitutil.CommitLedgerSnapshot(commitCtx, ledgerPath, msg)
-	commitCancel()
-	if commitErr != nil {
-		return result, fmt.Errorf("commit replacements: %w", commitErr)
-	}
-
-	// squash all unpushed commits into one — GitLab's pre-receive hook checks
-	// every commit in the push, not just HEAD. Without squashing, old commits
-	// still reference the missing LFS OIDs and the push is still rejected.
-	// a failed squash is a real error: the replacement commit exists but old
-	// commits still poison the push pack
-	if sqErr := squashUnpushed(ctx, ledgerPath, msg); sqErr != nil {
-		return result, fmt.Errorf("pointer replacement committed but squash failed (push will still fail): %w", sqErr)
-	}
-	result.Squashed = true
-
-	logger.Info("lfs reconcile complete", "replaced", result.Replaced, "recovered_uploads", result.RecoveredUploads)
-	return result, nil
+	return squashHistoryOnly(ctx, ledgerPath, logger, result)
 }
 
 // squashHistoryOnly is the repair when the tip is clean and only intermediate
@@ -390,13 +351,13 @@ type recoveryUpload struct {
 
 // preflightMissingPointer verifies the working pointer and classifies its
 // recovery cache without changing either. A nil content result means no cache
-// exists and the pointer is eligible for deliberate removal. Any cache that is
-// not provably the exact pointed-to object fails closed.
+// exists, so the pointer is unrecoverable. Any cache that is not provably the
+// exact pointed-to object fails closed.
 func preflightMissingPointer(ledgerPath string, p pointerEntry) ([]byte, error) {
 	workingPath := filepath.Join(ledgerPath, p.relPath)
 	if info, err := os.Lstat(workingPath); err == nil {
 		if !info.Mode().IsRegular() {
-			return nil, fmt.Errorf("refusing to replace %s: working copy is not a regular file", p.relPath)
+			return nil, fmt.Errorf("refusing to restore %s: working copy is not a regular file", p.relPath)
 		}
 		working, readErr := os.ReadFile(workingPath)
 		if readErr != nil {
@@ -404,36 +365,41 @@ func preflightMissingPointer(ledgerPath string, p pointerEntry) ([]byte, error) 
 		}
 		oid, size, parseErr := ParsePointer(string(working))
 		if len(working) > maxPointerSize || parseErr != nil || (FileRef{OID: oid}).BareOID() != p.ref.BareOID() || size != p.ref.Size {
-			return nil, fmt.Errorf("refusing to replace %s: working copy differs from the committed pointer", p.relPath)
+			return nil, fmt.Errorf("refusing to restore %s: working copy differs from the committed pointer", p.relPath)
 		}
 	} else if !os.IsNotExist(err) {
 		return nil, fmt.Errorf("inspect working copy of %s: %w", p.relPath, err)
 	}
 
-	if !strings.HasPrefix(p.relPath, "sessions"+string(filepath.Separator)) {
-		return nil, nil
-	}
+	// Both path families reconcile may repair (the caller has already refused
+	// every other path) have a recovery cache: session artifacts, kept there by
+	// finalize, and plans, kept there by a restore. The OID and size check
+	// below is what makes a cached file safe to re-upload.
+	session := strings.HasPrefix(p.relPath, "sessions"+string(filepath.Separator))
 	cachePath := filepath.Join(ledgerPath, ".sageox", "cache", p.relPath)
 	info, err := os.Lstat(cachePath)
 	if err != nil {
-		if os.IsNotExist(err) {
+		// a session's cache that cannot be inspected fails closed, because
+		// finalize promised those bytes are there; a plan has no such promise
+		// and simply stays unrecoverable
+		if os.IsNotExist(err) || !session {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("inspect session recovery cache for %s: %w", p.relPath, err)
 	}
 	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("refusing to replace %s: session recovery cache is not a regular non-symlink file", p.relPath)
+		return nil, fmt.Errorf("refusing to restore %s: session recovery cache is not a regular non-symlink file", p.relPath)
 	}
 	content, err := os.ReadFile(cachePath)
 	if err != nil {
 		return nil, fmt.Errorf("read session recovery cache for %s: %w", p.relPath, err)
 	}
 	if pointerShaped(content) {
-		return nil, fmt.Errorf("refusing to replace %s: session recovery cache contains an LFS pointer", p.relPath)
+		return nil, fmt.Errorf("refusing to restore %s: session recovery cache contains an LFS pointer", p.relPath)
 	}
 	actual := NewFileRef(content)
 	if actual.Size != p.ref.Size || actual.BareOID() != p.ref.BareOID() {
-		return nil, fmt.Errorf("refusing to replace %s: session recovery cache does not match pointer OID and size", p.relPath)
+		return nil, fmt.Errorf("refusing to restore %s: session recovery cache does not match pointer OID and size", p.relPath)
 	}
 	return content, nil
 }
@@ -740,6 +706,21 @@ func validateUnpushedTip(ctx context.Context, ledgerPath, upstream string) error
 		return fmt.Errorf("diff unpushed tree: %w", err)
 	}
 	tokens := strings.Split(string(raw), "\x00")
+
+	// One long-lived `git cat-file --batch` serves every blob read below, under
+	// ONE deadline sized to the file count. A process per file (thousands for a
+	// long backlog, each with its own short deadline) lets a single slow spawn
+	// under machine load throw away the whole pass.
+	files := len(tokens) / 2
+	batchCtx, cancel := context.WithTimeout(ctx, 30*time.Second+time.Duration(files)*25*time.Millisecond)
+	defer cancel()
+	blobs, err := startBlobReader(batchCtx, ledgerPath)
+	if err != nil {
+		return fmt.Errorf("start Ledger blob reader: %w", err)
+	}
+	defer blobs.Close()
+
+	storageGit := make(map[string]map[string]FileRef) // meta.json path -> files manifest
 	for i := 0; i+1 < len(tokens); i += 2 {
 		fields := strings.Fields(strings.TrimPrefix(tokens[i], ":"))
 		if len(fields) < 5 || strings.HasPrefix(fields[4], "D") {
@@ -749,14 +730,14 @@ func validateUnpushedTip(ctx context.Context, ledgerPath, upstream string) error
 		if err := gitutil.ValidateLedgerEntryMode(path, fields[1]); err != nil {
 			return err
 		}
-		blob, err := gitPlumbing(ctx, ledgerPath, nil, "cat-file", "blob", fields[3])
+		blob, err := blobs.Read(fields[3])
 		if err != nil {
 			return fmt.Errorf("inspect unpushed Ledger blob %s: %w", path, err)
 		}
 		if gitutil.HasConflictMarkersBytes(blob) {
 			return fmt.Errorf("%s contains an unresolved conflict; run `ox doctor --fix-slug=session-conflict-markers`", path)
 		}
-		if sessionContentStorageGit(ctx, ledgerPath, path) {
+		if sessionContentStorageGit(blobs, storageGit, path) {
 			continue
 		}
 		if err := gitutil.ValidateLedgerBlob(path, blob); err != nil {
@@ -766,23 +747,88 @@ func validateUnpushedTip(ctx context.Context, ledgerPath, upstream string) error
 	return nil
 }
 
-func sessionContentStorageGit(ctx context.Context, ledgerPath, path string) bool {
+// sessionContentStorageGit reports whether HEAD's meta.json registers path with
+// storage=git. Manifests are cached per session so each is read once.
+func sessionContentStorageGit(blobs *blobReader, cache map[string]map[string]FileRef, path string) bool {
 	parts := strings.Split(filepath.ToSlash(filepath.Clean(path)), "/")
 	if len(parts) < 3 || parts[0] != "sessions" || !isLedgerContentFile(filepath.Base(path)) {
 		return false
 	}
 	metaPath := strings.Join(parts[:2], "/") + "/meta.json"
-	data, err := gitPlumbing(ctx, ledgerPath, nil, "show", "HEAD:"+metaPath)
+	files, seen := cache[metaPath]
+	if !seen {
+		if data, err := blobs.Read("HEAD:" + metaPath); err == nil {
+			var meta struct {
+				Files map[string]FileRef `json:"files"`
+			}
+			if json.Unmarshal(data, &meta) == nil {
+				files = meta.Files
+			}
+		}
+		cache[metaPath] = files
+	}
+	return files[strings.Join(parts[2:], "/")].Storage == "git"
+}
+
+// blobReader is one `git cat-file --batch` process answering one request at a
+// time, so memory holds a single blob rather than every unpushed blob at once.
+type blobReader struct {
+	cmd   *exec.Cmd
+	stdin io.WriteCloser
+	out   *bufio.Reader
+	errs  *bytes.Buffer
+}
+
+func startBlobReader(ctx context.Context, ledgerPath string) (*blobReader, error) {
+	cmd := exec.CommandContext(ctx, "git", "-C", ledgerPath, "cat-file", "--batch")
+	cmd.Dir = ledgerPath
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C", "LANG=C")
+	cmd.WaitDelay = 5 * time.Second
+	errs := &bytes.Buffer{}
+	cmd.Stderr = errs
+	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return false
+		return nil, err
 	}
-	var meta struct {
-		Files map[string]FileRef `json:"files"`
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
 	}
-	if json.Unmarshal(data, &meta) != nil {
-		return false
+	if err := cmd.Start(); err != nil {
+		return nil, err
 	}
-	return meta.Files[strings.Join(parts[2:], "/")].Storage == "git"
+	return &blobReader{cmd: cmd, stdin: stdin, out: bufio.NewReader(stdout), errs: errs}, nil
+}
+
+// Read returns the content of the object named by spec (an object id or a
+// rev:path expression). A missing object is an error.
+func (r *blobReader) Read(spec string) ([]byte, error) {
+	if _, err := io.WriteString(r.stdin, spec+"\n"); err != nil {
+		return nil, fmt.Errorf("request %s: %w: %s", spec, err, strings.TrimSpace(r.errs.String()))
+	}
+	header, err := r.out.ReadString('\n')
+	if err != nil {
+		return nil, fmt.Errorf("read header for %s: %w: %s", spec, err, strings.TrimSpace(r.errs.String()))
+	}
+	fields := strings.Fields(header)
+	if len(fields) != 3 {
+		return nil, fmt.Errorf("object %s not found", spec) // "<spec> missing"
+	}
+	size, convErr := strconv.Atoi(fields[2])
+	if convErr != nil || size < 0 {
+		return nil, fmt.Errorf("unexpected blob header %q", strings.TrimSpace(header))
+	}
+	content := make([]byte, size)
+	if _, err := io.ReadFull(r.out, content); err != nil {
+		return nil, fmt.Errorf("read blob %s: %w", spec, err)
+	}
+	_, _ = r.out.ReadByte() // the LF git writes after each object
+	return content, nil
+}
+
+func (r *blobReader) Close() {
+	_ = r.stdin.Close()
+	_ = r.cmd.Wait()
 }
 
 func isLedgerContentFile(name string) bool {
@@ -792,27 +838,6 @@ func isLedgerContentFile(name string) bool {
 		}
 	}
 	return false
-}
-
-func preflightSacredDeletions(ctx context.Context, ledgerPath, upstream string, replaceable []pointerEntry) error {
-	deletedOut, err := gitPlumbing(ctx, ledgerPath, nil, "diff-tree", "-r", "--name-only", "--diff-filter=D", upstream, "HEAD")
-	if err != nil {
-		return fmt.Errorf("preflight sacred deletions: %w", err)
-	}
-	paths := strings.Fields(string(deletedOut))
-	for _, entry := range replaceable {
-		paths = append(paths, filepath.ToSlash(entry.relPath))
-	}
-	deleted := sacred.Filter(paths)
-	seen := make(map[string]bool, len(deleted))
-	for _, path := range deleted {
-		seen[path] = true
-	}
-	if len(seen) <= sacred.MassDeleteThreshold {
-		return nil
-	}
-	return fmt.Errorf("refusing LFS reconcile: would delete %d files under sacred paths, exceeding threshold %d",
-		len(seen), sacred.MassDeleteThreshold)
 }
 
 // pointerSizedBlobs filters oids to blobs small enough to be an LFS pointer, so
@@ -898,171 +923,9 @@ func gitPlumbing(ctx context.Context, repoPath string, stdin []byte, args ...str
 	return stdout.Bytes(), nil
 }
 
-// prepareMissingPointerMetadata removes only matching missing-object references,
-// clearing trace metadata when either attachment is removed and preserving all
-// unrelated fields (including fields from newer clients). Parse all
-// manifests before touching pointers so corrupt or mismatched metadata fails safe.
-func prepareMissingPointerMetadata(ledgerPath string, missing map[string]FileRef) (map[string][]byte, error) {
-	manifests := make(map[string]map[string]json.RawMessage)
-	filesByManifest := make(map[string]map[string]json.RawMessage)
-	changed := make(map[string]bool)
-	// sorted, so when more than one artifact is unusable the same one is
-	// reported on every run instead of whichever the map yields first
-	artifactPaths := make([]string, 0, len(missing))
-	for artifactPath := range missing {
-		artifactPaths = append(artifactPaths, artifactPath)
-	}
-	sort.Strings(artifactPaths)
-	for _, artifactPath := range artifactPaths {
-		ref := missing[artifactPath]
-		parts := strings.Split(filepath.ToSlash(artifactPath), "/")
-		depth := 2
-		if parts[0] == "data" {
-			depth = 3
-		}
-		if len(parts) <= depth {
-			return nil, fmt.Errorf("invalid artifact path %s", artifactPath)
-		}
-		metaPath := filepath.Join(append(parts[:depth:depth], "meta.json")...)
-		if _, seen := manifests[metaPath]; !seen {
-			absPath := filepath.Join(ledgerPath, metaPath)
-			info, err := os.Lstat(absPath)
-			if os.IsNotExist(err) {
-				manifests[metaPath] = nil
-				continue
-			}
-			if err != nil {
-				return nil, err
-			}
-			if !info.Mode().IsRegular() {
-				return nil, fmt.Errorf("metadata %s is not a regular file", metaPath)
-			}
-			data, err := os.ReadFile(absPath)
-			if err != nil {
-				return nil, err
-			}
-			var meta map[string]json.RawMessage
-			if err := json.Unmarshal(data, &meta); err != nil || meta == nil {
-				return nil, fmt.Errorf("metadata %s is not a valid JSON object", metaPath)
-			}
-			manifests[metaPath] = meta
-			var files map[string]json.RawMessage
-			if raw, ok := meta["files"]; ok {
-				if err := json.Unmarshal(raw, &files); err != nil {
-					return nil, fmt.Errorf("metadata files %s: %w", metaPath, err)
-				}
-			}
-			filesByManifest[metaPath] = files
-		}
-		files := filesByManifest[metaPath]
-		name := strings.Join(parts[depth:], "/")
-		if raw, exists := files[name]; exists {
-			var registered FileRef
-			if err := json.Unmarshal(raw, &registered); err != nil {
-				return nil, err
-			}
-			if registered.BareOID() != ref.BareOID() || !registered.IsLFS() {
-				return nil, fmt.Errorf("metadata reference for %s disagrees with missing pointer", artifactPath)
-			}
-			delete(files, name)
-			changed[metaPath] = true
-		}
-		if pipeline.IsTraceFile(name) {
-			if _, exists := manifests[metaPath]["trace"]; exists {
-				delete(manifests[metaPath], "trace")
-				changed[metaPath] = true
-			}
-		}
-	}
-	result := make(map[string][]byte)
-	for metaPath, files := range filesByManifest {
-		if !changed[metaPath] {
-			continue
-		}
-		encodedFiles, err := json.Marshal(files)
-		if err != nil {
-			return nil, err
-		}
-		meta := manifests[metaPath]
-		if files != nil {
-			meta["files"] = encodedFiles
-		}
-		content, err := json.MarshalIndent(meta, "", "  ")
-		if err != nil {
-			return nil, err
-		}
-		result[metaPath] = append(content, '\n')
-	}
-	return result, nil
-}
-
 // squashUnpushed collapses all unpushed local commits into a single commit.
 func squashUnpushed(ctx context.Context, repoPath, commitMsg string) error {
-	upCtx, upCancel := context.WithTimeout(ctx, 5*time.Second)
-	upstream, err := gitutil.RunGit(upCtx, repoPath, "rev-parse", "--verify", "@{upstream}")
-	upCancel()
-	if err != nil {
-		return fmt.Errorf("no upstream tracking ref: %w", err)
-	}
-	upstream = strings.TrimSpace(upstream)
-
-	// reset --soft to an upstream that HEAD does not contain would commit the
-	// index back over the commits HEAD lacks, reverting a coworker's work. A
-	// diverged branch needs a pull, never a squash.
-	ancestorCtx, ancestorCancel := context.WithTimeout(ctx, 5*time.Second)
-	_, ancestorErr := gitutil.RunGit(ancestorCtx, repoPath, "merge-base", "--is-ancestor", upstream, "HEAD")
-	ancestorCancel()
-	if ancestorErr != nil {
-		return fmt.Errorf("upstream is not an ancestor of HEAD (branch diverged; pull first): %w", ancestorErr)
-	}
-
-	originalCtx, originalCancel := context.WithTimeout(ctx, 5*time.Second)
-	original, originalErr := gitutil.RunGit(originalCtx, repoPath, "rev-parse", "--verify", "HEAD")
-	originalCancel()
-	if originalErr != nil {
-		return fmt.Errorf("resolve original HEAD: %w", originalErr)
-	}
-	original = strings.TrimSpace(original)
-
-	countCtx, countCancel := context.WithTimeout(ctx, 5*time.Second)
-	countOut, err := gitutil.RunGit(countCtx, repoPath, "rev-list", "--count", upstream+"..HEAD")
-	countCancel()
-	if err != nil {
-		// not "nothing to squash": a caller that asked for a squash must learn
-		// it did not happen, or the push stays wedged with no error
-		return fmt.Errorf("count unpushed commits: %w", err)
-	}
-	if count := strings.TrimSpace(countOut); count == "0" || count == "1" {
-		return nil
-	}
-
-	resetCtx, resetCancel := context.WithTimeout(ctx, 5*time.Second)
-	_, err = gitutil.RunGit(resetCtx, repoPath, "reset", "--soft", upstream)
-	resetCancel()
-	if err != nil {
-		return fmt.Errorf("reset --soft: %w", err)
-	}
-
-	squashCtx, squashCancel := context.WithTimeout(ctx, 10*time.Second)
-	_, err = gitutil.CommitLedgerSnapshot(squashCtx, repoPath, commitMsg)
-	squashCancel()
-	if err != nil {
-		return rollbackSoftReset(ctx, repoPath, original, fmt.Errorf("validate squash or commit: %w", err))
-	}
-
-	return nil
-}
-
-// rollbackSoftReset restores the pre-squash branch tip after a validation or
-// commit failure. The soft reset's index already represents original's tree, so
-// restoring only HEAD preserves both the replacement commit and working copy.
-func rollbackSoftReset(ctx context.Context, repoPath, original string, cause error) error {
-	rollbackCtx, rollbackCancel := context.WithTimeout(ctx, 5*time.Second)
-	defer rollbackCancel()
-	if _, err := gitutil.RunGit(rollbackCtx, repoPath, "reset", "--soft", original); err != nil {
-		return fmt.Errorf("%w; restore original HEAD: %w", cause, err)
-	}
-	return cause
+	return gitutil.SquashUnpushed(ctx, repoPath, commitMsg)
 }
 
 // ValidateUnpushedTip reports whether HEAD's delta against upstream passes the

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/conversation/read"
+	"github.com/stretchr/testify/require"
 )
 
 // TestWalkthroughTextNamesAreaAndMarks: --text output for an area take says
@@ -40,6 +41,62 @@ func TestWalkthroughTextNamesAreaAndMarks(t *testing.T) {
 	if mark < 0 || click < 0 || mark > click {
 		t.Errorf("the mark at 00:00:04 must print before the click at the same instant:\n%s", out)
 	}
+}
+
+// Reject conflicting read/paid-work modes before a request can consume quota.
+func TestWalkthroughCommandRecoveryModeValidation(t *testing.T) {
+	useWalkthroughReader(t)
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"retry read", []string{"--retry"}, "--retry requires"},
+		{"extract without pin", []string{"--extract", "--cues", "1"}, "--extract needs"},
+		{"extract without selector", []string{"--extract", "--revision", strings.Repeat("a", 64)}, "--extract needs"},
+		{"extract frame budget", []string{"--extract", "--revision", strings.Repeat("a", 64), "--cues", "1", "--max-frames", "9"}, "--extract needs"},
+		{"extract width too small", []string{"--extract", "--revision", strings.Repeat("a", 64), "--cues", "1", "--max-width", "319"}, "--max-width 320-4096"},
+		{"extract width too large", []string{"--extract", "--revision", strings.Repeat("a", 64), "--cues", "1", "--max-width", "4097"}, "--max-width 320-4096"},
+		{"prepare and extract", []string{"--prepare", "--extract"}, "separate operations"},
+		{"prepare with pin", []string{"--prepare", "--revision", "old"}, "separate operations"},
+		{"prepare with cues", []string{"--prepare", "--cues", "1"}, "separate operations"},
+		{"prepare with time", []string{"--prepare", "--from", "1s", "--to", "2s"}, "separate operations"},
+		{"prepare with fetch", []string{"--prepare", "--fetch"}, "separate operations"},
+		{"job with transcript", []string{"--job", "job-1", "--transcript"}, "separate operations"},
+		{"job with cursor", []string{"--job", "job-1", "--cursor", "cursor"}, "separate operations"},
+		{"job with extract", []string{"--job", "job-1", "--extract"}, "separate operations"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, _, err := runConversationInProc(t, "walkthrough", append([]string{shareTestWalkthroughRec}, tc.args...)...)
+			require.Error(t, err)
+			env := decodeConvEnvelope(t, out)
+			require.False(t, env.Success)
+			require.Equal(t, read.ErrCodeInvalidSelector, env.Error.Code)
+			require.Contains(t, env.Error.Message, tc.want)
+		})
+	}
+}
+
+func TestWalkthroughCommandFetchKeepsSourceOnMissingImages(t *testing.T) {
+	useWalkthroughReader(t)
+	out, _, err := runConversationInProc(t, "walkthrough", shareTestWalkthroughRec, "--fetch", "--cues", "1")
+	require.NoError(t, err, out)
+	env := decodeConvEnvelope(t, out)
+	require.True(t, env.Success)
+	require.Contains(t, string(env.Data), "Settings walkthrough")
+}
+
+func TestWalkthroughTextTranscriptPageRetainsContinuation(t *testing.T) {
+	var out bytes.Buffer
+	renderConversationWalkthroughText(&out, &read.Envelope{Data: &read.WalkthroughData{
+		Title: "No screen evidence", Transcript: &read.WalkthroughTranscript{
+			Cues:       []read.TranscriptCue{{N: 101, Start: "00:00:05", Text: "Keep the final panel\x1b[31m"}},
+			NextCursor: "pinned-next-page",
+		},
+	}})
+	require.Contains(t, out.String(), "[101] 00:00:05 Keep the final panel")
+	require.Contains(t, out.String(), "next transcript cursor: pinned-next-page")
+	require.NotContains(t, out.String(), "\x1b[31m")
 }
 
 // TestWalkthroughTextTargetLineJoinsOnlyWhatIsThere: a window target missing

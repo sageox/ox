@@ -13,6 +13,12 @@ import (
 
 // PushOpts configures push behavior for PushWithRetry.
 type PushOpts struct {
+	// ImmutablePaths declares that paths in this repository never move (a
+	// Ledger). The retry rebase and its conflict resolver then skip git's rename
+	// detection, which is pure cost on such a tree. Leave false for repositories
+	// where a rename can race an add under the old name.
+	ImmutablePaths bool
+
 	// AutoResolvePrefixes lists path prefixes where accept-theirs conflict
 	// resolution is safe (e.g., "data/github/", "data/murmurs/").
 	// Empty means no auto-resolve — rebase failures abort immediately.
@@ -27,6 +33,13 @@ type PushOpts struct {
 	// Use for credential refresh or other caller-specific setup.
 	// Non-nil errors are logged as warnings but do not prevent the push attempt.
 	PrePush func(repoPath string) error
+
+	// ValidatePush checks whether the current history may be published before
+	// every push attempt, including retries after rebase or LFS reconciliation.
+	// It runs under WithRepoLock, held through the push, and must not acquire
+	// that lock itself. Errors stop immediately; alreadyPublished skips the push
+	// and returns success without publishing unrelated pending commits.
+	ValidatePush func(ctx context.Context, repoPath string) (alreadyPublished bool, err error)
 
 	// ReconcileLFS is called when a push fails with "LFS objects are missing".
 	// If set, PushWithRetry calls this instead of failing permanently, then
@@ -115,6 +128,12 @@ func (o *PushOpts) pushBreaker() *pushBreaker {
 // without running git, so every pusher stops re-running the same expensive
 // rejected push and repair. Match it with errors.Is.
 var ErrPushWedged = errors.New("ledger push wedged")
+
+// ErrNeedsPullCycle is returned (wrapped) by PushWithRetry when the retry's
+// rebase stopped and was aborted (typically content conflicts). The tree is
+// back to its pre-retry state; the next pull cycle, which owns the conflict
+// resolution ladder, can reconcile it before the following push.
+var ErrNeedsPullCycle = errors.New("rebase needs pull cycle")
 
 const (
 	// pushWedgeBackoffBase is how long the breaker stays open after it first
@@ -234,8 +253,16 @@ const lfsObjectsMissing = "LFS objects are missing"
 // Retry loop: up to MaxRetries attempts with linear backoff (1s, 2s, 3s...).
 // On non-fast-forward rejection: pulls with --rebase --autostash, optionally
 // auto-resolves conflicts for paths in AutoResolvePrefixes.
-// The retry pull acquires WithRepoLock; callers and conflict hooks must not
-// acquire that same non-reentrant lock around this call or inside the hook.
+// The retry pull and validated push acquire WithRepoLock; callers and callbacks
+// must not acquire that same non-reentrant lock around this call or inside a hook.
+// collapseBacklogAbove is the unpushed-commit count past which a push that
+// lost the non-fast-forward race collapses its backlog into one snapshot
+// commit before rebasing. Replaying a backlog costs O(commits) while the race
+// window is the interval between coworkers' pushes; past this size the replay
+// is slower than the team and every retry loses (#1261). The pre-collapse tip
+// is kept under refs/ox-backup/.
+const collapseBacklogAbove = 100
+
 func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 	log := opts.logger()
 	breaker := opts.pushBreaker()
@@ -262,13 +289,38 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 		}
 	}
 
+	if opts.ImmutablePaths {
+		ctx = WithImmutablePaths(ctx)
+	}
 	maxRetries := opts.maxRetries()
 	opTimeout := opts.opTimeout()
 	var lastOut string
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		attemptCtx, cancel := context.WithTimeout(ctx, opTimeout)
-		outStr, err := RunGit(attemptCtx, repoPath, "push", "--quiet")
+		var outStr string
+		var err error
+		if opts.ValidatePush == nil {
+			outStr, err = RunGit(attemptCtx, repoPath, "push", "--quiet")
+		} else {
+			validationErr := WithRepoLock(attemptCtx, repoPath, func() error {
+				if err := IsSafeForGitOps(repoPath); err != nil {
+					return fmt.Errorf("repo blocked: %w", err)
+				}
+				alreadyPublished, validationErr := opts.ValidatePush(attemptCtx, repoPath)
+				if validationErr != nil {
+					return validationErr
+				}
+				if !alreadyPublished {
+					outStr, err = RunGit(attemptCtx, repoPath, "push", "--quiet")
+				}
+				return nil
+			})
+			if validationErr != nil {
+				cancel()
+				return validationErr
+			}
+		}
 		cancel()
 		if err == nil {
 			breaker.clear(repoPath)
@@ -341,24 +393,40 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 				baseCtx, baseCancel := context.WithTimeout(ctx, opTimeout)
 				defer baseCancel()
 				pullCtx, pullCancel := PullContext(baseCtx, ahead, nil)
+				if opts.ValidatePush != nil {
+					// autostash restoration does not preserve differing staged
+					// and working copies, so validated publication must stop here.
+					if _, err := RunGit(pullCtx, repoPath, "diff", "--cached", "--quiet", "--"); err != nil {
+						pullCancel()
+						return fmt.Errorf("automatic synchronization stopped; staged changes remain untouched: save the staged draft before manual synchronization, then rerun import: %w", err)
+					}
+				}
 				// A prior pull may have left autostash conflicts without an
 				// active rebase. Never send those to the positional resolver.
 				if _, err := ResolveAutostashConflicts(pullCtx, repoPath, opts.AutoResolvePrefixes, opts.AutoResolveDenyPrefixes); err != nil {
 					pullCancel()
 					return fmt.Errorf("restore autostash before pull: %w", err)
 				}
-				pullOut, pullErr := RunGit(pullCtx, repoPath, "pull", "--rebase", "--autostash", "--quiet")
+				// Fetch then rebase onto an explicit ref instead of `git pull
+				// --rebase`: pull rebases onto FETCH_HEAD, which a concurrent
+				// fetch can rewrite ("Cannot rebase onto multiple branches").
+				target, fetchOut, fetchErr := fetchUpstream(pullCtx, repoPath)
+				if fetchErr != nil {
+					pullCancel()
+					return fmt.Errorf("git fetch failed during retry: %s: %w", fetchOut, fetchErr)
+				}
+				pullOut, pullErr := RunGit(pullCtx, repoPath, append(RenameDetectionFlags(pullCtx), "rebase", "--autostash", "--fork-point", "--quiet", target)...)
 				timedOut := PullTimedOut(pullCtx, pullErr)
 				pullCancel()
 				if timedOut {
-					// the killed pull leaves its rebase behind; clear it now
+					// the killed rebase is left behind; clear it now
 					if found, abortErr := RecoverPullTimeoutInRebase(ctx, repoPath, repoPath, ahead, log); found {
 						// report the timeout itself: falling through would run
 						// conflict handling on a rebase that no longer exists
 						if abortErr != nil {
-							return fmt.Errorf("git pull --rebase timed out: %w", abortErr)
+							return fmt.Errorf("git rebase timed out: %w", abortErr)
 						}
-						return fmt.Errorf("git pull --rebase timed out after %s with %d commits ahead: %w", PullBudget(ahead), ahead, pullErr)
+						return fmt.Errorf("git rebase timed out after %s with %d commits ahead: %w", PullBudget(ahead), ahead, pullErr)
 					}
 				}
 				if pullErr != nil {
@@ -387,7 +455,7 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 									abortCtx, abortCancel := context.WithTimeout(ctx, opTimeout)
 									_, _ = RunGit(abortCtx, repoPath, "rebase", "--abort")
 									abortCancel()
-									return fmt.Errorf("git pull --rebase failed during retry: %s (could not list conflicts: %w)", pullOut, listErr)
+									return fmt.Errorf("git rebase failed during retry: %s (could not list conflicts: %w)", pullOut, listErr)
 								}
 								hookCtx, hookCancel := context.WithTimeout(ctx, opTimeout)
 								resolved, hookErr := opts.OnUnresolvedConflicts(hookCtx, repoPath, conflicted)
@@ -408,7 +476,7 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 								abortCtx, abortCancel := context.WithTimeout(ctx, opTimeout)
 								_, _ = RunGit(abortCtx, repoPath, "rebase", "--abort")
 								abortCancel()
-								return fmt.Errorf("git pull --rebase failed during retry: %s", pullOut)
+								return fmt.Errorf("%w: git rebase failed during retry: %s", ErrNeedsPullCycle, pullOut)
 							}
 						} else {
 							log.Info("auto-resolved rebase conflicts", "strategy", "accept-theirs")
@@ -418,7 +486,7 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 						abortCtx, abortCancel := context.WithTimeout(ctx, opTimeout)
 						_, _ = RunGit(abortCtx, repoPath, "rebase", "--abort")
 						abortCancel()
-						return fmt.Errorf("git pull --rebase failed during retry: %s", pullOut)
+						return fmt.Errorf("%w: git rebase failed during retry: %s", ErrNeedsPullCycle, pullOut)
 					}
 				}
 				// A successful pull (or rebase --continue) can still leave conflicts
@@ -427,6 +495,20 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 				defer recoveryCancel()
 				if _, err := ResolveAutostashConflicts(recoveryCtx, repoPath, opts.AutoResolvePrefixes, opts.AutoResolveDenyPrefixes); err != nil {
 					return fmt.Errorf("restore autostash after pull: %w", err)
+				}
+				// A backlog this large replays slower than coworkers push, so
+				// the next push would lose the same race (#1261). Collapse it
+				// into one snapshot commit: the next rebase replays a single
+				// commit in seconds and the push wins.
+				if ahead > collapseBacklogAbove {
+					collapseCtx, collapseCancel := context.WithTimeout(ctx, opTimeout)
+					collapseErr := SquashUnpushed(collapseCtx, repoPath, fmt.Sprintf("ledger: collapse %d unpushed commits so the push can win the rebase race", ahead))
+					collapseCancel()
+					if collapseErr != nil {
+						log.Warn("collapsing unpushed backlog failed; retrying push with full history", "commits", ahead, "error", collapseErr)
+					} else {
+						log.Info("collapsed unpushed backlog into one commit", "commits", ahead)
+					}
 				}
 				return nil
 			})
@@ -456,6 +538,66 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 		return tripPushWedge(log, breaker, repoPath, lastOut, "reconcile_exhausted_attempts")
 	}
 	return fmt.Errorf("git push failed after %d attempts: %s", maxRetries, lastOut)
+}
+
+// cannotLockRef is git's message when two fetches update the same
+// refs/remotes/<remote>/<branch> at once. The other fetcher finishes in
+// moments, so the loser retries rather than treating the repo as broken.
+const cannotLockRef = "cannot lock ref"
+
+// fetchRetryWait is how long to wait before retrying a fetch that lost a ref
+// lock race. Matches the first step of the push loop's linear backoff.
+const fetchRetryWait = time.Second
+
+// fetchUpstream fetches the branch the current branch tracks and returns the
+// remote-tracking ref to rebase onto (e.g. refs/remotes/origin/main). A single
+// cannot-lock-ref failure is retried once.
+func fetchUpstream(ctx context.Context, repoPath string) (target, out string, err error) {
+	remote, source, target, err := upstreamRefs(ctx, repoPath)
+	if err != nil {
+		return "", err.Error(), err
+	}
+	// explicit source:destination so a non-default fetch refspec mapping
+	// (branch.<b>.merge fetched into a differently named tracking ref) still
+	// lands where the rebase looks
+	refspec := "+" + source + ":" + target
+	for try := 0; ; try++ {
+		out, err = RunGit(ctx, repoPath, "fetch", "--quiet", remote, refspec)
+		if err == nil {
+			return target, out, nil
+		}
+		if try > 0 || !strings.Contains(out, cannotLockRef) {
+			return "", out, err
+		}
+		select {
+		case <-time.After(fetchRetryWait):
+		case <-ctx.Done():
+			return "", out, ctx.Err()
+		}
+	}
+}
+
+// upstreamRefs resolves the remote, the remote ref to fetch (branch.<b>.merge)
+// and the remote-tracking ref holding it (@{u}) for HEAD. Without an upstream
+// it falls back to origin and the current branch.
+func upstreamRefs(ctx context.Context, repoPath string) (remote, source, target string, err error) {
+	branchOut, err := RunGit(ctx, repoPath, "symbolic-ref", "--short", "HEAD")
+	if err != nil {
+		return "", "", "", fmt.Errorf("resolve current branch: %w", err)
+	}
+	branch := strings.TrimSpace(branchOut)
+
+	trackOut, trackErr := RunGit(ctx, repoPath, "rev-parse", "--symbolic-full-name", "@{u}")
+	mergeOut, mergeErr := RunGit(ctx, repoPath, "config", "--get", "branch."+branch+".merge")
+	remoteOut, remoteErr := RunGit(ctx, repoPath, "config", "--get", "branch."+branch+".remote")
+	track := strings.TrimSpace(trackOut)
+	merge := strings.TrimSpace(mergeOut)
+	remote = strings.TrimSpace(remoteOut)
+	if trackErr == nil && mergeErr == nil && remoteErr == nil &&
+		strings.HasPrefix(track, "refs/remotes/") && merge != "" && remote != "" {
+		return remote, merge, track, nil
+	}
+	return "origin", "refs/heads/" + branch, "refs/remotes/origin/" + branch, nil
 }
 
 // tripPushWedge opens the breaker for repoPath and returns the error for the

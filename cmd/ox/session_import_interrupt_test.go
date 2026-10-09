@@ -35,7 +35,7 @@ func TestImportE2E_InterruptPublishesWhatIsDone(t *testing.T) {
 	f.add(t, pastSession{agent: nativeimport.AgentCodex, id: e2eCodexA, start: start.Add(time.Hour), prompt: pushPrompt, reply: "Re-uploaded the object."})
 	f.add(t, pastSession{agent: nativeimport.AgentCodex, id: e2eCodexB, start: start.Add(2 * time.Hour), prompt: tokenPrompt, reply: "The deploy bot."})
 
-	r := f.run(t, importOptions{yes: true, jsonOut: true})
+	r := f.run(t, importOptions{yes: true, jsonOut: true, parallel: 1})
 	assert.ErrorIs(t, r.err, cli.ErrSilent)
 	assert.Equal(t, "interrupted", postHogErrorKind(r.err, 1), "usage telemetry files a Ctrl-C as one")
 
@@ -102,9 +102,13 @@ func TestImportE2E_JSONRunReportsProgress(t *testing.T) {
 	r := f.run(t, importOptions{yes: true, jsonOut: true}) // run parses stdout as one document
 	require.NoError(t, r.err, r.out)
 	lines := strings.Split(strings.TrimSpace(f.progress.String()), "\n")
-	require.Len(t, lines, 2, f.progress.String())
-	assert.Contains(t, lines[0], "[1/2]")
-	assert.Contains(t, lines[0], nativeShortID(e2eClaudeA))
-	assert.Contains(t, lines[1], "[2/2]")
-	assert.Contains(t, lines[1], nativeShortID(e2eCodexA))
+	require.Len(t, lines, 4, f.progress.String())
+	for _, want := range []string{
+		"[1/2] summarizing claude " + nativeShortID(e2eClaudeA),
+		"[2/2] summarizing codex " + nativeShortID(e2eCodexA),
+		"[1/2] claude " + nativeShortID(e2eClaudeA) + " ready",
+		"[2/2] codex " + nativeShortID(e2eCodexA) + " ready",
+	} {
+		assert.Contains(t, f.progress.String(), want)
+	}
 }

@@ -25,6 +25,8 @@ import (
 )
 
 const (
+	importDefaultParallel = 3
+
 	// importPushBatch bounds how many committed imports wait for one push. Each
 	// push may pull, rebase and autostash; batching keeps a bulk run to a few.
 	importPushBatch = 10
@@ -101,30 +103,44 @@ func readNativeWithAdapter(agent nativeimport.Agent, path string) ([]adapters.Ra
 	return adapter.Read(path)
 }
 
-// publishImport runs one session through staging, conversion, summary, scan,
-// LFS and a scoped commit. It returns errImportHeld (wrapped) when the session
-// did not reach the Ledger, and a skip reason when it was left alone on
-// purpose. A committed session still needs a push.
-func publishImport(ctx context.Context, env *importEnv, c *importCandidate) (skip string, err error) {
+// preparedImport owns a session's staging directory until the committer has
+// published it or decided to hold it. Workers never write to sessions/.
+type preparedImport struct {
+	staging string
+}
+
+// cleanup releases staging after the committer publishes or holds the session.
+func (p *preparedImport) cleanup() { _ = os.RemoveAll(p.staging) }
+
+// prepareImport does the slow independent work. On success the caller owns
+// staging; every other exit removes it, leaving nothing to publish later.
+func prepareImport(ctx context.Context, env *importEnv, c *importCandidate) (prepared *preparedImport, skip string, err error) {
 	s := c.Session
+	if err := ctx.Err(); err != nil {
+		return nil, "", err
+	}
 	if reason := justInTimeCheck(env, c); reason != "" {
-		return reason, nil
+		return nil, reason, nil
 	}
 	staging := filepath.Join(env.stagingRoot, c.Name)
 	if err := os.RemoveAll(staging); err != nil {
-		return "", heldf("prepare staging: %v", err)
+		return nil, "", heldf("prepare staging: %v", err)
 	}
 	if err := os.MkdirAll(staging, 0o700); err != nil {
-		return "", heldf("prepare staging: %v", err)
+		return nil, "", heldf("prepare staging: %v", err)
 	}
-	defer os.RemoveAll(staging)
+	defer func() {
+		if prepared == nil {
+			_ = os.RemoveAll(staging)
+		}
+	}()
 
 	raw, err := env.deps.readNative(s.Agent, s.Path)
 	if err != nil {
 		if errors.Is(err, adapters.ErrAdapterOutputLimit) {
-			return "", heldf("too large to import: converted output exceeds the adapter's limit")
+			return nil, "", heldf("too large to import: converted output exceeds the adapter's limit")
 		}
-		return "", heldf("read %s session: %v", s.Agent, err)
+		return nil, "", heldf("read %s session: %v", s.Agent, err)
 	}
 	header := nativeimport.RawHeader{
 		SessionID: c.SessionID, AgentType: adapterNameFor(s.Agent), RepoID: env.repoID,
@@ -133,38 +149,40 @@ func publishImport(ctx context.Context, env *importEnv, c *importCandidate) (ski
 	rawPath := filepath.Join(staging, pipeline.LedgerFileRaw)
 	entryCount, err := nativeimport.WriteRaw(rawPath, env.projectRoot, header, raw)
 	if err != nil {
-		return "", heldf("convert: %v", err)
+		return nil, "", heldf("convert: %v", err)
 	}
 	if !session.HasSubstantiveEntries(rawPath) {
-		return "no conversation after conversion", nil
+		return nil, "no conversation after conversion", nil
 	}
 	stored, err := session.ReadSessionFromPath(rawPath)
 	if err != nil {
-		return "", heldf("read converted session: %v", err)
+		return nil, "", heldf("read converted session: %v", err)
 	}
 
 	summary, err := summarizeImport(ctx, env, c, stored)
 	if err != nil {
-		return "", err
+		return nil, "", err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, "", err
 	}
 	// Summarizing can take minutes; a session resumed meanwhile is not final.
 	if reason := justInTimeCheck(env, c); reason != "" {
-		return reason, nil
+		return nil, reason, nil
 	}
 	if verdict := importVerdictFor(summary); verdict != "" {
-		return rememberVerdict(env, c, verdict, summary.ScoreReason), nil
+		return nil, rememberVerdict(env, c, verdict, summary.ScoreReason), nil
 	}
 	// A meta with no title is exactly what the daemon's repair paths rewrite,
 	// leaving an uncommitted edit that wedges the next pull (#1105).
 	if strings.TrimSpace(summary.Title) == "" {
-		return "", heldf("the summary has no title")
+		return nil, "", heldf("the summary has no title")
 	}
 	if _, err := session.WriteSessionArtifacts(staging, stored, summary); err != nil {
-		return "", heldf("write summary: %v", err)
+		return nil, "", heldf("write summary: %v", err)
 	}
-	var meta *lfs.SessionMeta
 	err = lfs.MutateSessionMeta(ctx, staging, func(*lfs.SessionMeta) (*lfs.SessionMeta, error) {
-		meta = sessionMetaBase(c.Name, env.username, "", header.AgentType, s.StartedAt, env.projectRoot, c.SessionID).
+		meta := sessionMetaBase(c.Name, env.username, "", header.AgentType, s.StartedAt, env.projectRoot, c.SessionID).
 			Title(summary.Title).
 			Summary(summary.Summary).
 			EntryCount(entryCount).
@@ -177,8 +195,22 @@ func publishImport(ctx context.Context, env *importEnv, c *importCandidate) (ski
 		return meta, nil
 	})
 	if err != nil {
-		return "", heldf("write meta.json: %v", err)
+		return nil, "", heldf("write meta.json: %v", err)
 	}
+	return &preparedImport{staging: staging}, "", nil
+}
+
+// publishPreparedImport is owned by the single committer: it checks again
+// after any wait in the pool, scans, uploads and commits under the repo lock.
+func publishPreparedImport(ctx context.Context, env *importEnv, c *importCandidate, prepared *preparedImport) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if reason := justInTimeCheck(env, c); reason != "" {
+		return reason, nil
+	}
+	staging := prepared.staging
+	var meta *lfs.SessionMeta
 
 	if file, err := residualSecret(env.projectRoot, staging); err != nil {
 		return "", heldf("scan: %v", err)
@@ -314,6 +346,9 @@ func summarizeImport(ctx context.Context, env *importEnv, c *importCandidate, st
 	}
 	var rejected, runnerErr error
 	for attempt := 1; attempt <= importSummaryAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		req := agentwork.RunRequest{
 			Prompt: prompt, WorkDir: workDir, Model: model, Isolated: true, TimeoutOverride: importSummaryTimeout,
 		}

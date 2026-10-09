@@ -102,7 +102,6 @@ func TestReconcile_ReuploadsExactRecoveryCacheWithoutLocalMutation(t *testing.T)
 
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.RecoveredUploads)
-	assert.Zero(t, result.Replaced)
 	assert.True(t, result.Changed())
 	assert.Equal(t, content, uploaded[ref.BareOID()])
 	assert.Equal(t, headBefore, git(t, ledger, "rev-parse", "HEAD"))
@@ -171,7 +170,6 @@ func TestReconcile_RecoveryCacheFailuresAreAtomic(t *testing.T) {
 
 			require.ErrorContains(t, err, test.wantError)
 			assert.Zero(t, result.RecoveredUploads)
-			assert.Zero(t, result.Replaced)
 			assert.False(t, result.Changed())
 			assert.Equal(t, headBefore, git(t, ledger, "rev-parse", "HEAD"))
 			assert.Equal(t, indexBefore, git(t, ledger, "write-tree"))
@@ -238,7 +236,7 @@ func TestReconcile_DivergedBranchDoesNotMutate(t *testing.T) {
 	assert.FileExists(t, pointerPath)
 }
 
-func TestReconcile_MassDeletionPreflightDoesNotMutate(t *testing.T) {
+func TestReconcile_ManyUnrecoverablePointersDoNotMutate(t *testing.T) {
 	ledger, _ := initLedgerWithRemote(t)
 	missing := make(map[string]bool)
 	files := make(map[string]string)
@@ -255,7 +253,7 @@ func TestReconcile_MassDeletionPreflightDoesNotMutate(t *testing.T) {
 
 	result, err := reconcileUnpushedPointers(context.Background(), ledger, nil, func() (*Client, error) { return client, nil })
 
-	require.ErrorContains(t, err, "exceeding threshold")
+	require.ErrorContains(t, err, "will not be removed")
 	assert.False(t, result.Changed())
 	assert.Equal(t, headBefore, git(t, ledger, "rev-parse", "HEAD"))
 	assert.Equal(t, indexBefore, git(t, ledger, "write-tree"))
@@ -265,7 +263,7 @@ func TestReconcile_MassDeletionPreflightDoesNotMutate(t *testing.T) {
 	}
 }
 
-func TestReconcile_MixedReuploadAndUnrecoverableRepair(t *testing.T) {
+func TestReconcile_MixedReuploadAndUnrecoverableKeepsPushPaused(t *testing.T) {
 	ledger, _ := initLedgerWithRemote(t)
 	content := []byte("keep the recording\n")
 	pointerPath, metaPath, cachePath, sessionRef := commitMissingSessionPointer(t, ledger, "mixed", content)
@@ -280,15 +278,16 @@ func TestReconcile_MixedReuploadAndUnrecoverableRepair(t *testing.T) {
 
 	result, err := reconcileUnpushedPointers(context.Background(), ledger, nil, func() (*Client, error) { return client, nil })
 
-	require.NoError(t, err)
+	var unrecoverable *UnrecoverablePointersError
+	require.ErrorAs(t, err, &unrecoverable)
+	assert.Equal(t, 1, unrecoverable.Uploaded)
 	assert.Equal(t, 1, result.RecoveredUploads)
-	assert.Equal(t, 1, result.Replaced)
 	assert.True(t, result.Changed())
 	assert.Equal(t, content, uploaded[sessionRef.BareOID()])
 	assert.Equal(t, pointerBefore, mustReadFile(t, pointerPath))
 	assert.Equal(t, metaBefore, mustReadFile(t, metaPath))
 	assert.Equal(t, content, mustReadFile(t, cachePath))
-	assert.NoFileExists(t, planPath)
+	assert.FileExists(t, planPath, "the unrecoverable plan pointer is never removed")
 }
 
 func mustReadFile(t *testing.T, path string) []byte {
@@ -296,4 +295,51 @@ func mustReadFile(t *testing.T, path string) []byte {
 	content, err := os.ReadFile(path)
 	require.NoError(t, err)
 	return content
+}
+
+// A plan whose LFS object vanished from the store is restored from the Ledger
+// recovery cache exactly like a session artifact: the cache bytes must match
+// the pointer's OID and size, and nothing local is mutated. Failure prevented:
+// the cache was consulted only for sessions/, so a plan with its exact bytes
+// sitting in .sageox/cache was still reported as "no blob locally" and kept
+// every push rejected.
+func TestReconcile_ReuploadsExactRecoveryCacheForPlan(t *testing.T) {
+	ledger, _ := initLedgerWithRemote(t)
+	content := []byte("<!doctype html><html><head><meta name=\"sageox:plan\" content=\"p\"></head><body>plan</body></html>\n")
+	ref := NewFileRef(content)
+	pointerPath := filepath.Join(ledger, "data", "plans", "2026-10-01-keys", "plan.html")
+	cachePath := filepath.Join(ledger, ".sageox", "cache", "data", "plans", "2026-10-01-keys", "plan.html")
+	require.NoError(t, os.MkdirAll(filepath.Dir(pointerPath), 0o755))
+	require.NoError(t, os.WriteFile(pointerPath, []byte(FormatPointer(ref.OID, ref.Size)), 0o644))
+	git(t, ledger, "add", "--sparse", "data/plans/2026-10-01-keys")
+	git(t, ledger, "commit", "-m", "plan: keys", "--no-verify")
+	require.NoError(t, os.MkdirAll(filepath.Dir(cachePath), 0o700))
+	require.NoError(t, os.WriteFile(cachePath, content, 0o600))
+	headBefore := git(t, ledger, "rev-parse", "HEAD")
+	client, uploaded := recoveryLFSServer(t, map[string]bool{ref.BareOID(): true}, 0)
+
+	result, err := reconcileUnpushedPointers(context.Background(), ledger, nil, func() (*Client, error) { return client, nil })
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.RecoveredUploads)
+	assert.Equal(t, content, uploaded[ref.BareOID()])
+	assert.Equal(t, headBefore, git(t, ledger, "rev-parse", "HEAD"))
+	assert.Equal(t, []byte(FormatPointer(ref.OID, ref.Size)), mustReadFile(t, pointerPath), "the pointer is untouched")
+}
+
+// A session's recovery cache that cannot be inspected fails closed: finalize
+// promised those bytes are there, so an unreadable cache is an error, never
+// permission to call the pointer unrecoverable.
+func TestReconcile_SessionCacheUnreadableFailsClosed(t *testing.T) {
+	ledger, _ := initLedgerWithRemote(t)
+	content := []byte("recording whose cache is obstructed\n")
+	_, _, _, ref := commitMissingSessionPointer(t, ledger, "obstructed", content)
+	require.NoError(t, os.MkdirAll(filepath.Join(ledger, ".sageox"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(ledger, ".sageox", "cache"), []byte("not a directory"), 0o644))
+	client, uploaded := recoveryLFSServer(t, map[string]bool{ref.BareOID(): true}, 0)
+
+	_, err := reconcileUnpushedPointers(context.Background(), ledger, nil, func() (*Client, error) { return client, nil })
+
+	require.ErrorContains(t, err, "inspect session recovery cache for sessions/obstructed/raw.jsonl")
+	assert.Empty(t, uploaded, "nothing is uploaded or removed on an unreadable cache")
 }

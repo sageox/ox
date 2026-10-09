@@ -216,7 +216,7 @@ func (opts doctorOptions) shouldFixAdapterSlug(slug string, fixSafe bool) bool {
 		}
 	}
 	// if --fix flag is set and the fix is safe, apply it
-	if opts.fix && fixSafe {
+	if opts.fixAll() && fixSafe {
 		return true
 	}
 	return false

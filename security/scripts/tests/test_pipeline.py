@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import sys
 import tempfile
+import textwrap
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -165,12 +167,15 @@ class ScannerStatusTest(unittest.TestCase):
             return pipeline.scanner_status(out, tool)
 
     def test_statuses(self):
+        """Verify scanner statuses and reasons, including tool-specific install hints."""
         sarif = json.dumps({"runs": [{"results": []}]})
         gosec_ok = json.dumps({"Issues": None, "Report": {}})
         gosec_typecheck = json.dumps({"Issues": [{"FromLinter": "typecheck",
                                                   "Text": "export data version 4 is greater than maximum supported version 2"}]})
         cases = [
-            ("opengrep", "missing", {}, "skipped", "not installed"),
+            ("opengrep", "missing", {}, "skipped", "not installed — run `make sec-install`"),
+            # make sec-install does not install golangci-lint; the reason must name what is missing.
+            ("gosec", "missing", {}, "skipped", "golangci-lint v2 is not installed"),
             ("opengrep", "nofiles", {}, "skipped", "no changed files"),
             ("opengrep", 0, {"det-opengrep.sarif": sarif}, "ran", ""),
             ("opengrep", 0, {}, "failed", "no SARIF output"),
@@ -238,6 +243,19 @@ class ScannerStatusTest(unittest.TestCase):
         self.assertEqual(len(findings), 1)
         self.assertEqual(findings[0]["message"], "bad parse")
         self.assertTrue(findings[0]["reachable"], "a symbol-level trace means the code is called")
+
+    def test_advisory_collectors_keep_aliases_and_the_package(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gv, osv = Path(tmp) / "gv.json", Path(tmp) / "osv.json"
+            gv.write_text('{"osv": {"id": "GO-2026-0002", "summary": "s", "aliases": ["GHSA-aaaa-bbbb-cccc"]}}\n'
+                          '{"finding": {"osv": "GO-2026-0002", "trace": [{"module": "golang.org/x/crypto"}]}}\n')
+            osv.write_text(json.dumps({"results": [{"source": {"path": str(Path(tmp) / "go.mod")}, "packages": [
+                {"package": {"name": "github.com/docker/docker", "version": "v28.5.2"},
+                 "vulnerabilities": [{"id": "GO-2026-4887", "aliases": ["GHSA-x86f-5xw2-fm2r"], "summary": "bypass"}]}]}]}))
+            g = pipeline.govulncheck_findings(gv)[0]
+            o = pipeline.osv_findings(osv, Path(tmp))[0]
+        self.assertEqual((g["aliases"], g["package"]), (["GHSA-aaaa-bbbb-cccc"], "golang.org/x/crypto"))
+        self.assertEqual((o["aliases"], o["package"]), (["GHSA-x86f-5xw2-fm2r"], "github.com/docker/docker"))
 
 
 def full_state() -> dict:
@@ -448,6 +466,126 @@ class ScannerFindingsTest(unittest.TestCase):
         self.assertEqual([(f["tool"], f["rule"]) for f in got], [("govulncheck", "GO-2026-0001"), ("gosec", "G204")])
         self.assertTrue(got[0]["reachable"])
 
+    def test_det_summary_lists_each_scanner_and_its_findings(self):
+        doc = {**self.DET, "scope": "diff", "since": "origin/main", "touched_files": 2, "coverage": "partial",
+               "tools": {"opengrep": {"status": "ran", "findings": 0},
+                         "govulncheck": {"status": "ran", "findings": 1},
+                         "osv-scanner": {"status": "skipped", "reason": "not installed"},
+                         "grype": {"status": "failed", "reason": "exit 2"},
+                         "gosec": {"status": "ran", "findings": 2}}}
+        md = pipeline.render_det_summary(doc)
+        self.assertIn("**PARTIAL COVERAGE**", md)
+        self.assertIn("| grype | failed: exit 2 |", md)
+        self.assertIn("| osv-scanner | skipped: not installed |", md)
+        self.assertIn("| gosec | ran: 2 finding(s) |", md)
+        self.assertIn("| govulncheck | GO-2026-0001 (reachable) | dependency | bad parse |", md)
+        self.assertIn("| gosec | G204 | `cmd/ox/b.go:3` | subprocess with variable |", md)
+
+    def test_pipes_in_any_cell_are_escaped(self):
+        """A file path the PR controls, or a scanner's failure reason, must not split a column."""
+        doc = {"findings": [{"tool": "gosec", "ruleId": "G304", "level": "warning", "message": "read",
+                             "locations": [{"file": "cmd/ox/a|b.go", "line": 4}]}],
+               "coverage": "partial", "scope": "diff", "since": "origin/main", "touched_files": 1,
+               "tools": {"gosec": {"status": "ran", "findings": 1},
+                         "grype": {"status": "failed", "reason": "exit 2 | db stale"}}}
+        md = pipeline.render_det_summary(doc)
+        self.assertIn("| gosec | G304 | `cmd/ox/a\\|b.go:4` | read |", md)
+        self.assertIn("| grype | failed: exit 2 \\| db stale |", md)
+
+    def test_changed_lines_come_from_added_hunk_ranges(self):
+        diff = ("diff --git a/a.go b/a.go\n--- a/a.go\n+++ b/a.go\n"
+                "@@ -10,0 +11,2 @@\n+x\n+y\n@@ -20 +22 @@\n-old\n+new\n@@ -30,3 +33,0 @@\n-gone\n"
+                "diff --git a/old.go b/old.go\n--- a/old.go\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-a\n-b\n")
+        self.assertEqual(pipeline.parse_changed_lines(diff), {"a.go": {11, 12, 22}})
+
+    def test_a_failed_diff_marks_nothing_as_existing_code(self):
+        """If the diff cannot be read, no finding may be moved out of the main table."""
+        with tempfile.TemporaryDirectory() as tmp:  # not a git repo: both diff attempts fail
+            changed = pipeline.changed_lines(Path(tmp), "origin/main")
+        self.assertIsNone(changed)
+        findings = [{"tool": "gosec", "locations": [{"file": "a.go", "line": 3}]}]
+        pipeline.mark_in_diff(findings, changed)
+        self.assertNotIn("in_diff", findings[0])
+        pipeline.mark_in_diff(findings, {"a.go": {3}})
+        self.assertTrue(findings[0]["in_diff"])
+
+    def test_dependency_advisories_are_never_marked_existing_code(self):
+        """grype puts every advisory at line 1 of the manifest, a placeholder, not a code line."""
+        findings = [{"tool": "grype", "ruleId": "CVE-1", "locations": [{"file": "go.mod", "line": 1}]},
+                    {"tool": "gosec", "ruleId": "G304", "locations": [{"file": "a.go", "line": 9}]}]
+        pipeline.mark_in_diff(findings, {"a.go": {3}})
+        self.assertNotIn("in_diff", findings[0], "an advisory must stay in the main table")
+        self.assertFalse(findings[1]["in_diff"])
+
+    def test_findings_off_the_changed_lines_are_set_apart(self):
+        """A hit in a touched file but not on a changed line is existing code, not the change's."""
+        doc = {"findings": [
+                   {"tool": "gosec", "ruleId": "G304", "level": "warning", "message": "new", "in_diff": True,
+                    "locations": [{"file": "a.go", "line": 3}]},
+                   {"tool": "gosec", "ruleId": "G104", "level": "warning", "message": "old", "in_diff": False,
+                    "locations": [{"file": "a.go", "line": 90}]},
+                   {"tool": "grype", "ruleId": "CVE-1", "level": "error", "message": "dep", "locations": []}],
+               "coverage": "full", "scope": "diff", "since": "origin/main", "touched_files": 1,
+               "tools": {"gosec": {"status": "ran", "findings": 2}, "grype": {"status": "ran", "findings": 1}}}
+        md = pipeline.render_det_summary(doc)
+        head, marker, tail = md.partition("Elsewhere in touched files (existing code): 1 finding(s)")
+        self.assertTrue(marker, md)
+        self.assertIn("| gosec | G304 | `a.go:3` | new |", head)
+        self.assertIn("| grype | CVE-1 | dependency | dep |", head)
+        self.assertIn("| gosec | G104 | `a.go:90` | old |", tail)
+        self.assertNotIn("G104", head)
+
+    ADVISORIES = [
+        {"tool": "govulncheck", "ruleId": "GO-2026-6355", "level": "error", "message": "DoS in ssh", "locations": [],
+         "reachable": True, "aliases": ["GHSA-aaaa-bbbb-cccc"], "package": "golang.org/x/crypto"},
+        {"tool": "osv-scanner", "ruleId": "GHSA-aaaa-bbbb-cccc", "level": "warning", "message": "DoS in ssh (osv)",
+         "locations": [{"file": "go.mod", "line": 0}], "aliases": ["GO-2026-6355"], "package": "golang.org/x/crypto"},
+        {"tool": "grype", "ruleId": "GO-2026-6355-golang.org/x/crypto", "level": "error",
+         "message": "A high vulnerability in go-module package: golang.org/x/crypto, version v0.54.0 was found at: /go.mod",
+         "locations": [{"file": "/go.mod", "line": 1}]},
+        {"tool": "grype", "ruleId": "GHSA-dddd-eeee-ffff-github.com/docker/docker", "level": "warning",
+         "message": "A medium vulnerability in go-module package: github.com/docker/docker, version v28.5.2 was found at: /go.mod",
+         "locations": [{"file": "/go.mod", "line": 1}]},
+    ]
+
+    def advisory_doc(self, dependency_change):
+        return {"findings": self.ADVISORIES, "coverage": "partial", "scope": "diff", "since": "origin/main",
+                "touched_files": 1, "dependency_change": dependency_change,
+                "tools": {"govulncheck": {"status": "ran", "findings": 1}, "osv-scanner": {"status": "ran", "findings": 1},
+                          "grype": {"status": "ran", "findings": 2}}}
+
+    def test_one_row_per_vulnerability_across_scanners(self):
+        md = pipeline.render_det_summary(self.advisory_doc(True))
+        self.assertIn("| govulncheck, grype, osv-scanner | GO-2026-6355 (reachable) | `golang.org/x/crypto` | DoS in ssh |", md)
+        self.assertEqual(md.count("GO-2026-6355"), 1, md)
+        self.assertIn("| grype | GHSA-dddd-eeee-ffff | `github.com/docker/docker` |", md)
+        self.assertNotIn("go.mod:1", md, "grype's line 1 is a placeholder, not a location")
+
+    def test_a_merged_advisory_names_every_affected_package(self):
+        """One advisory, two modules: both are upgrade targets, so both must be listed."""
+        rows = [{"tool": "osv-scanner", "ruleId": "GO-2026-7000", "level": "warning", "message": "bug",
+                 "locations": [{"file": "go.mod", "line": 0}], "aliases": [], "package": "golang.org/x/net"},
+                {"tool": "osv-scanner", "ruleId": "GO-2026-7000", "level": "warning", "message": "bug",
+                 "locations": [{"file": "go.mod", "line": 0}], "aliases": [], "package": "golang.org/x/crypto"}]
+        md = pipeline.render_det_summary({**self.advisory_doc(True), "findings": rows})
+        self.assertIn("| osv-scanner | GO-2026-7000 | `golang.org/x/crypto`, `golang.org/x/net` | bug |", md)
+
+    def test_unreachable_advisories_collapse_unless_dependencies_changed(self):
+        md = pipeline.render_det_summary(self.advisory_doc(False))
+        head, marker, tail = md.partition("Dependency advisories without a known call path from ox code: 1")
+        self.assertTrue(marker, md)
+        self.assertIn("GO-2026-6355 (reachable)", head, "a reachable advisory always stays visible")
+        self.assertIn("github.com/docker/docker", tail)
+        md = pipeline.render_det_summary(self.advisory_doc(True))
+        self.assertNotIn("without a known call path", md, "a dependency change shows every advisory")
+
+    def test_det_summary_never_reads_clean_without_coverage(self):
+        doc = {"findings": [], "coverage": "none", "scope": "diff", "since": "origin/main", "touched_files": 1,
+               "tools": {t: {"status": "skipped", "reason": "not installed"} for t in pipeline.SCANNERS}}
+        md = pipeline.render_det_summary(doc)
+        self.assertIn("**NO COVERAGE**", md)
+        self.assertNotIn("No scanner findings", md)
+
     def test_sarif_carries_scanner_results_with_their_location(self):
         scan = pipeline.scanner_report_findings(self.DET, [])
         sarif = pipeline.render_sarif([], scan)
@@ -457,8 +595,73 @@ class ScannerFindingsTest(unittest.TestCase):
         self.assertEqual(results["gosec/G204"]["properties"], {"source": "gosec", "validated": False})
 
 
+class ValidatorRoutingTest(unittest.TestCase):
+    CONFIG = textwrap.dedent(
+        """\
+        models:
+          validator_model: model-default   # most findings
+          validator_hard_class_model: model-hard
+
+        hard_classes:
+          - daemon-ipc        # peer-cred, payload validation
+          - supply-chain
+
+        hunters:
+          - cli-input
+        """
+    )
+
+    def route(self, finding, config=CONFIG):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg, f = Path(tmp) / "config.yml", Path(tmp) / "finding"
+            if config is not None:
+                cfg.write_text(config)
+            f.write_text(json.dumps(finding))
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                pipeline.main(["validator-model", "--config", str(cfg), "--finding", str(f)])
+            return buf.getvalue().strip()
+
+    def test_hard_class_gets_the_hard_class_model(self):
+        self.assertEqual(self.route({"class": "daemon-ipc"}), "model-hard")
+        self.assertEqual(self.route({"class": " Supply-Chain "}), "model-hard")
+
+    def test_other_classes_get_the_default_validator_model(self):
+        for finding in ({"class": "cli-input"}, {"class": "daemon-ipc-authz"}, {"class": ""}, {}):
+            with self.subTest(finding=finding):
+                self.assertEqual(self.route(finding), "model-default")
+
+    def test_quoted_items_and_flow_lists_are_parsed_as_yaml(self):
+        """Valid YAML spellings of hard_classes must not silently fall back to the default."""
+        for config in ('hard_classes:\n  - "daemon-ipc"\n  - \'supply-chain\'\n',
+                       "hard_classes: [daemon-ipc, 'supply-chain']\n",
+                       'hard_classes: ["daemon-ipc", supply-chain]  # flow style\n'):
+            with self.subTest(config=config):
+                self.assertEqual(pipeline.config_list_from_text(config, "hard_classes"), ["daemon-ipc", "supply-chain"])
+                self.assertEqual(self.route({"class": "daemon-ipc"}, config), "claude-opus-5-5")
+        quoted_models = 'models:\n  validator_hard_class_model: "model-hard"\nhard_classes:\n  - daemon-ipc\n'
+        self.assertEqual(self.route({"class": "daemon-ipc"}, quoted_models), "model-hard")
+
+    def test_missing_keys_fall_back_to_sonnet_and_opus(self):
+        self.assertEqual(self.route({"class": "daemon-ipc"}, "hard_classes:\n  - daemon-ipc\n"), "claude-opus-5-5")
+        self.assertEqual(self.route({"class": "daemon-ipc"}, None), "claude-sonnet-5")
+
+    def test_every_hard_class_is_a_class_an_active_hunter_reports(self):
+        """The bug this guards: hard_classes named classes no hunter emits, so nothing reached Opus."""
+        repo = Path(__file__).resolve().parents[3]
+        config = repo / "security/config.yml"
+        reported = {}
+        for hunter in pipeline.config_list(config, "hunters"):
+            playbook = (repo / ".claude/skills/security-review/prompts" / f"hunter-{hunter}.md").read_text()
+            reported[hunter] = re.findall(r'"class":\s*"([^"]+)"', playbook)
+        hard = pipeline.config_list(config, "hard_classes")
+        self.assertTrue(hard, "no hard classes configured: no finding would reach the hard-class model")
+        self.assertLessEqual(set(hard), {c for classes in reported.values() for c in classes},
+                             f"hard_classes {hard} vs the classes active hunters report {reported}")
+
+
 class ValidatorResultTest(unittest.TestCase):
-    def merge(self, finding, output=None, unvalidated=""):
+    def merge(self, finding, output=None, unvalidated="", model=""):
         with tempfile.TemporaryDirectory() as tmp:
             f, o = Path(tmp) / "finding", Path(tmp) / "output"
             f.write_text(json.dumps(finding))
@@ -467,6 +670,8 @@ class ValidatorResultTest(unittest.TestCase):
             args = ["validator-result", "--finding", str(f), "--output", str(o)]
             if unvalidated:
                 args += ["--unvalidated", unvalidated]
+            if model:
+                args += ["--model", model]
             buf = io.StringIO()
             with redirect_stdout(buf):
                 pipeline.main(args)
@@ -485,6 +690,13 @@ class ValidatorResultTest(unittest.TestCase):
                 got = self.merge({"title": "t"}, output)
                 self.assertEqual(got["verdict"], "unvalidated")
                 self.assertIn(reason, got["verdict_reason"])
+
+    def test_records_the_model_that_judged_it(self):
+        got = self.merge({"title": "t"}, json.dumps({"class": "daemon-ipc", "verdict": "confirmed"}),
+                         model="claude-opus-5-5")
+        self.assertEqual(got["validator_model"], "claude-opus-5-5")
+        capped = self.merge({"title": "t"}, '{"verdict": "cap", "reason": "x"}', model="claude-opus-5-5")
+        self.assertNotIn("validator_model", capped, "no model judged a finding the cap stopped")
 
 
 if __name__ == "__main__":

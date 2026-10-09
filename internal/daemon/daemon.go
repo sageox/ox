@@ -133,7 +133,10 @@ func saveRestartHistory(h *restartHistory) error {
 
 // recordRestart adds the current time to restart history.
 func recordRestart() error {
-	h, _ := loadRestartHistory() // ignore errors, start fresh if needed
+	h, err := loadRestartHistory()
+	if err != nil {
+		h = &restartHistory{} // unreadable history: start fresh rather than dereference nil
+	}
 	h.Restarts = append(h.Restarts, time.Now())
 	return saveRestartHistory(h)
 }
@@ -358,8 +361,12 @@ func (d *Daemon) Start() error {
 		throttleDuration = time.Since(throttleStart)
 	}
 
-	// record this startup attempt for loop detection
-	if err := recordRestart(); err != nil {
+	// record this startup attempt for loop detection, unless the spawner
+	// killed a live daemon to make room for us: that restart is deliberate
+	if os.Getenv(supersedeEnvVar) != "" {
+		_ = os.Unsetenv(supersedeEnvVar) // don't leak to children we spawn
+		d.logger.Debug("startup supersedes a live daemon, not recording restart")
+	} else if err := recordRestart(); err != nil {
 		d.logger.Debug("failed to record restart", "error", err)
 	}
 
@@ -397,6 +404,7 @@ func (d *Daemon) Start() error {
 	if runtime.GOMAXPROCS(0) > daemonMaxProcs {
 		runtime.GOMAXPROCS(daemonMaxProcs)
 	}
+	d.logger.Info("daemon priority", "nice", daemonNiceness, "gomaxprocs", runtime.GOMAXPROCS(0))
 
 	// write PID file (informational only)
 	if err := d.writePidFile(); err != nil {
@@ -1355,6 +1363,14 @@ func (d *Daemon) initComponents() time.Duration {
 		if d.codedb != nil {
 			githubSync.SetCodeDBManager(d.codedb)
 		}
+		// the settings fetcher is created after this block, so the flag is
+		// looked up lazily; nil settings (not fetched yet) mean the mirror is off
+		githubSync.SetMirrorRelayer(newProjectGitHubMirrorRelayer(d.config.ProjectRoot, func() *flags.CLISettingsResponse {
+			if d.settingsFetcher == nil {
+				return nil
+			}
+			return d.settingsFetcher.CachedSettings()
+		}, d.heartbeat.GetAuthToken, d.logger))
 		d.scheduler.SetGitHubSyncManager(githubSync)
 	}
 	d.scheduler.SetTelemetryCallback(func(syncType, operation, status string, duration time.Duration) {

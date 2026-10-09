@@ -101,19 +101,19 @@ func TestReconcile_PushRangeScope_IgnoresPointersTheRemoteAlreadyHas(t *testing.
 	tests := []struct {
 		name         string
 		missing      map[string]int // OIDs the LFS store 404s
-		wantReplaced int
+		wantRefused  bool
 		wantPushable bool
 	}{
 		{
-			name:         "teammate disagreement outside range does not block repairing the own missing pointer",
+			name:         "teammate breakage outside range is ignored; the own missing pointer is reported, never removed",
 			missing:      map[string]int{teammateOID: http.StatusNotFound, ownMissingOID: http.StatusNotFound},
-			wantReplaced: 1,
-			wantPushable: true,
+			wantRefused:  true,
+			wantPushable: false,
 		},
 		{
 			name:         "nothing in range is missing: teammate breakage is not this push's problem",
 			missing:      map[string]int{teammateOID: http.StatusNotFound},
-			wantReplaced: 0,
+			wantRefused:  false,
 			wantPushable: true,
 		},
 	}
@@ -147,19 +147,20 @@ func TestReconcile_PushRangeScope_IgnoresPointersTheRemoteAlreadyHas(t *testing.
 			result, err := reconcileUnpushedPointers(context.Background(), ledger, nil,
 				func() (*Client, error) { return client, nil })
 
-			require.NoError(t, err, "pointers outside @{u}..HEAD must never abort the repair")
-			assert.Equal(t, tt.wantReplaced, result.Replaced)
 			assert.Equal(t, 2, result.ScannedPointers, "only the two pointers introduced by the unpushed commit are examined")
 			assert.FileExists(t, filepath.Join(ledger, "sessions", "teammate", "summary.md"), "coworker files are never touched")
-			if tt.wantReplaced > 0 {
-				assert.NoFileExists(t, filepath.Join(ledger, "sessions", "own", "raw.jsonl"))
-				assert.Equal(t, []string{filepath.Join("sessions", "own", "raw.jsonl")}, result.ReplacedFiles)
+			assert.FileExists(t, filepath.Join(ledger, "sessions", "own", "raw.jsonl"), "no pointer is ever removed")
+			if tt.wantRefused {
+				var unrecoverable *UnrecoverablePointersError
+				require.ErrorAs(t, err, &unrecoverable)
+				require.Len(t, unrecoverable.Pointers, 1, "only the in-range pointer is reported")
+				assert.Equal(t, filepath.Join("sessions", "own", "raw.jsonl"), unrecoverable.Pointers[0].Path)
+			} else {
+				require.NoError(t, err, "pointers outside @{u}..HEAD must never abort the repair")
 			}
 
-			if tt.wantPushable {
-				ok, out := tryPush(t, ledger)
-				assert.True(t, ok, "push must be accepted after reconcile: %s", out)
-			}
+			ok, out := tryPush(t, ledger)
+			assert.Equal(t, tt.wantPushable, ok, "push after reconcile: %s", out)
 		})
 	}
 }
@@ -185,10 +186,13 @@ func TestReconcile_WholeTreeScope_StillSeesAlreadyPushedPointers(t *testing.T) {
 		return ledger, fakeLFSDownloadServer(t, map[string]int{teammateOID: http.StatusNotFound})
 	}
 
-	t.Run("whole tree fails closed on the disagreeing coworker session", func(t *testing.T) {
+	t.Run("whole tree reports the coworker's pointer and removes nothing", func(t *testing.T) {
 		ledger, client := setup(t)
 		_, err := reconcileAllPointers(context.Background(), ledger, nil, func() (*Client, error) { return client, nil })
-		require.ErrorContains(t, err, "disagrees with missing pointer")
+		var unrecoverable *UnrecoverablePointersError
+		require.ErrorAs(t, err, &unrecoverable)
+		assert.Equal(t, "sessions/teammate/summary.md", filepath.ToSlash(unrecoverable.Pointers[0].Path))
+		assert.FileExists(t, filepath.Join(ledger, "sessions", "teammate", "summary.md"))
 	})
 
 	t.Run("push range has nothing to do", func(t *testing.T) {
@@ -199,7 +203,7 @@ func TestReconcile_WholeTreeScope_StillSeesAlreadyPushedPointers(t *testing.T) {
 		assert.False(t, result.Changed())
 	})
 
-	t.Run("whole tree clears an already-pushed pointer whose metadata agrees", func(t *testing.T) {
+	t.Run("whole tree never removes an already-pushed pointer with a dead blob", func(t *testing.T) {
 		ledger, _ := initLedgerWithRemote(t)
 		writeAndCommit(t, ledger, "plan with a dead blob", map[string]string{
 			"data/plans/p1/plan.html": lfsPointerContent(teammateOID, 500),
@@ -208,10 +212,10 @@ func TestReconcile_WholeTreeScope_StillSeesAlreadyPushedPointers(t *testing.T) {
 		client := fakeLFSDownloadServer(t, map[string]int{teammateOID: http.StatusNotFound})
 
 		result, err := reconcileAllPointers(context.Background(), ledger, nil, func() (*Client, error) { return client, nil })
-		require.NoError(t, err)
-		assert.Equal(t, 1, result.Replaced)
-		assert.True(t, result.Changed())
-		assert.NoFileExists(t, filepath.Join(ledger, "data", "plans", "p1", "plan.html"))
+		var unrecoverable *UnrecoverablePointersError
+		require.ErrorAs(t, err, &unrecoverable)
+		assert.False(t, result.Changed())
+		assert.FileExists(t, filepath.Join(ledger, "data", "plans", "p1", "plan.html"))
 	})
 }
 
@@ -251,7 +255,6 @@ func TestReconcile_SquashesMissingObjectReferencedOnlyByIntermediateCommit(t *te
 	require.NoError(t, err)
 
 	assert.Equal(t, 1, result.HistoryOnly, "the dead object is referenced only by history")
-	assert.Zero(t, result.Replaced, "nothing at the tip to repair")
 	assert.True(t, result.Squashed, "squash is the whole repair")
 	assert.True(t, result.Changed(), "callers retry the push only when Changed() says so")
 	assert.Equal(t, 1, unpushedCount(t, ledger))
@@ -308,7 +311,6 @@ func TestReconcile_RefusesWhatItCannotRepairSafely(t *testing.T) {
 			result, err := reconcileUnpushedPointers(context.Background(), ledger, nil, func() (*Client, error) { return client, nil })
 
 			require.ErrorContains(t, err, tt.wantErr)
-			assert.Zero(t, result.Replaced)
 			assert.False(t, result.Squashed)
 			assert.Equal(t, headBefore, git(t, ledger, "rev-parse", "HEAD"))
 			after, readErr := os.ReadFile(filepath.Join(ledger, filepath.FromSlash(tt.path)))

@@ -103,6 +103,7 @@ func fixSessionUncommitted(ledgerPath string, count int) checkResult {
 	}
 
 	if err := gitutil.PushWithRetry(context.Background(), ledgerPath, gitutil.PushOpts{
+		ImmutablePaths:      true, // the Ledger never renames paths
 		AutoResolvePrefixes: ledger.AutoResolvePrefixes,
 	}); err != nil {
 		return WarningCheck(name,

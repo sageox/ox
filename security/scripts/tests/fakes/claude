@@ -18,6 +18,8 @@ Knobs (env):
                         exceeds --max-budget-usd (exit 1, error_max_budget_usd)
   FAKE_NO_ENTRY_POINTS  "1": the cartographer finds no entry points
   FAKE_PLANT            the line a cli-input hunter reports when it sees it
+  FAKE_DAEMON_FINDING   "1": the daemon IPC hunter also reports the daemon change
+                        (class daemon-ipc, a hard class) when it sees it
 """
 import json
 import os
@@ -25,6 +27,10 @@ import sys
 
 PLANT_DEFAULT = "os.RemoveAll(filepath.Join(heldDir, args[0]))"
 ENTRY_FILE = "cmd/ox/upload.go"
+DAEMON_PLANT = "return publish()"
+# Env vars that keep the reviewed branch's git metadata and memory files out of context.
+CONTEXT_ENV = ("CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS", "CLAUDE_CODE_DISABLE_CLAUDE_MDS")
+DAEMON_FILE = "internal/daemon/finalize.go"
 
 
 def arg(name):
@@ -84,6 +90,14 @@ def respond(role, playbook, stdin, structured):
                 "attack": "ox session upload --discard ../../.. deletes a directory outside the held-session cache",
                 "fix": "resolve the name against the directory listing and reject any path separator",
             })
+        if "daemon IPC" in playbook and os.environ.get("FAKE_DAEMON_FINDING") == "1" and DAEMON_PLANT in stdin:
+            findings.append({
+                "class": "daemon-ipc", "subclass": "state-mutating-no-authz", "severity": "high",
+                "title": "Daemon finalize publishes without checking the caller",
+                "file": DAEMON_FILE, "line": 3,
+                "attack": "any local process on the socket triggers a publish",
+                "fix": "check the peer's credentials before publishing",
+            })
         return {"findings": findings}
     if role == "dedup":
         items = [json.loads(line) for line in stdin.splitlines() if line.strip().startswith("{")]
@@ -110,7 +124,9 @@ def main():
     if log:
         with open(log, "a") as f:
             f.write(json.dumps({"role": role, "playbook": playbook, "stdin": stdin, "budget": budget,
-                                "schema": schema is not None, "tools": arg("--tools")}) + "\n")
+                                "schema": schema is not None, "tools": arg("--tools"),
+                                "model": arg("--model"), "setting_sources": arg("--setting-sources"),
+                                "env": {k: os.environ.get(k) for k in CONTEXT_ENV}}) + "\n")
     if budget is not None and os.environ.get("FAKE_HONOR_BUDGET", "1") == "1" and cost > float(budget):
         print(json.dumps({"type": "result", "subtype": "error_max_budget_usd", "is_error": True,
                           "result": None, "total_cost_usd": round(float(budget) + 0.001, 6)}))

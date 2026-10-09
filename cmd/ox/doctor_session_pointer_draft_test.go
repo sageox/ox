@@ -127,13 +127,12 @@ func TestRestoreUnpushedSessionPointers_DraftCacheConflictFailsClosed(t *testing
 
 // TestRestoreUnpushedSessionPointers_BulkUntrackPassesSacredGuard covers a repair that removes more
 // files than the sacred mass-delete guard allows in one commit. The bytes are in the cache, so the
-// repair must go through, and it must not leave the override set for the rest of the process.
+// repair must go through, and it must do so through the cache-verified exemption, never an env override.
 func TestRestoreUnpushedSessionPointers_BulkUntrackPassesSacredGuard(t *testing.T) {
 	ledger := newWedgedLedger(t, false)
 	for _, name := range []string{"2026-10-03T05-19-ryan-OxAAAA", "2026-10-03T06-19-ryan-OxBBBB"} {
 		commitDraftArtifacts(t, ledger, name)
 	}
-	_, hadOverride := os.LookupEnv("OX_ALLOW_SACRED_MASS_DELETE")
 
 	report, err := restoreUnpushedSessionPointers(context.Background(), ledger, true, nil)
 
@@ -141,8 +140,8 @@ func TestRestoreUnpushedSessionPointers_BulkUntrackPassesSacredGuard(t *testing.
 	assert.Len(t, report.Untracked, 6)
 	assert.True(t, report.Committed)
 	assert.NoError(t, report.Remaining)
-	_, stillSet := os.LookupEnv("OX_ALLOW_SACRED_MASS_DELETE")
-	assert.Equal(t, hadOverride, stillSet, "the override must not outlive the commit")
+	_, overrideSet := os.LookupEnv("OX_ALLOW_SACRED_MASS_DELETE")
+	assert.False(t, overrideSet, "no override env is read or set")
 }
 
 // TestSessionStageGuard_RefusesDraftArtifacts covers the prevention: no automatic writer may stage a
