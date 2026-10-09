@@ -1,7 +1,7 @@
 {
   "summary": "Fields no current reader knows (x_*) on a round, an item, both resolution layouts and a remap. Readers ignore them: the remap still moves hold to hnew, and a resolution with no matching mark adds no item.",
   "items": [
-    {"anchor": "hnew", "reviewer": "Ana", "status": "request-change", "open": true, "remapped_from": "hold"},
-    {"anchor": "h2", "reviewer": "Ana", "status": "flag", "open": false, "resolution": "addressed"}
+    {"anchor": "hnew", "reviewer": "Ana", "status": "request-change", "label": "The first risk", "note": "Circle this.", "open": true, "remapped_from": "hold"},
+    {"anchor": "h2", "reviewer": "Ana", "status": "flag", "label": "The second risk", "note": "Is this still true?", "open": false, "resolution": "addressed"}
   ]
 }

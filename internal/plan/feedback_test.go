@@ -327,14 +327,19 @@ func find(items []MergedItem, anchor string) *MergedItem {
 // (AssembleReview + CorruptFeedbackRounds) returns for each shared fixture in
 // testdata/review-contract, the fixtures
 // docs/specs/plan-review-ledger-contract.md publishes for other hosts and
-// release measurements. Failure prevented: a reader change silently
-// reinterprets review data that released CLIs and other hosts read too.
+// release measurements. expect.json holds a projection of each merged item,
+// not the literal CLI JSON: the fields every host must agree on, including
+// the reviewer's label and note. Failure prevented: a reader change silently
+// reinterprets, or drops the words of, review data that released CLIs and
+// other hosts read too.
 func TestReviewContractFixtures(t *testing.T) {
 	t.Parallel()
 	type item struct {
 		Anchor       string `json:"anchor"`
 		Reviewer     string `json:"reviewer"`
 		Status       string `json:"status"`
+		Label        string `json:"label"`
+		Note         string `json:"note"`
 		Open         bool   `json:"open"`
 		Resolution   string `json:"resolution,omitempty"`
 		RemappedFrom string `json:"remapped_from,omitempty"`
@@ -369,7 +374,7 @@ func TestReviewContractFixtures(t *testing.T) {
 			}
 			var got []item
 			for _, it := range merged {
-				g := item{Anchor: it.Anchor, Reviewer: it.Reviewer, Status: string(it.Status), Open: it.Open, RemappedFrom: it.RemappedFrom}
+				g := item{Anchor: it.Anchor, Reviewer: it.Reviewer, Status: string(it.Status), Label: it.Label, Note: it.Note, Open: it.Open, RemappedFrom: it.RemappedFrom}
 				if it.Resolution != nil {
 					g.Resolution = string(it.Resolution.State)
 				}

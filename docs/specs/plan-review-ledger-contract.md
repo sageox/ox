@@ -15,7 +15,7 @@ contract choices the shared module implements.
 
 | Where | What it pins |
 |---|---|
-| `internal/plan/testdata/review-contract/<fixture>/` | Shared fixtures: a plan dir (`plan/`) and what `ox plan feedback show --json` returns for it (`expect.json`) |
+| `internal/plan/testdata/review-contract/<fixture>/` | Shared fixtures: a plan dir (`plan/`) and the merged review `ox plan feedback show --json` returns for it, projected to the fields every host must agree on, the reviewer's label and note included (`expect.json`) |
 | `TestReviewContractFixtures` (`internal/plan/feedback_test.go`) | The v1 reader against every fixture |
 | `TestPlanReviewDurability_RacingClonesKeepEveryRecord` (`cmd/ox/plan_review_durability_test.go`) | Rounds and resolutions from three clones survive the push rebase |
 
@@ -152,7 +152,9 @@ to repair (`TestPlanReviewDurability_RacingClonesKeepEveryRecord`).
 - Same operation means same `(plan, kind, id)`. Same payload means the same
   digest of the **frozen request**: v2 records carry `request_sha256` over the
   exact bytes the client froze; v1 records are compared with the
-  `ContentRoundID` canonicalization (reviewer + items; unknown fields ignored).
+  `ContentRoundID` canonicalization (reviewer + items; unknown fields ignored),
+  taken after each item's empty reviewer is filled from the round's reviewer
+  as `SaveFeedback` stores it, so a request and its stored copy compare equal.
 - Host materialization (`created_at`, slug, per-item reviewer stamp,
   authenticated identity) is outside the digest, so an acceptance timestamp
   never creates another logical submission.
@@ -171,9 +173,10 @@ except `resolutions.json`.
 
 - Rounds: `feedback/round-<ts>-<id>.<digest>.json`.
   Resolutions: `feedback/resolutions/<ts>-<id>.<digest>.json`.
-- `<ts>`: the frozen request time when the request carries one, else
-  acceptance time; UTC, fixed width `20060102-150405.000000000`, so file order
-  stays assembly order.
+- `<ts>`: acceptance time, as v1 names rounds; UTC, fixed width
+  `20060102-150405.000000000`. Copies of one request then sort in acceptance
+  order, so the earliest acceptance is the one assembled (fixture `same-id`)
+  and file order stays assembly order.
 - `<digest>`: the first 16 hex characters of SHA-256 over the record file's
   exact bytes. The same path therefore always holds the same bytes, an
   add/add of identical bytes merges cleanly, and different bytes never meet
@@ -228,13 +231,16 @@ closes. #1288 implements it, with those cases as its tests.
 - Every entry under `feedback/` and `feedback/resolutions/` is either a known
   record or a reported failure: unrecognized, not a regular file, over a limit,
   undecodable, gone after listing, or replaced between listing and read.
-- **Limits:** 10,000 records, 8 MiB per record, 64 MiB per capture. The review
-  server caps a request at 1 MiB (`reviewBodyLimit`), but a stored round can be
-  larger than its request: indented JSON plus a reviewer stamp on every item
-  turned a 1 MiB request of minimal items into a 7.3 MB record (6.9x). 8 MiB
-  covers anything a v1 writer can store; writers refuse to store more. Sampled
-  Ledgers held 12 plans with review data: largest record 8.9 KB, at most 9
-  rounds on a plan, largest review subtree 21 KB.
+- **Limits:** 10,000 records, 8 MiB per record, 64 MiB per capture; new
+  writers refuse to store a record over 8 MiB. v1 writers have no cap: `ox plan
+  feedback apply --from` reads any size, and a stored round outgrows its
+  request (indented JSON, the round's reviewer copied into every item). One
+  1 MiB request of minimal items, the review server's cap
+  (`reviewBodyLimit`), was stored as 7.3 MB (6.9x), an example rather than a
+  maximum. A v1 record over a limit is reported, never read past silently,
+  and the capture is incomplete. Sampled Ledgers held 12 plans with review
+  data: largest record 8.9 KB, at most 9 rounds on a plan, largest review
+  subtree 21 KB.
 - **Complete** only when nothing failed, the listing before and after the read
   is identical (names, sizes, mtimes, inodes), and no rebase or merge is in
   progress in the Ledger. Three attempts, then incomplete.

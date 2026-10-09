@@ -299,6 +299,11 @@ func TestPlanReviewDurability_RacingClonesKeepEveryRecord(t *testing.T) {
 	if err != nil || len(items) != 3 {
 		t.Fatalf("a fresh clone should assemble one item per reviewer, got %+v (err %v)", items, err)
 	}
+	for _, it := range items {
+		if it.Open || it.Resolution == nil || it.Resolution.State != plan.ResolutionAddressed {
+			t.Fatalf("every reviewer's item should be closed as addressed, got %+v", it)
+		}
+	}
 }
 
 // TestPlanCommit_PathspecExcludesUnrelatedStagedChange: a plan commit carries
