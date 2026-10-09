@@ -141,10 +141,10 @@ func TestSyncScheduler_Checkout_LedgerCloneIsAtomic(t *testing.T) {
 }
 
 // TestSyncScheduler_Checkout_LedgerSymlinkClonesAsFile: a symlink committed
-// to the Ledger arrives in a fresh daemon clone as a plain file holding the
-// link text, and its target is untouched. Failure prevented: a teammate's
-// committed link redirects ox's writes into the clone, starting with the
-// AGENTS.md written right after it, to a file outside the Ledger.
+// to the Ledger arrives in a fresh daemon clone as a plain file, so the
+// AGENTS.md written right after the clone stays inside it. Failure prevented:
+// AGENTS.md committed as a link to a missing path makes the clone's
+// CreateAgentsMD create that path outside the Ledger.
 func TestSyncScheduler_Checkout_LedgerSymlinkClonesAsFile(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: git clone operations")
@@ -152,10 +152,9 @@ func TestSyncScheduler_Checkout_LedgerSymlinkClonesAsFile(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("creating symlinks needs elevated rights on Windows, where git checks them out as files anyway")
 	}
-	victim := filepath.Join(t.TempDir(), "victim")
-	require.NoError(t, os.WriteFile(victim, []byte("precious\n"), 0o644))
+	outside := filepath.Join(t.TempDir(), "created-through-link")
 	cloneURL := setupBareLedgerHTTPWith(t, func(work string) {
-		require.NoError(t, os.Symlink(victim, filepath.Join(work, "AGENTS.md")))
+		require.NoError(t, os.Symlink(outside, filepath.Join(work, "AGENTS.md")))
 	})
 	s := checkoutTestScheduler(t)
 
@@ -166,9 +165,8 @@ func TestSyncScheduler_Checkout_LedgerSymlinkClonesAsFile(t *testing.T) {
 	info, err := os.Lstat(filepath.Join(repoPath, "AGENTS.md"))
 	require.NoError(t, err)
 	assert.True(t, info.Mode().IsRegular(), "AGENTS.md checked out as %s, want a plain file", info.Mode())
-	body, err := os.ReadFile(victim)
-	require.NoError(t, err)
-	assert.Equal(t, "precious\n", string(body), "the link's target must be untouched")
+	_, statErr := os.Stat(outside)
+	assert.True(t, os.IsNotExist(statErr), "nothing may be written outside the Ledger: %v", statErr)
 }
 
 // TestSyncScheduler_Checkout_FailedLedgerCloneLeavesNoHalfClone is the

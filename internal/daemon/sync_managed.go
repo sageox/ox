@@ -37,9 +37,8 @@ type ManagedRepoPullOpts struct {
 	ImmutablePaths bool
 
 	// NoSymlinks holds the fetch and pull until ledger.DisableSymlinks has
-	// saved core.symlinks=false, so nothing the remote holds checks out as a
-	// link (the Ledger). A failure becomes the result's Err and the next cycle
-	// retries.
+	// saved core.symlinks=false (the Ledger). Its error becomes the result's
+	// Err, and the next cycle retries.
 	NoSymlinks bool
 
 	// ProjectRoot is the user's project root, used to resolve the endpoint

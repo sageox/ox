@@ -122,13 +122,40 @@ func TestConfigureSparseCheckout_KeepsPlanReviewState(t *testing.T) {
 	}
 }
 
+// gitIn runs git in dir and returns its output, failing the test on error.
+func gitIn(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+	return string(out)
+}
+
+// fileText returns the contents of path, failing the test unless it is a
+// plain file.
+func fileText(t *testing.T, path string) string {
+	t.Helper()
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.Mode().IsRegular() {
+		t.Fatalf("%s is %s, want a plain file", path, info.Mode())
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(body)
+}
+
 // TestConfigureSparseCheckout_SymlinksCheckOutAsFiles: a symlink committed to
 // the Ledger becomes a plain file holding its link text, whether an older
-// clone already checked it out or a later pull brings it in; a link someone
+// clone already checked it out or a later pull brings it in; a link
 // retargeted locally keeps its new target as an uncommitted change; no
 // target is touched. Failure prevented: a teammate's committed link
-// redirects ox's writes into the Ledger (plan saves, review records) to a
-// file outside it.
+// redirects ox's writes into the Ledger to a file outside it.
 func TestConfigureSparseCheckout_SymlinksCheckOutAsFiles(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: git clone and pull")
@@ -136,23 +163,14 @@ func TestConfigureSparseCheckout_SymlinksCheckOutAsFiles(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("creating symlinks needs elevated rights on Windows, where git checks them out as files anyway")
 	}
-	git := func(dir string, args ...string) string {
-		t.Helper()
-		out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput()
-		if err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
-		return string(out)
-	}
 	victim := filepath.Join(t.TempDir(), "victim")
 	if err := os.WriteFile(victim, []byte("precious\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	plan := filepath.Join("data", "plans", "2026-10-09-p")
 	src := t.TempDir()
-	git(src, "init", "-q", "-b", "main")
-	git(src, "config", "user.email", "test@example.com")
-	git(src, "config", "user.name", "Test")
+	gitIn(t, src, "init", "-q", "-b", "main")
+	gitIn(t, src, "config", "user.email", "test@example.com")
+	gitIn(t, src, "config", "user.name", "Test")
 	plant := func(rel string) {
 		t.Helper()
 		if err := os.MkdirAll(filepath.Dir(filepath.Join(src, rel)), 0o755); err != nil {
@@ -161,18 +179,18 @@ func TestConfigureSparseCheckout_SymlinksCheckOutAsFiles(t *testing.T) {
 		if err := os.Symlink(victim, filepath.Join(src, rel)); err != nil {
 			t.Fatal(err)
 		}
-		git(src, "add", "-A")
-		git(src, "commit", "-q", "-m", "plant "+rel)
+		gitIn(t, src, "add", "-A")
+		gitIn(t, src, "commit", "-q", "-m", "plant "+rel)
 	}
-	remaps := filepath.Join(plan, "feedback", "remaps.json")
-	retargeted := filepath.Join(plan, "feedback", "resolutions.json")
+	remaps := "data/plans/2026-10-09-p/feedback/remaps.json"
+	retargeted := "data/plans/2026-10-09-p/feedback/resolutions.json"
 	plant(remaps)
 	plant(retargeted)
 	bare := filepath.Join(t.TempDir(), "ledger.git")
-	git(src, "clone", "-q", "--bare", src, bare)
+	gitIn(t, src, "clone", "-q", "--bare", src, bare)
 
 	clone := filepath.Join(t.TempDir(), "ledger")
-	git(filepath.Dir(clone), "clone", "-q", bare, clone)
+	gitIn(t, filepath.Dir(clone), "clone", "-q", bare, clone)
 	local := filepath.Join(t.TempDir(), "local-target")
 	if err := os.Remove(filepath.Join(clone, retargeted)); err != nil {
 		t.Fatal(err)
@@ -180,142 +198,103 @@ func TestConfigureSparseCheckout_SymlinksCheckOutAsFiles(t *testing.T) {
 	if err := os.Symlink(local, filepath.Join(clone, retargeted)); err != nil {
 		t.Fatal(err)
 	}
-	fileText := func(rel string) string {
-		t.Helper()
-		info, err := os.Lstat(filepath.Join(clone, rel))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !info.Mode().IsRegular() {
-			t.Fatalf("%s is %s, want a plain file", rel, info.Mode())
-		}
-		body, err := os.ReadFile(filepath.Join(clone, rel))
-		if err != nil {
-			t.Fatal(err)
-		}
-		return string(body)
-	}
 
 	if err := ConfigureSparseCheckout(clone); err != nil {
 		t.Fatalf("ConfigureSparseCheckout: %v", err)
 	}
-	if got := fileText(remaps); got != victim {
+	if got := fileText(t, filepath.Join(clone, remaps)); got != victim {
 		t.Fatalf("an unchanged link should hold its link text %q, got %q", victim, got)
 	}
-	if got := fileText(retargeted); got != local {
+	if got := fileText(t, filepath.Join(clone, retargeted)); got != local {
 		t.Fatalf("a locally retargeted link should keep its new target %q, got %q", local, got)
 	}
-	if st := git(clone, "status", "--porcelain"); strings.TrimSpace(st) != "M "+filepath.ToSlash(retargeted) {
-		t.Fatalf("only the local retarget should show as an uncommitted change, got:\n%s", st)
+	if st := strings.TrimSpace(gitIn(t, clone, "status", "--porcelain")); st != "M "+retargeted {
+		t.Fatalf("only the local retarget should be an uncommitted change, got:\n%s", st)
 	}
 
-	planMD := filepath.Join(plan, "plan.md")
+	planMD := "data/plans/2026-10-09-p/plan.md"
 	plant(planMD)
-	git(src, "push", "-q", bare, "main")
-	git(clone, "pull", "-q", "--rebase", "--autostash")
-	if got := fileText(planMD); got != victim {
+	gitIn(t, src, "push", "-q", bare, "main")
+	gitIn(t, clone, "pull", "-q", "--rebase", "--autostash")
+	if got := fileText(t, filepath.Join(clone, planMD)); got != victim {
 		t.Fatalf("a link pulled afterwards should arrive as a file holding %q, got %q", victim, got)
 	}
-	if body, _ := os.ReadFile(victim); string(body) != "precious\n" {
-		t.Fatalf("the link target was touched: %q", body)
+	if got := fileText(t, victim); got != "precious\n" {
+		t.Fatalf("the link target was touched: %q", got)
 	}
 }
 
-// TestDisableSymlinks_FailedRunRetries: a step that fails returns an error and
-// leaves core.symlinks unsaved, so the next call (the next sync cycle) runs
-// again and finishes, leaving a clean worktree. Failure prevented: a Ledger
-// reported as protected while a link is still checked out, or a failed run
-// that never retries.
-func TestDisableSymlinks_FailedRunRetries(t *testing.T) {
+// TestDisableSymlinks_RetriesAndReadsTheCloneSetting: a failed run returns an
+// error and leaves core.symlinks unsaved, so the next call converts the link
+// and saves it; a global core.symlinks=false does not stand in for the
+// clone's own. Failure prevented: a Ledger reported as protected while a link
+// is still checked out, or left unprotected once a developer drops a global
+// setting.
+func TestDisableSymlinks_RetriesAndReadsTheCloneSetting(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("creating symlinks needs elevated rights on Windows")
 	}
 	if err := DisableSymlinks(t.TempDir()); err == nil || !strings.Contains(err.Error(), "list tracked files") {
 		t.Fatalf("outside a repo: err = %v, want a listing error", err)
 	}
-
-	dir := t.TempDir()
-	for _, args := range [][]string{{"init", "-q", "-b", "main"}, {"config", "user.email", "test@example.com"}, {"config", "user.name", "Test"}} {
-		if out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
+	// repoWithLink returns a repo whose committed "link" is checked out as a
+	// symlink to target.
+	repoWithLink := func(t *testing.T) (dir, target string) {
+		t.Helper()
+		dir, target = t.TempDir(), t.TempDir()
+		gitIn(t, dir, "init", "-q", "-b", "main")
+		gitIn(t, dir, "config", "user.email", "test@example.com")
+		gitIn(t, dir, "config", "user.name", "Test")
+		if err := os.Symlink(target, filepath.Join(dir, "link")); err != nil {
+			t.Fatal(err)
 		}
+		gitIn(t, dir, "add", "-A")
+		gitIn(t, dir, "commit", "-q", "-m", "link")
+		return dir, target
 	}
-	if err := os.Symlink(t.TempDir(), filepath.Join(dir, "link")); err != nil {
-		t.Fatal(err)
-	}
-	if out, err := exec.Command("git", "-C", dir, "add", "-A").CombinedOutput(); err != nil {
-		t.Fatalf("git add: %v\n%s", err, out)
-	}
-	if out, err := exec.Command("git", "-C", dir, "commit", "-q", "-m", "link").CombinedOutput(); err != nil {
-		t.Fatalf("git commit: %v\n%s", err, out)
-	}
-	saved := func() bool {
-		out, _ := exec.Command("git", "-C", dir, "config", "--get", "core.symlinks").Output()
+	saved := func(dir string) bool {
+		out, _ := exec.Command("git", "-C", dir, "config", "--local", "--get", "core.symlinks").Output()
 		return strings.TrimSpace(string(out)) == "false"
 	}
 
-	lock := filepath.Join(dir, ".git", "config.lock")
-	if err := os.WriteFile(lock, nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := DisableSymlinks(dir); err == nil || !strings.Contains(err.Error(), "config core.symlinks") {
-		t.Fatalf("with the config locked: err = %v, want a config error", err)
-	}
-	if saved() {
-		t.Fatal("core.symlinks must stay unsaved after a failure, so the next call retries")
-	}
-
-	if err := os.Remove(lock); err != nil {
-		t.Fatal(err)
-	}
-	if err := DisableSymlinks(dir); err != nil {
-		t.Fatalf("retry: %v", err)
-	}
-	if !saved() {
-		t.Fatal("the retry should save core.symlinks=false")
-	}
-	if info, err := os.Lstat(filepath.Join(dir, "link")); err != nil || !info.Mode().IsRegular() {
-		t.Fatalf("link should be a plain file after the retry: %v %v", info, err)
-	}
-	if st, _ := exec.Command("git", "-C", dir, "status", "--porcelain").Output(); len(st) != 0 {
-		t.Fatalf("the retry should leave nothing to commit:\n%s", st)
-	}
-}
-
-// TestDisableSymlinks_IgnoresGlobalSetting: a global core.symlinks=false does
-// not stand in for the clone's own setting. Links the clone already checked
-// out are converted and the setting is saved locally. Failure prevented: a
-// developer's global config skips the conversion, and removing it later
-// re-enables symlink checkout in the Ledger.
-func TestDisableSymlinks_IgnoresGlobalSetting(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("creating symlinks needs elevated rights on Windows")
-	}
-	dir := t.TempDir()
-	for _, args := range [][]string{{"init", "-q", "-b", "main"}, {"config", "user.email", "test@example.com"}, {"config", "user.name", "Test"}} {
-		if out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
+	t.Run("a failed run retries", func(t *testing.T) {
+		dir, target := repoWithLink(t)
+		lock := filepath.Join(dir, ".git", "config.lock")
+		if err := os.WriteFile(lock, nil, 0o644); err != nil {
+			t.Fatal(err)
 		}
-	}
-	if err := os.Symlink(t.TempDir(), filepath.Join(dir, "link")); err != nil {
-		t.Fatal(err)
-	}
-	if out, err := exec.Command("git", "-C", dir, "add", "-A").CombinedOutput(); err != nil {
-		t.Fatalf("git add: %v\n%s", err, out)
-	}
-	global := filepath.Join(t.TempDir(), "gitconfig")
-	if err := os.WriteFile(global, []byte("[core]\n\tsymlinks = false\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("GIT_CONFIG_GLOBAL", global)
+		if err := DisableSymlinks(dir); err == nil || !strings.Contains(err.Error(), "config core.symlinks") {
+			t.Fatalf("with the config locked: err = %v, want a config error", err)
+		}
+		if saved(dir) {
+			t.Fatal("core.symlinks must stay unsaved after a failure, so the next call retries")
+		}
+		if err := os.Remove(lock); err != nil {
+			t.Fatal(err)
+		}
+		if err := DisableSymlinks(dir); err != nil || !saved(dir) {
+			t.Fatalf("retry: err %v, saved %v", err, saved(dir))
+		}
+		if got := fileText(t, filepath.Join(dir, "link")); got != target {
+			t.Fatalf("link should hold its link text %q, got %q", target, got)
+		}
+		if st := gitIn(t, dir, "status", "--porcelain"); st != "" {
+			t.Fatalf("the retry should leave nothing to commit:\n%s", st)
+		}
+	})
 
-	if err := DisableSymlinks(dir); err != nil {
-		t.Fatal(err)
-	}
-	if info, err := os.Lstat(filepath.Join(dir, "link")); err != nil || !info.Mode().IsRegular() {
-		t.Fatalf("the checked-out link should be converted despite the global setting: %v %v", info, err)
-	}
-	if out, _ := exec.Command("git", "-C", dir, "config", "--local", "--get", "core.symlinks").Output(); strings.TrimSpace(string(out)) != "false" {
-		t.Fatalf("core.symlinks should be saved in the clone, got %q", out)
-	}
+	t.Run("a global setting is not the clone's", func(t *testing.T) {
+		dir, target := repoWithLink(t)
+		global := filepath.Join(t.TempDir(), "gitconfig")
+		if err := os.WriteFile(global, []byte("[core]\n\tsymlinks = false\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("GIT_CONFIG_GLOBAL", global)
+		if err := DisableSymlinks(dir); err != nil || !saved(dir) {
+			t.Fatalf("err %v, saved in the clone %v", err, saved(dir))
+		}
+		if got := fileText(t, filepath.Join(dir, "link")); got != target {
+			t.Fatalf("link should hold its link text %q, got %q", target, got)
+		}
+	})
 }

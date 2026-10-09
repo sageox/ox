@@ -592,18 +592,16 @@ func ConfigureSparseCheckout(path string) error {
 	return nil
 }
 
-// DisableSymlinks makes git check Ledger symlinks out as plain files holding
-// the link text. Teammates write this repo, and ox's own writes into it (plan
-// saves, review records, AGENTS.md, .gitignore) follow a symlink at the path
-// they write, so a committed link could aim them outside the Ledger. ox never
-// writes a symlink into the Ledger, so nothing it relies on changes.
+// DisableSymlinks saves core.symlinks=false so git checks Ledger symlinks out
+// as plain files holding the link text. Teammates write this repo, and ox's
+// writes into it (plan saves, review records, AGENTS.md) follow a symlink at
+// the path they write, so a committed link could aim them outside the Ledger.
+// ox never writes a symlink here itself.
 //
-// A clone made before the setting already holds real links. Each is replaced,
-// by renaming a temp file over the link (never touching its target), with a
-// plain file holding its current link text: an unchanged link then reads as
-// clean, and one retargeted locally keeps its new target as an uncommitted
-// change. core.symlinks is saved only after every link is converted, so a
-// failed run repeats on the next call.
+// Links an older clone already checked out become files holding their
+// current link text, so an unchanged one reads as clean and a local retarget
+// stays an uncommitted change. The setting is saved last: a failed run
+// repeats on the next call.
 func DisableSymlinks(path string) error {
 	// --local: a global or system core.symlinks=false says nothing about links
 	// this clone already checked out, and can be removed later.
