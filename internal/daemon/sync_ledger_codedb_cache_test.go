@@ -211,6 +211,12 @@ func TestAdoptCacheOnlyTarget_Branches(t *testing.T) {
 
 		_, err := adoptCacheOnlyTarget(tmp, target)
 		require.Error(t, err)
+		// confirm the gate: the failure is the skeleton removal, i.e. after the
+		// cache was already moved into the clone, so restoration really ran
+		var pathErr *os.PathError
+		require.ErrorAs(t, err, &pathErr)
+		assert.Equal(t, "remove", pathErr.Op)
+		assert.Equal(t, filepath.Join(target, ".sageox"), pathErr.Path)
 		require.NoError(t, os.Chmod(target, 0o755))
 		_, statErr := os.Stat(filepath.Join(target, ".sageox", "cache", "codedb", "index.db"))
 		assert.NoError(t, statErr, "the index must survive a failed adoption")
