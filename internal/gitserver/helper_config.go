@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/url"
 	"os/exec"
 	"strings"
@@ -65,6 +66,11 @@ func CredentialHelperArgs() []string {
 // and threaded down here so internal/gitserver doesn't have to know the path
 // to the running ox binary.
 type HelperConfig struct {
+	// Scheme is the credential scope scheme: "https" (default when empty) or
+	// "http" for loopback remotes. Git matches the scope against the remote's
+	// scheme, so an https scope never fires for an http remote.
+	Scheme string
+
 	// Host is the git server host (e.g. "git.sageox.ai"). The credential
 	// scope is set to "https://<host>" so the helper only fires for that
 	// exact host — never for third-party remotes that may live in the
@@ -98,7 +104,14 @@ func InstallCredentialHelper(repoPath string, cfg HelperConfig) error {
 	if cfg.Command == "" {
 		return fmt.Errorf("helper config: command is empty")
 	}
-	scope := "credential.https://" + cfg.Host + ".helper"
+	scheme := cfg.Scheme
+	if scheme == "" {
+		scheme = "https"
+	}
+	if scheme != "https" && scheme != "http" {
+		return fmt.Errorf("helper config: unsupported scheme %q", scheme)
+	}
+	scope := "credential." + scheme + "://" + cfg.Host + ".helper"
 
 	// Read current value so we can skip the write if it already matches.
 	if current, err := readGitConfig(repoPath, scope); err == nil && current == cfg.Command {
@@ -293,7 +306,8 @@ func MigrateLedgerCredentials(repoPath string, helperCmd string) (changed bool, 
 	if err != nil {
 		return changed, fmt.Errorf("parse origin URL %q: %w", remoteURL, err)
 	}
-	if parsed.Scheme != "https" {
+	scheme, host := helperTarget(parsed)
+	if host == "" {
 		return changed, nil
 	}
 
@@ -308,11 +322,8 @@ func MigrateLedgerCredentials(repoPath string, helperCmd string) (changed bool, 
 	// 3. Install (or refresh) the credential helper for this host. We do
 	// this even when no PAT was embedded so brand-new ledgers also get
 	// the helper configured during normal sync.
-	host := parsed.Hostname()
-	if host == "" {
-		return changed, nil
-	}
 	if err := InstallCredentialHelper(repoPath, HelperConfig{
+		Scheme:  scheme,
 		Host:    host,
 		Command: helperCmd,
 	}); err != nil {
@@ -326,4 +337,35 @@ func MigrateLedgerCredentials(repoPath string, helperCmd string) (changed bool, 
 // asErr is a tiny shim around errors.As to keep call sites readable.
 func asErr(err error, target **exec.ExitError) bool {
 	return errors.As(err, target)
+}
+
+// IsLoopbackHost reports whether h (a bare host, no port) names the local
+// machine: an IP loopback literal or the well-known name "localhost". It is the
+// single definition of "loopback" shared by the LFS client and the credential
+// helper, so plain http is allowed in exactly the same places.
+func IsLoopbackHost(h string) bool {
+	if h == "" {
+		return false
+	}
+	if ip := net.ParseIP(h); ip != nil {
+		return ip.IsLoopback()
+	}
+	return strings.EqualFold(h, "localhost")
+}
+
+// helperTarget returns the credential scope scheme and host for a remote URL,
+// or ("", "") when ox installs no helper for it. https remotes scope to the
+// bare hostname (any port). Plain http is accepted only for loopback hosts and
+// scopes to host:port, since git matches the port for non-default ports.
+// Non-loopback http, file://, and ssh remotes get no helper.
+func helperTarget(u *url.URL) (scheme, host string) {
+	switch strings.ToLower(u.Scheme) {
+	case "https":
+		return "https", u.Hostname()
+	case "http":
+		if IsLoopbackHost(u.Hostname()) {
+			return "http", u.Host
+		}
+	}
+	return "", ""
 }
