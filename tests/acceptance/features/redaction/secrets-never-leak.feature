@@ -19,6 +19,15 @@ Feature: A Coworker's Secrets Never Leak
       And teammates see a redaction marker in the transcript where the key was
       And the session records that a redaction happened, so the scrub is auditable
 
+  Rule: Redaction covers what a command was given and what it printed, not only the conversation
+
+    Scenario: Avery runs a command that prints a team token and a term Sam's team redacts
+      Given Sam has added an internal project name to the repo's redaction rules
+      And during Devon's session, Avery runs a command that mentions the project name and prints a SageOx team token
+      When the session is recorded
+      Then neither the project name nor the token appears in the recorded session
+      And teammates see redaction markers in their place
+
   Rule: A credential ox cannot rewrite is held back while everyone else's work still syncs
 
     Scenario: Sam pushes a session whose summary contains a key alongside a clean session

@@ -1,0 +1,37 @@
+# gosec for the /security-review deterministic tier — not the lint gate.
+#
+# .config/golangci.yml (`make lint`) excludes the rules that are noise for a CLI
+# that reads user paths by design. This config keeps them (G204 subprocess with
+# variable, G301/G302/G306 permissions, G304 file inclusion via variable, …):
+# on a diff they are the hints a hunter wants. deterministic.sh keeps only the
+# issues in touched files.
+#
+# The interprocedural taint analyzers stay off. On this module they ran for over
+# 20 minutes without finishing (2026-10-06), and the AI hunters trace the same
+# source → sink paths on the diff itself.
+version: "2"
+
+run:
+  tests: false
+  # Report paths relative to go.mod (the repo root). v2's default is relative to
+  # this file, which printed every path as ../cmd/ox/…, matched no touched file,
+  # and turned every finding into a silent "0 findings".
+  relative-path-mode: gomod
+
+linters:
+  default: none
+  enable:
+    - gosec
+  settings:
+    gosec:
+      excludes:
+        - G702 # command injection via taint
+        - G703 # path traversal via taint
+        - G704 # SSRF via taint
+        # Unchecked errors belong to errcheck in the lint gate (.config/golangci.yml),
+        # which is curated for a CLI and honors //nolint:errcheck; G104 ignores both.
+        - G104 # errors unhandled
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

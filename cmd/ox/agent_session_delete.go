@@ -41,6 +41,11 @@ func runAgentSessionDelete(inst *agentinstance.Instance, cmd *cobra.Command, arg
 	}
 
 	sessionName := args[0]
+	// ".." would name the Ledger root, so the delete would become
+	// `git rm -r --force .` and push it to the team.
+	if err := session.ValidateDraftSessionName(sessionName); err != nil {
+		return err
+	}
 
 	projectRoot, err := findProjectRoot()
 	if err != nil {
@@ -177,6 +182,7 @@ func deleteSessionFromLedger(ledgerPath, sessionName, sessionDir string) error {
 
 	// push with retry — no --force: ledger history must never be rewritten
 	if err := gitutil.PushWithRetry(context.Background(), ledgerPath, gitutil.PushOpts{
+		ImmutablePaths:      true, // the Ledger never renames paths
 		AutoResolvePrefixes: ledger.AutoResolvePrefixes,
 	}); err != nil {
 		return fmt.Errorf("git push: %w", err)

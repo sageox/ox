@@ -72,12 +72,16 @@ func (r *CodexRunner) Run(ctx context.Context, req RunRequest) (*RunResult, erro
 	// ps / /proc/<pid>/cmdline / sysctl kern.procargs2 (security finding #10).
 	// `-` as the positional prompt tells codex to read the prompt from stdin.
 	args := []string{"exec", "--sandbox", "read-only", "--ephemeral", "--color", "never", "-c", "features.hooks=false"}
-	if req.Isolated {
+	if req.Isolated || req.IsolateIfSupported {
 		isolation, err := codexIsolatedArgs(ctx, r.binaryPath, help)
-		if err != nil {
+		switch {
+		case err == nil:
+			args = append(args, isolation...)
+		case req.Isolated || !errors.As(err, new(isolationUnsupported)):
 			return nil, err
+		default:
+			r.logger.Warn("running codex without isolation; update Codex", "error", err)
 		}
-		args = append(args, isolation...)
 	}
 	args = append(args, "-")
 

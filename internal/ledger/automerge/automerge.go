@@ -178,7 +178,7 @@ func (r *Resolver) resolveOneStep(ctx context.Context, repoPath string, first bo
 	// invoke it when every remaining path is safe.
 	if r.allUnderSafePrefixes(remaining) && len(r.opts.SafePrefixes) > 0 {
 		r.logger.Info("automerge.tier", "tier", "accept-theirs", "paths", len(remaining))
-		if err := gitutil.ResolveRebaseAcceptTheirs(ctx, repoPath, r.opts.SafePrefixes, r.opts.SafeDenyPrefixes); err != nil {
+		if err := gitutil.ResolveRebaseAcceptTheirs(gitutil.WithImmutablePaths(ctx), repoPath, r.opts.SafePrefixes, r.opts.SafeDenyPrefixes); err != nil {
 			return false, fmt.Errorf("accept-theirs: %w", err)
 		}
 		// ResolveRebaseAcceptTheirs runs `git rebase --continue` itself, in a

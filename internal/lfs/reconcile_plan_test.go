@@ -121,35 +121,40 @@ func TestReconcile_PlanOnlyPointerIsScanned(t *testing.T) {
 	assert.Equal(t, 1, result.ScannedPointers, "a plan-only pointer must be scanned")
 }
 
-// TestReconcile_RemovesMissingPlanPointerAndSquashes exercises the actual recovery
-// core for a plan pointer: a 404 blob → the broken pointer artifact is removed and
-// the unpushed history is squashed so the poisoned OID leaves the push pack.
-//
-// Failure prevented: the plan-walk tests above assert only ScannedPointers; this
-// drives the removal+squash that unblocks a wedged ledger — the whole point of the
-// #810 reconcile extension. A regression that scanned plan pointers but failed to
-// remove/squash them would leave the ledger stuck.
-func TestReconcile_RemovesMissingPlanPointerAndSquashes(t *testing.T) {
+// TestReconcile_MissingPlanPointerIsReportedNeverRemoved drives the recovery
+// core for a plan pointer: a 404 blob with no local bytes is reported with its
+// path and OID, the pointer file and history are untouched, and the push stays
+// paused. A plan cannot be regenerated, so reconcile never removes it, not even
+// when it is the only unrecoverable pointer.
+func TestReconcile_MissingPlanPointerIsReportedNeverRemoved(t *testing.T) {
 	ledger, _ := initLedgerWithRemote(t)
 
 	oid := strings.Repeat("d", 64)
 	planDir := filepath.Join(ledger, "data", "plans", "2026-08-24-orphan")
 	require.NoError(t, os.MkdirAll(planDir, 0o755))
 	htmlPath := filepath.Join(planDir, "plan.html")
-	require.NoError(t, os.WriteFile(htmlPath, []byte(lfsPointerContent(oid, 500000)), 0o644))
+	pointer := []byte(lfsPointerContent(oid, 500000))
+	require.NoError(t, os.WriteFile(htmlPath, pointer, 0o644))
 	git(t, ledger, "add", ".")
 	git(t, ledger, "commit", "-m", "plan: orphan pointer", "--no-verify")
+	headBefore := git(t, ledger, "rev-parse", "HEAD")
 
 	client := fakeLFSDownloadServer(t, map[string]int{oid: http.StatusNotFound})
 	result, err := reconcileUnpushedPointers(context.Background(), ledger, nil,
 		func() (*Client, error) { return client, nil })
-	require.NoError(t, err)
 
-	assert.Equal(t, 1, result.Replaced, "the orphaned plan pointer must be removed")
-	assert.True(t, result.Squashed, "unpushed commits collapse to one")
+	var unrecoverable *UnrecoverablePointersError
+	require.ErrorAs(t, err, &unrecoverable)
+	require.Len(t, unrecoverable.Pointers, 1)
+	assert.Equal(t, filepath.Join("data", "plans", "2026-08-24-orphan", "plan.html"), unrecoverable.Pointers[0].Path)
+	assert.Contains(t, err.Error(), oid)
+	assert.False(t, result.Squashed)
 
-	assert.NoFileExists(t, htmlPath)
-	assert.Equal(t, 0, unpushedCount(t, ledger), "removing the only unpublished artifact returns to upstream")
+	got, readErr := os.ReadFile(htmlPath)
+	require.NoError(t, readErr)
+	assert.Equal(t, pointer, got, "the pointer file is untouched")
+	assert.Equal(t, headBefore, git(t, ledger, "rev-parse", "HEAD"), "no commit, no squash")
+	assert.Equal(t, 1, unpushedCount(t, ledger))
 }
 
 // TestReconcile_TransientErrorNeverBlanks pins the destructive-op guard for BOTH
@@ -177,11 +182,10 @@ func TestReconcile_TransientErrorNeverBlanks(t *testing.T) {
 			git(t, ledger, "commit", "-m", "add pointers", "--no-verify")
 
 			client := fakeLFSDownloadServer(t, map[string]int{planOID: code, sessOID: code})
-			result, err := reconcileUnpushedPointers(context.Background(), ledger, nil,
+			_, err := reconcileUnpushedPointers(context.Background(), ledger, nil,
 				func() (*Client, error) { return client, nil })
 
 			require.Error(t, err, "a non-404 batch result must abort, never blank")
-			assert.Zero(t, result.Replaced)
 
 			got, _ := os.ReadFile(planHTML)
 			assert.Equal(t, planPtr, got, "plan pointer must be untouched on HTTP %d", code)

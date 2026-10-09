@@ -69,6 +69,8 @@ func TestTraceFinalizeDoorsPublishPointers(t *testing.T) {
 			}))
 			defer server.Close()
 			serverURL = server.URL
+			// The PAT is only sent to its endpoint's git server, so the endpoint is this server.
+			t.Setenv(endpoint.EnvVar, server.URL)
 			runGitCmd(t, ledger, "remote", "set-url", "origin", server.URL+"/ledger.git")
 			runGitCmd(t, ledger, "remote", "set-url", "--push", "origin", bare)
 			project := t.TempDir()

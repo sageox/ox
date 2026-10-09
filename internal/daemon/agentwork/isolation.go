@@ -8,6 +8,10 @@ import (
 	"time"
 )
 
+// isolationUnsupported marks a CLI whose help or feature list shows it cannot
+// isolate. A probe that fails to answer proves nothing, so it is never this.
+type isolationUnsupported struct{ error }
+
 // isolatedEnv keeps an isolated summarizer from ever becoming a recorded
 // session of its own, even if something inside it runs ox agent prime.
 var isolatedEnv = []string{"OX_SESSION_RECORDING=disabled", "SAGEOX_DAEMON=false"}
@@ -69,7 +73,7 @@ func probeOutput(ctx context.Context, binary string, args ...string) (string, er
 func requireFlags(help string, flags []string, cli string) error {
 	for _, flag := range flags {
 		if !strings.Contains(help, flag) {
-			return fmt.Errorf("isolated summarization requires %s %s; upgrade and retry", cli, flag)
+			return isolationUnsupported{fmt.Errorf("isolated summarization requires %s %s; upgrade and retry", cli, flag)}
 		}
 	}
 	return nil
@@ -102,7 +106,7 @@ func codexIsolatedArgs(ctx context.Context, binary, help string) ([]string, erro
 	}
 	for _, feature := range codexShellFeatures {
 		if !known[feature] {
-			return nil, fmt.Errorf("isolated summarization cannot disable the shell: this Codex does not list the %s feature; update Codex or use another summarizer", feature)
+			return nil, isolationUnsupported{fmt.Errorf("isolated summarization cannot disable the shell: this Codex does not list the %s feature; update Codex or use another summarizer", feature)}
 		}
 	}
 	args := []string{"--ignore-user-config", "--ignore-rules", "--skip-git-repo-check"}

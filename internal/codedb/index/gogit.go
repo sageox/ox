@@ -14,10 +14,11 @@ import (
 	"github.com/sageox/ox/internal/codedb/gitopen"
 )
 
-// plainOpenTolerant opens a git repo via go-git with KeepDescriptors enabled for
-// better performance. KeepDescriptors caches open pack file file descriptors across
-// reads instead of reopening on every git object access — eliminates the dominant
-// I/O overhead when reading thousands of objects from packfiles.
+// plainOpenTolerant opens a git repo via go-git, whose storage keeps pack file
+// descriptors open across reads (an fd pool, the default since go-git
+// v6.0.0-alpha.5 replaced the KeepDescriptors option) instead of reopening on
+// every git object access — eliminates the dominant I/O overhead when reading
+// thousands of objects from packfiles.
 //
 // Falls back to gitopen.GuardedPlainOpen if the custom open fails (e.g., .git is
 // a file not a directory, as in submodule checkouts).
@@ -39,9 +40,9 @@ func plainOpenTolerant(path string) (*git.Repository, error) {
 	return gitopen.GuardedPlainOpen(path)
 }
 
-// plainOpenWithKeepDescriptors opens a git repo using filesystem.Options{KeepDescriptors: true}.
-// This caches packfile file descriptors across reads, avoiding the open+close overhead
-// that accounts for ~47% of total CPU time on large repos.
+// plainOpenWithKeepDescriptors opens a git repo through codedb's own storer. Its
+// default fd pool caches packfile file descriptors across reads, avoiding the
+// open+close overhead that accounts for ~47% of total CPU time on large repos.
 //
 // Only works when .git is a directory (not a file). Returns an error for linked
 // worktrees whose .git is a file — the caller falls back to git.PlainOpen.
@@ -58,9 +59,7 @@ func plainOpenWithKeepDescriptors(path string) (*git.Repository, error) {
 	dot := osfs.New(dotPath, osfs.WithBoundOS())
 	wt := osfs.New(path, osfs.WithBoundOS())
 	repositoryFs := dotgit.NewRepositoryFilesystem(dot, nil)
-	s := filesystem.NewStorageWithOptions(repositoryFs, cache.NewObjectLRUDefault(), filesystem.Options{
-		KeepDescriptors: true,
-	})
+	s := filesystem.NewStorageWithOptions(repositoryFs, cache.NewObjectLRUDefault(), filesystem.Options{})
 	// Deny config writes: go-git must never rewrite the source repo's
 	// .git/config while codedb reads its objects (issue #819).
 	return git.Open(gitopen.WrapReadOnlyConfig(s), wt)

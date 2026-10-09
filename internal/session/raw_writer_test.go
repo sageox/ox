@@ -649,6 +649,32 @@ func TestNewRawWriterWithProjectRootLoadsCustomRedactionRules(t *testing.T) {
 	require.NotContains(t, string(out), "custom-secret-12345")
 }
 
+// TestRawWriter_RedactsToolFieldsWithBuiltinAndTeamRules: layer 2 used to
+// redact only Content, so a team token or a REDACT.md term in a tool's input
+// or output reached raw.jsonl, and from there every reader of the Ledger.
+func TestRawWriter_RedactsToolFieldsWithBuiltinAndTeamRules(t *testing.T) {
+	projectRoot := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(projectRoot, ".sageox"), 0755))
+	redactMD := "```redact\nregex \"custom-secret-[0-9]+\" -> [REDACTED_CUSTOM_TOKEN]\n```\n"
+	require.NoError(t, os.WriteFile(filepath.Join(projectRoot, ".sageox", "REDACT.md"), []byte(redactMD), 0600))
+
+	path := filepath.Join(t.TempDir(), "raw.jsonl")
+	w, err := NewRawWriter(path, projectRoot)
+	require.NoError(t, err)
+	const teamToken = "oxt_test_1ljPfrQ9"
+	require.NoError(t, w.WriteEntry(&SessionEntry{
+		Type:       EntryTypeTool,
+		ToolInput:  "deploy --key custom-secret-12345",
+		ToolOutput: "SAGEOX_TOKEN=" + teamToken,
+	}))
+	require.NoError(t, w.CloseAndSync())
+
+	out, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.NotContains(t, string(out), "custom-secret-12345", "a team REDACT.md rule must apply to tool input")
+	assert.NotContains(t, string(out), teamToken, "a built-in rule must apply to tool output")
+}
+
 // TestAsWriterBypassesRedactionStack documents and pins the asWriter
 // contract: bytes written through it reach the file completely unredacted.
 // If this ever changed silently, a caller relying on the documented bypass

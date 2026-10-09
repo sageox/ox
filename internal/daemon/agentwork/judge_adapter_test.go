@@ -22,9 +22,11 @@ import (
 // produced them.
 func TestNewRunnerCompleter_ForwardsPromptAndExtractsOutput(t *testing.T) {
 	var lastPrompt string
+	var isolated bool
 	mock := NewMockRunner(true)
 	mock.RunFunc = func(ctx context.Context, req RunRequest) (*RunResult, error) {
 		lastPrompt = req.Prompt
+		isolated = req.IsolateIfSupported
 		return &RunResult{
 			Output:    "ok",
 			TokensIn:  500,
@@ -48,6 +50,9 @@ func TestNewRunnerCompleter_ForwardsPromptAndExtractsOutput(t *testing.T) {
 	}
 	if lastPrompt != "please judge me" {
 		t.Errorf("prompt not forwarded: %q", lastPrompt)
+	}
+	if !isolated {
+		t.Error("the judge reads a summary of an untrusted transcript, so it must run isolated")
 	}
 }
 

@@ -10,7 +10,9 @@ import (
 	"testing"
 
 	"github.com/sageox/ox/internal/api"
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/internal/skillmanager"
 	"github.com/stretchr/testify/assert"
@@ -390,4 +392,29 @@ func TestRunInit_TeamFlag_AmbiguousValueFailsBeforeAnythingIsWritten(t *testing.
 		require.Len(t, reqs, 1)
 		assert.Equal(t, []string{"team-orgb"}, reqs[0].Teams)
 	})
+}
+
+// TestRunInit_DashboardHandoffIsNotAnInit drives a logged-in person with no team
+// through the init picker to "+ Create new team via dashboard".
+//
+// Failure prevented: the handoff exiting 0 although nothing was initialized, so
+// `ox init && git add .sageox/` carried on and the usage funnels counted a
+// repository initialized for everyone who went to create a team.
+func TestRunInit_DashboardHandoffIsNotAnInit(t *testing.T) {
+	env := newOxE2E(t)
+	withInitFlags(t, "")
+	env.SetTeams() // a new account: no team yet
+	t.Setenv("SKIP_BROWSER", "1")
+
+	var err error
+	out := captureStdoutForPlanCLI(t, func() {
+		withStdin(t, "2\n", func() { err = runInit() }) // "+ Create new team via dashboard"
+	})
+
+	assertFailureKind(t, err, errkind.Usage, "no team yet: handed off to the dashboard")
+	assert.True(t, cli.IsSilent(err), "ox already said what to do next; got %v", err)
+	assert.Contains(t, out, "/teams/new")
+	assert.Contains(t, out, "re-run")
+	assert.NotContains(t, env.Requested(), "/api/v1/repo/init", "nothing was registered")
+	assert.NoDirExists(t, filepath.Join(env.Root, ".sageox"), "nothing was initialized")
 }

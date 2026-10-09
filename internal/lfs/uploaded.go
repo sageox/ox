@@ -68,5 +68,30 @@ func UploadBlob(client *Client, content []byte) (UploadedRef, error) {
 			return UploadedRef{}, fmt.Errorf("LFS upload OID %s: %w", r.OID, r.Error)
 		}
 	}
+	// a 2xx PUT is not proof of persistence; ask the store whether it can serve
+	// the object before any pointer for it is committed
+	if err := verifyStored(client, ref); err != nil {
+		return UploadedRef{}, err
+	}
 	return UploadedRef{ref: ref}, nil
+}
+
+// verifyStored probes the store with a Batch download request, one round trip,
+// and fails if the server does not report the object.
+func verifyStored(client *Client, ref FileRef) error {
+	resp, err := client.BatchDownload([]BatchObject{{OID: ref.BareOID(), Size: ref.Size}})
+	if err != nil {
+		return fmt.Errorf("LFS upload verification probe: %w", err)
+	}
+	for _, obj := range resp.Objects {
+		if obj.OID != ref.BareOID() {
+			continue
+		}
+		if obj.Error != nil {
+			return fmt.Errorf("LFS upload OID %s not found on the store after upload: server error %d: %s",
+				ref.BareOID(), obj.Error.Code, obj.Error.Message)
+		}
+		return nil
+	}
+	return fmt.Errorf("LFS upload OID %s not reported by the store after upload", ref.BareOID())
 }

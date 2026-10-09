@@ -2,11 +2,13 @@ package gitutil
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/sageox/ox/internal/sacred"
@@ -59,6 +61,17 @@ import (
 // Returns committed=false with nil error when the snapshot equals the parent's
 // tree — the "nothing to commit" idempotency callers rely on.
 func CommitLedgerSnapshot(ctx context.Context, repoPath, message string, pathspecs ...string) (committed bool, err error) {
+	return CommitLedgerSnapshotPreserving(ctx, repoPath, message, nil, pathspecs...)
+}
+
+// CommitLedgerSnapshotPreserving is CommitLedgerSnapshot for a caller that
+// deletes tracked sacred paths after preserving their full bytes in
+// .sageox/cache. preserved lists those ledger-relative paths. Each one is
+// exempt from the mass-deletion count only if the sha256 of its cache file
+// equals the sha256 of the blob the parent commit holds; a missing, short, or
+// different cache file leaves the path counted. No other path is exempt and
+// there is no switch that disables the guard.
+func CommitLedgerSnapshotPreserving(ctx context.Context, repoPath, message string, preserved []string, pathspecs ...string) (committed bool, err error) {
 	// Never mutate the ledger mid-rebase: moving the branch ref under a rebase
 	// consumes the replay step (see .claude/rules/cache-only-design.md).
 	if err := IsSafeForGitOps(repoPath); err != nil {
@@ -97,7 +110,7 @@ func CommitLedgerSnapshot(ctx context.Context, repoPath, message string, pathspe
 	if err := validateLedgerTree(ctx, repoPath, parent, tree, pathspecs...); err != nil {
 		return false, err
 	}
-	if err := assertNoSacredMassDeletion(ctx, repoPath, parent, tree); err != nil {
+	if err := assertNoSacredMassDeletion(ctx, repoPath, parent, tree, preserved); err != nil {
 		return false, err
 	}
 	if err := commitTreeToBranch(ctx, repoPath, tree, parent, message); err != nil {
@@ -169,7 +182,7 @@ func writeScopedIndexTree(ctx context.Context, repoPath, parent string, pathspec
 // Fail-closed, matching validateLedgerTree: an unborn branch (parent=="") has
 // no deletions and passes; if the diff itself cannot be computed the caller
 // must NOT commit, so the error propagates rather than defaulting to "safe".
-func assertNoSacredMassDeletion(ctx context.Context, repoPath, parent, tree string) error {
+func assertNoSacredMassDeletion(ctx context.Context, repoPath, parent, tree string, preserved []string) error {
 	if parent == "" {
 		return nil // first commit: nothing pre-existing to delete
 	}
@@ -180,12 +193,10 @@ func assertNoSacredMassDeletion(ctx context.Context, repoPath, parent, tree stri
 			shortOID(parent), shortOID(tree), err)
 	}
 	deleted := sacred.Filter(strings.Split(string(out), "\n"))
+	deleted = slices.DeleteFunc(deleted, func(path string) bool {
+		return slices.Contains(preserved, path) && cacheHoldsBlob(ctx, repoPath, parent, path)
+	})
 	if len(deleted) <= sacred.MassDeleteThreshold {
-		return nil
-	}
-	if os.Getenv(sacred.OverrideEnv) == "1" {
-		slog.WarnContext(ctx, "ledger sacred mass-deletion allowed by explicit override",
-			"repo", repoPath, "sacred_deletions", len(deleted), "override_env", sacred.OverrideEnv)
 		return nil
 	}
 	// Loud alert: this is a data-loss event caught at the last line of defense.
@@ -193,12 +204,26 @@ func assertNoSacredMassDeletion(ctx context.Context, repoPath, parent, tree stri
 		"repo", repoPath,
 		"sacred_deletions", len(deleted),
 		"threshold", sacred.MassDeleteThreshold,
-		"sample", sampleStrings(deleted, 5),
-		"override_env", sacred.OverrideEnv)
+		"sample", sampleStrings(deleted, 5))
 	return fmt.Errorf("refusing commit: would delete %d files under sacred paths (%s) in one commit, "+
 		"exceeds guard threshold %d — likely a sparse/GC-reconcile wipe (see ADR-024); "+
-		"if this bulk removal is intentional, set %s=1",
-		len(deleted), strings.Join(sacred.Prefixes, ", "), sacred.MassDeleteThreshold, sacred.OverrideEnv)
+		"there is no override",
+		len(deleted), strings.Join(sacred.Prefixes, ", "), sacred.MassDeleteThreshold)
+}
+
+// cacheHoldsBlob reports whether .sageox/cache/<path> holds exactly the bytes
+// of the blob parent tracks at path (sha256 equal), i.e. deleting the tracked
+// path loses nothing. Any read failure answers false so the path stays counted.
+func cacheHoldsBlob(ctx context.Context, repoPath, parent, path string) bool {
+	cached, err := os.ReadFile(filepath.Join(repoPath, ".sageox", "cache", filepath.FromSlash(path)))
+	if err != nil {
+		return false
+	}
+	blob, err := cleanGitOutput(ctx, repoPath, "cat-file", "blob", parent+":"+path)
+	if err != nil {
+		return false
+	}
+	return sha256.Sum256(cached) == sha256.Sum256(blob)
 }
 
 // commitTreeToBranch commits an already-validated tree and advances the current

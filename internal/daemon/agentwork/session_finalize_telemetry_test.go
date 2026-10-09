@@ -210,6 +210,9 @@ func TestBuildPrompt_NormalSession_NoSkippedEvent(t *testing.T) {
 	req, err := handler.BuildPrompt(item)
 	require.NoError(t, err)
 	assert.False(t, req.SkipLLM, "normal session should not trigger SkipLLM")
+	// The transcript can carry prompt injection; a bypassed-permission
+	// summarizer would let it drive Bash in the Ledger clone.
+	assert.True(t, req.IsolateIfSupported, "the daemon must summarize in an isolated run when the CLI can")
 	assert.Nil(t, tel.lastByName("summarization_skipped"),
 		"summarization_skipped event must NOT fire on a real session")
 }

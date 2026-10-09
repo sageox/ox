@@ -77,20 +77,3 @@ func TestCommitLedgerSnapshot_AllowsSmallSacredDeletion(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, committed, "a single-plan delete is normal churn and must commit")
 }
-
-// TestCommitLedgerSnapshot_OverrideAllowsSacredMassDeletion proves the explicit
-// escape hatch works for a deliberate bulk removal — and, with the guard thereby
-// disabled, that the wipe otherwise commits (the "red" the guard turns green).
-func TestCommitLedgerSnapshot_OverrideAllowsSacredMassDeletion(t *testing.T) {
-	skipIntegration(t)
-	repo := newLedgerTestRepo(t)
-	ctx := context.Background()
-
-	seedSacredPlans(t, repo, sacred.MassDeleteThreshold+5)
-	mustRunGit(t, repo, "rm", "-r", "data/plans")
-
-	t.Setenv(sacred.OverrideEnv, "1")
-	committed, err := commitLedgerSnapshot(ctx, repo, "chore: intentional bulk plan removal")
-	require.NoError(t, err)
-	assert.True(t, committed, "override must let a deliberate bulk removal through")
-}

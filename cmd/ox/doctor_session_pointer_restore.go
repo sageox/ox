@@ -18,7 +18,6 @@ import (
 	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/lfs/pointer"
-	"github.com/sageox/ox/internal/sacred"
 )
 
 // CheckSlugSessionPointerRestore finds session artifacts that unpushed Ledger
@@ -184,12 +183,9 @@ func restoreUnpushedSessionPointers(ctx context.Context, ledgerPath string, fix 
 		if len(report.Untracked) > 0 {
 			msg = fmt.Sprintf("doctor: restore LFS pointers / untrack draft artifacts for %d session artifacts", len(repairable)+len(report.Untracked))
 		}
-		if len(report.Untracked) > sacred.MassDeleteThreshold {
-			// a deliberate bulk removal: every untracked artifact's bytes are already in the cache,
-			// and none of them was ever pushed, so the sacred mass-delete guard has nothing to protect
-			defer allowSacredMassDelete()()
-		}
-		committed, err := gitutil.CommitLedgerSnapshot(ctx, ledgerPath, msg, pathspecs...)
+		// each untracked artifact's bytes were written to the cache by untrackDraftArtifact; the
+		// commit helper re-verifies that by hash, and only these exact paths leave the deletion count
+		committed, err := gitutil.CommitLedgerSnapshotPreserving(ctx, ledgerPath, msg, report.Untracked, pathspecs...)
 		if err != nil {
 			return fmt.Errorf("commit restored pointers: %w", err)
 		}
@@ -249,20 +245,6 @@ func restoreOne(ctx context.Context, ledgerPath, upstream string, raw rawSession
 		return "working copy differs from the committed content (uncommitted local edit); commit or discard it first", ""
 	}
 	return "", metaPath
-}
-
-// allowSacredMassDelete sets the guard's documented override for the duration of one
-// commit and returns the function that restores the previous value.
-func allowSacredMassDelete() func() {
-	previous, had := os.LookupEnv(sacred.OverrideEnv)
-	_ = os.Setenv(sacred.OverrideEnv, "1")
-	return func() {
-		if had {
-			_ = os.Setenv(sacred.OverrideEnv, previous)
-		} else {
-			_ = os.Unsetenv(sacred.OverrideEnv)
-		}
-	}
 }
 
 // untrackDraftArtifact removes an artifact a draft session directory must never track.
@@ -331,38 +313,50 @@ func ledgerUpstream(ctx context.Context, ledgerPath string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-// rawSessionArtifactsAhead lists content artifacts that HEAD changes relative to
-// upstream and holds as raw content, using the tree delta the push validator reads.
-func rawSessionArtifactsAhead(ctx context.Context, ledgerPath, upstream string) ([]rawSessionArtifact, error) {
+// sessionBlobsAhead calls visit for every regular file under sessions/ that HEAD adds or
+// changes relative to upstream, with its blob content: the tree delta the push validator reads.
+func sessionBlobsAhead(ctx context.Context, ledgerPath, upstream string, visit func(path string, blob []byte) error) error {
 	raw, err := exec.CommandContext(ctx, "git", "-C", ledgerPath, "diff-tree", "-r", "-z", "--no-renames", "--raw", upstream, "HEAD", "--", "sessions/").Output()
 	if err != nil {
-		return nil, fmt.Errorf("diff unpushed tree: %w", err)
+		return fmt.Errorf("diff unpushed tree: %w", err)
 	}
 	tokens := strings.Split(string(raw), "\x00")
-	var found []rawSessionArtifact
 	for i := 0; i+1 < len(tokens); i += 2 {
 		fields := strings.Fields(strings.TrimPrefix(tokens[i], ":"))
 		path := tokens[i+1]
-		parts := strings.Split(path, "/")
 		if len(fields) < 5 || strings.HasPrefix(fields[4], "D") || fields[1] != "100644" && fields[1] != "100755" {
-			continue
-		}
-		if len(parts) < 3 || parts[0] != "sessions" || !lfs.IsContentArtifact(strings.Join(parts[2:], "/")) {
 			continue
 		}
 		blob, err := exec.CommandContext(ctx, "git", "-C", ledgerPath, "cat-file", "blob", fields[3]).Output()
 		if err != nil {
-			return nil, fmt.Errorf("read unpushed blob %s: %w", path, err)
+			return fmt.Errorf("read unpushed blob %s: %w", path, err)
+		}
+		if err := visit(path, blob); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// rawSessionArtifactsAhead lists content artifacts that HEAD changes relative to
+// upstream and holds as raw content.
+func rawSessionArtifactsAhead(ctx context.Context, ledgerPath, upstream string) ([]rawSessionArtifact, error) {
+	var found []rawSessionArtifact
+	err := sessionBlobsAhead(ctx, ledgerPath, upstream, func(path string, blob []byte) error {
+		parts := strings.Split(path, "/")
+		if len(parts) < 3 || parts[0] != "sessions" || !lfs.IsContentArtifact(strings.Join(parts[2:], "/")) {
+			return nil
 		}
 		if _, _, perr := pointer.Parse(string(blob)); perr == nil {
-			continue
+			return nil
 		}
 		if meta := headSessionMeta(ctx, ledgerPath, parts[1]); meta.StoredInGit(strings.Join(parts[2:], "/")) {
-			continue // Storage=git: raw content is the correct state
+			return nil // Storage=git: raw content is the correct state
 		}
 		found = append(found, rawSessionArtifact{path: path, content: blob})
-	}
-	return found, nil
+		return nil
+	})
+	return found, err
 }
 
 // headSessionMeta reads the session manifest from HEAD, not the working tree, so

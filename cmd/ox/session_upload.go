@@ -536,6 +536,7 @@ func pushLedger(ctx context.Context, ledgerPath string) error {
 
 	pushCtx, pushSpan := perf.Start(ctx, "git_push")
 	err := gitutil.PushWithRetry(pushCtx, ledgerPath, gitutil.PushOpts{
+		ImmutablePaths:      true, // the Ledger never renames paths
 		AutoResolvePrefixes: ledgerAutoResolvePrefixes,
 		PrePush: func(repoPath string) error {
 			if ep != "" {

@@ -761,6 +761,29 @@ func TestLFSRefreshesRejectedCredentials(t *testing.T) {
 	}
 }
 
+// Failure prevented: an endpoint's Git PAT is sent for a repo on another host,
+// or refused for the git server the SageOx API named for it.
+func TestNewClientForEndpointOnlyTrustsItsGitServer(t *testing.T) {
+	prevDir := gitserver.TestSetConfigDirOverride(t.TempDir())
+	prevFile := gitserver.TestSetForceFileStorage(true)
+	t.Cleanup(func() {
+		gitserver.TestSetConfigDirOverride(prevDir)
+		gitserver.TestSetForceFileStorage(prevFile)
+	})
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv(auth.EnvVarToken, "")
+	const ep = "https://sageox.ai"
+	require.NoError(t, gitserver.SaveCredentialsForEndpoint(ep, gitserver.GitCredentials{
+		Token: "pat", ExpiresAt: time.Now().Add(time.Hour), ServerURL: "http://10.0.0.5:8929",
+	}))
+
+	_, err := NewClientForEndpoint(context.Background(), "http://10.0.0.5:8929/team/ledger.git", ep)
+	require.NoError(t, err, "the server the API named is the PAT's git server")
+
+	_, err = NewClientForEndpoint(context.Background(), "https://github.com/acme/app.git", ep)
+	require.ErrorContains(t, err, "github.com, which is not its git server")
+}
+
 // Failure prevented: OAuth or JWT refresh ignores cancellation or saves fallback credentials.
 func TestLFSBatchCancelsCredentialRefresh(t *testing.T) {
 	for _, stage := range []string{"OAuth", "JWT"} {

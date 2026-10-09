@@ -90,11 +90,7 @@ var rootCmd = &cobra.Command{
 
 		// fire-and-forget heartbeat so daemon always knows current CLI version
 		// (triggers version mismatch restart when CLI is upgraded)
-		if shouldHeartbeat(cmd) && config.IsInitializedInCwd() && daemon.IsRunning() {
-			if gitRoot := findGitRoot(); gitRoot != "" {
-				Heartbeat(gitRoot, nil, "")
-			}
-		}
+		maybeHeartbeat(cmd)
 
 		// resolve feature flags: daemon cache → disk cache → env vars → defaults
 		initFeatureFlags(cmd)
@@ -545,6 +541,37 @@ func dirExists(path string) bool {
 	return err == nil && info.IsDir()
 }
 
+// maybeHeartbeat sends the fire-and-forget heartbeat when the command warrants one.
+func maybeHeartbeat(cmd *cobra.Command) {
+	if !shouldHeartbeat(cmd) || !config.IsInitializedInCwd() || !daemonReachable(cmd) {
+		return
+	}
+	if gitRoot := findGitRoot(); gitRoot != "" {
+		Heartbeat(gitRoot, nil, "")
+	}
+}
+
+// daemonReachable reports whether to attempt daemon requests, pinging first unless skipped.
+// Hooks skip it: their first real request already proves liveness, and on dial
+// failure they exit quietly. Each ping is a separate IPC connection (the server
+// handles one request per connection), so skipping saves two dials per hook.
+func daemonReachable(cmd *cobra.Command) bool {
+	if isAgentHookInvocation(cmd) {
+		return true
+	}
+	return daemon.IsRunning()
+}
+
+// isAgentHookInvocation reports whether cmd is `ox agent hook ...`, which the
+// agent command dispatches itself via its first positional argument.
+func isAgentHookInvocation(cmd *cobra.Command) bool {
+	if cmd == nil || cmd.Name() != "agent" {
+		return false
+	}
+	args := cmd.Flags().Args()
+	return len(args) > 0 && args[0] == "hook"
+}
+
 // shouldHeartbeat returns true if the command should send a fire-and-forget heartbeat.
 // Most commands should — skip only zero-side-effect commands like help and version.
 func shouldHeartbeat(cmd *cobra.Command) bool {
@@ -572,7 +599,7 @@ func initFeatureFlags(cmd *cobra.Command) {
 	var daemonProvider flags.DaemonProvider
 
 	// try daemon IPC first (fast path: daemon already has settings in memory)
-	if config.IsInitializedInCwd() && daemon.IsRunning() {
+	if config.IsInitializedInCwd() && daemonReachable(cmd) {
 		client := daemon.NewClientForCurrentRepo()
 		if settings, err := client.SettingsGet(); err == nil && settings != nil {
 			daemonProvider.CachedSettings = settings

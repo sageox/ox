@@ -7,6 +7,7 @@ import (
 
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/decision"
+	"github.com/sageox/ox/internal/errkind"
 	"github.com/spf13/cobra"
 )
 
@@ -79,7 +80,7 @@ exits non-zero so callers cannot mistake partial retrieval for a verified miss.`
 			return err
 		}
 		if result.Signals.Degraded {
-			return cli.ErrSilent
+			return silentFailure(errkind.Other, "degraded", nil)
 		}
 		return nil
 	},

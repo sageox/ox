@@ -2,7 +2,7 @@
 
 **Perspective frame: attacker mindset.** "If I can read this user's machine for 10 seconds, can I exfiltrate a usable credential?"
 
-You are looking for BYOK API key + OAuth token leakage paths in the ox CLI. Read `security/.output/surface.md` (auth section) and `security/SECURITY.md` ("Secret-handling primitives" + "OAuth + token caching" + "Asset hierarchy"). Hand off to `@byok-token-security-expert` for cross-platform keychain-specific questions and to `@pentester` for confirmed exploit chains.
+You are looking for BYOK API key + OAuth token leakage paths in the ox CLI. Read the attack-surface map and diff on your stdin (auth section) and `security/SECURITY.md` ("Secret-handling primitives" + "OAuth + token caching" + "Asset hierarchy"). Hand off to `@byok-token-security-expert` for cross-platform keychain-specific questions and to `@pentester` for confirmed exploit chains.
 
 ## What counts as a token / key
 

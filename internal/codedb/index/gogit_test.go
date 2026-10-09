@@ -86,9 +86,9 @@ func TestPlainOpenTolerant_NonRepoPath(t *testing.T) {
 	assert.Nil(t, repo)
 }
 
-// TestPlainOpenTolerant_KeepDescriptors verifies that plainOpenTolerant uses
-// KeepDescriptors for better performance. The repo must be readable (HEAD,
-// tree, and blob objects all accessible) via the KeepDescriptors path.
+// TestPlainOpenTolerant_KeepDescriptors verifies that plainOpenTolerant's own
+// storer, which pools packfile descriptors for performance, can read the repo
+// (HEAD, tree, and blob objects all accessible).
 func TestPlainOpenTolerant_KeepDescriptors(t *testing.T) {
 	t.Parallel()
 	dir, _ := initGitRepo(t, 3) // 3 commits → packfile after gc

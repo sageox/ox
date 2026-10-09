@@ -1,3 +1,5 @@
+//go:build darwin
+
 package daemon
 
 import (
@@ -10,20 +12,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const backgroundBandHelperEnv = "OX_TEST_BACKGROUND_BAND_HELPER"
+const priorityBandHelperEnv = "OX_TEST_PRIORITY_BAND_HELPER"
 
 // darwinBackgroundPriority is the scheduler priority ps reports for a process
-// in the background band (normal user processes sit at 31).
+// in macOS's background band (PRIO_DARWIN_BG). Normal user processes sit at 31
+// and a nice'd process a little below that; 4 means the band.
 const darwinBackgroundPriority = 4
 
-// TestBackgroundBandHelper is the child half of
-// TestLowerDaemonPriority_EntersBackgroundBand: it lowers THIS process, which an
-// unprivileged process cannot undo, so it only runs in a throwaway subprocess.
-// It reports its own priority and that of a child it spawns, the way the
-// daemon spawns git.
-func TestBackgroundBandHelper(t *testing.T) {
-	if os.Getenv(backgroundBandHelperEnv) != "1" {
-		t.Skip("subprocess helper; run via TestLowerDaemonPriority_EntersBackgroundBand")
+// TestPriorityBandHelper is the child half of
+// TestLowerDaemonPriority_StaysOutOfBackgroundBand: it lowers THIS process,
+// which an unprivileged process cannot undo, so it only runs in a throwaway
+// subprocess. It reports its own scheduler priority and that of a child it
+// spawns, the way the daemon spawns git.
+func TestPriorityBandHelper(t *testing.T) {
+	if os.Getenv(priorityBandHelperEnv) != "1" {
+		t.Skip("subprocess helper; run via TestLowerDaemonPriority_StaysOutOfBackgroundBand")
 	}
 	require.NoError(t, lowerDaemonPriority())
 	self, err := exec.Command("ps", "-o", "pri=", "-p", strconv.Itoa(os.Getpid())).Output()
@@ -33,13 +36,17 @@ func TestBackgroundBandHelper(t *testing.T) {
 	t.Logf("RESULT self=%s child=%s", strings.TrimSpace(string(self)), strings.TrimSpace(string(child)))
 }
 
-// TestLowerDaemonPriority_EntersBackgroundBand proves the daemon and the git it
-// spawns leave the performance cores on macOS. Failure prevented: a runaway
-// index or push loop at nice 10 still ran on the performance cores and drove
-// the machine into thermal shutdown.
-func TestLowerDaemonPriority_EntersBackgroundBand(t *testing.T) {
-	cmd := exec.Command(os.Args[0], "-test.run=^TestBackgroundBandHelper$", "-test.v")
-	cmd.Env = append(os.Environ(), backgroundBandHelperEnv+"=1") // safe: re-execs this test binary
+// TestLowerDaemonPriority_StaysOutOfBackgroundBand proves the daemon and the
+// git it spawns are merely nice'd, never placed in the background band.
+//
+// Failure prevented: in the band (the QoS Spotlight runs in) the daemon and its
+// git children were scheduled at priority 4 and got zero CPU whenever the
+// machine was busy. A Ledger push then sat behind a `git status` that never
+// ran, clients timed out and auto-started replacements that starved too
+// (#1235). Nice alone keeps the daemon polite without ever starving it.
+func TestLowerDaemonPriority_StaysOutOfBackgroundBand(t *testing.T) {
+	cmd := exec.Command(os.Args[0], "-test.run=^TestPriorityBandHelper$", "-test.v")
+	cmd.Env = append(os.Environ(), priorityBandHelperEnv+"=1") // safe: re-execs this test binary
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, "helper failed: %s", out)
 
@@ -47,6 +54,7 @@ func TestLowerDaemonPriority_EntersBackgroundBand(t *testing.T) {
 	require.True(t, found, "helper printed no result: %s", out)
 	fields := strings.Fields(result)
 	require.GreaterOrEqual(t, len(fields), 2, "malformed result: %s", result)
-	require.Equal(t, "self="+strconv.Itoa(darwinBackgroundPriority), fields[0], "daemon must be in the background band")
-	require.Equal(t, "child="+strconv.Itoa(darwinBackgroundPriority), fields[1], "spawned git must inherit the background band")
+	band := strconv.Itoa(darwinBackgroundPriority)
+	require.NotEqual(t, "self="+band, fields[0], "daemon must not enter the background band")
+	require.NotEqual(t, "child="+band, fields[1], "spawned git must not inherit the background band")
 }

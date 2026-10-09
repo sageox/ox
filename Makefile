@@ -739,7 +739,7 @@ coverage-ratchet-diff: test-all ## Enforce package + changed-line coverage vs CO
 	@python3 scripts/coverage_ratchet.py coverage.out --require-provenance coverage.out.provenance.json --diff-base $(COVERAGE_BASE)
 
 coverage-ratchet-test: ## Test the coverage ratchet parser and failure semantics
-	@cd scripts && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v coverage_ratchet_test.py test_tiers_test.py test_metrics_test.py test_split_test.py
+	@cd scripts && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v coverage_ratchet_test.py test_tiers_test.py test_metrics_test.py test_split_test.py session_import_testbed_test.py
 
 # The instrumented binary lands in its OWN directory, not shared bin/, because
 # ox discovers adapters as siblings of the running binary. In bin/ it saw every
@@ -800,7 +800,7 @@ smoke-test: build ## Run smoke tests against SageOx cloud (requires SAGEOX_CI_PA
 # Code quality
 # Targets below are agent-friendly by default (quiet). V=1 for verbose.
 lint: lint-test-env lint-sessionprovenance ## Run golangci-lint
-	@which golangci-lint > /dev/null || (echo "golangci-lint not found. Install from https://golangci-lint.run/usage/install/" && exit 1)
+	@which golangci-lint > /dev/null || (echo "golangci-lint not found. Install from https://golangci-lint.run/docs/welcome/install/" && exit 1)
 	@# --allow-parallel-runners: multiple AI coding agent sessions routinely run
 	@# `make lint` at the same time in this repo. golangci-lint's default file
 	@# lock turns that into a hard failure ("parallel golangci-lint is running")
@@ -812,7 +812,7 @@ lint: lint-test-env lint-sessionprovenance ## Run golangci-lint
 # against the main module, so pkg/sessionprovenance would ship unlinted.
 .PHONY: lint-sessionprovenance
 lint-sessionprovenance: ## Lint the public native-session contract
-	@which golangci-lint > /dev/null || (echo "golangci-lint not found. Install from https://golangci-lint.run/usage/install/" && exit 1)
+	@which golangci-lint > /dev/null || (echo "golangci-lint not found. Install from https://golangci-lint.run/docs/welcome/install/" && exit 1)
 	@cd pkg/sessionprovenance && golangci-lint run -c $(CURDIR)/.config/golangci.yml --allow-parallel-runners ./...
 
 lint-test-env: ## Check that test files use testguard instead of os.Environ()
@@ -1082,6 +1082,9 @@ sec-fast: ## Run only the deterministic OSS-tool tier (no AI cost)
 
 sec-install: ## Install all security-review tool binaries to bin/ (no root)
 	@bash security/scripts/install-bins.sh
+
+sec-test: ## Test the security-review pipeline itself (fake claude + scanners; no network, no AI cost)
+	@python3 -m unittest discover -s security/scripts/tests -p 'test_*.py'
 
 sec-install-hook: ## Install opt-in pre-commit fast tier (run with SEC_PRECOMMIT=1 git commit)
 	@mkdir -p .git/hooks

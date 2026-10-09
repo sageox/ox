@@ -397,6 +397,17 @@ func NewClientForEndpoint(ctx context.Context, repoURL, endpointURL string) (*Cl
 	if creds.Token == "" {
 		return nil, errkind.Errorf(errkind.NotLoggedIn, "git credentials have empty token")
 	}
+	// The PAT is only for the endpoint's git server. `ox fetch` on a stub in a
+	// third-party clone would otherwise send it to that clone's origin, and a
+	// 401 from there would mint a fresh one. Loading it above talks only to
+	// the SageOx API.
+	if !gitserver.RemoteOnGitServer(repoURL, endpointURL, creds.ServerURL) {
+		host := "a remote"
+		if u, err := url.Parse(repoURL); err == nil && u.Hostname() != "" {
+			host = u.Hostname()
+		}
+		return nil, errkind.Errorf(errkind.Usage, "refusing to send %s Git credentials to %s, which is not its git server", endpointURL, host)
+	}
 
 	c := NewClient(repoURL, creds.Username, creds.Token)
 	c.credentialEndpoint = endpointURL

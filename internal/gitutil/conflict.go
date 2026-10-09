@@ -405,6 +405,12 @@ func runPlumbing(ctx context.Context, repoPath string, stdin []byte, extraEnv []
 // and edits made after the conflict are always refused.
 // The caller must hold WithRepoLock. No commits are made or stashes removed.
 func ResolveAutostashConflicts(ctx context.Context, repoPath string, safePrefixes, denyPrefixes []string) (bool, error) {
+	// A pull killed after "Created autostash" strands the change under
+	// MERGE_AUTOSTASH and blocks every later autostash pull; put it back
+	// first, so any conflict it raises is handled below like the others.
+	if _, err := RestoreLeftoverAutostash(ctx, repoPath); err != nil {
+		return false, fmt.Errorf("restore leftover autostash: %w", err)
+	}
 	entries, err := listUnmergedEntries(ctx, repoPath)
 	if err != nil {
 		// Deliberately unwrapped: listUnmergedEntries already tags this with

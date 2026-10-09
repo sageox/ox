@@ -33,23 +33,39 @@ func readLines(t *testing.T, path string) []string {
 }
 
 func TestClaudeRunnerIsolated(t *testing.T) {
+	isolatedArgs := []string{"--output-format", "stream-json", "--verbose", "--safe-mode", "--tools", "", "--no-session-persistence", "--model", "claude-haiku-4-5", "-p"}
 	tests := []struct {
-		name    string
-		help    string
-		wantErr string
-		want    []string
+		name        string
+		help        string
+		ifSupported bool // the daemon's request; import uses Isolated
+		wantErr     string
+		want        []string
+		wantEnv     string
 	}{
 		{
 			name: "no tools, no permission bypass, nothing persisted",
 			help: "--safe-mode --tools --no-session-persistence",
-			want: []string{"--output-format", "stream-json", "--verbose", "--safe-mode", "--tools", "", "--no-session-persistence", "--model", "claude-haiku-4-5", "-p"},
+			want: isolatedArgs, wantEnv: "disabled",
 		},
 		{
 			name:    "a Claude that cannot isolate is refused, never widened",
 			help:    "--tools --no-session-persistence",
 			wantErr: "--safe-mode",
 		},
+		{
+			name: "the daemon isolates a Claude that can", ifSupported: true,
+			help: "--safe-mode --tools --no-session-persistence",
+			want: isolatedArgs, wantEnv: "disabled",
+		},
+		{
+			// Failure prevented: Claude Code older than 2.1.169 (no --safe-mode)
+			// stops the daemon from summarizing sessions at all.
+			name: "the daemon keeps summarizing with a Claude too old to isolate", ifSupported: true,
+			help: "--tools --no-session-persistence",
+			want: []string{"--output-format", "stream-json", "--verbose", "--permission-mode", "bypassPermissions", "--model", "claude-haiku-4-5", "-p"},
+		},
 	}
+	t.Setenv("OX_SESSION_RECORDING", "")
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -60,7 +76,7 @@ printf '%s\n' "$OX_SESSION_RECORDING" > "`+envFile+`"
 printf '%s\n' '{"type":"result","result":"ok"}'
 `)
 			r := &ClaudeRunner{binaryPath: script, logger: slog.Default()}
-			_, err := r.Run(context.Background(), RunRequest{Prompt: "p", Model: "claude-haiku-4-5", Isolated: true})
+			_, err := r.Run(context.Background(), RunRequest{Prompt: "p", Model: "claude-haiku-4-5", Isolated: !tt.ifSupported, IsolateIfSupported: tt.ifSupported})
 			if tt.wantErr != "" {
 				require.ErrorContains(t, err, tt.wantErr)
 				assert.NoFileExists(t, argsFile, "no prompt-bearing run after a failed probe")
@@ -68,7 +84,7 @@ printf '%s\n' '{"type":"result","result":"ok"}'
 			}
 			require.NoError(t, err)
 			assert.Equal(t, tt.want, readLines(t, argsFile))
-			assert.Equal(t, []string{"disabled"}, readLines(t, envFile))
+			assert.Equal(t, []string{tt.wantEnv}, readLines(t, envFile))
 		})
 	}
 }
@@ -87,19 +103,31 @@ printf '%s\n' '{"type":"result","result":"ok"}'
 func TestCodexRunnerIsolated(t *testing.T) {
 	const fullHelp = "--sandbox --ephemeral --color --config --ignore-user-config --ignore-rules --skip-git-repo-check --disable"
 	const features = "shell_tool stable true\nunified_exec stable true\nplugins stable true\nfuture_thing stable true\n"
+	const isolatedOut = "exec\n--sandbox\nread-only\n--ephemeral\n--color\nnever\n-c\nfeatures.hooks=false\n" +
+		"--ignore-user-config\n--ignore-rules\n--skip-git-repo-check\n" +
+		"--disable\nplugins\n--disable\nshell_tool\n--disable\nunified_exec\n-"
 	tests := []struct {
-		name     string
-		help     string
-		features string
-		wantErr  string
-		want     string
+		name        string
+		help        string
+		features    string
+		ifSupported bool // the daemon's request; import uses Isolated
+		wantErr     string
+		want        string
 	}{
 		{
 			name: "ignores user config and rules, disables every tool feature this Codex lists",
 			help: fullHelp, features: features,
-			want: "exec\n--sandbox\nread-only\n--ephemeral\n--color\nnever\n-c\nfeatures.hooks=false\n" +
-				"--ignore-user-config\n--ignore-rules\n--skip-git-repo-check\n" +
-				"--disable\nplugins\n--disable\nshell_tool\n--disable\nunified_exec\n-",
+			want: isolatedOut,
+		},
+		{
+			name: "the daemon isolates a Codex that can", ifSupported: true,
+			help: fullHelp, features: features,
+			want: isolatedOut,
+		},
+		{
+			name: "the daemon keeps summarizing with a Codex too old to isolate", ifSupported: true,
+			help: "--sandbox --ephemeral --color --config --disable", features: features,
+			want: "exec\n--sandbox\nread-only\n--ephemeral\n--color\nnever\n-c\nfeatures.hooks=false\n-",
 		},
 		{
 			name: "a Codex that cannot isolate is refused, never widened",
@@ -122,7 +150,7 @@ touch "`+prompted+`"
 printf '%s\n' "$@"
 `)
 			r := &CodexRunner{binaryPath: script, logger: slog.Default()}
-			result, err := r.Run(context.Background(), RunRequest{Prompt: "p", Isolated: true})
+			result, err := r.Run(context.Background(), RunRequest{Prompt: "p", Isolated: !tt.ifSupported, IsolateIfSupported: tt.ifSupported})
 			assert.Len(t, readLines(t, probes), 1, "exec --help is probed once per run")
 			if tt.wantErr != "" {
 				require.ErrorContains(t, err, tt.wantErr)
@@ -174,14 +202,18 @@ if [ "$1" = "features" ]; then exec sleep 5; fi`, "did not answer within"},
 			t.Cleanup(func() { codexProbeTimeout = prior })
 			prompted := filepath.Join(t.TempDir(), "prompted")
 			script := fakeCLI(t, tt.cli, tt.body+"\ntouch \""+prompted+"\"\n")
-			var err error
-			if tt.cli == "claude" {
-				_, err = (&ClaudeRunner{binaryPath: script, logger: slog.Default()}).Run(context.Background(), RunRequest{Prompt: "p", Isolated: true})
-			} else {
-				_, err = (&CodexRunner{binaryPath: script, logger: slog.Default()}).Run(context.Background(), RunRequest{Prompt: "p", Isolated: true})
+			// A probe that failed proves nothing about the CLI, so the daemon's
+			// best-effort request must not fall back to running unisolated either.
+			for _, req := range []RunRequest{{Prompt: "p", Isolated: true}, {Prompt: "p", IsolateIfSupported: true}} {
+				var err error
+				if tt.cli == "claude" {
+					_, err = (&ClaudeRunner{binaryPath: script, logger: slog.Default()}).Run(context.Background(), req)
+				} else {
+					_, err = (&CodexRunner{binaryPath: script, logger: slog.Default()}).Run(context.Background(), req)
+				}
+				require.ErrorContains(t, err, tt.wantErr)
+				assert.NoFileExists(t, prompted, "no prompt-bearing run after a failed probe")
 			}
-			require.ErrorContains(t, err, tt.wantErr)
-			assert.NoFileExists(t, prompted, "no prompt-bearing run after a failed probe")
 		})
 	}
 }

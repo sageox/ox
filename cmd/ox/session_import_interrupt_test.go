@@ -37,6 +37,7 @@ func TestImportE2E_InterruptPublishesWhatIsDone(t *testing.T) {
 
 	r := f.run(t, importOptions{yes: true, jsonOut: true})
 	assert.ErrorIs(t, r.err, cli.ErrSilent)
+	assert.Equal(t, "interrupted", postHogErrorKind(r.err, 1), "usage telemetry files a Ctrl-C as one")
 
 	done := r.session(t, e2eClaudeA)
 	assert.Equal(t, "uploaded", done.Outcome, "a session committed before the interrupt still goes out")
@@ -79,6 +80,7 @@ func TestImportE2E_InterruptDuringRetryUploadsNothing(t *testing.T) {
 
 	r := f.run(t, importOptions{yes: true, jsonOut: true})
 	assert.ErrorIs(t, r.err, cli.ErrSilent)
+	assert.Equal(t, "interrupted", postHogErrorKind(r.err, 1), "usage telemetry files a Ctrl-C as one")
 	s := r.session(t, e2eClaudeA)
 	assert.Equal(t, "failed", s.Outcome)
 	assert.Equal(t, "interrupted", s.Detail)

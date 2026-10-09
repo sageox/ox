@@ -20,6 +20,7 @@ import (
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon/agentwork"
+	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/lfs"
@@ -229,9 +230,11 @@ type importFixture struct {
 	store          *fakeLFSStore
 	push           func(ctx context.Context, ledgerPath string) error // nil: the real pushLedger
 	pushBatch      int
-	readErr        error // every adapter read fails with it
-	unusable       bool  // no summarizer CLI is installed and logged in
-	interactive    bool  // a coworker at a terminal can answer
+	readErr        error                                  // every adapter read fails with it
+	unusable       bool                                   // no summarizer CLI is installed and logged in
+	runners        map[nativeimport.Agent]*fakeSummarizer // per-CLI summarizers; nil: summarizer serves both
+	loggedOut      map[nativeimport.Agent]bool            // CLIs installed but not logged in
+	interactive    bool                                   // a coworker at a terminal can answer
 	confirm        func(prompt string) (bool, error)
 	ctx            context.Context // the run's context; nil means context.Background()
 	progress       bytes.Buffer    // what a JSON run reports while it works
@@ -445,14 +448,19 @@ func (f *importFixture) envFor(ledgerPath string, opts importOptions) (*importEn
 	}
 	env.deps = productionImportDeps(context.Background(), env)
 	env.deps.readNative = f.readNative
-	env.deps.runner = func(nativeimport.Agent) agentwork.Runner { return f.summarizer }
+	env.deps.runner = func(agent nativeimport.Agent) agentwork.Runner {
+		if f.runners != nil {
+			return f.runners[agent]
+		}
+		return f.summarizer
+	}
 	env.deps.lfsClient = func() (*lfs.Client, error) { return f.store.client(), nil }
 	env.deps.notify = func(_ *lfs.SessionMeta, name string) {
 		f.mu.Lock()
 		f.notified = append(f.notified, name)
 		f.mu.Unlock()
 	}
-	env.deps.usable = func(nativeimport.Agent) bool { return !f.unusable }
+	env.deps.usable = func(agent nativeimport.Agent) bool { return !f.unusable && !f.loggedOut[agent] }
 	env.deps.syncLedger = func() {}
 	env.deps.interactive = func() bool { return f.interactive }
 	if f.confirm != nil {
@@ -531,6 +539,9 @@ func optionsFromCommand(t *testing.T, command string) importOptions {
 			agent, ok := parseImportAgent(fields[i])
 			require.True(t, ok, command)
 			opts.summarizer = agent
+		case "--from-test-data":
+			i++
+			opts.testData = strings.Trim(fields[i], "'") // shell-quoted; test paths hold no spaces
 		default:
 			t.Fatalf("unexpected argument %q in %q", fields[i], command)
 		}
@@ -1037,6 +1048,8 @@ func TestImportE2E_SummaryThatRepeatsASecretIsHeld(t *testing.T) {
 
 			r := f.run(t, importOptions{yes: true, jsonOut: true})
 			assert.ErrorIs(t, r.err, cli.ErrSilent)
+			assert.Equal(t, errkind.Other, errkind.Of(r.err))
+			assert.Equal(t, "session publish failed", errkind.DetailOf(r.err))
 			held := r.session(t, e2eCodexA)
 			assert.Equal(t, "failed", held.Outcome)
 			assert.Contains(t, held.Detail, "possible secret remains in "+tc.wantFile)
@@ -1086,6 +1099,7 @@ func TestImportE2E_FailedPushIsCarriedByTheNextOne(t *testing.T) {
 		f.add(t, pastSession{agent: nativeimport.AgentCodex, id: e2eCodexB, start: start.Add(2 * time.Hour), prompt: tokenPrompt, reply: "The deploy bot."})
 		held := f.run(t, importOptions{yes: true, jsonOut: true})
 		assert.ErrorIs(t, held.err, cli.ErrSilent)
+		assert.Equal(t, "session push failed", errkind.DetailOf(held.err))
 		s := held.session(t, e2eCodexB)
 		assert.Equal(t, "committed", s.Outcome)
 		assert.Contains(t, s.Detail, "not pushed")

@@ -86,6 +86,10 @@ type SessionFinalizePayload struct {
 	// Ordinary session files remain subject to the normal upload/commit checks.
 	omitTraces bool
 
+	// llmPaused is set by BuildPrompt when the claude quota pause is active, so
+	// ProcessResult leaves the session untouched for a later scan.
+	llmPaused bool
+
 	// prefilterSummary holds a deterministic summary built by
 	// sessionsummary.MaybeBuildSkipSummary when BuildPrompt determined
 	// the session was too thin for an LLM-generated summary to be
@@ -155,6 +159,10 @@ type SessionFinalizeHandler struct {
 	// Used as fallback when .recording.json predates the ParentPID field (rollout compat).
 	// Returns 0 if unknown.
 	pidLookup func(agentID string) int
+	// quota is the pause shared by all sessions after a quota/rate-limit exit.
+	quota quotaPause
+	// now is the clock for the quota pause; tests replace it.
+	now func() time.Time
 	// quality thresholds (configurable via AgentWorkerConfig)
 	qualityUploadThreshold  float64
 	qualityDiscardThreshold float64
@@ -215,6 +223,7 @@ func NewSessionFinalizeHandler(logger *slog.Logger) *SessionFinalizeHandler {
 		qualityUploadThreshold:  0.3,
 		qualityDiscardThreshold: 0.1,
 		captureLockWait:         defaultCaptureLockWait,
+		now:                     time.Now,
 	}
 }
 
@@ -301,6 +310,25 @@ func NewSessionFinalizeHandlerForTest(logger *slog.Logger) *SessionFinalizeHandl
 	h.skipGit = true
 	h.skipLFS = true
 	return h
+}
+
+// pauseSummarization starts the shared quota pause and announces it once.
+func (h *SessionFinalizeHandler) pauseSummarization(output string) {
+	now := h.now()
+	until := quotaPauseUntil(output, now)
+	if h.quota.start(until, now) {
+		h.logger.Warn("summarization paused: claude quota exhausted", "until", until.Format(time.RFC3339))
+	}
+}
+
+// summarizationPaused reports whether the quota pause is active, logging once
+// when it ends.
+func (h *SessionFinalizeHandler) summarizationPaused() bool {
+	_, paused, ended := h.quota.check(h.now())
+	if ended {
+		h.logger.Info("summarization resumed: quota pause ended")
+	}
+	return paused
 }
 
 // Type implements WorkHandler.
@@ -1120,6 +1148,8 @@ func (h *SessionFinalizeHandler) BuildPrompt(item *WorkItem) (RunRequest, error)
 		return RunRequest{}, err
 	}
 
+	payload.llmPaused = false
+
 	// Quarantined for ownership review: do not spend an LLM run on it. ProcessResult
 	// drops the item.
 	if sessionQuarantined(payload.SessionDir) {
@@ -1238,6 +1268,15 @@ func (h *SessionFinalizeHandler) BuildPrompt(item *WorkItem) (RunRequest, error)
 		return RunRequest{SkipLLM: true}, nil
 	}
 
+	// A quota exit is global, so while the pause is active no session may spawn
+	// the agent. ProcessResult drops the item; a later scan re-offers it.
+	if h.summarizationPaused() {
+		payload.llmPaused = true
+		h.logger.Debug("summarization paused, skipping session until quota resets",
+			"session", filepath.Base(payload.SessionDir))
+		return RunRequest{SkipLLM: true}, nil
+	}
+
 	// Daemon spawns a cold-start coding agent subprocess for summarization.
 	// The subprocess cannot reliably read files via tool calls — empirically,
 	// 96% of sessions fail when the prompt says "Read the file at <path>".
@@ -1248,6 +1287,9 @@ func (h *SessionFinalizeHandler) BuildPrompt(item *WorkItem) (RunRequest, error)
 		Prompt:  prompt,
 		WorkDir: payload.LedgerPath,
 		Model:   sessionsummary.DefaultSummaryModel(),
+		// The transcript holds whatever the session read, prompt injection
+		// included, and the summary needs no tools.
+		IsolateIfSupported: true,
 	}, nil
 }
 
@@ -1364,14 +1406,24 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 			"quality_score", summaryResp.QualityScore,
 		)
 	} else {
+		// BuildPrompt skipped the agent for the quota pause; nothing to parse.
+		if payload.llmPaused {
+			return nil
+		}
 
 		// non-zero exit = summarization failed; don't trust the output at all.
 		if result.ExitCode != 0 {
+			reason := classifyAgentFailure(llmOutput)
 			h.logger.Warn("summarization agent exited with error, discarding output",
 				"session", filepath.Base(payload.SessionDir),
 				"exit_code", result.ExitCode,
+				"reason", reason,
 				"output_len", len(llmOutput),
+				"output", failureDetail("", llmOutput),
 			)
+			if reason == failureReasonQuotaExhausted {
+				h.pauseSummarization(llmOutput)
+			}
 			return nil
 		}
 
@@ -2445,6 +2497,7 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 	// push with retry (best-effort — failures are non-fatal)
 	ep := endpoint.GetForProject(h.projectRoot)
 	if err := gitutil.PushWithRetry(ctx, ledgerPath, gitutil.PushOpts{
+		ImmutablePaths:      true, // the Ledger never renames paths
 		AutoResolvePrefixes: ledger.AutoResolvePrefixes,
 		Logger:              h.logger,
 		SuspendWhenWedged:   true,

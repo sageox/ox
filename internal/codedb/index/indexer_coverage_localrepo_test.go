@@ -181,8 +181,8 @@ func TestIndexLocalRepo_RefsRecorded(t *testing.T) {
 // --- FD leak regression ---
 
 // TestIndexLocalRepo_NoFDLeak verifies that repeated IndexLocalRepo calls
-// don't leak file descriptors. go-git opens packfiles with KeepDescriptors
-// for performance — without repo.Close(), each call leaks those FDs.
+// don't leak file descriptors. go-git keeps packfile descriptors open in a
+// pool for performance — without repo.Close(), each call leaks those FDs.
 // Failure prevented: daemon exhausts FD limit after many indexing cycles.
 func TestIndexLocalRepo_NoFDLeak(t *testing.T) {
 	// no t.Parallel(): FD leak detector counts process-wide FDs,
@@ -194,7 +194,7 @@ func TestIndexLocalRepo_NoFDLeak(t *testing.T) {
 
 	dir, _ := initGitRepo(t, 20)
 
-	// force packfile creation — KeepDescriptors only leaks when packfiles exist
+	// force packfile creation — pooled descriptors only leak when packfiles exist
 	gitGC := exec.Command("git", "gc", "--aggressive")
 	gitGC.Dir = dir
 	gitGC.Env = append(os.Environ(), // safe: git CLI in temp dir

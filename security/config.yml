@@ -7,21 +7,26 @@
 # Ported from sageox-monorepo's security/config.yml; adapted to a single-binary
 # Go CLI surface (no BFF, no Helm, no Terraform, no api-go).
 
-# Cost ceiling per run, in USD. Hits => skill pauses with a one-liner explaining
-# how to re-run with --cap=N. Lower than sageox's $5 because ox is a single
-# binary with a much smaller diff surface; the AI tier rarely needs to chew
-# through more than a couple dollars per run. On-demand runs use subsidized
-# Claude Code tokens (effectively free), so this only constrains the daily
-# batch GH Action.
-cost_cap_usd: 2.0
+# Cost ceiling per run, in USD, from the `total_cost_usd` each subagent call
+# reports. When reached, the remaining AI calls are skipped, unvalidated findings
+# are kept and marked, and the run exits 2 (re-run with --cap=N). Measured
+# 2026-10-06 with hunters reading the real diff: one 97 KB chunk with one finding
+# cost $3.87 (map $0.36, five hunters $2.90, dedup $0.07, validation $0.54). $8
+# covers one to two chunks; a bigger change stops early and says so. (The old $2
+# cap was sized when hunters read only a 1–3 KB surface map — and was never
+# enforced, because the cost field it read does not exist.) On-demand runs use
+# subsidized Claude Code tokens, so for them this is a budget signal.
+cost_cap_usd: 8.0
 
 # Models per phase. Right-size aggressively — Haiku for the map phase (cheap,
 # parallelizable), Sonnet for hunt + most validation, Opus only for the hardest
 # finding classes where stricter judgment pays for itself. Synthesia's
 # "right-size models per phase" principle, applied at the per-finding level.
+# orchestrate.sh reads every model from here; none is hard-coded.
 models:
   cartographer_model: claude-haiku-4-5-20251001
   hunter_model: claude-sonnet-5
+  dedup_model: claude-sonnet-5
   validator_model: claude-sonnet-5
   validator_hard_class_model: claude-opus-5-5
 
@@ -37,14 +42,18 @@ hunters:
   - supply-chain       # adapter download URL validation, checksum/signature, go.mod pin drift
   - llm-trust          # prompt injection from indexed repos / ledger / KB into adapter LLMs
 
-# Hard finding classes routed to the smarter validator model. Picked because
-# each of these classes has historically generated the highest false-positive
-# rate from Sonnet-tier judgment on this codebase pattern, AND the cost of a
-# false-negative is high enough to justify Opus per finding.
+# Hard finding classes, validated by validator_hard_class_model instead of
+# validator_model. Picked because each of these classes has historically
+# generated the highest false-positive rate from Sonnet-tier judgment on this
+# codebase pattern, AND the cost of a false-negative is high enough to justify
+# Opus per finding. Matched exactly against each finding's `class`, which is the
+# name of the hunter that reported it (dedup keeps it; the subclass does not
+# survive dedup). make sec-test fails if an entry is not a class an active
+# hunter reports.
 hard_classes:
-  - secrets-redaction-bypass    # raw.jsonl chokepoint violations, keyring leakage
-  - daemon-ipc-authz-bypass     # peer-cred + payload-validation logic
-  - supply-chain-tampering      # adapter binary install path, go.mod drift
+  - secrets-redaction   # raw.jsonl chokepoint violations, keyring leakage, log/upload leaks
+  - daemon-ipc          # peer-cred, payload validation, command authz
+  - supply-chain        # adapter binary install path, go.mod drift
 
 # Severity threshold for posting per-PR digest comments. Findings below this
 # still land in security/.output/FINDINGS.md, but don't generate inline noise
@@ -84,9 +93,17 @@ sensitive_paths:
 # scope to the full package whenever any hunk lands inside a sensitive path.
 # Rationale: a one-line change to auth_client.go shouldn't be reviewed in
 # isolation; the hunter needs the surrounding flow.
+#
+# Every cartographer and hunter call reads the diff itself (test files are not
+# sent), split into chunks of at most `chunk_bytes`; each chunk gets its own
+# cartographer call and its own wave of hunters, sensitive paths first. A change
+# larger than `max_chunks` chunks is reviewed up to that limit and the run
+# reports PARTIAL COVERAGE, naming the files no reviewer saw.
 diff:
   base: origin/main
   expand_to_sensitive: true
+  chunk_bytes: 120000
+  max_chunks: 8
 
 # OpenGrep rule files. The deterministic.sh script (once ported) merges in
 # $OX_PRIVATE_RULES_DIR/*.yml at runtime if the env var is set — keeps

@@ -1,0 +1,147 @@
+#!/usr/bin/env python3
+"""Fake `claude` CLI for the security-review pipeline tests.
+
+Speaks just enough of `claude --print --output-format json`: reads the prompt
+from stdin, recognizes the playbook from --append-system-prompt, and answers
+with a result envelope shaped like the real CLI's (total_cost_usd, subtype,
+structured_output). Every call is logged to $FAKE_CLAUDE_LOG so a test can
+assert on what each reviewer was actually shown.
+
+Its reviewers are deliberately dumb: a hunter reports the planted line only if
+the line is in its stdin, and the cartographer names an entry point only if a
+changed file's path is. So a finding shows up exactly when the change reached
+the reviewer — which is the property under test.
+
+Knobs (env):
+  FAKE_COST             USD each call reports in total_cost_usd (default 0.01)
+  FAKE_HONOR_BUDGET     "1" (default): stop like the real CLI when FAKE_COST
+                        exceeds --max-budget-usd (exit 1, error_max_budget_usd)
+  FAKE_NO_ENTRY_POINTS  "1": the cartographer finds no entry points
+  FAKE_PLANT            the line a cli-input hunter reports when it sees it
+  FAKE_DAEMON_FINDING   "1": the daemon IPC hunter also reports the daemon change
+                        (class daemon-ipc, a hard class) when it sees it
+"""
+import json
+import os
+import sys
+
+PLANT_DEFAULT = "os.RemoveAll(filepath.Join(heldDir, args[0]))"
+ENTRY_FILE = "cmd/ox/upload.go"
+DAEMON_PLANT = "return publish()"
+# Env vars that keep the reviewed branch's git metadata and memory files out of context.
+CONTEXT_ENV = ("CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS", "CLAUDE_CODE_DISABLE_CLAUDE_MDS")
+DAEMON_FILE = "internal/daemon/finalize.go"
+
+
+def arg(name):
+    argv = sys.argv[1:]
+    if name not in argv:
+        return None
+    i = argv.index(name)
+    return argv[i + 1] if i + 1 < len(argv) else ""
+
+
+def first_json_object(text):
+    decoder = json.JSONDecoder()
+    i = text.find("{")
+    while i != -1:
+        try:
+            obj, _ = decoder.raw_decode(text, i)
+            if isinstance(obj, dict):
+                return obj
+        except ValueError:
+            pass
+        i = text.find("{", i + 1)
+    return {}
+
+
+def diff_section(stdin):
+    """What a real cartographer maps: the diff between the BEGIN/END markers.
+    (The scope section lists every changed file, so matching all of stdin would
+    map every chunk. The old pipeline sent no markers: use all of stdin.)"""
+    start, end = stdin.find("<<<BEGIN DIFF"), stdin.find("<<<END DIFF")
+    return stdin[start:end] if start != -1 and end != -1 else stdin
+
+
+def respond(role, playbook, stdin, structured):
+    plant = os.environ.get("FAKE_PLANT", PLANT_DEFAULT)
+    if role == "cartographer":
+        sees_entry = ENTRY_FILE in diff_section(stdin) and os.environ.get("FAKE_NO_ENTRY_POINTS") != "1"
+        entry_points = (
+            [{"kind": "cobra-command", "name": "ox session upload <name>", "file": ENTRY_FILE, "line": 12,
+              "gate": "cobra ExactArgs(1)", "intent": "publish or discard a held session"}]
+            if sees_entry else []
+        )
+        if structured:
+            return {"entry_points": entry_points, "sinks": [], "trust_boundaries": [], "high_value_paths": [],
+                    "notes": []}
+        # The old free-form contract: markdown with "entry point" and "sink" sections.
+        body = "\n".join(f"- {e['name']} — {e['file']}:{e['line']}" for e in entry_points) or "(none in scope)"
+        return ("# Attack surface map\n\n## Entry points reached/touched by the diff\n\n" + body +
+                "\n\n## Sinks reached from each entry\n\n(none in scope)\n\n## Trust boundaries\n\n(none in scope)\n"
+                "\n## High-value paths\n\n(none in scope)\n\n## Notes for hunters\n\n" + "(none in scope)\n" * 30)
+    if role == "hunter":
+        findings = []
+        if "CLI input" in playbook and plant in stdin:
+            findings.append({
+                "class": "cli-input", "subclass": "path-traversal", "severity": "high",
+                "title": "Session name from argv reaches os.RemoveAll unvalidated",
+                "file": ENTRY_FILE, "line": 17,
+                "attack": "ox session upload --discard ../../.. deletes a directory outside the held-session cache",
+                "fix": "resolve the name against the directory listing and reject any path separator",
+            })
+        if "daemon IPC" in playbook and os.environ.get("FAKE_DAEMON_FINDING") == "1" and DAEMON_PLANT in stdin:
+            findings.append({
+                "class": "daemon-ipc", "subclass": "state-mutating-no-authz", "severity": "high",
+                "title": "Daemon finalize publishes without checking the caller",
+                "file": DAEMON_FILE, "line": 3,
+                "attack": "any local process on the socket triggers a publish",
+                "fix": "check the peer's credentials before publishing",
+            })
+        return {"findings": findings}
+    if role == "dedup":
+        items = [json.loads(line) for line in stdin.splitlines() if line.strip().startswith("{")]
+        return {"findings": items}
+    if role == "validator":
+        start = stdin.find("# Finding to validate")
+        finding = first_json_object(stdin[start:] if start != -1 else stdin)
+        return {**finding, "verdict": "confirmed", "verdict_reason": "fake validator: traced", "exploitability": 7}
+    return {}
+
+
+def main():
+    stdin = sys.stdin.read()
+    system = arg("--append-system-prompt") or ""
+    playbook = system.splitlines()[0] if system else ""
+    schema = arg("--json-schema")
+    budget = arg("--max-budget-usd")
+    cost = float(os.environ.get("FAKE_COST", "0.01"))
+    role = ("cartographer" if playbook.startswith("# Cartographer") else
+            "hunter" if playbook.startswith("# Hunter") else
+            "dedup" if playbook.startswith("# Dedup") else
+            "validator" if playbook.startswith("# Validator") else "unknown")
+    log = os.environ.get("FAKE_CLAUDE_LOG")
+    if log:
+        with open(log, "a") as f:
+            f.write(json.dumps({"role": role, "playbook": playbook, "stdin": stdin, "budget": budget,
+                                "schema": schema is not None, "tools": arg("--tools"),
+                                "model": arg("--model"), "setting_sources": arg("--setting-sources"),
+                                "env": {k: os.environ.get(k) for k in CONTEXT_ENV}}) + "\n")
+    if budget is not None and os.environ.get("FAKE_HONOR_BUDGET", "1") == "1" and cost > float(budget):
+        print(json.dumps({"type": "result", "subtype": "error_max_budget_usd", "is_error": True,
+                          "result": None, "total_cost_usd": round(float(budget) + 0.001, 6)}))
+        return 1
+    payload = respond(role, playbook, stdin, schema is not None)
+    envelope = {"type": "result", "subtype": "success", "is_error": False, "total_cost_usd": cost,
+                "permission_denials": [], "num_turns": 1}
+    if schema is not None:
+        envelope["result"] = ""
+        envelope["structured_output"] = payload
+    else:
+        envelope["result"] = payload if isinstance(payload, str) else json.dumps(payload)
+    print(json.dumps(envelope))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

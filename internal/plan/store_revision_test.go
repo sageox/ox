@@ -411,3 +411,124 @@ func TestKindsHint_ListsExactlyTheValidKinds(t *testing.T) {
 		t.Error("ValidKind accepted an unknown kind")
 	}
 }
+
+// TestSave_FullDirectoryNameAsSlugRevisesThatPlan covers the advice an
+// AmbiguousSlugError gives: pass the full dated directory name. Failure
+// prevented: the name was treated as a brand-new slug and minted a duplicate
+// plan at <today>-<full-dir-name> with a new id and link.
+func TestSave_FullDirectoryNameAsSlugRevisesThatPlan(t *testing.T) {
+	ledger := t.TempDir()
+	withLedger(t, ledger)
+	plansDir := filepath.Join(ledger, "data", "plans")
+	day1 := time.Date(2026, 10, 1, 9, 0, 0, 0, time.UTC)
+	day2 := time.Date(2026, 10, 2, 9, 0, 0, 0, time.UTC)
+	first := saveWithSlug(t, "team-glance", day1, "v1")
+	second := filepath.Join(plansDir, "2026-10-02-team-glance")
+	if err := os.MkdirAll(second, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeMetaForTest(second, Meta{Topic: "team glance", Slug: "team-glance", CreatedAt: day2}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Save("/fake/git/root", Input{Raw: "x"}, Result{}, nil, Meta{Topic: "t", Slug: "team-glance", CreatedAt: day2}); err == nil {
+		t.Fatal("precondition: the shared slug must be ambiguous")
+	}
+
+	dir, _, err := Save("/fake/git/root", Input{Raw: "v2"}, Result{}, []byte("<html><body>v2</body></html>"),
+		Meta{Topic: "Revision target", Slug: filepath.Base(first), CreatedAt: day2, Primary: PrimaryHTML})
+
+	if err != nil {
+		t.Fatalf("Save with the full directory name: %v", err)
+	}
+	if dir != first {
+		t.Fatalf("dir = %s, want the named plan %s", dir, first)
+	}
+	events, err := LoadEvents(first)
+	if err != nil || len(events) != 2 || events[1].Kind != EventRevised || events[0].PlanID != events[1].PlanID {
+		t.Fatalf("events = %+v err=%v, want [created, revised] with one plan id", events, err)
+	}
+	meta, err := LoadMeta(first)
+	if err != nil || meta.Slug != "team-glance" {
+		t.Errorf("slug = %q err=%v, want the plan's own slug kept", meta.Slug, err)
+	}
+	entries, _ := os.ReadDir(plansDir)
+	if len(entries) != 2 {
+		t.Errorf("plans dir has %d entries, want the original 2 (no duplicate)", len(entries))
+	}
+}
+
+// A full directory name that names a CLOSED plan is refused, never forked.
+func TestSave_FullDirectoryNameOfClosedPlanIsRefused(t *testing.T) {
+	ledger := t.TempDir()
+	withLedger(t, ledger)
+	day := time.Date(2026, 10, 1, 9, 0, 0, 0, time.UTC)
+	closed := saveWithSlug(t, "done-plan", day, "v1")
+	if _, err := AppendPlanEvent(context.Background(), closed, EventAbandoned, PlanEventFields{Reason: "dropped"}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err := Save("/fake/git/root", Input{Raw: "v2"}, Result{}, nil,
+		Meta{Topic: "t", Slug: filepath.Base(closed), CreatedAt: day.Add(48 * time.Hour)})
+
+	if err == nil {
+		t.Fatal("want an error for a closed plan's directory name")
+	}
+	entries, _ := os.ReadDir(filepath.Join(ledger, "data", "plans"))
+	if len(entries) != 1 {
+		t.Errorf("plans dir has %d entries, want 1: no dated duplicate may be minted", len(entries))
+	}
+}
+
+// A plan directory addressed by its exact name whose meta.json cannot be parsed
+// must fail the save, not fall through to a fresh dated duplicate. A directory
+// with no meta.json at all is still "not a plan" and stays a no-match.
+func TestResolveSaveDir_NamedDirWithUnreadableMetaIsAnError(t *testing.T) {
+	day := time.Date(2026, 9, 23, 9, 0, 0, 0, time.UTC)
+	ledger := t.TempDir()
+	withLedger(t, ledger)
+	existing := saveWithSlug(t, "named", day, "first")
+	name := filepath.Base(existing)
+
+	if err := os.WriteFile(filepath.Join(existing, planMetaFile), []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ResolveSaveDir("/fake/git/root", Meta{Topic: "x", Slug: name, CreatedAt: day}); err == nil {
+		t.Fatal("a named plan with corrupt meta.json must be an error, not a new dated duplicate")
+	}
+
+	// negative control: no meta.json is not a saved plan, so the name is an ordinary slug
+	if err := os.Remove(filepath.Join(existing, planMetaFile)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ResolveSaveDir("/fake/git/root", Meta{Topic: "x", Slug: name, CreatedAt: day}); err != nil {
+		t.Fatalf("a meta-less directory is not a plan and must not error: %v", err)
+	}
+}
+
+// Failure prevented: Save on an exact plan name whose meta.json is corrupt
+// minting a fresh dated duplicate (or rewriting the broken plan) instead of
+// failing. Both filesystem outcomes are asserted, not just the resolver.
+func TestSave_NamedDirWithCorruptMetaFailsWithoutSideEffects(t *testing.T) {
+	day := time.Date(2026, 9, 23, 9, 0, 0, 0, time.UTC)
+	ledger := t.TempDir()
+	withLedger(t, ledger)
+	existing := saveWithSlug(t, "named", day, "first")
+	name := filepath.Base(existing)
+	corrupt := []byte("{not json")
+	if err := os.WriteFile(filepath.Join(existing, planMetaFile), corrupt, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := Save("/fake/git/root", Input{Raw: "v2"}, Result{}, nil,
+		Meta{Topic: "x", Slug: name, CreatedAt: day.Add(24 * time.Hour)})
+	if err == nil {
+		t.Fatal("Save on a named plan with corrupt meta.json must fail")
+	}
+	entries, _ := os.ReadDir(filepath.Join(ledger, "data", "plans"))
+	if len(entries) != 1 {
+		t.Errorf("plans dir has %d entries, want 1: no dated duplicate may be minted", len(entries))
+	}
+	got, _ := os.ReadFile(filepath.Join(existing, planMetaFile))
+	if string(got) != string(corrupt) {
+		t.Errorf("existing plan's meta.json was rewritten: %q", got)
+	}
+}
