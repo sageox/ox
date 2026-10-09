@@ -1,6 +1,8 @@
 package gitserver
 
 import (
+	"bytes"
+	"log/slog"
 	"net/http"
 	"net/http/cgi"
 	"net/http/httptest"
@@ -191,7 +193,14 @@ func TestInstallCloneHelper_ScopeByCloneURL(t *testing.T) {
 	}
 
 	t.Run("install failure is logged, not fatal", func(t *testing.T) {
+		var buf bytes.Buffer
+		prev := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+		t.Cleanup(func() { slog.SetDefault(prev) })
+
 		installCloneHelper(filepath.Join(t.TempDir(), "missing"), "https://git.sageox.ai/x.git")
+		assert.Contains(t, buf.String(), "failed to install credential helper")
+		assert.Contains(t, buf.String(), "host=git.sageox.ai")
 	})
 }
 
