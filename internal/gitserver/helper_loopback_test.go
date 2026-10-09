@@ -154,3 +154,55 @@ func TestInstallCredentialHelper_LoopbackHTTPPushNeedsNoPrompt(t *testing.T) {
 	out, err = git("push", "origin", "main")
 	require.NoError(t, err, "%s", out)
 }
+
+// Failure prevented: the clone-time install skips loopback http (the original
+// bug) or installs a helper for a remote that must never receive credentials.
+func TestInstallCloneHelper_ScopeByCloneURL(t *testing.T) {
+	orig := DefaultHelperCommand()
+	t.Cleanup(func() { SetHelperCommand(orig) })
+	SetHelperCommand("!ox git-credential-helper")
+
+	tests := []struct {
+		cloneURL string
+		wantKey  string // "" = no helper
+	}{
+		{"https://git.sageox.ai/team/ctx.git", "credential.https://git.sageox.ai.helper"},
+		{"http://localhost:8080/team/ctx.git", "credential.http://localhost:8080.helper"},
+		{"http://127.0.0.1:8080/team/ctx.git", "credential.http://127.0.0.1:8080.helper"},
+		{"http://example.com/team/ctx.git", ""},
+		{"file:///tmp/bare.git", ""},
+		{"::not-a-url::", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.cloneURL, func(t *testing.T) {
+			dir := t.TempDir()
+			require.NoError(t, exec.Command("git", "-C", dir, "init", "-q").Run())
+			installCloneHelper(dir, tt.cloneURL)
+			out, err := exec.Command("git", "-C", dir, "config", "--local", "--get-regexp", `^credential\..*\.helper$`).Output()
+			if tt.wantKey == "" {
+				var exitErr *exec.ExitError
+				require.ErrorAs(t, err, &exitErr)
+				require.Equal(t, 1, exitErr.ExitCode())
+				return
+			}
+			require.NoError(t, err)
+			assert.Contains(t, string(out), tt.wantKey)
+		})
+	}
+
+	t.Run("install failure is logged, not fatal", func(t *testing.T) {
+		installCloneHelper(filepath.Join(t.TempDir(), "missing"), "https://git.sageox.ai/x.git")
+	})
+}
+
+func TestIsLoopbackHost(t *testing.T) {
+	tests := map[string]bool{
+		"localhost": true, "LOCALHOST": true, "127.0.0.1": true, "127.1.2.3": true, "::1": true,
+		"": false, "example.com": false, "0.0.0.0": false, "10.0.0.1": false, "localhost.evil.com": false,
+	}
+	for host, want := range tests {
+		t.Run(host, func(t *testing.T) {
+			assert.Equal(t, want, IsLoopbackHost(host))
+		})
+	}
+}

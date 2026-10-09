@@ -90,18 +90,7 @@ func TwoPhaseClone(ctx context.Context, cloneURL, repoPath string, kind manifest
 	// from here on it lives in .git/config. Host-scoped to the clone host so
 	// it never fires for unrelated remotes. Best-effort — file:// test clones
 	// have no host and unshallow is non-fatal anyway.
-	if u, perr := url.Parse(cloneURL); perr == nil {
-		if scheme, host := helperTarget(u); host != "" {
-			if err := InstallCredentialHelper(repoPath, HelperConfig{
-				Scheme:  scheme,
-				Host:    host,
-				Command: DefaultHelperCommand(),
-			}); err != nil {
-				slog.Warn("two-phase clone: failed to install credential helper",
-					"path", repoPath, "host", host, "error", err)
-			}
-		}
-	}
+	installCloneHelper(repoPath, cloneURL)
 
 	// materialize only .sageox/ to read the manifest.
 	// use --no-cone mode to support both file and directory patterns in Phase 2.
@@ -190,6 +179,27 @@ func phaseOneCloneArgs(cloneURL, repoPath string) []string {
 		cloneURL, repoPath,
 	)
 	return args
+}
+
+// installCloneHelper writes the credential helper for cloneURL's host into the
+// clone's .git/config. Best-effort: a failure is logged, never returned.
+func installCloneHelper(repoPath, cloneURL string) {
+	u, err := url.Parse(cloneURL)
+	if err != nil {
+		return
+	}
+	scheme, host := helperTarget(u)
+	if host == "" {
+		return
+	}
+	if err := InstallCredentialHelper(repoPath, HelperConfig{
+		Scheme:  scheme,
+		Host:    host,
+		Command: DefaultHelperCommand(),
+	}); err != nil {
+		slog.Warn("two-phase clone: failed to install credential helper",
+			"path", repoPath, "host", host, "error", err)
+	}
 }
 
 // cloneHost extracts the credential-helper host from a clone URL.
