@@ -239,6 +239,7 @@ func TestSyncScheduler_TeamContextIntegration(t *testing.T) {
 
 	// Isolate auth and shared team data as well as git credentials. A real
 	// bearer can trigger credential refresh even with a recent refresh time.
+	t.Setenv("OX_XDG_DISABLE", "")
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 
