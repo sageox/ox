@@ -22,6 +22,31 @@ import (
 	whisperstore "github.com/sageox/ox/internal/whisper/store"
 )
 
+// Team sync budgets. A pull gets its own timeout so one slow team cannot
+// expire the others; the cycle bound only guarantees the scheduler never hangs.
+// Vars (not consts) so tests can shrink them.
+var (
+	// teamPullTimeout bounds a single team's git pull. Matches the old
+	// shared 60s budget, now applied per team.
+	teamPullTimeout = 60 * time.Second
+
+	// teamCycleTimeout bounds one whole sync cycle: with 3 pulls in flight it
+	// leaves room for several slow teams while still capping a hung network.
+	teamCycleTimeout = 5 * time.Minute
+
+	// runTeamPull is the per-team pull; tests replace it to avoid real git.
+	runTeamPull = (*SyncScheduler).pullTeamContext
+)
+
+// teamPullConcurrency caps simultaneous team pulls. Each is a `git pull
+// --rebase`; fanning out one per team made a loaded host slower, which is what
+// made the pulls time out in the first place.
+const teamPullConcurrency = 3
+
+// teamBudgetExhaustedMsg is the skip reason reported for teams the cycle
+// budget ran out before reaching. It is not a sync failure.
+const teamBudgetExhaustedMsg = "sync budget exhausted before this team started"
+
 // pullTeamContexts syncs all team context repos from workspace registry (used by scheduler).
 // For repos that exist locally: pulls latest changes.
 // For repos that don't exist: spawns background clone (non-blocking).
@@ -38,9 +63,9 @@ func (s *SyncScheduler) pullTeamContexts(ctx context.Context) {
 	// anti-entropy: ensure missing workspaces get cloned
 	s.triggerMissingClones()
 
-	// bound background sync to 60s so a DNS/network hang doesn't block
-	// the scheduler for minutes (the caller ctx has no deadline)
-	teamCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	// bound the whole cycle so a DNS/network hang can't block the scheduler
+	// (the caller ctx has no deadline); each pull has its own, shorter budget
+	teamCtx, cancel := context.WithTimeout(ctx, teamCycleTimeout)
 	defer cancel()
 	// background scheduler path: per-team outcomes and setup errors are
 	// recorded on the workspace registry / logged inside doTeamSync, so the
@@ -55,7 +80,7 @@ func (s *SyncScheduler) pullTeamContexts(ctx context.Context) {
 // per-team status instead of inferring "synced" from the bare success of the
 // IPC round-trip.
 func (s *SyncScheduler) TeamSync(progress *ProgressWriter) ([]TeamSyncResult, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), teamCycleTimeout)
 	defer cancel()
 
 	// a manual sync means the user wants a retry now; lift kb scope backoff
@@ -216,19 +241,38 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 		targets = append(targets, syncTarget{ws: ws})
 	}
 
-	// sync eligible repos in parallel — each operates on its own repo path,
-	// and the network I/O (ls-remote, fetch, pull) dominates wall time
+	// sync eligible repos in parallel, at most teamPullConcurrency at a time —
+	// each operates on its own repo path, and the network I/O (ls-remote,
+	// fetch, pull) dominates wall time
 	type syncResult struct {
 		ws         WorkspaceState
 		err        error
 		pullRan    bool
+		skipped    bool // cycle budget ran out before this team started
 		duration   time.Duration
 		prePullSHA string
 	}
 	results := make([]syncResult, len(targets))
+	sem := make(chan struct{}, teamPullConcurrency)
 	var wg sync.WaitGroup
 
 	for i, t := range targets {
+		// waiting for a slot is bounded by the cycle budget: once it is gone
+		// the team is skipped, never started, and never marked as failed
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			results[i] = syncResult{ws: t.ws, skipped: true}
+			continue
+		}
+		// select picks at random when a freed slot and an expired budget are
+		// both ready; never start a pull on a context that is already done
+		if ctx.Err() != nil {
+			<-sem
+			results[i] = syncResult{ws: t.ws, skipped: true}
+			continue
+		}
+
 		s.workspaceRegistry.SetSyncInProgress(t.ws.ID, true)
 		if progress != nil {
 			_ = progress.WriteStage("syncing", fmt.Sprintf("Syncing team: %s", t.ws.TeamName))
@@ -237,17 +281,38 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 		wg.Add(1)
 		go func(idx int, ws WorkspaceState) {
 			defer wg.Done()
+			defer func() { <-sem }()
 			preSHA := s.captureHEAD(ws.Path)
 			start := time.Now()
-			outcome, pullErr := s.pullTeamContext(ctx, ws.Path)
+			// own budget per team, still bounded by the cycle context
+			pullCtx, cancelPull := context.WithTimeout(ctx, teamPullTimeout)
+			defer cancelPull()
+			outcome, pullErr := runTeamPull(s, pullCtx, ws.Path)
 			results[idx] = syncResult{ws: ws, err: pullErr, pullRan: outcome.PullRan, duration: time.Since(start), prePullSHA: preSHA}
 		}(i, t.ws)
 	}
 	wg.Wait()
 
+	// one line per cycle instead of one WARN per untried team
+	var budgetSkipped int
+	for _, r := range results {
+		if r.skipped {
+			budgetSkipped++
+		}
+	}
+	if budgetSkipped > 0 {
+		s.logger.Warn("team sync budget exhausted", "skipped", budgetSkipped, "total", len(targets), "cycle_budget", teamCycleTimeout)
+	}
+
 	// process results sequentially (registry updates, progress messages)
 	var syncedCount int
 	for _, r := range results {
+		if r.skipped {
+			// never tried: no failure, no workspace error, no backoff
+			addResult(r.ws, "skipped", teamBudgetExhaustedMsg)
+			skippedCount++
+			continue
+		}
 		s.workspaceRegistry.SetSyncInProgress(r.ws.ID, false)
 
 		if r.err != nil {
@@ -677,6 +742,12 @@ func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) (teamP
 // so kb sync and team-context sync share the same sparse application logic.
 func (s *SyncScheduler) applySparseCheckout(ctx context.Context, tcPath string) *manifest.ManifestConfig {
 	cfg := manifest.ParseFile(filepath.Join(tcPath, ".sageox", "sync.manifest"), manifest.RepoKindTeamContext)
+	// a done context fails every git call; the refresh retries next cycle and
+	// the pull error (if any) already explains why
+	if ctx.Err() != nil {
+		s.logger.Debug("skipping sparse-checkout refresh, context done", "path", tcPath, "error", ctx.Err())
+		return cfg
+	}
 	_ = applySparseFromManifest(ctx, tcPath, cfg, manifest.RepoKindTeamContext, s.logger)
 	return cfg
 }
