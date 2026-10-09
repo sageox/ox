@@ -71,8 +71,8 @@ From GitHub's `author_association` and user type — never from text.
 | `member` | `OWNER`, `MEMBER`, `COLLABORATOR` |
 | `external` | everything else, including a missing association |
 
-A comment whose GitHub account was deleted arrives with a null user. It is credited to `ghost`
-(GitHub's own placeholder login) with author id 0, so its heading still parses.
+A comment whose GitHub account was deleted arrives with a null user. It is credited to `unknown`
+with author id 0, so readers see the author is unknown and its heading still parses.
 
 ### What the daemon relays
 
@@ -250,8 +250,9 @@ network call. File names are only a prefilter: every slug of a repo starts with 
 cut to the shortest length any item number can force; `source_key` decides.
 
 - **Prime** adds one pointer when the board has live posts for this repo:
-  `<bulletin board="github" dir="…" this-repo="{owner}-{name}-*" live="N" hint="…"/>`. It never loads
-  post bodies.
+  `<bulletin board="github" dir="…" this-repo="{owner}-{name}-*" live="N" hint="…"/>`. After a rename
+  `this-repo` lists one glob per name that still has live posts, current name first, so every post
+  counted in `live` is reachable. It never loads post bodies.
 - **CodeDB** indexes the board's posts for this repo into the existing `pull_requests` / `issues`
   tables after the Ledger snapshots, so a board post wins over a Ledger snapshot for the same number.
   Rows stay after a post expires; GitHub remains the source of truth. Only this repo's posts trigger

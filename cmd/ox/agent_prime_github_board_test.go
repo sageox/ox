@@ -301,35 +301,40 @@ func TestLoadGitHubBoard_RenamedRepo(t *testing.T) {
 		{owner: "other", name: "service", kind: githubmirror.KindPullRequest, number: 7, expiresAt: future},
 	}
 
+	pr5 := githubmirror.Slug("acme", "api-v2", githubmirror.KindPullRequest, 5)
+	pr6 := githubmirror.Slug("acme", "api", githubmirror.KindPullRequest, 6)
+
 	tests := []struct {
 		name     string
 		ledger   func(t *testing.T) func() string
 		wantLive int
-		wantGlob string
+		// wantFound are the live posts a coworker following the pointer's globs
+		// must reach, by slug
+		wantFound []string
 	}{
 		{
-			name:     "the canonical name and the pre-rename name are both this repo",
-			ledger:   func(t *testing.T) func() string { return ledgerWithRelayState(t, "acme/api", "acme", "api-v2") },
-			wantLive: 2, // #5 under the new name, #6 from before the rename; #8 expired, #7 is another repo's
-			wantGlob: "acme-api-v2-*",
+			name:      "the canonical name and the pre-rename name are both this repo",
+			ledger:    func(t *testing.T) func() string { return ledgerWithRelayState(t, "acme/api", "acme", "api-v2") },
+			wantLive:  2, // #5 under the new name, #6 from before the rename; #8 expired, #7 is another repo's
+			wantFound: []string{pr5, pr6},
 		},
 		{
-			name:     "no relay state: only the remote's name is known",
-			ledger:   func(t *testing.T) func() string { return func() string { return t.TempDir() } },
-			wantLive: 1, // #6; the new name's posts are not recognizable without the relay's record
-			wantGlob: "acme-api-*",
+			name:      "no relay state: only the remote's name is known",
+			ledger:    func(t *testing.T) func() string { return func() string { return t.TempDir() } },
+			wantLive:  1, // #6; the new name's posts are not recognizable without the relay's record
+			wantFound: []string{pr6},
 		},
 		{
-			name:     "no ledger",
-			ledger:   func(t *testing.T) func() string { return func() string { return "" } },
-			wantLive: 1,
-			wantGlob: "acme-api-*",
+			name:      "no ledger",
+			ledger:    func(t *testing.T) func() string { return func() string { return "" } },
+			wantLive:  1,
+			wantFound: []string{pr6},
 		},
 		{
-			name:     "relay state for another repo is not trusted",
-			ledger:   func(t *testing.T) func() string { return ledgerWithRelayState(t, "acme/web", "acme", "web-v2") },
-			wantLive: 1,
-			wantGlob: "acme-api-*",
+			name:      "relay state for another repo is not trusted",
+			ledger:    func(t *testing.T) func() string { return ledgerWithRelayState(t, "acme/web", "acme", "web-v2") },
+			wantLive:  1,
+			wantFound: []string{pr6},
 		},
 	}
 	for _, tt := range tests {
@@ -343,7 +348,21 @@ func TestLoadGitHubBoard_RenamedRepo(t *testing.T) {
 
 			require.NotNil(t, info.GitHubBoard)
 			assert.Equal(t, tt.wantLive, info.GitHubBoard.Live)
-			assert.Equal(t, tt.wantGlob, info.GitHubBoard.ThisRepo, "the glob names the canonical slug prefix when the relay recorded one")
+
+			// follow the pointer the way a coworker would: every glob it names,
+			// in its directory. Each live post it counts must be reachable.
+			found := map[string]bool{}
+			for _, glob := range strings.Fields(info.GitHubBoard.ThisRepo) {
+				matches, err := filepath.Glob(filepath.Join(info.GitHubBoard.Dir, glob+".md"))
+				require.NoError(t, err)
+				for _, match := range matches {
+					found[filepath.Base(match)] = true
+				}
+			}
+			for _, slug := range tt.wantFound {
+				assert.True(t, found[slug+"-"+strings.Repeat("c", 8)+".md"],
+					"post %s is counted live but the pointer's globs %q do not reach it", slug, info.GitHubBoard.ThisRepo)
+			}
 		})
 	}
 

@@ -144,7 +144,9 @@ type GitHubBoardInfo struct {
 	Dir string `json:"dir"`
 	// ThisRepo is the filename glob that selects this repo's posts, e.g.
 	// "acme-api-*" (a post file is <slug>-<sha>.md, and a slug starts with the
-	// repo's "{owner}-{name}-" prefix).
+	// repo's "{owner}-{name}-" prefix). After a rename it holds one
+	// space-separated glob per name that still has live posts, current name
+	// first: "acme-api-v2-* acme-api-*".
 	ThisRepo string `json:"this_repo"`
 	// Live counts this repo's posts whose .meta.json expires_at is after now.
 	Live int `json:"live"`

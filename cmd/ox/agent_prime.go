@@ -2391,13 +2391,21 @@ func loadGitHubBoard(info *teamContextInfo, teamDir, projectRoot string, ledgerP
 		return
 	}
 
-	live := countLiveGitHubPosts(postsDir, entries, slugPrefixes, keyPrefixes, now)
+	live, spellingLive := countLiveGitHubPosts(postsDir, entries, slugPrefixes, keyPrefixes, now)
 	if live == 0 {
 		return
 	}
+	// one glob per spelling that has live posts, so the pointer reaches every
+	// post it counts: after a rename both the new and the old name's posts
+	var globs []string
+	for i, prefix := range slugPrefixes {
+		if spellingLive[i] {
+			globs = append(globs, prefix+"*")
+		}
+	}
 	info.GitHubBoard = &prime.GitHubBoardInfo{
 		Dir:      postsDir,
-		ThisRepo: slugPrefixes[0] + "*",
+		ThisRepo: strings.Join(globs, " "),
 		Live:     live,
 	}
 }
@@ -2444,14 +2452,15 @@ func hasAnyPrefix(s string, prefixes []string) bool {
 // countLiveGitHubPosts counts the posts in entries that belong to one repo and
 // have not expired. slugPrefixes and keyPrefixes list every spelling of the
 // repo (see loadGitHubBoard); a post matching any of them is this repo's.
+// spellingLive[i] reports whether any live post was filed under spelling i.
 // Everything is read from the server-written sidecar, never from the post. The
 // file name is only a cheap prefilter (a post file is <slug>-<sha>.meta.json,
 // so a repo's posts all start with its slug prefix). The sidecar's slug and
 // expires_at decide — plus its source_key when it has one, because a slug
 // prefix cannot tell "acme/api" from "acme/api-gateway" and the source key can.
 // A sidecar that cannot be read or decoded is skipped, not counted.
-func countLiveGitHubPosts(postsDir string, entries []os.DirEntry, slugPrefixes, keyPrefixes []string, now time.Time) int {
-	live := 0
+func countLiveGitHubPosts(postsDir string, entries []os.DirEntry, slugPrefixes, keyPrefixes []string, now time.Time) (live int, spellingLive []bool) {
+	spellingLive = make([]bool, len(slugPrefixes))
 	for _, entry := range entries {
 		if !isGitHubPostMeta(entry) || !hasAnyPrefix(entry.Name(), slugPrefixes) {
 			continue
@@ -2463,12 +2472,34 @@ func countLiveGitHubPosts(postsDir string, entries []os.DirEntry, slugPrefixes, 
 		if !hasAnyPrefix(meta.Slug, slugPrefixes) || !meta.ExpiresAt.After(now) {
 			continue
 		}
-		if meta.SourceKey != "" && !hasAnyPrefix(meta.SourceKey, keyPrefixes) {
+		spelling := postSpelling(meta, slugPrefixes, keyPrefixes)
+		if spelling < 0 {
 			continue
 		}
+		spellingLive[spelling] = true
 		live++
 	}
-	return live
+	return live, spellingLive
+}
+
+// postSpelling returns the index of the repo spelling a post was filed under,
+// or -1 when it is another repo's. The source_key decides when the post has
+// one; otherwise the slug does, first match winning — spellings are ordered
+// canonical first, and a shorter old name ("acme-api-") is also a prefix of a
+// longer new one ("acme-api-v2-").
+func postSpelling(meta *githubmirror.PostMeta, slugPrefixes, keyPrefixes []string) int {
+	for i := range slugPrefixes {
+		if meta.SourceKey != "" {
+			if strings.HasPrefix(meta.SourceKey, keyPrefixes[i]) {
+				return i
+			}
+			continue
+		}
+		if strings.HasPrefix(meta.Slug, slugPrefixes[i]) {
+			return i
+		}
+	}
+	return -1
 }
 
 // discoverMemoryFiles lists .md files in a directory, sorted reverse-chronologically.
