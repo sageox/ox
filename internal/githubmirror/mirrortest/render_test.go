@@ -69,6 +69,9 @@ created: 2026-09-28T17:02:11Z
 merged: 2026-10-08T16:59:40Z
 last_material_change: 2026-10-08T16:59:40Z
 review: {approved: [avery-dev]}
+comment_metadata:
+  - {}
+  - {}
 files: [internal/daemon/github_sync.go]
 omitted: {bot_comments: 9, withheld: 1, hidden_spans: 0}
 ---
@@ -109,6 +112,47 @@ func TestRenderPost_Deterministic(t *testing.T) {
 	second := mirrortest.RenderPost(testRepo, item, nil)
 	if string(first) != string(second) {
 		t.Fatalf("two renders of the same item differ:\n%s\n---\n%s", first, second)
+	}
+}
+
+// inline locations must survive the scanned post without hidden text or withheld paths escaping into metadata.
+func TestRenderPost_PreservesCleanInlineMetadata(t *testing.T) {
+	t.Parallel()
+
+	line := 17
+	item := githubmirror.Item{
+		Kind: githubmirror.KindPullRequest, Number: 8, State: githubmirror.StateOpen,
+		Title: "Inline locations", Author: memberAuthor, CreatedAt: at(1, 9), LastMaterialChangeAt: at(1, 9),
+		Comments: []githubmirror.Comment{
+			{ID: 1, Author: reviewerAuthor, Body: "Review", CreatedAt: at(1, 9), Path: "src/<!-- hidden -->file.go", Line: &line},
+			{ID: 2, Author: reviewerAuthor, Body: "Outdated", CreatedAt: at(1, 10), Path: "src/outdated.go"},
+			{ID: 3, Author: externalAuthor, Body: "Discussion", CreatedAt: at(1, 11)},
+			{ID: 4, Author: externalAuthor, Body: "Flagged", CreatedAt: at(1, 12), Path: "private-path.go", Line: &line},
+		},
+	}
+	rendered := mirrortest.RenderPost(testRepo, item, map[int64]bool{4: true})
+	post, err := githubmirror.ParsePost(rendered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(rendered), "<!-- hidden -->") || strings.Contains(string(rendered), "private-path.go") {
+		t.Fatalf("hidden or withheld path was published: %s", rendered)
+	}
+	if len(post.Comments) != 4 {
+		t.Fatalf("got %d comments, want 4", len(post.Comments))
+	}
+	current, outdated, discussion, withheld := post.Comments[0], post.Comments[1], post.Comments[2], post.Comments[3]
+	if current.Path != "src/[hidden text removed]file.go" || current.Line == nil || *current.Line != line {
+		t.Errorf("current inline metadata = %+v", current)
+	}
+	if outdated.Path != "src/outdated.go" || outdated.Line != nil {
+		t.Errorf("outdated inline metadata = %+v", outdated)
+	}
+	if discussion.Path != "" || discussion.Line != nil || withheld.Path != "" || withheld.Line != nil || !withheld.Withheld {
+		t.Errorf("discussion/withheld metadata = %+v / %+v", discussion, withheld)
+	}
+	if post.Header.Omitted.HiddenSpans != 1 {
+		t.Errorf("hidden spans = %d, want 1", post.Header.Omitted.HiddenSpans)
 	}
 }
 

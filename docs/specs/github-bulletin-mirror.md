@@ -2,7 +2,7 @@
 
 **Status:** in progress · **Epic:** ox-zjuv · **Plan:** `ox plan view 2026-10-09-github-bulletin-mirror`
 
-Every pull request and issue a team works on becomes one small, read-only post on the team's
+Each eligible pull request and issue within the 90-day activity window becomes a read-only post on the team's
 `github` bulletin board. The post is injection-scanned, replaced in place when the item changes,
 and expires 90 days after the last material change. AI coworkers in every repo see recent GitHub
 context without the bot noise. The mirror runs beside the Ledger `data/github` sync and replaces
@@ -27,7 +27,7 @@ flowchart LR
 | Injection scan | Every segment (title, body, each comment), before anything is published. Fails closed |
 | Expiry | `last_material_change_at + 90d`, open and closed alike |
 | Private repos | The client sends `repo.private`; the server enforces the team's opt-in |
-| Rollout | Beside the Ledger sync → readers switch → Ledger `data/github` writer retired |
+| Rollout | Beside the Ledger sync → verify board coverage → Ledger `data/github` writer retired |
 
 ## Trust boundary
 
@@ -99,12 +99,12 @@ From GitHub's `author_association` and user type — never from text.
 `sha256:` + lowercase hex of the canonical JSON (sorted keys, no insignificant whitespace, UTF-8,
 every key always present — `draft: false`, `path: ""`) of exactly these fields, after Build. String
 escaping follows Go's `encoding/json` with HTML escaping off: `<`, `>` and `&` stay literal, while
-U+2028 and U+2029 are written as ` ` / ` ` and `\b` / `\f` use short escapes — an
-implementation in another language must match these bytes. Golden vectors live in
+U+2028 and U+2029 are encoded as the six ASCII bytes `\u2028` and `\u2029`; `\b` / `\f` use short
+escapes. An implementation in another language must match these bytes. Golden vectors live in
 `internal/githubmirror/hash_test.go` (`TestChangeHash_Golden`).
 
 ```
-kind, number, state, draft, title, body, author.id,
+kind, number, state, draft, title, body, author_id,
 labels (sorted),
 reviews: [{author_id, state}] (sorted by author_id),
 comments: [{id, author_id, body, path}] (sorted by id),
@@ -158,6 +158,7 @@ created: 2026-09-28T17:02:11Z
 merged: 2026-10-08T16:59:40Z
 last_material_change: 2026-10-08T16:59:40Z
 review: {approved: [avery-dev]}
+comment_metadata: [{path: internal/daemon/github_sync.go, line: 42}, {}]
 files: [internal/daemon/github_sync.go]
 omitted: {bot_comments: 9, withheld: 0, hidden_spans: 0}
 ---
@@ -183,6 +184,14 @@ everything between the `# …` title line and the first line that is exactly `##
 `## Files touched` (a member's own `## Summary` stays in the description); each comment starts
 with a `### @login · tier · RFC3339` heading; a withheld comment's body is exactly the withheld
 line. The `## Discussion` section is omitted when there are no human comments.
+
+The optional `comment_metadata` array has one entry per rendered discussion comment, in the
+same order, including withheld placeholders and excluding bots. Each entry carries `path`
+and nullable `line`: an empty path denotes a conversation comment; an inline comment keeps its
+path even when GitHub no longer supplies a line number. Withheld entries are empty objects.
+When present, the array length must match the discussion; a line must be positive and have a
+nonempty path. Readers accept older posts without this field. Inline paths receive the same
+structural cleanup as other published paths and belong in the server's prepublication scan.
 
 Rules the renderer guarantees so relayed text can never forge structure: line breaks in the title
 and in file paths are flattened to spaces; inside a description or comment body, any line that is
@@ -230,7 +239,7 @@ daemon logs single-line key=value records and exposes last relay time, backlog a
 | Step | Change | Gate to the next step |
 |---|---|---|
 | 1 | Run both: Ledger sync unchanged, mirror on for the SageOx team | 2 weeks; no member text wrongly withheld |
-| 2 | Readers switch: CodeDB and prime use the board | Every Ledger item has a live post |
+| 2 | Verify board coverage: CodeDB and prime already consume available posts | Every eligible item within the 90-day activity window has a live post |
 | 3 | Retire the Ledger `data/github` writer; enable customers | One release with no missing items |
 
 Server-side work is a private-owner follow-up.

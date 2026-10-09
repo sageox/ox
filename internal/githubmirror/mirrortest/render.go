@@ -35,6 +35,16 @@ func RenderPost(repo githubmirror.Repo, it githubmirror.Item, withheld map[int64
 	comments := renderableComments(it.Comments)
 
 	header := postHeader(repo, it, trust, countWithheld(comments, withheld))
+	for _, c := range comments {
+		var metadata githubmirror.PostCommentMetadata
+		if !withheld[c.ID] {
+			var removed int
+			metadata.Path, removed = githubmirror.Cleanup(c.Path)
+			metadata.Line = c.Line
+			header.Omitted.HiddenSpans += removed
+		}
+		header.CommentMetadata = append(header.CommentMetadata, metadata)
+	}
 	front, err := marshalHeader(header)
 	if err != nil {
 		// every field is a plain string, number, bool, time or slice of

@@ -14,7 +14,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sageox/ox/internal/codedb/query"
 	"github.com/sageox/ox/internal/codedb/store"
+	"github.com/sageox/ox/internal/githubmirror"
+	"github.com/sageox/ox/internal/githubmirror/mirrortest"
 	"github.com/sageox/ox/internal/ledger"
 )
 
@@ -163,6 +166,59 @@ func openBoardStore(t *testing.T) *store.Store {
 	require.NoError(t, err)
 	t.Cleanup(func() { s.Close() })
 	return s
+}
+
+// board replacement must preserve inline reviewer classifications without reviving withheld text.
+func TestIndexGitHubBoard_PreservesReviewerClassifications(t *testing.T) {
+	t.Parallel()
+
+	s := openBoardStore(t)
+	ctx := context.Background()
+	created := time.Date(2026, 10, 1, 8, 0, 0, 0, time.UTC)
+	line := 12
+	person := func(login string, id int64) githubmirror.Author {
+		return githubmirror.Author{Login: login, ID: id, Type: "User", Association: "MEMBER"}
+	}
+	item := githubmirror.Item{
+		Kind: githubmirror.KindPullRequest, Number: 91, State: githubmirror.StateOpen,
+		Title: "Preserve review classifications", Author: person("author-one", 1),
+		CreatedAt: created, LastMaterialChangeAt: created,
+		Comments: []githubmirror.Comment{
+			{ID: 1, Author: person("reviewer-one", 2), Body: "Current inline review", Path: "current.go", Line: &line, CreatedAt: created},
+			{ID: 2, Author: githubmirror.Author{Login: "automation[bot]", ID: 3, Type: "Bot"}, Body: "Bot noise", Path: "bot.go", CreatedAt: created},
+			{ID: 3, Author: person("withheld-reviewer", 4), Body: "Withheld text", Path: "withheld.go", Line: &line, CreatedAt: created},
+			{ID: 4, Author: person("discussant-one", 5), Body: "Discussion", CreatedAt: created},
+			{ID: 5, Author: person("reviewer-two", 6), Body: "Outdated inline review", Path: "outdated.go", CreatedAt: created},
+		},
+	}
+	rendered := mirrortest.RenderPost(githubmirror.Repo{Owner: "acme", Name: "api"}, item, map[int64]bool{3: true})
+	require.NotContains(t, string(rendered), "Withheld text")
+	require.NotContains(t, string(rendered), "withheld.go")
+	dir := t.TempDir()
+	path := writeBoardFile(t, dir, "acme-api-pr-91.md", string(rendered))
+	setBoardMtime(t, path, created)
+
+	for pass, wantIndexed := range []int{1, 0, 1} {
+		if pass == 2 {
+			item.Title = "Updated review classifications"
+			rendered = mirrortest.RenderPost(githubmirror.Repo{Owner: "acme", Name: "api"}, item, map[int64]bool{3: true})
+			require.NoError(t, os.WriteFile(path, rendered, 0o644))
+			setBoardMtime(t, path, created.Add(time.Second))
+		}
+		stats, err := IndexGitHubBoard(ctx, s, dir, boardRepoFullName, nil)
+		require.NoError(t, err)
+		assert.Equal(t, wantIndexed, stats.PRsIndexed)
+		rows, err := query.TriagePRs(ctx, s, query.TriageOpts{})
+		require.NoError(t, err)
+		require.Len(t, rows, 1)
+		assert.Equal(t, item.Title, rows[0].Title)
+		assert.Equal(t, 2, rows[0].Reviewers)
+		assert.Equal(t, 1, rows[0].Discussants)
+		assert.Equal(t, 3, rows[0].Comments)
+		assert.Equal(t, 1, countRows(t, s, `SELECT COUNT(*) FROM pr_comments WHERE path = 'current.go' AND line = 12`))
+		assert.Equal(t, 1, countRows(t, s, `SELECT COUNT(*) FROM pr_comments WHERE path = 'outdated.go' AND line IS NULL`))
+		assert.Zero(t, countRows(t, s, `SELECT COUNT(*) FROM pr_comments WHERE body IN ('Withheld text', 'Bot noise')`))
+	}
 }
 
 func writeBoardFile(t *testing.T, dir, name, content string) string {

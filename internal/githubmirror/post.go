@@ -76,7 +76,29 @@ func ParsePost(data []byte) (*Post, error) {
 	if err := parseBody(post, body); err != nil {
 		return nil, err
 	}
+	if err := attachCommentMetadata(post); err != nil {
+		return nil, err
+	}
 	return post, nil
+}
+
+// attachCommentMetadata keeps old posts readable while rejecting positional metadata that cannot match.
+func attachCommentMetadata(post *Post) error {
+	metadata := post.Header.CommentMetadata
+	if metadata == nil {
+		return nil
+	}
+	if len(metadata) != len(post.Comments) {
+		return fmt.Errorf("%w: comment metadata count does not match Discussion", ErrInvalidPost)
+	}
+	for i, entry := range metadata {
+		if entry.Line != nil && (*entry.Line <= 0 || entry.Path == "") {
+			return fmt.Errorf("%w: comment metadata %d line requires a positive value and a path", ErrInvalidPost, i)
+		}
+		post.Comments[i].Path = entry.Path
+		post.Comments[i].Line = entry.Line
+	}
+	return nil
 }
 
 // splitFrontMatter returns the YAML between the first line "---" and the next

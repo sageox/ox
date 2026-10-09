@@ -361,6 +361,8 @@ func indexBoardPR(ctx context.Context, s *store.Store, bp boardPost) error {
 			PrID:      prID,
 			Author:    toNullString(c.Login),
 			Body:      toNullString(c.Body),
+			Path:      toNullString(c.Path),
+			Line:      ptrIntToNullInt64(c.Line),
 			CreatedAt: timeToNullInt64(c.CreatedAt),
 		}); err != nil {
 			return fmt.Errorf("insert PR %d comment: %w", header.Number, err)

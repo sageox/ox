@@ -235,24 +235,25 @@ type Fetcher interface {
 // PostHeader is the YAML front matter of a rendered post on the github board.
 // The server writes it; CodeDB and prime read it.
 type PostHeader struct {
-	Source             string     `yaml:"source"` // always "github"
-	Repo               string     `yaml:"repo"`   // owner/name
-	Kind               string     `yaml:"kind"`
-	Number             int        `yaml:"number"`
-	URL                string     `yaml:"url"`
-	State              string     `yaml:"state"`
-	Draft              bool       `yaml:"draft,omitempty"`
-	Title              string     `yaml:"title"`
-	Author             PostAuthor `yaml:"author"`
-	Trust              string     `yaml:"trust"`
-	Labels             []string   `yaml:"labels,omitempty"`
-	Created            time.Time  `yaml:"created"`
-	Closed             *time.Time `yaml:"closed,omitempty"`
-	Merged             *time.Time `yaml:"merged,omitempty"`
-	LastMaterialChange time.Time  `yaml:"last_material_change"`
-	Review             PostReview `yaml:"review,omitempty"`
-	Files              []string   `yaml:"files,omitempty"`
-	Omitted            PostOmit   `yaml:"omitted"`
+	Source             string                `yaml:"source"` // always "github"
+	Repo               string                `yaml:"repo"`   // owner/name
+	Kind               string                `yaml:"kind"`
+	Number             int                   `yaml:"number"`
+	URL                string                `yaml:"url"`
+	State              string                `yaml:"state"`
+	Draft              bool                  `yaml:"draft,omitempty"`
+	Title              string                `yaml:"title"`
+	Author             PostAuthor            `yaml:"author"`
+	Trust              string                `yaml:"trust"`
+	Labels             []string              `yaml:"labels,omitempty"`
+	Created            time.Time             `yaml:"created"`
+	Closed             *time.Time            `yaml:"closed,omitempty"`
+	Merged             *time.Time            `yaml:"merged,omitempty"`
+	LastMaterialChange time.Time             `yaml:"last_material_change"`
+	Review             PostReview            `yaml:"review,omitempty"`
+	CommentMetadata    []PostCommentMetadata `yaml:"comment_metadata,omitempty"`
+	Files              []string              `yaml:"files,omitempty"`
+	Omitted            PostOmit              `yaml:"omitted"`
 }
 
 type PostAuthor struct {
@@ -264,6 +265,12 @@ type PostAuthor struct {
 type PostReview struct {
 	Approved         []string `yaml:"approved,omitempty"`
 	ChangesRequested []string `yaml:"changes_requested,omitempty"`
+}
+
+// PostCommentMetadata preserves inline locations in Discussion order, including withheld entries.
+type PostCommentMetadata struct {
+	Path string `yaml:"path,omitempty"`
+	Line *int   `yaml:"line,omitempty"`
 }
 
 type PostOmit struct {
@@ -279,6 +286,8 @@ type PostComment struct {
 	Trust     string
 	CreatedAt time.Time
 	Body      string
+	Path      string
+	Line      *int
 	Withheld  bool
 }
 

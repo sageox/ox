@@ -189,6 +189,32 @@ func TestParsePost_Rejects(t *testing.T) {
 	}
 }
 
+// malformed positional metadata must not silently classify another comment as an inline review.
+func TestParsePost_RejectsInvalidCommentMetadata(t *testing.T) {
+	t.Parallel()
+
+	body := "# PR #7 — A title\n\n## Discussion\n\n### @reviewer-one · member · 2026-10-02T10:00:00Z\n\nReview.\n"
+	tests := []struct {
+		name     string
+		metadata string
+	}{
+		{"missing entry", "[]"},
+		{"extra entry", "[{}, {}]"},
+		{"zero line", "[{path: file.go, line: 0}]"},
+		{"negative line", "[{path: file.go, line: -1}]"},
+		{"line without path", "[{line: 12}]"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := githubmirror.ParsePost(document(memberHeader+"comment_metadata: "+tt.metadata+"\n", body))
+			if !errors.Is(err, githubmirror.ErrInvalidPost) {
+				t.Fatalf("ParsePost error = %v, want ErrInvalidPost", err)
+			}
+		})
+	}
+}
+
 func TestParsePost_Body(t *testing.T) {
 	t.Parallel()
 
