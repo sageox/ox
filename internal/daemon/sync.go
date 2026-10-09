@@ -1506,6 +1506,9 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 	s.workspaceRegistry.ClearSyncFailures("ledger")
 	s.clearErrors("ledger")
 	if s.issues != nil {
+		// a pulling ledger is cloned: drop a stale clone_failed (it would
+		// otherwise keep `ox sync` reporting NOT synced after recovery)
+		s.issues.ClearIssue(IssueTypeCloneFailed, "ledger")
 		s.issues.ClearIssue(IssueTypeMergeConflict, "ledger")
 		s.issues.ClearIssue(IssueTypeSyncBackoff, "ledger")
 		s.issues.ClearIssue(IssueTypeDiverged, "ledger")
@@ -2396,6 +2399,10 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 				return result, nil
 			}
 			// fall through to clone below
+		} else if isCacheOnlyDir(payload.RepoPath) {
+			// CodeDB opened its shared index before the first clone: keep the
+			// cache in place; adoptCacheOnlyTarget carries it into the clone.
+			s.logger.Debug("checkout: target holds only a CodeDB cache, keeping it", "path", payload.RepoPath)
 		} else {
 			// directory exists but not a git repo - self-healing: move aside and clone fresh
 			// this handles corrupt/incomplete clones that need recovery
@@ -2659,7 +2666,19 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 		// lock for this exact path — but os.Rename onto an existing
 		// directory fails safely rather than merging into it either way),
 		// this fails loudly instead of silently corrupting either side.
+		//
+		// One exception: a target holding only a .sageox/cache skeleton is
+		// not a clone. CodeDB creates its shared index at
+		// <ledger>/.sageox/cache/codedb as soon as it opens, which can be
+		// before the first clone lands. Carry that cache into the temp clone
+		// so the swap succeeds instead of failing "file exists" forever.
+		restoreCache, err := adoptCacheOnlyTarget(tempPath, payload.RepoPath)
+		if err != nil {
+			s.logger.Warn("checkout: could not adopt cache-only target", "path", payload.RepoPath, "error", err)
+		}
 		if err := os.Rename(tempPath, payload.RepoPath); err != nil {
+			// the temp clone is deleted on return; give the adopted cache back
+			restoreCache()
 			return fmt.Errorf("failed to move completed clone into place: %w", err)
 		}
 		return nil
@@ -2977,4 +2996,81 @@ func gitHeadSHA(ctx context.Context, repoPath string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// isCacheOnlyDir reports whether dir holds nothing except
+// .sageox/cache (optionally empty), all real directories. That is what CodeDB
+// leaves when it opens its shared index before the first clone lands; it is
+// not a clone and must not be treated as one, nor moved aside as corrupt.
+func isCacheOnlyDir(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 1 || entries[0].Name() != ".sageox" || !entries[0].IsDir() {
+		return false
+	}
+	inner, err := os.ReadDir(filepath.Join(dir, ".sageox"))
+	if err != nil || len(inner) > 1 {
+		return false
+	}
+	return len(inner) == 0 || (inner[0].Name() == "cache" && inner[0].IsDir())
+}
+
+// adoptCacheOnlyTarget handles a clone target that exists but holds nothing
+// except <target>/.sageox/cache. It moves that cache into the fresh clone at
+// tempPath and removes the empty skeleton so the caller's rename can land.
+// A target with any other content, or a cache that is not a real directory,
+// is left alone and the rename fails loudly as before.
+//
+// The returned restore func (never nil) moves an adopted cache back to target;
+// call it if the rename fails, because the temp clone is then deleted with the
+// cache inside it.
+func adoptCacheOnlyTarget(tempPath, target string) (restore func(), err error) {
+	restore = func() {}
+	if !isCacheOnlyDir(target) {
+		return restore, nil
+	}
+	sageoxDir := filepath.Join(target, ".sageox")
+	inner, err := os.ReadDir(sageoxDir)
+	if err != nil {
+		return restore, err
+	}
+	if len(inner) == 1 {
+		// never move local data through a symlinked .sageox in the clone
+		tempSageox := filepath.Join(tempPath, ".sageox")
+		if fi, lerr := os.Lstat(tempSageox); lerr == nil && !fi.IsDir() {
+			return restore, fmt.Errorf("clone's .sageox is not a directory")
+		}
+		src := filepath.Join(sageoxDir, "cache")
+		dst := filepath.Join(tempSageox, "cache")
+		if _, lerr := os.Lstat(dst); lerr == nil {
+			// the clone already ships a cache dir; the old one is derived data
+			if err := os.RemoveAll(src); err != nil {
+				return restore, err
+			}
+		} else {
+			if err := os.MkdirAll(tempSageox, 0755); err != nil {
+				return restore, err
+			}
+			if err := os.Rename(src, dst); err != nil {
+				return restore, err
+			}
+			restore = func() {
+				if _, lerr := os.Lstat(src); lerr == nil {
+					return
+				}
+				if os.MkdirAll(sageoxDir, 0755) == nil {
+					_ = os.Rename(dst, src)
+				}
+			}
+		}
+	}
+	// remove only empty directories; never recurse into unexpected content
+	if err := os.Remove(sageoxDir); err != nil {
+		restore()
+		return func() {}, err
+	}
+	if err := os.Remove(target); err != nil {
+		restore()
+		return func() {}, err
+	}
+	return restore, nil
 }
