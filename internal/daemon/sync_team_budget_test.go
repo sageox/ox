@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -80,9 +81,12 @@ func resultsByPath(results []TeamSyncResult) map[string]TeamSyncResult {
 func TestDoTeamSync_SlowTeamDoesNotFailOthers(t *testing.T) {
 	scheduler, _, _ := newTeamBudgetScheduler(t, 4)
 	var slowTeamPath atomic.Value
+	var slowElapsed atomic.Int64
 	overrideTeamBudgets(t, 150*time.Millisecond, 5*time.Second, func(ctx context.Context, path string) (teamPullOutcome, error) {
 		if p, _ := slowTeamPath.Load().(string); p == path {
+			begin := time.Now()
 			<-ctx.Done() // blocks until its own budget expires
+			slowElapsed.Store(int64(time.Since(begin)))
 			return teamPullOutcome{PullRan: true}, fmt.Errorf("pull failed: %w", ctx.Err())
 		}
 		// each sibling fits its own budget, but the one queued behind the
@@ -113,6 +117,11 @@ func TestDoTeamSync_SlowTeamDoesNotFailOthers(t *testing.T) {
 	}
 	failures, _ := scheduler.workspaceRegistry.GetSyncRetryInfo(contexts[1].TeamID)
 	assert.Zero(t, failures, "healthy teams must not enter backoff")
+
+	// the slow pull must be cut off by its own 150ms budget, not by the 5s
+	// cycle context; without a per-team timeout this would run ~5s
+	assert.Less(t, time.Duration(slowElapsed.Load()), 2*time.Second, "slow team expired on the cycle budget, not its own")
+	assert.Greater(t, time.Duration(slowElapsed.Load()), time.Duration(0), "slow team pull never ran")
 }
 
 func TestDoTeamSync_ParallelismIsBounded(t *testing.T) {
@@ -194,4 +203,37 @@ func TestApplySparseCheckout_SkipsQuietlyOnDoneContext(t *testing.T) {
 	assert.NotNil(t, cfg, "manifest config is still returned so sync intervals apply")
 	assert.NotContains(t, logs.String(), "level=WARN", "a done context must not produce a WARN")
 	assert.NotContains(t, logs.String(), "sparse-checkout set failed")
+}
+
+// Background cycle and on-demand TeamSync are separate doTeamSync calls; the
+// pull cap must hold across both, not per call.
+func TestDoTeamSync_ParallelismBoundedAcrossOverlappingCalls(t *testing.T) {
+	scheduler, _, _ := newTeamBudgetScheduler(t, 6)
+
+	var running, peak atomic.Int32
+	overrideTeamBudgets(t, 5*time.Second, 30*time.Second, func(ctx context.Context, path string) (teamPullOutcome, error) {
+		n := running.Add(1)
+		for {
+			p := peak.Load()
+			if n <= p || peak.CompareAndSwap(p, n) {
+				break
+			}
+		}
+		time.Sleep(80 * time.Millisecond)
+		running.Add(-1)
+		return teamPullOutcome{PullRan: true}, nil
+	})
+
+	var wg sync.WaitGroup
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := scheduler.doTeamSync(context.Background(), nil, true)
+			assert.NoError(t, err)
+		}()
+	}
+	wg.Wait()
+
+	assert.LessOrEqual(t, int(peak.Load()), teamPullConcurrency, "overlapping syncs must share the pull slots")
 }

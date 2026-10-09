@@ -134,6 +134,13 @@ type SyncScheduler struct {
 	credentialRefreshInProgress bool
 	lastTeamDiscovery           time.Time // dedup concurrent team discovery calls
 
+	// teamPullSlots is the scheduler-wide cap on concurrent team pulls, shared
+	// by the background cycle and on-demand TeamSync so overlapping calls
+	// cannot exceed teamPullConcurrency together. Built lazily (see
+	// teamPullSemaphore) so zero-value schedulers in tests still work.
+	teamPullSlotsOnce sync.Once
+	teamPullSlots     chan struct{}
+
 	// lastWedgeCheck tracks when checkAndRunGC last attempted a ledger
 	// wedge check (the live-fetch-confirming call to ledgerSyncWedged) —
 	// deliberately separate from workspaceRegistry's LastGCTime, which any

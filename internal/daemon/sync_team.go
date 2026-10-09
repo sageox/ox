@@ -43,6 +43,15 @@ var (
 // made the pulls time out in the first place.
 const teamPullConcurrency = 3
 
+// teamPullSemaphore returns the scheduler-wide pull slots, creating them on
+// first use.
+func (s *SyncScheduler) teamPullSemaphore() chan struct{} {
+	s.teamPullSlotsOnce.Do(func() {
+		s.teamPullSlots = make(chan struct{}, teamPullConcurrency)
+	})
+	return s.teamPullSlots
+}
+
 // teamBudgetExhaustedMsg is the skip reason reported for teams the cycle
 // budget ran out before reaching. It is not a sync failure.
 const teamBudgetExhaustedMsg = "sync budget exhausted before this team started"
@@ -253,8 +262,21 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 		prePullSHA string
 	}
 	results := make([]syncResult, len(targets))
-	sem := make(chan struct{}, teamPullConcurrency)
+	sem := s.teamPullSemaphore()
 	var wg sync.WaitGroup
+
+	// pulls finish out of order from several goroutines; serialize writes and
+	// report each completion so the client's idle timer sees steady progress
+	// while later teams wait for a slot
+	var progressMu sync.Mutex
+	reportProgress := func(stage, msg string) {
+		if progress == nil {
+			return
+		}
+		progressMu.Lock()
+		defer progressMu.Unlock()
+		_ = progress.WriteStage(stage, msg)
+	}
 
 	for i, t := range targets {
 		// waiting for a slot is bounded by the cycle budget: once it is gone
@@ -274,9 +296,7 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 		}
 
 		s.workspaceRegistry.SetSyncInProgress(t.ws.ID, true)
-		if progress != nil {
-			_ = progress.WriteStage("syncing", fmt.Sprintf("Syncing team: %s", t.ws.TeamName))
-		}
+		reportProgress("syncing", fmt.Sprintf("Syncing team: %s", t.ws.TeamName))
 
 		wg.Add(1)
 		go func(idx int, ws WorkspaceState) {
@@ -289,6 +309,7 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 			defer cancelPull()
 			outcome, pullErr := runTeamPull(s, pullCtx, ws.Path)
 			results[idx] = syncResult{ws: ws, err: pullErr, pullRan: outcome.PullRan, duration: time.Since(start), prePullSHA: preSHA}
+			reportProgress("syncing", fmt.Sprintf("Pulled team: %s", ws.TeamName))
 		}(i, t.ws)
 	}
 	wg.Wait()
