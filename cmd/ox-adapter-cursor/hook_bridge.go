@@ -216,6 +216,7 @@ func runCursorOx(ctx context.Context, executable, cwd, event string, input []byt
 	cmd.Stdout, cmd.Stderr = out, errOut
 	cmd.WaitDelay = 250 * time.Millisecond
 	configureCursorHookProcess(cmd)
+	defer cleanupCursorHookProcess(cmd)
 	err := cmd.Run()
 	if out.overflow || errOut.overflow {
 		return nil, errCursorHookOutputLimit

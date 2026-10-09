@@ -73,7 +73,7 @@ func runAgentSessionResume(inst *agentinstance.Instance, _ []string) error {
 		excluded    int
 		sessionName string
 	)
-	if err := session.UpdateRecordingStateForAgent(projectRoot, inst.AgentID, func(s *session.RecordingState) {
+	if err := updateRecordingControl(projectRoot, state, session.LifecycleActionResume, func(s *session.RecordingState) {
 		resumeSeq = s.EntryCount
 		excluded = computeExcludedSinceLastPause(s.Lifecycle, resumeSeq)
 		sessionName = session.GetSessionName(s.SessionPath)

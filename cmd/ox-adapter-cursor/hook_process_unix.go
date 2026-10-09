@@ -25,3 +25,11 @@ func configureCursorHookProcess(cmd *exec.Cmd) {
 		return nil
 	}
 }
+
+// A prime timeout may let the host exit before its descendants. The adapter
+// owns this process group until the entire hook invocation has returned.
+func cleanupCursorHookProcess(cmd *exec.Cmd) {
+	if cmd.Process != nil {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+}

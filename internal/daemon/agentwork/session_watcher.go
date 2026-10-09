@@ -177,6 +177,9 @@ func (m *SessionWatcherManager) startWatchAt(
 	if state.StoppedAt != nil || session.HasExplicitStop(state.WorkspacePath, state.AgentID) {
 		return fmt.Errorf("session recording has stopped")
 	}
+	if state.AdapterName == "cursor" && m.cursorRecordingInactive(recPath) {
+		return fmt.Errorf("recording is inactive and awaiting Cursor finalization")
+	}
 	if state.EntryCount > 0 && state.SourceOffset <= state.StartOffset {
 		return fmt.Errorf("recording has acknowledged entries without a source cursor: entries=%d source_offset=%d start_offset=%d",
 			state.EntryCount, state.SourceOffset, state.StartOffset)
@@ -304,6 +307,9 @@ func (m *SessionWatcherManager) DetectAndRestart(ledgerPath string) int {
 		if !state.IsAgentAlive() {
 			continue
 		}
+		if state.AdapterName == "cursor" && m.cursorRecordingInactive(recPath) {
+			continue
+		}
 		if state.SessionFile == "" {
 			if state.AdapterName == "cursor" {
 				// A pending known-zero conversation can be watched before its
@@ -358,7 +364,9 @@ func (m *SessionWatcherManager) DetectAndRestart(ledgerPath string) int {
 }
 
 // Cleanup stops watchers for sessions that have been stopped, whose
-// .recording.json has been removed, or whose agent PID has died.
+// .recording.json has been removed, whose agent PID has died, or whose Cursor
+// inactivity window has elapsed. StopWatch joins the writer before returning,
+// releasing raw ownership so the finalizer can drain and settle the recording.
 func (m *SessionWatcherManager) Cleanup() {
 	m.mu.Lock()
 	var toStop []string
@@ -373,7 +381,8 @@ func (m *SessionWatcherManager) Cleanup() {
 		if err != nil {
 			continue
 		}
-		if state.StoppedAt != nil || state.SourceRejected || !state.IsAgentAlive() {
+		if state.StoppedAt != nil || state.SourceRejected || !state.IsAgentAlive() ||
+			(state.AdapterName == "cursor" && m.cursorRecordingInactive(recPath)) {
 			toStop = append(toStop, name)
 		}
 	}
@@ -382,6 +391,17 @@ func (m *SessionWatcherManager) Cleanup() {
 	for _, name := range toStop {
 		m.StopWatch(name)
 	}
+}
+
+// Use exactly the finalizer's inactivity decision. Cursor has no unique parent
+// PID, and a stale watcher must not reacquire ownership ahead of finalization.
+func (m *SessionWatcherManager) cursorRecordingInactive(recPath string) bool {
+	info, err := os.Stat(recPath)
+	if err != nil {
+		return false
+	}
+	stale, _, method := isStaleRecording(recPath, info, nil, m.logger)
+	return stale && method == "cursor_inactivity"
 }
 
 // runWatcher tails the session file and appends entries to raw.jsonl.

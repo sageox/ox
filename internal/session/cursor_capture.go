@@ -73,8 +73,8 @@ func ValidateCursorRecordingSource(homeDir string, state *RecordingState) (strin
 // hook fallback and finalization. The caller MUST hold the raw.jsonl owner
 // lock. Lock order is raw owner, append, then recording marker. Holding the marker
 // across append and checkpoint gives pause/resume an exact saved-entry boundary.
-// Failed checkpoints are recovered with the same redacted-prefix proof as all
-// other capture paths; source offsets are never reset or inferred from raw rows.
+// Append journals recover failed checkpoints even if redaction rules changed;
+// source offsets are never reset or inferred from raw rows.
 func DrainCursorSource(ctx context.Context, projectRoot, sessionPath, homeDir string, reader adapters.IncrementalReader, final bool) (*CursorCaptureResult, error) {
 	var result *CursorCaptureResult
 	err := withRawAppendLock(filepath.Join(sessionPath, "raw.jsonl"), func() error {
@@ -87,10 +87,7 @@ func DrainCursorSource(ctx context.Context, projectRoot, sessionPath, homeDir st
 	return result, err
 }
 
-func drainCursorSourceLocked(ctx context.Context, projectRoot, sessionPath, homeDir string, reader adapters.IncrementalReader, final bool) (*CursorCaptureResult, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
+func loadCursorCaptureCheckpoint(projectRoot, sessionPath string, final bool) (*RecordingState, error) {
 	data, err := os.ReadFile(recordingStatePath(sessionPath))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, ErrNotRecording
@@ -99,7 +96,7 @@ func drainCursorSourceLocked(ctx context.Context, projectRoot, sessionPath, home
 		return nil, fmt.Errorf("read Cursor recording checkpoint: %w", err)
 	}
 	state, _, err := decodeRecordingState(data)
-	if err != nil || state == nil {
+	if err != nil || state == nil || state.AdapterName != "cursor" {
 		return nil, fmt.Errorf("invalid Cursor recording checkpoint")
 	}
 	if state.SourceRejected {
@@ -120,6 +117,17 @@ func drainCursorSourceLocked(ctx context.Context, projectRoot, sessionPath, home
 		return nil, err
 	} else if finalized {
 		return nil, ErrNotRecording
+	}
+	return state, nil
+}
+
+func drainCursorSourceLocked(ctx context.Context, projectRoot, sessionPath, homeDir string, reader adapters.IncrementalReader, final bool) (*CursorCaptureResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	state, err := loadCursorCaptureCheckpoint(projectRoot, sessionPath, final)
+	if err != nil {
+		return nil, err
 	}
 	path, err := ValidateCursorRecordingSource(homeDir, state)
 	if err != nil {
@@ -157,6 +165,9 @@ func drainCursorSourceLocked(ctx context.Context, projectRoot, sessionPath, home
 	}
 	converted := ConvertRawEntries(entries)
 	rawPath := filepath.Join(sessionPath, "raw.jsonl")
+	if err := recoverRawAppend(rawPath, state.SourceOffset); err != nil {
+		return nil, fmt.Errorf("recover Cursor capture: %w", err)
+	}
 	matched, err := ReconcileRawPrefix(rawPath, state.EntryCount, converted, projectRoot)
 	if err != nil {
 		return nil, fmt.Errorf("reconcile Cursor capture: %w", err)
@@ -165,11 +176,24 @@ func drainCursorSourceLocked(ctx context.Context, projectRoot, sessionPath, home
 	if err != nil {
 		return nil, err
 	}
+	advancing := nextOffset > state.SourceOffset
+	if advancing {
+		if err := writer.BeginAppend(state.SourceOffset, nextOffset); err != nil {
+			_ = writer.Close()
+			return nil, fmt.Errorf("begin Cursor capture: %w", err)
+		}
+	}
 	// The append lock covers the transaction; do not acquire it recursively.
 	for i := matched; i < len(converted); i++ {
 		if err := writer.writeEntry(&converted[i]); err != nil {
 			_ = writer.Close()
 			return nil, fmt.Errorf("append Cursor capture: %w", err)
+		}
+	}
+	if advancing {
+		if err := writer.SealAppend(); err != nil {
+			_ = writer.Close()
+			return nil, fmt.Errorf("seal Cursor capture: %w", err)
 		}
 	}
 	if err := writer.CloseAndSync(); err != nil {
@@ -187,9 +211,14 @@ func drainCursorSourceLocked(ctx context.Context, projectRoot, sessionPath, home
 			return nil, fmt.Errorf("checkpoint Cursor capture: %w", err)
 		}
 	}
+	if advancing {
+		if err := writer.FinishAppend(); err != nil {
+			return nil, fmt.Errorf("finish Cursor capture: %w", err)
+		}
+	}
 	return &CursorCaptureResult{
 		State: state, Entries: len(converted),
-		Complete: nextOffset == int64(len(before.data)) && cursorSourceTurnComplete(before.data),
+		Complete: nextOffset == int64(len(before.data)) && cursorSourceReady(state, before.data),
 	}, nil
 }
 

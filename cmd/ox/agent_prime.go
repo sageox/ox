@@ -493,6 +493,22 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("failed to generate agent ID: %w", err)
 		}
 	}
+	if isCursor && agentSessionID != "" {
+		// Reserve identity before recording or network work. A bounded hook
+		// can kill prime before context delivery; its retry must reuse the
+		// first recording even though PrimedAt is still unset.
+		existingMarker, err = UpdateSessionMarker(agentSessionID, func(marker *SessionMarker) error {
+			if marker.AgentID == "" {
+				marker.AgentID = agentID
+			}
+			agentID = marker.AgentID
+			marker.ParentPID = 0
+			return nil
+		})
+		if err != nil {
+			return fmt.Errorf("persist Cursor prime identity: %w", err)
+		}
+	}
 
 	// detect parent agent early: if SAGEOX_AGENT_ID is already set, this is a subagent
 	// and the existing value identifies the parent (orchestrator inherits env vars).
@@ -1557,6 +1573,11 @@ func startSessionRecordingUnlocked(projectRoot, agentID, agentType, parentAgentI
 	inheritedPauseSeq, inheritedPauseAt, inheritedPause := session.PeekExplicitPause(projectRoot, agentID)
 	if agentType == "cursor" {
 		opts.BeforePublish = func(state *session.RecordingState) error {
+			if cursorBoundary != nil {
+				if err := session.InitializeCursorTurnBoundary(state, cursorBoundary.SourcePath, cursorBoundary.GenerationID); err != nil {
+					return err
+				}
+			}
 			if inheritedPause {
 				now := time.Now().UTC()
 				state.SuspendedAt = &now

@@ -41,6 +41,15 @@ func prepareCursorHookBoundary(input *cursorNativeInput, event string) (*Session
 				return fmt.Errorf("identity-conflict: Cursor hook does not own this recording")
 			}
 			active = state != nil
+			if active && event == "beforeSubmitPrompt" {
+				home, err := os.UserHomeDir()
+				if err != nil {
+					return err
+				}
+				if err := session.RecordCursorPrompt(context.Background(), input.WorkspacePath, state, home, input.GenerationID); err != nil && !errors.Is(err, session.ErrNotRecording) {
+					return err
+				}
+			}
 		}
 		if previous != nil && (active || event == "sessionStart" || previous.GenerationID == input.GenerationID || previous.GenerationID == "") {
 			if previous.GenerationID == "" && event == "beforeSubmitPrompt" {
@@ -216,6 +225,12 @@ func runCursorPrimeForHook(agentID string, hook *HookContext) error {
 	if err != nil {
 		return fmt.Errorf("adapter-missing: ox executable is unavailable")
 	}
+	return runCursorPrimeExecutableForHook(path, agentID, hook)
+}
+
+// Keep executable resolution outside the subprocess transaction so tests can
+// exercise delivery with an isolated child without re-executing the test binary.
+func runCursorPrimeExecutableForHook(path, agentID string, hook *HookContext) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, path, "agent", "prime", "--agent", "cursor")
@@ -233,7 +248,7 @@ func runCursorPrimeForHook(agentID string, hook *HookContext) error {
 	if _, err := os.Stdout.Write(output.data.Bytes()); err != nil {
 		return err
 	}
-	_, err = UpdateSessionMarker(hook.Input.SessionID, func(marker *SessionMarker) error {
+	_, err := UpdateSessionMarker(hook.Input.SessionID, func(marker *SessionMarker) error {
 		if marker.AgentID == "" {
 			return fmt.Errorf("missing-native-identity: Cursor prime did not assign an AI coworker")
 		}

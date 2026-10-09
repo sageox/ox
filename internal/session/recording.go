@@ -158,6 +158,10 @@ type RecordingState struct {
 	// CursorFinalDrainPending keeps an ended native recording recoverable until
 	// its exported final turn is complete. It never permits automatic restart.
 	CursorFinalDrainPending bool `json:"cursor_final_drain_pending,omitempty"`
+	// Cursor prompt hooks can precede JSONL export. Count unique submissions
+	// against native terminal rows so an older terminal cannot finalize them.
+	CursorPromptGenerations []string `json:"cursor_prompt_generations,omitempty"`
+	CursorExpectedTurns     int      `json:"cursor_expected_turns,omitempty"`
 
 	// ADR-020 session pause/resume fields. Lifecycle is the durable timeline of
 	// session-entity transitions and is the source of truth for which raw.jsonl
@@ -1736,6 +1740,15 @@ func validateCursorLifecycleChange(before, state *RecordingState) error {
 	entries, complete, err := completeRawRecords(raw)
 	if err != nil || complete != len(raw) || len(entries) != state.EntryCount {
 		return fmt.Errorf("checkpoint-pending: Cursor capture checkpoint is pending; retry the recording control after capture recovers")
+	}
+	if before.SuspendedAt != nil && state.SuspendedAt == nil {
+		// Generic marker writers must also fail closed: durable raw entries
+		// alone do not prove that all paused native rows have been captured.
+		snapshot, err := readCursorSourceSnapshot(state.SessionFile)
+		if err != nil || state.SourceOffset != int64(len(snapshot.data)) ||
+			cursorSourceHash(snapshot.data) != state.SourcePrefixSHA256 || !cursorSourceReady(state, snapshot.data) {
+			return ErrCursorFinalDrainPending
+		}
 	}
 	return nil
 }

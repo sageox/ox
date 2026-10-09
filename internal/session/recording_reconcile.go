@@ -17,6 +17,10 @@ import (
 // prefix is retained and returned as the number of entries to skip on replay.
 // A torn last line is removed only if its bytes are a prefix of the next entry
 // that RawWriter would write. All other mismatches leave the file untouched.
+// This is the legacy fallback for batches without an append journal. New
+// capture batches must recover their journal first so a changed REDACT policy
+// can safely rewrite unacknowledged bytes. Without a journal or matching policy,
+// an old suffix cannot be proved and deliberately remains untouched.
 func ReconcileRawPrefix(rawPath string, checkpointEntryCount int, entries []Entry, projectRoot string) (int, error) {
 	data, err := os.ReadFile(rawPath)
 	if errors.Is(err, os.ErrNotExist) {

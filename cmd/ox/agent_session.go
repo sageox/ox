@@ -146,6 +146,17 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 		if marker == nil || marker.AgentSessionID == "" {
 			return fmt.Errorf("missing-native-identity: Cursor manual recording requires a completed Cursor prime for this AI coworker")
 		}
+		if marker.CursorSourceBoundary == nil {
+			return session.ErrCursorBoundaryUnavailable
+		}
+		workspace, workspaceErr := canonicalCursorWorkspace(projectRoot)
+		if workspaceErr != nil {
+			return workspaceErr
+		}
+		markerWorkspace, workspaceErr := canonicalCursorWorkspace(marker.CursorSourceBoundary.WorkspacePath)
+		if workspaceErr != nil || markerWorkspace != workspace {
+			return fmt.Errorf("workspace-mismatch: Cursor conversation is bound to another workspace")
+		}
 		agentSessionID = marker.AgentSessionID
 		if _, adapterErr := adapters.GetAdapter(string(agentx.AgentTypeCursor)); adapterErr != nil {
 			return fmt.Errorf("adapter-missing: Cursor adapter unavailable: %w", adapterErr)
@@ -154,6 +165,9 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 		sessionFile, startOffset, sourcePrefixSHA256, boundaryErr = cursorManualStartBoundary(projectRoot, agentSessionID)
 		if boundaryErr != nil {
 			return boundaryErr
+		}
+		if marker.CursorSourceBoundary.SourcePath != sessionFile {
+			return fmt.Errorf("invalid-source-path: Cursor marker does not match the conversation export")
 		}
 		startOffsetKnown = true
 		adapterName = string(agentx.AgentTypeCursor)
