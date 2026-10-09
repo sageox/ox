@@ -205,7 +205,7 @@ func TestRenderPost_FlattensTitleLineBreaks(t *testing.T) {
 // rendering as "### @ · external · <time>". A reader rejects a heading with an
 // empty login, so the heading is read as body text and the post is either
 // dropped whole or its text is credited to the previous commenter.
-func TestRenderPost_MissingLoginRendersGhost(t *testing.T) {
+func TestRenderPost_MissingLoginRendersUnknown(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -232,7 +232,7 @@ func TestRenderPost_MissingLoginRendersGhost(t *testing.T) {
 			if strings.Contains(rendered, "### @ ·") {
 				t.Errorf("comment heading has an empty login:\n%s", rendered)
 			}
-			if want := "### @ghost · external · 2026-10-02T09:00:00Z"; !strings.Contains(rendered, want) {
+			if want := "### @unknown · external · 2026-10-02T09:00:00Z"; !strings.Contains(rendered, want) {
 				t.Errorf("rendered post lacks %q:\n%s", want, rendered)
 			}
 
@@ -240,11 +240,11 @@ func TestRenderPost_MissingLoginRendersGhost(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ParsePost: %v", err)
 			}
-			if got := post.Header.Author.Login; got != githubmirror.GhostLogin {
-				t.Errorf("header author login = %q, want %q", got, githubmirror.GhostLogin)
+			if got := post.Header.Author.Login; got != githubmirror.UnknownLogin {
+				t.Errorf("header author login = %q, want %q", got, githubmirror.UnknownLogin)
 			}
-			if got := post.Header.Review.Approved; len(got) != 1 || got[0] != githubmirror.GhostLogin {
-				t.Errorf("approved reviewers = %q, want [%q]", got, githubmirror.GhostLogin)
+			if got := post.Header.Review.Approved; len(got) != 1 || got[0] != githubmirror.UnknownLogin {
+				t.Errorf("approved reviewers = %q, want [%q]", got, githubmirror.UnknownLogin)
 			}
 		})
 	}

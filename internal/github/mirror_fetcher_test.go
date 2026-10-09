@@ -128,7 +128,7 @@ func TestMirrorFetcher_ListPullRequestsMapsIdentityAndLifecycle(t *testing.T) {
 		},
 		{
 			Number: 1292, Title: "Author account deleted", Body: "x", State: "closed",
-			Author:    githubmirror.Author{Login: githubmirror.GhostLogin, Association: "NONE"},
+			Author:    githubmirror.Author{Login: githubmirror.UnknownLogin, Association: "NONE"},
 			Labels:    []string{},
 			CreatedAt: mustTime(t, "2026-10-05T08:00:00Z"), UpdatedAt: mustTime(t, "2026-10-05T09:00:00Z"),
 			ClosedAt: &closedDeleted,
@@ -372,10 +372,10 @@ func assertComments(t *testing.T, got, want []githubmirror.SourceComment) {
 // the relay with an empty login. The reader of a rendered post rejects a
 // comment heading with an empty login, so the whole post would be dropped from
 // CodeDB and prime.
-func TestMirrorFetcher_NullUserMapsToGhost(t *testing.T) {
+func TestMirrorFetcher_NullUserMapsToUnknown(t *testing.T) {
 	t.Parallel()
 
-	wantGhost := githubmirror.Author{Login: githubmirror.GhostLogin, Association: "NONE"}
+	wantUnknown := githubmirror.Author{Login: githubmirror.UnknownLogin, Association: "NONE"}
 	const created = `"created_at":"2026-10-02T10:00:00Z","updated_at":"2026-10-02T10:00:00Z"`
 
 	tests := []struct {
@@ -459,8 +459,8 @@ func TestMirrorFetcher_NullUserMapsToGhost(t *testing.T) {
 			if err != nil {
 				t.Fatalf("fetch: %v", err)
 			}
-			if got != wantGhost {
-				t.Errorf("author = %+v, want %+v (GitHub's placeholder login, id 0 so trust is unchanged)", got, wantGhost)
+			if got != wantUnknown {
+				t.Errorf("author = %+v, want %+v (the unknown-author login, id 0 so trust is unchanged)", got, wantUnknown)
 			}
 		})
 	}
@@ -468,7 +468,7 @@ func TestMirrorFetcher_NullUserMapsToGhost(t *testing.T) {
 
 // Failure prevented: the customer-visible consequence of a deleted commenter.
 // Run through the real fetcher, builder, reference renderer and parser: the
-// comment must survive with its own text, credited to "ghost", and the comments
+// comment must survive with its own text, credited to "unknown", and the comments
 // around it must not absorb it or be lost with the post.
 func TestMirrorFetcher_DeletedCommenterSurvivesRender(t *testing.T) {
 	t.Parallel()
@@ -505,7 +505,7 @@ func TestMirrorFetcher_DeletedCommenterSurvivesRender(t *testing.T) {
 
 	want := []struct{ login, body string }{
 		{"avery-dev", "before"},
-		{githubmirror.GhostLogin, "written by an account that no longer exists"},
+		{githubmirror.UnknownLogin, "written by an account that no longer exists"},
 		{"devon-dev", "after"},
 	}
 	if len(post.Comments) != len(want) {

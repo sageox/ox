@@ -282,13 +282,13 @@ func normalize(s string) string {
 
 // renderLogin is a login as the post shows it. A comment heading is
 // "### @login · tier · time" and a reader rejects one with an empty login, so a
-// missing login (the fetcher already maps a deleted account to GhostLogin; this
-// is the backstop) is shown as GitHub's own placeholder rather than as "### @ ·".
+// missing login (the fetcher already maps a deleted account to UnknownLogin; this
+// is the backstop) is shown as UnknownLogin rather than as "### @ ·".
 func renderLogin(login string) string {
 	if flat := oneLine(login); flat != "" {
 		return flat
 	}
-	return githubmirror.GhostLogin
+	return githubmirror.UnknownLogin
 }
 
 // oneLine collapses every line break (and the Unicode line/paragraph

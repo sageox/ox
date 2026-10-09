@@ -150,13 +150,13 @@ func (f *MirrorFetcher) ListPRFiles(ctx context.Context, owner, name string, num
 // mirrorAuthor maps a GitHub account to the mirror's Author. The numeric id and
 // the account type (not the login) are what trust decisions rest on. A deleted
 // account arrives as a null user; it keeps the zero id and type, so it is
-// never a bot, and takes GitHub's own placeholder login. The login must not be
+// never a bot, and takes githubmirror.UnknownLogin. The login must not be
 // empty: a rendered comment heading with no login cannot be read back, which
 // costs the whole post.
 func mirrorAuthor(u GitHubUser, association string) githubmirror.Author {
 	login := u.Login
 	if login == "" {
-		login = githubmirror.GhostLogin
+		login = githubmirror.UnknownLogin
 	}
 	return githubmirror.Author{
 		Login:       login,

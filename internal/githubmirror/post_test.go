@@ -585,23 +585,23 @@ func TestParsePost_RoundTrip(t *testing.T) {
 	}
 }
 
-// TestParsePost_RoundTripGhostAuthor is the deleted-account property: a comment
+// TestParsePost_RoundTripUnknownAuthor is the deleted-account property: a comment
 // whose GitHub user is gone is read back as its own comment, credited to
-// "ghost", with its text intact and the comments around it untouched. It must
+// "unknown", with its text intact and the comments around it untouched. It must
 // hold whether or not the post carries comment_metadata, because the two fail
 // differently: with metadata the count mismatch makes the whole post invalid,
 // without it the heading line becomes body text of the previous comment.
-func TestParsePost_RoundTripGhostAuthor(t *testing.T) {
+func TestParsePost_RoundTripUnknownAuthor(t *testing.T) {
 	t.Parallel()
 
-	ghosts := []struct {
+	unknowns := []struct {
 		name   string
 		author githubmirror.Author
 	}{
-		{name: "login from the fetcher", author: githubmirror.Author{Login: githubmirror.GhostLogin, Association: "NONE"}},
+		{name: "login from the fetcher", author: githubmirror.Author{Login: githubmirror.UnknownLogin, Association: "NONE"}},
 		{name: "login missing entirely", author: githubmirror.Author{Association: "NONE"}},
 	}
-	for _, g := range ghosts {
+	for _, g := range unknowns {
 		for _, withMetadata := range []bool{true, false} {
 			name := g.name + " without comment_metadata"
 			if withMetadata {
@@ -631,7 +631,7 @@ func TestParsePost_RoundTripGhostAuthor(t *testing.T) {
 				}
 				assertComments(t, post.Comments, []githubmirror.PostComment{
 					{Login: "avery-dev", Trust: githubmirror.TrustMember, CreatedAt: ts(10, 2, 9), Body: "before"},
-					{Login: githubmirror.GhostLogin, Trust: githubmirror.TrustExternal, CreatedAt: ts(10, 3, 9), Body: "left by an account that no longer exists"},
+					{Login: githubmirror.UnknownLogin, Trust: githubmirror.TrustExternal, CreatedAt: ts(10, 3, 9), Body: "left by an account that no longer exists"},
 					{Login: "devon-dev", Trust: githubmirror.TrustMember, CreatedAt: ts(10, 4, 9), Body: "after"},
 				})
 			})
