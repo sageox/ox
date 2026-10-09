@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sageox/ox/internal/fileutil"
@@ -489,6 +490,7 @@ func (idx *importIndex) markerMatch(s nativeimport.Session) string {
 // judged not worth sharing or local-only, so a rerun neither summarizes them
 // again nor lists them as ready. A session that changed since is judged again.
 type importVerdicts struct {
+	mu       sync.Mutex
 	path     string
 	Sessions map[string]importVerdict `json:"sessions"`
 }
@@ -518,12 +520,19 @@ func verdictKey(s nativeimport.Session) string {
 	return key.agent + "/" + key.id
 }
 
+// lookup reads a verdict under the shared worker lock and rejects stale native files.
 func (v *importVerdicts) lookup(s nativeimport.Session) (importVerdict, bool) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
 	got, ok := v.Sessions[verdictKey(s)]
 	return got, ok && got.Size == s.Size
 }
 
+// record serializes the in-memory update and atomic cache write so concurrent
+// preparation cannot overwrite another session's verdict.
 func (v *importVerdicts) record(s nativeimport.Session, verdict importVerdict) error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
 	v.Sessions[verdictKey(s)] = verdict
 	if err := os.MkdirAll(filepath.Dir(v.path), 0o700); err != nil {
 		return err
