@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -685,5 +685,5 @@ func resolveAdapter(name string) (adapters.Adapter, error) {
 // adapter already answered; the host was too loaded to drain its pipes in
 // time, so the next poll retries with the cursor unchanged.
 func isPipeDrainTimeout(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "WaitDelay expired")
+	return errors.Is(err, exec.ErrWaitDelay)
 }

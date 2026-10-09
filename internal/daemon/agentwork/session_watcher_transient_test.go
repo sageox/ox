@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -25,7 +26,8 @@ func TestIsPipeDrainTimeout(t *testing.T) {
 		want bool
 	}{
 		{"nil", nil, false},
-		{"wait delay", fmt.Errorf("adapter x read failed: %w (stderr: )", errors.New("exec: WaitDelay expired before I/O complete")), true},
+		{"wait delay", fmt.Errorf("adapter x read failed: %w (stderr: )", exec.ErrWaitDelay), true},
+		{"unrelated error quoting the text", errors.New("adapter error: exec: WaitDelay expired before I/O complete"), false},
 		{"other adapter failure", errors.New("adapter error: bad offset"), false},
 	}
 	for _, tt := range tests {
@@ -38,21 +40,28 @@ func TestIsPipeDrainTimeout(t *testing.T) {
 	}
 }
 
-// flakyHandleReader fails its first call, then serves one entry.
+// flakyHandleReader fails its first call, then serves one entry. The failed
+// call reports a bogus advanced offset so a watcher that trusts it is caught.
 type flakyHandleReader struct {
-	mu    sync.Mutex
-	calls int
-	err   error
+	mu      sync.Mutex
+	offsets []int64
+	err     error
 }
 
 func (r *flakyHandleReader) ReadFromOffset(_ string, offset int64) ([]adapters.RawEntry, int64, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.calls++
-	if r.calls == 1 {
-		return nil, offset, r.err
+	r.offsets = append(r.offsets, offset)
+	if len(r.offsets) == 1 {
+		return nil, offset + 100, r.err
 	}
 	return []adapters.RawEntry{{Timestamp: time.Now().UTC(), Role: "user", Content: "recovered"}}, offset + 1, nil
+}
+
+func (r *flakyHandleReader) readOffsets() []int64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]int64(nil), r.offsets...)
 }
 
 // lockedBuffer lets the poll goroutine log while the test reads.
@@ -73,7 +82,8 @@ func (b *lockedBuffer) String() string {
 	return b.buf.String()
 }
 
-// A pipe-drain timeout is logged as transient and the next poll still records.
+// A pipe-drain timeout is logged as transient and the next poll retries from
+// the same offset, so nothing between the old and a bogus new cursor is lost.
 func TestPollSession_PipeDrainTimeoutIsLoggedTransientAndRetried(t *testing.T) {
 	cache := t.TempDir()
 	rawPath := filepath.Join(cache, "raw.jsonl")
@@ -93,13 +103,14 @@ func TestPollSession_PipeDrainTimeoutIsLoggedTransientAndRetried(t *testing.T) {
 	logs := &lockedBuffer{}
 	m := NewSessionWatcherManager(slog.New(slog.NewTextHandler(logs, nil)))
 	aw := &activeWatcher{sessionName: "s", adapterName: "codex", sessionFile: "codex:x", cachePath: cache}
-	reader := &flakyHandleReader{err: errors.New("adapter read-from-offset failed: exec: WaitDelay expired before I/O complete (stderr: )")}
+	reader := &flakyHandleReader{err: fmt.Errorf("adapter read-from-offset failed: %w (stderr: )", exec.ErrWaitDelay)}
+	const startOffset int64 = 7
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		m.pollSession(ctx, aw, reader, rw, 0)
+		m.pollSession(ctx, aw, reader, rw, startOffset)
 	}()
 	defer func() {
 		cancel()
@@ -113,5 +124,8 @@ func TestPollSession_PipeDrainTimeoutIsLoggedTransientAndRetried(t *testing.T) {
 	})
 	if got := logs.String(); !strings.Contains(got, "handle-based session read failed") || !strings.Contains(got, "transient=true") {
 		t.Fatalf("log missing transient flag: %s", got)
+	}
+	if offsets := reader.readOffsets(); len(offsets) < 2 || offsets[0] != startOffset || offsets[1] != startOffset {
+		t.Fatalf("read offsets = %v, want the retry to reuse %d", offsets, startOffset)
 	}
 }
