@@ -40,10 +40,14 @@ func TestFinalizeFailedSummaryPreservesSessionAndRedactsDiagnostic(t *testing.T)
 		Message  string `json:"msg"`
 		Output   string `json:"output"`
 		ExitCode int    `json:"exit_code"`
+		Reason   string `json:"reason"`
 	}
-	require.NoError(t, json.Unmarshal(bytes.TrimSpace(logs.Bytes()), &record))
+	// the first line is the diagnostic; a quota-looking output also logs the pause
+	firstLine, _, _ := bytes.Cut(bytes.TrimSpace(logs.Bytes()), []byte("\n"))
+	require.NoError(t, json.Unmarshal(firstLine, &record))
 	require.Equal(t, "summarization agent exited with error, discarding output", record.Message)
 	require.Equal(t, 1, record.ExitCode)
+	require.Equal(t, failureReasonQuotaExhausted, record.Reason)
 	require.Contains(t, record.Output, "usage limit reached")
 	require.Contains(t, record.Output, "[REDACTED]")
 	require.NotContains(t, logs.String(), token)
