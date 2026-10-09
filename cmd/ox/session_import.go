@@ -43,7 +43,12 @@ var sessionImportCmd = &cobra.Command{
 or with recording off, to the team's Ledger.
 
 The import shows a preview first: which sessions are ready, and which are
-skipped and why. Nothing is uploaded until you confirm. Each session is
+skipped and why. At a terminal, browse opening requests, human prompts and
+the last AI reply, then choose sessions with Space. Press b for a local browser,
+or start with --browse. The browser returns your selection to the terminal;
+nothing is uploaded until you confirm there. Previewing calls no summarizer.
+Use --preview --session <id> to read one session without importing it.
+Each imported session is
 summarized on this computer by your own claude or codex CLI, in an isolated
 mode with no tools, and then uploaded once. A session the summarizer judges
 not worth sharing stays on this computer, as it would had ox recorded it.
@@ -54,6 +59,8 @@ and sessions ox recorded live, are recognized and skipped.
 This is not 'ox agent <id> session import', which adds a planning
 conversation to the current recording.`,
 	Example: `  ox session import                    # preview, then confirm
+  ox session import --browse          # review in a local browser
+  ox session import --preview --session 3f9a1c2b
   ox session import --dry-run --json   # preview only, machine-readable
   ox session import --agent codex --since 30d
   ox session import --session 3f9a1c2b --yes`,
@@ -74,6 +81,8 @@ func addSessionImportFlags(f *pflag.FlagSet) {
 	f.String("summarizer", "", "summarize with this CLI instead of each session's own: claude or codex")
 	f.Int("parallel", importDefaultParallel, "maximum sessions summarized at once (at least 1)")
 	f.Bool("dry-run", false, "preview only; never upload")
+	f.Bool("browse", false, "review session content in a local browser; return to the terminal to confirm")
+	f.Bool("preview", false, "read one session's content without importing; requires --session")
 	// Test-only: <dir>/claude stands in for ~/.claude and <dir>/codex for ~/.codex.
 	f.String("from-test-data", "", "read sessions from this test-data directory instead of this machine's Claude Code and Codex stores")
 	_ = f.MarkHidden("from-test-data")
@@ -117,6 +126,9 @@ type importOptions struct {
 	jsonOut    bool
 	agentCtx   bool
 	testData   string // absolute; stands in for this machine's native stores when set
+	browse     bool
+	preview    bool
+	reviewed   map[string]importSourceSnapshot // pins the content reviewed before confirmation
 }
 
 type importDestination struct {
@@ -186,6 +198,8 @@ func runSessionImport(cmd *cobra.Command, _ []string) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 	env, dest, failure := importPreflight(ctx, opts)
 	if failure != nil {
 		return renderImportFailure(out, opts.jsonOut, *failure)
@@ -209,10 +223,18 @@ func parseImportOptions(cmd *cobra.Command) (importOptions, *importFailure) {
 	}
 	o.yes = cli.AssumeYes()
 	o.dryRun, _ = cmd.Flags().GetBool("dry-run")
+	o.browse, _ = cmd.Flags().GetBool("browse")
+	o.preview, _ = cmd.Flags().GetBool("preview")
 	o.sessions, _ = cmd.Flags().GetStringSlice("session")
 	o.parallel, _ = cmd.Flags().GetInt("parallel")
 	bad := func(msg string) (importOptions, *importFailure) {
 		return o, &importFailure{Code: importErrBadFlag, Message: msg}
+	}
+	if o.browse && (o.jsonOut || o.yes || o.preview || o.agentCtx) {
+		return bad("--browse requires human text review; do not combine it with --json, --yes or --preview")
+	}
+	if o.preview && (len(o.sessions) != 1 || o.yes) {
+		return bad("--preview requires exactly one --session and cannot be combined with --yes")
 	}
 	if o.parallel < 1 {
 		return bad("--parallel must be at least 1")
@@ -311,7 +333,7 @@ func importPreflight(ctx context.Context, opts importOptions) (*importEnv, impor
 		return fail(importErrRedactionRules, err.Error(), "Fix the listed REDACT.md problems (see ox session redaction policy), then retry.")
 	}
 	fetchImportDestination(ep, repoID, &dest)
-	if !opts.dryRun {
+	if !opts.dryRun && !opts.preview {
 		if !dest.verified {
 			return fail(importErrUnverified, "could not confirm the destination Ledger with SageOx",
 				"Check your connection and ox status, then retry. A preview still works with --dry-run.")
@@ -408,12 +430,72 @@ func productionImportDeps(ctx context.Context, env *importEnv) importDeps {
 		confirm: func(prompt string) (bool, error) {
 			return cli.ConfirmYesNoRequired(prompt, false, false)
 		},
+		review: func(ctx context.Context, dest importDestination, cands []*importCandidate, load importPreviewLoader, browse bool) (importReviewResult, error) {
+			if browse {
+				return runImportBrowser(ctx, dest, cands, load)
+			}
+			return runImportTerminal(ctx, dest, cands, load)
+		},
 	}
 }
 
 // runSessionImportFlow is everything after preflight: discovery, classification, the
 // preview and, once confirmed, the uploads.
 func runSessionImportFlow(ctx context.Context, out io.Writer, opts importOptions, env *importEnv, dest importDestination) error {
+	if opts.preview || opts.browse || (importMayUpload(opts, env.deps.interactive()) && !opts.yes && env.deps.review != nil) {
+		cands, ignored, failure := planImport(ctx, opts, env)
+		if failure != nil {
+			return renderImportFailure(out, opts.jsonOut, *failure)
+		}
+		load := newImportPreviewLoader(env, cands)
+		if opts.preview {
+			for _, c := range cands {
+				if strings.HasPrefix(strings.ToLower(c.Session.NativeID), strings.ToLower(opts.sessions[0])) {
+					p, err := load(ctx, c.Session.NativeID)
+					if err != nil {
+						return renderImportFailure(out, opts.jsonOut, importFailure{Code: importErrNativeUnreadable, Message: err.Error()})
+					}
+					return renderImportContent(out, opts, dest, c, p)
+				}
+			}
+			return renderImportFailure(out, opts.jsonOut, importFailure{Code: importErrBadFlag, Message: "session not found"})
+		}
+		if len(cands) == 0 || env.deps.review == nil || (opts.browse && !env.deps.interactive()) {
+			return renderImportPreview(out, opts, dest, cands, ignored, true)
+		}
+		result, err := env.deps.review(ctx, dest, cands, load, opts.browse)
+		if err != nil {
+			return err
+		}
+		if result.Canceled || len(result.IDs) == 0 {
+			fmt.Fprintln(out, "Nothing was uploaded.")
+			return nil
+		}
+		opts.reviewed, err = validateImportReview(cands, result)
+		if err != nil {
+			return renderImportFailure(out, opts.jsonOut, importFailure{Code: importErrNativeUnreadable, Message: err.Error(), Guidance: "Rerun the review before importing."})
+		}
+		opts.sessions = result.IDs // full IDs, including an explicitly narrowed selection
+		for _, c := range cands {
+			_, c.Selected = opts.reviewed[c.Session.NativeID]
+		}
+		if !importMayUpload(opts, env.deps.interactive()) {
+			return renderImportPreview(out, opts, dest, cands, ignored, true)
+		}
+		if err := renderImportPreview(out, opts, dest, cands, ignored, false); err != nil {
+			return err
+		}
+		prompt := fmt.Sprintf("Upload %d session%s to %s (%s)?", len(result.IDs), plural(len(result.IDs)), ledgerLabel(dest), dest.Visibility)
+		confirmed, err := env.deps.confirm(prompt)
+		if err != nil {
+			return err
+		}
+		if !confirmed {
+			fmt.Fprintln(out, "Nothing was uploaded.")
+			return nil
+		}
+		opts.yes = true // the final terminal confirmation authorized these exact IDs
+	}
 	if !importMayUpload(opts, env.deps.interactive()) {
 		cands, ignored, failure := planImport(ctx, opts, env)
 		if failure != nil {
@@ -448,7 +530,7 @@ func runSessionImportFlow(ctx context.Context, out io.Writer, opts importOptions
 // confirmation; without it only a coworker at a terminal, reading text, is
 // asked. An AI coworker or a JSON reader gets the preview and must rerun.
 func importMayUpload(opts importOptions, interactive bool) bool {
-	if opts.dryRun {
+	if opts.dryRun || opts.preview {
 		return false
 	}
 	return opts.yes || (interactive && !opts.agentCtx && !opts.jsonOut)
@@ -472,6 +554,11 @@ func runLockedImport(ctx context.Context, out io.Writer, opts importOptions, env
 		return renderImportFailure(out, opts.jsonOut, *failure)
 	}
 	selected := selectedCandidates(cands)
+	for _, c := range selected {
+		if snapshot, reviewed := opts.reviewed[c.Session.NativeID]; reviewed && snapshot != importSnapshot(c) {
+			return renderImportFailure(out, opts.jsonOut, importFailure{Code: importErrNativeUnreadable, Message: errImportSourceChanged.Error(), Guidance: "Rerun the review before importing."})
+		}
+	}
 	if len(selected) == 0 {
 		if opts.jsonOut {
 			return renderImportResult(out, opts, dest, cands, ignored)

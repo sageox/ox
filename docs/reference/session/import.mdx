@@ -14,7 +14,12 @@ Upload the Claude Code and Codex sessions you ran in this repo before SageOx,
 or with recording off, to the team's Ledger.
 
 The import shows a preview first: which sessions are ready, and which are
-skipped and why. Nothing is uploaded until you confirm. Each session is
+skipped and why. At a terminal, browse opening requests, human prompts and
+the last AI reply, then choose sessions with Space. Press b for a local browser,
+or start with --browse. The browser returns your selection to the terminal;
+nothing is uploaded until you confirm there. Previewing calls no summarizer.
+Use --preview --session <id> to read one session without importing it.
+Each imported session is
 summarized on this computer by your own claude or codex CLI, in an isolated
 mode with no tools, and then uploaded once. A session the summarizer judges
 not worth sharing stays on this computer, as it would had ox recorded it.
@@ -33,6 +38,8 @@ ox session import [flags]
 
 ```
   ox session import                    # preview, then confirm
+  ox session import --browse          # review in a local browser
+  ox session import --preview --session 3f9a1c2b
   ox session import --dry-run --json   # preview only, machine-readable
   ox session import --agent codex --since 30d
   ox session import --session 3f9a1c2b --yes
@@ -42,9 +49,11 @@ ox session import [flags]
 
 ```
       --agent string        only sessions from this tool: claude or codex
+      --browse              review session content in a local browser; return to the terminal to confirm
       --dry-run             preview only; never upload
   -h, --help                help for import
       --parallel int        maximum sessions summarized at once (at least 1) (default 3)
+      --preview             read one session's content without importing; requires --session
       --session strings     import exactly these sessions, by native session ID or a unique prefix of 8+ characters
       --since string        only sessions active within this window (7d, 48h) or since a date (2026-09-01)
       --summarizer string   summarize with this CLI instead of each session's own: claude or codex

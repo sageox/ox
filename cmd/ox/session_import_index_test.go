@@ -193,6 +193,7 @@ func TestImportMayUploadOnlyWithConfirmation(t *testing.T) {
 		want        bool
 	}{
 		{"a dry run never uploads, even with --yes", importOptions{dryRun: true, yes: true}, true, false},
+		{"content preview never uploads", importOptions{preview: true}, true, false},
 		{"--yes is the confirmation", importOptions{yes: true}, false, true},
 		{"a coworker at a terminal is asked", importOptions{}, true, true},
 		{"no terminal and no --yes is a preview", importOptions{}, false, false},

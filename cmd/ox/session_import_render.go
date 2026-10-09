@@ -43,21 +43,25 @@ type importJSONOutput struct {
 func importJSON(status string, dest importDestination, cands []*importCandidate, ignored importIgnored) importJSONOutput {
 	out := importJSONOutput{Status: status, Destination: dest, Counts: map[string]int{}, Ignored: ignored}
 	for _, c := range cands {
-		s := c.Session
-		out.Sessions = append(out.Sessions, importJSONSession{
-			Agent: string(s.Agent), NativeID: s.NativeID,
-			StartedAt: s.StartedAt.Format("2006-01-02T15:04:05Z"), LastActivity: s.LastActivity.Format("2006-01-02T15:04:05Z"),
-			Messages: s.Messages(), SizeBytes: s.Size, Branch: s.Branch,
-			State: string(c.State), Reason: c.Reason, CoveredBy: c.Covered,
-			SessionName: c.Name, SessionID: c.SessionID, Selected: c.Selected,
-			Outcome: c.Outcome, Detail: c.Detail, URL: c.URL, Retry: c.Retry,
-		})
+		out.Sessions = append(out.Sessions, jsonImportSession(c))
 		out.Counts[string(c.State)]++
 		if c.Outcome != "" {
 			out.Counts["outcome_"+c.Outcome]++
 		}
 	}
 	return out
+}
+
+func jsonImportSession(c *importCandidate) importJSONSession {
+	s := c.Session
+	return importJSONSession{
+		Agent: string(s.Agent), NativeID: s.NativeID,
+		StartedAt: s.StartedAt.Format("2006-01-02T15:04:05Z"), LastActivity: s.LastActivity.Format("2006-01-02T15:04:05Z"),
+		Messages: s.Messages(), SizeBytes: s.Size, Branch: s.Branch,
+		State: string(c.State), Reason: c.Reason, CoveredBy: c.Covered,
+		SessionName: c.Name, SessionID: c.SessionID, Selected: c.Selected,
+		Outcome: c.Outcome, Detail: c.Detail, URL: c.URL, Retry: c.Retry,
+	}
 }
 
 // renderImportPreview shows what an import would do. previewOnly means the

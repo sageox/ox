@@ -2,6 +2,7 @@ package nativeimport
 
 import (
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/sageox/ox/internal/lfs"
@@ -42,15 +43,10 @@ func (h RawHeader) NativeSessions() []lfs.NativeSession {
 // how many entries were written. projectRoot selects the team, repo and user
 // REDACT.md rules; a policy the strict writer rejects refuses the write.
 func WriteRaw(rawPath, projectRoot string, h RawHeader, raw []adapters.RawEntry) (int, error) {
-	entries := session.ConvertRawEntries(raw)
-	redactor, problems := session.NewRedactorWithCustomRules(projectRoot)
-	if len(problems) > 0 {
-		return 0, fmt.Errorf("invalid redaction policy (%d errors)", len(problems))
+	entries, err := convertRedactedEntries(projectRoot, raw)
+	if err != nil {
+		return 0, err
 	}
-	// The writer's pattern layer covers message text only. The hook path runs
-	// this pass first so tool input and output get the same rules; so does import.
-	redactor.RedactEntries(entries)
-
 	w, err := session.NewRawSnapshotWriter(rawPath, projectRoot)
 	if err != nil {
 		return 0, err
@@ -91,4 +87,38 @@ func WriteRaw(rawPath, projectRoot string, h RawHeader, raw []adapters.RawEntry)
 		return 0, err
 	}
 	return len(entries), nil
+}
+
+// PreviewEntries returns exactly the entries an import retains, through the
+// same conversion, custom rules and command-correlated redaction as WriteRaw.
+// The stream writer mutates entries in place; its output is discarded, so
+// inspecting a session creates no recording, staging directory or summary.
+func PreviewEntries(projectRoot string, raw []adapters.RawEntry) ([]session.Entry, error) {
+	entries, err := convertRedactedEntries(projectRoot, raw)
+	if err != nil {
+		return nil, err
+	}
+	w, err := session.NewRawStreamWriter(io.Discard, projectRoot)
+	if err != nil {
+		return nil, err
+	}
+	defer w.Close()
+	for i := range entries {
+		if err := w.WriteEntry(&entries[i]); err != nil {
+			return nil, fmt.Errorf("redact entry %d: %w", i, err)
+		}
+	}
+	return entries, nil
+}
+
+func convertRedactedEntries(projectRoot string, raw []adapters.RawEntry) ([]session.Entry, error) {
+	entries := session.ConvertRawEntries(raw)
+	redactor, problems := session.NewRedactorWithCustomRules(projectRoot)
+	if len(problems) > 0 {
+		return nil, fmt.Errorf("invalid redaction policy (%d errors)", len(problems))
+	}
+	// The writer's pattern layer covers message text only. The hook path runs
+	// this pass first so tool input and output get the same rules; so does import.
+	redactor.RedactEntries(entries)
+	return entries, nil
 }

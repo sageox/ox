@@ -447,6 +447,9 @@ func (f *importFixture) envFor(ledgerPath string, opts importOptions) (*importEn
 		logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 	env.deps = productionImportDeps(context.Background(), env)
+	// Interactive review has its own E2E proofs; these pipeline tests inject
+	// confirmation directly without starting a real terminal or browser.
+	env.deps.review = nil
 	env.deps.readNative = f.readNative
 	env.deps.runner = func(agent nativeimport.Agent) agentwork.Runner {
 		if f.runners != nil {

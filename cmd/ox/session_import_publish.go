@@ -69,6 +69,7 @@ type importDeps struct {
 	syncLedger  func()                              // best-effort fresh pull
 	interactive func() bool                         // a coworker can answer a prompt
 	confirm     func(prompt string) (bool, error)
+	review      func(context.Context, importDestination, []*importCandidate, importPreviewLoader, bool) (importReviewResult, error)
 }
 
 // importEnv is one run's fixed context.

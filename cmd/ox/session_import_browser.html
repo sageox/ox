@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Choose sessions to import · ox</title>
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <main>
+    <header class="topbar">
+      <div><span class="wordmark">ox</span><span class="product">SageOx</span></div>
+      <span class="local"><span class="dot"></span>Reading on this computer</span>
+    </header>
+    <section class="intro">
+      <p class="eyebrow">Session import</p>
+      <h1>Read before you share.</h1>
+      <p class="lede">Follow the requests and replies, then choose which sessions to import.</p>
+    </section>
+    <section class="shell" aria-label="Choose sessions">
+      <div class="destination" id="destination">Loading the destination…</div>
+      <div class="workspace">
+        <aside class="picker" aria-label="Session list">
+          <div class="search-tools">
+            <label class="sr-only" for="search">Find sessions by opening request, session ID, or tool</label>
+            <input id="search" type="search" placeholder="Find a request or session ID" autocomplete="off">
+            <label class="sr-only" for="eligibility">Session eligibility</label>
+            <select id="eligibility"><option value="all">All sessions</option><option value="ready">Ready to import</option><option value="unavailable">Unavailable for import</option></select>
+            <div class="list-heading"><span id="list-count">Loading sessions…</span><span id="scan-status" aria-live="polite"></span></div>
+          </div>
+          <div id="session-list"></div>
+        </aside>
+        <section class="detail" id="session-detail" aria-label="Session content" aria-live="polite"><p class="muted">Loading sessions…</p></section>
+      </div>
+      <footer>
+        <div><strong id="selected-count">No sessions selected</strong><p class="footnote">Selection returns to the terminal. Import requires a separate confirmation.</p></div>
+        <div class="actions"><button id="all" type="button">Select all ready</button><button id="none" type="button">Clear</button><button id="cancel" type="button">Cancel review</button><button class="primary" id="submit" type="button" disabled>Use selection in terminal</button></div>
+      </footer>
+    </section>
+    <p id="announcement" class="announcement" role="status" aria-live="polite"></p>
+    <section class="explanation">
+      <div><h2>Actual conversation</h2><p>Opening requests and the last AI reply come from the session. No AI overview is generated while you browse.</p></div>
+      <div><h2>What import shares</h2><p>The retained, redacted conversation and available tool activity. A summary is generated after you confirm in the terminal.</p></div>
+      <div><h2>Keep your choices</h2><p>Filtering preserves selected sessions. Removing one excludes it from this run; you can import it later.</p></div>
+    </section>
+  </main>
+</body>
+</html>
