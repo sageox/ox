@@ -198,12 +198,13 @@ type SyncScheduler struct {
 	configSyncSkipped sync.Map
 
 	// test hooks (nil in production)
-	onBeforeCloneSem         func()        // called just before acquiring cloneSem; tests use this to observe blocking
-	cloneSemTimeoutOverride  time.Duration // override cloneSemTimeout for tests (0 = use default)
-	preCloneLockWaitOverride time.Duration // override the pre-clone lock's wait budget for tests (0 = use gitutil.PreCloneLockTimeout+10s)
-	gcAsyncTestHook          func()        // called at the start of TriggerGCAsync's goroutine, before runTriggerGC; tests use this to hold the goroutine open deterministically
-	gcSwapWindowTestHook     func()        // called right after runBlueGreenGCOpts writes .gc-swap-lock, before the rename; tests use this to observe the lock file mid-swap
-	retractLockedTestHook    func()        // called on entry to retractOrphanedDrafts' locked closure; tests use it to prove the reaper reached locked revalidation rather than timing out on the lock
+	onBeforeCloneSem         func()             // called just before acquiring cloneSem; tests use this to observe blocking
+	cloneSemTimeoutOverride  time.Duration      // override cloneSemTimeout for tests (0 = use default)
+	preCloneLockWaitOverride time.Duration      // override the pre-clone lock's wait budget for tests (0 = use gitutil.PreCloneLockTimeout+10s)
+	gcAsyncTestHook          func()             // called at the start of TriggerGCAsync's goroutine, before runTriggerGC; tests use this to hold the goroutine open deterministically
+	gcSwapWindowTestHook     func()             // called right after runBlueGreenGCOpts writes .gc-swap-lock, before the rename; tests use this to observe the lock file mid-swap
+	disableSymlinksTestHook  func(string) error // replaces ledger.DisableSymlinks in pullManagedRepo; tests use it to make the protection fail
+	retractLockedTestHook    func()             // called on entry to retractOrphanedDrafts' locked closure; tests use it to prove the reaper reached locked revalidation rather than timing out on the lock
 
 	// callbacks
 	onActivity   func()                                                           // called on any sync activity
@@ -1411,6 +1412,7 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 		// (data/) which cover all idempotent import paths (github, linear, murmurs).
 		return s.pullManagedRepo(ctx, ManagedRepoPullOpts{
 			ImmutablePaths:     true, // the Ledger: session and plan dirs never move
+			NoSymlinks:         true,
 			RepoPath:           s.config.LedgerPath,
 			RepoName:           "ledger",
 			ProjectRoot:        s.config.ProjectRoot,
@@ -2614,7 +2616,7 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 		}
 		// core.symlinks=false: a symlink committed to the Ledger checks out as a
 		// plain file, so the AGENTS.md written below (and every later write)
-		// cannot follow one out of the clone. See ledger.disableSymlinks.
+		// cannot follow one out of the clone. See ledger.DisableSymlinks.
 		cloneArgs = append(cloneArgs,
 			"-c", "protocol.ext.allow=never",
 			"clone", "--quiet", "--config", "core.symlinks=false", "--", cloneURL, tempPath,

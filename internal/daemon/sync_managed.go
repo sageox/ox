@@ -16,6 +16,7 @@ import (
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/kb"
+	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/manifest"
 	"github.com/sageox/ox/internal/perf"
 )
@@ -34,6 +35,12 @@ type ManagedRepoPullOpts struct {
 	// Ledger). Pull-rebase and conflict resolution then skip git's rename
 	// detection; see gitutil.WithImmutablePaths.
 	ImmutablePaths bool
+
+	// NoSymlinks holds the fetch and pull until ledger.DisableSymlinks has
+	// saved core.symlinks=false, so nothing the remote holds checks out as a
+	// link (the Ledger). A failure becomes the result's Err and the next cycle
+	// retries.
+	NoSymlinks bool
 
 	// ProjectRoot is the user's project root, used to resolve the endpoint
 	// for credential refresh.
@@ -298,6 +305,16 @@ func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPul
 					result = ManagedRepoPullResult{Skipped: true, SkipReason: skipReasonRecentlyFetched}
 					return nil
 				}
+			}
+		}
+		if opts.NoSymlinks {
+			disable := ledger.DisableSymlinks
+			if s.disableSymlinksTestHook != nil {
+				disable = s.disableSymlinksTestHook
+			}
+			if err := disable(path); err != nil {
+				result = ManagedRepoPullResult{Err: fmt.Errorf("pull held until symlink protection is saved: %w", err)}
+				return nil
 			}
 		}
 		result = s.fetchAndPullLocked(ctx, opts, path, repoName, logger)

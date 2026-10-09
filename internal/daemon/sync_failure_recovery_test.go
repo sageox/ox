@@ -2,8 +2,10 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -78,4 +80,46 @@ func TestDoPull_NetworkFailurePreservesStateAndRetryProgresses(t *testing.T) {
 	assert.Equal(t, int64(1), metrics.PullFailureCount)
 	assert.Equal(t, int64(1), metrics.PullSuccessCount,
 		"the recovery pull, unlike the initial remote-unchanged checkpoint, must record success")
+}
+
+// TestDoPull_LedgerPullWaitsForSymlinkProtection: while core.symlinks=false
+// cannot be saved, the Ledger pull does not run, so a symlink the remote
+// gained cannot land as a real link; once it can be saved, the next pull
+// brings the link in as a plain file. Failure prevented: a failed save lets a
+// teammate's committed symlink through, and a later ox write follows it out
+// of the Ledger.
+func TestDoPull_LedgerPullWaitsForSymlinkProtection(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: exercises real git pulls")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks needs elevated rights on Windows, where git checks them out as files anyway")
+	}
+	ledgerDir := filepath.Join(t.TempDir(), "ledger")
+	require.NoError(t, os.MkdirAll(ledgerDir, 0o755))
+	setupGitRepo(t, ledgerDir)
+	remote := bareRepoPath(ledgerDir)
+	scheduler := newPullTestScheduler(t, ledgerDir)
+
+	teammate := filepath.Join(t.TempDir(), "teammate")
+	gitCmd(t, t.TempDir(), "clone", remote, teammate)
+	gitCmd(t, teammate, "config", "user.name", "test")
+	gitCmd(t, teammate, "config", "user.email", "test@test.com")
+	require.NoError(t, os.Symlink(filepath.Join(t.TempDir(), "outside"), filepath.Join(teammate, "AGENTS.md")))
+	gitCmd(t, teammate, "add", "AGENTS.md")
+	gitCmd(t, teammate, "commit", "-m", "plant a link")
+	gitCmd(t, teammate, "push", "origin", "HEAD")
+
+	scheduler.disableSymlinksTestHook = func(string) error { return errors.New("config not writable") }
+	err := scheduler.doPull(context.Background(), nil, true, false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "symlink protection")
+	_, statErr := os.Lstat(filepath.Join(ledgerDir, "AGENTS.md"))
+	require.True(t, os.IsNotExist(statErr), "no pull may run while protection is unsaved: %v", statErr)
+
+	scheduler.disableSymlinksTestHook = nil
+	require.NoError(t, scheduler.doPull(context.Background(), nil, true, false))
+	info, err := os.Lstat(filepath.Join(ledgerDir, "AGENTS.md"))
+	require.NoError(t, err)
+	assert.True(t, info.Mode().IsRegular(), "the pulled link must arrive as a plain file, got %s", info.Mode())
 }
