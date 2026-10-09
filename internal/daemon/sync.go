@@ -873,13 +873,15 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 		// delayed team context sync for regular pulls (not just cloning).
 		// Gated on global-sync ownership — non-owner daemons leave team
 		// contexts to the owning daemon for this endpoint (ox-6zme).
-		go func() {
-			time.Sleep(5 * time.Second)
+		startupTeamSyncDone := startDelayedTeamContextSync(ctx, 5*time.Second, func(ctx context.Context) {
 			if !s.IsGlobalSyncOwner() {
 				return
 			}
 			s.pullTeamContexts(ctx)
-		}()
+		})
+		// The startup pull must stop before the scheduler's caller releases
+		// its resources. Cancellation also interrupts the initial delay.
+		defer func() { <-startupTeamSyncDone }()
 	} else {
 		s.logger.Info("sync scheduler started",
 			"read_interval", s.config.SyncIntervalRead,
@@ -1051,6 +1053,30 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 			span.End()
 		}
 	}
+}
+
+// startDelayedTeamContextSync schedules the initial team pull and reports when
+// its callback has finished, including when cancellation skips the pull.
+func startDelayedTeamContextSync(ctx context.Context, delay time.Duration, pull func(context.Context)) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if ctx.Err() != nil {
+			return
+		}
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
+		// The timer and cancellation can become ready together.
+		if ctx.Err() == nil {
+			pull(ctx)
+		}
+	}()
+	return done
 }
 
 // TriggerSync triggers an immediate sync (debounced by watcher).

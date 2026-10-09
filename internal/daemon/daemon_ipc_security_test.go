@@ -1,11 +1,13 @@
 package daemon
 
 import (
+	"context"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/session/adapters"
@@ -90,7 +92,11 @@ func TestPublishMurmur_RejectsTraversalDoesNotWrite(t *testing.T) {
 	canary := filepath.Join(tmp, "stolen.json")
 	require.NoFileExists(t, canary, "preflight: canary must not exist yet")
 
-	d := &Daemon{logger: slog.New(slog.NewTextHandler(testWriter{t}, nil))}
+	completed := make(chan struct{}, 3)
+	d := &Daemon{logger: slog.New(murmurPublishCompletionHandler{
+		Handler:   slog.NewTextHandler(testWriter{t}, nil),
+		completed: completed,
+	})}
 	svc := &daemonServiceImpl{d: d}
 
 	// Attack 1: target_dir outside any workspace.
@@ -114,12 +120,35 @@ func TestPublishMurmur_RejectsTraversalDoesNotWrite(t *testing.T) {
 		MurmurJSON: []byte(`{"evil":true}`),
 	})
 
-	// PublishMurmur fires the disk write on a goroutine after validation passes.
-	// Since all three attacks must be rejected synchronously before the goroutine
-	// spawns, no canary file can ever appear. Assert immediately.
+	// PublishMurmur validates inside its worker. Wait for each terminal rejection
+	// and its test log to finish before inspecting disk or releasing testing.T.
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	for range 3 {
+		select {
+		case <-completed:
+		case <-deadline.C:
+			t.Fatal("murmur rejection workers did not finish within 2s")
+		}
+	}
 	assert.NoFileExists(t, canary, "rejected murmur must not write the canary")
 	assert.NoFileExists(t, filepath.Join(ledger, "stolen.json"),
 		"rejected murmur must not write inside ledger either")
+}
+
+// Completion follows the underlying handler, so the worker cannot call t.Log
+// after the test has received its terminal rejection notification.
+type murmurPublishCompletionHandler struct {
+	slog.Handler
+	completed chan<- struct{}
+}
+
+func (h murmurPublishCompletionHandler) Handle(ctx context.Context, record slog.Record) error {
+	err := h.Handler.Handle(ctx, record)
+	if record.Message == "murmur publish failed" {
+		h.completed <- struct{}{}
+	}
+	return err
 }
 
 // TestValidateSessionName_RejectsTraversal pins the trust-boundary contract
