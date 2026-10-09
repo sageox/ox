@@ -451,6 +451,18 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 				bk.charge(prime.BudgetSourceSageox)
 			}
 
+			// github mirror board — the same pointer-only contract, for the
+			// board the team's machine identity publishes. Emitted only when
+			// this repo has live posts, so a team without a mirror pays
+			// nothing. Self-closing like the general pointer, which is what
+			// keeps it out of the hook-cap trim candidates: it rides with the
+			// <team-knowledge> wrapper and is never deferred on its own.
+			if gb := output.TeamContext.GitHubBoard; gb != nil && gb.Live > 0 {
+				fmt.Fprintf(&sb, "\n<bulletin board=\"github\" dir=\"%s\" this-repo=\"%s\" live=\"%d\" hint=\"%s\"/>\n",
+					escapeXML(gb.Dir), escapeXML(gb.ThisRepo), gb.Live, escapeXML(prime.GitHubBoardReadingHint))
+				bk.charge(prime.BudgetSourceSageox)
+			}
+
 			// team rules: framing is ours, bodies and rows are team data.
 			// emitTeamRules charges its own buckets through the bookkeeper.
 			if len(output.TeamContext.TeamRules) > 0 {

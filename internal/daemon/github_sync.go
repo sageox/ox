@@ -29,7 +29,12 @@ type GitHubSyncManager struct {
 	logger      *slog.Logger
 	ledgerMu    *sync.Mutex // shared with SyncScheduler; guards all ledger git ops
 	issues      *IssueTracker
-	codedb      *CodeDBManager // trigger indexing after extraction
+	codedb      *CodeDBManager       // trigger indexing after extraction
+	mirror      *GitHubMirrorRelayer // bulletin-board mirror; independent of the Ledger sync below
+
+	// ledgerFetcher builds the GitHub reader for the Ledger sync; nil means the
+	// real client. A field so tests can run a full cycle without the network.
+	ledgerFetcher func(token string) ledger.GitHubFetcher
 
 	mu           sync.Mutex
 	syncing      bool
@@ -47,6 +52,9 @@ type GitHubSyncStats struct {
 	Syncing   bool      `json:"syncing"`
 	Owner     string    `json:"owner,omitempty"`
 	Repo      string    `json:"repo,omitempty"`
+	// Mirror is the bulletin-board mirror's status; absent while the mirror is
+	// off and has never run.
+	Mirror *GitHubMirrorStats `json:"mirror,omitempty"`
 }
 
 // NewGitHubSyncManager creates a new sync manager.
@@ -73,6 +81,14 @@ func (m *GitHubSyncManager) SetCodeDBManager(codedb *CodeDBManager) {
 	m.codedb = codedb
 }
 
+// SetMirrorRelayer sets the bulletin-board mirror that runs at the end of every
+// sync cycle. nil (the default) leaves the mirror off.
+func (m *GitHubSyncManager) SetMirrorRelayer(r *GitHubMirrorRelayer) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.mirror = r
+}
+
 // Status returns current sync status.
 func (m *GitHubSyncManager) Status() GitHubSyncStats {
 	m.mu.Lock()
@@ -86,6 +102,7 @@ func (m *GitHubSyncManager) Status() GitHubSyncStats {
 	if m.lastErr != nil {
 		stats.LastError = m.lastErr.Error()
 	}
+	stats.Mirror = m.mirror.Stats()
 	return stats
 }
 
@@ -96,13 +113,17 @@ func (m *GitHubSyncManager) CheckAndSync(ctx context.Context, ledgerPath string)
 		m.mu.Unlock()
 		return
 	}
+	// A Ledger sync in backoff or suspended must not silence the mirror: they
+	// fail for unrelated reasons, so the cycle still runs without the Ledger half.
+	ledgerBlocked := false
 	if time.Now().Before(m.backoffUntil) {
 		m.logger.Debug("github sync in backoff", "until", m.backoffUntil.Format(time.RFC3339))
-		m.mu.Unlock()
-		return
-	}
-	if m.failCount > 5 {
+		ledgerBlocked = true
+	} else if m.failCount > 5 {
 		m.logger.Debug("github sync suspended after too many failures", "fail_count", m.failCount)
+		ledgerBlocked = true
+	}
+	if ledgerBlocked && m.mirror == nil {
 		m.mu.Unlock()
 		return
 	}
@@ -116,11 +137,21 @@ func (m *GitHubSyncManager) CheckAndSync(ctx context.Context, ledgerPath string)
 			m.mu.Unlock()
 		}()
 
-		m.doSync(ctx, ledgerPath)
+		m.runCycle(ctx, ledgerPath, !ledgerBlocked)
 	}()
 }
 
+// doSync runs a full cycle: the Ledger sync, then the mirror.
 func (m *GitHubSyncManager) doSync(ctx context.Context, ledgerPath string) {
+	m.runCycle(ctx, ledgerPath, true)
+}
+
+// runCycle resolves what both halves share (config toggles, GitHub token,
+// remote), then runs the Ledger sync (unless includeLedger is false) and the
+// mirror. The mirror runs on every path out of the Ledger sync, failures
+// included, and shares none of its accounting: failCount, backoffUntil,
+// lastErr and the issue tracker belong to the Ledger sync alone.
+func (m *GitHubSyncManager) runCycle(ctx context.Context, ledgerPath string, includeLedger bool) {
 	// check config toggle
 	if config.ResolveGitHubSync(m.projectRoot) == config.GitHubSyncDisabled {
 		m.logger.Debug("github sync disabled via config")
@@ -149,10 +180,54 @@ func (m *GitHubSyncManager) doSync(ctx context.Context, ledgerPath string) {
 		return
 	}
 
+	defer m.relayMirror(ctx, MirrorTarget{
+		LedgerPath:   ledgerPath,
+		Owner:        owner,
+		Repo:         repo,
+		GitHubToken:  token,
+		PullRequests: syncPRs,
+		Issues:       syncIssues,
+	})
+
+	if includeLedger {
+		m.syncLedger(ctx, ledgerPath, token, owner, repo, syncPRs, syncIssues)
+	}
+}
+
+// relayMirror runs the mirror, if one is set. It deliberately returns nothing
+// and touches none of the Ledger sync's state. A panic is contained here: the
+// mirror is feature-flagged and handles server and GitHub data, and the daemon
+// must outlive it.
+//
+// The mirror runs while m.syncing is held, so a slow mirror would make
+// CheckAndSync skip the Ledger's next cycle. Run therefore bounds itself
+// (githubMirrorCycleTimeout, below the sync interval) instead of this method
+// imposing a second deadline.
+func (m *GitHubSyncManager) relayMirror(ctx context.Context, target MirrorTarget) {
+	m.mu.Lock()
+	relayer := m.mirror
+	m.mu.Unlock()
+	if relayer == nil {
+		return
+	}
+	defer func() {
+		if rec := recover(); rec != nil {
+			m.logger.Error("github mirror cycle panicked", "panic", fmt.Sprint(rec))
+		}
+	}()
+	relayer.Run(ctx, target)
+}
+
+// syncLedger syncs PRs and issues into the Ledger's data/github and pushes.
+func (m *GitHubSyncManager) syncLedger(ctx context.Context, ledgerPath, token, owner, repo string, syncPRs, syncIssues bool) {
 	m.logger.Info("starting github sync", "owner", owner, "repo", repo)
 	start := time.Now()
 
-	fetcher := gh.NewFetcher(gh.NewClient(token))
+	newFetcher := m.ledgerFetcher
+	if newFetcher == nil {
+		newFetcher = func(token string) ledger.GitHubFetcher { return gh.NewFetcher(gh.NewClient(token)) }
+	}
+	fetcher := newFetcher(token)
 	maxDays := ledger.DefaultGitHubDataWindowDays
 	combined := &ledger.SyncResult{}
 
