@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -169,7 +170,7 @@ func (c *RepoClient) ConfirmRecordingUpload(ctx context.Context, contextType, co
 	if recordingID == "" {
 		return nil, fmt.Errorf("recording ID is required")
 	}
-	reqURL := strings.TrimSuffix(c.baseURL, "/") + base + "/" + recordingID + "/confirm"
+	reqURL := strings.TrimSuffix(c.baseURL, "/") + base + "/" + url.PathEscape(recordingID) + "/confirm"
 
 	var payload any
 	if req != nil {

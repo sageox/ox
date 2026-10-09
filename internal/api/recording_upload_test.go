@@ -123,3 +123,23 @@ func TestConfirmRecordingUpload_BodyOnlyWhenGiven(t *testing.T) {
 	assert.Equal(t, []string{"", `{"upload_id":"upl_1","parts":[{"part_number":1,"etag":"\"e1\""}]}`}, bodies)
 	assert.Equal(t, []string{"", "application/json"}, contentTypes)
 }
+
+// TestConfirmRecordingUpload_EscapesRecordingID: the recording ID comes from
+// the server, so it is one path segment no matter what it contains.
+// Failure prevented: a recording ID holding "/", "..", or "?" steering the
+// bearer-authenticated confirm call to a different route.
+func TestConfirmRecordingUpload_EscapesRecordingID(t *testing.T) {
+	var escapedPath, rawQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		escapedPath = r.URL.EscapedPath()
+		rawQuery = r.URL.RawQuery
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	defer srv.Close()
+
+	_, err := NewRepoClientWithEndpoint(srv.URL).ConfirmRecordingUpload(t.Context(), ContextTypeTeam, "team_1", "../../admin?x=1", nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, "/api/v1/teams/team_1/recordings/..%2F..%2Fadmin%3Fx=1/confirm", escapedPath)
+	assert.Empty(t, rawQuery)
+}
