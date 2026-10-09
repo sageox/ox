@@ -344,11 +344,20 @@ func detectOtherAIEditors() []string {
 	return detected
 }
 
+// integrateInstallHint is the command that installs an agent's hooks, for doctor
+// hints and tips. It takes the `ox integrate install` flag name, never the display
+// name: lowercasing "Gemini CLI" produced `--gemini cli`, and the hints used to
+// name `ox hooks install`, a command that does not exist (#1257).
+func integrateInstallHint(integrateFlag string) string {
+	return "ox integrate install --" + integrateFlag
+}
+
 // checkAgentHooks checks if hooks are properly installed for the given agent
 // Uses tiered detection:
 // - Project config exists → error if hooks not installed
 // - CLI in PATH only → suggestion to install hooks
-func checkAgentHooks(agent Agent, agentName string, fix bool) checkResult {
+// integrateFlag is the agent's `ox integrate install` flag (e.g. "gemini").
+func checkAgentHooks(agent Agent, agentName, integrateFlag string, fix bool) checkResult {
 	projectDetected := agent.DetectProject()
 	cliDetected := agent.DetectCLI()
 
@@ -378,22 +387,22 @@ func checkAgentHooks(agent Agent, agentName string, fix bool) checkResult {
 			return PassedCheck(agentName+" hooks", "installed (project)")
 		}
 		return FailedCheck(agentName+" hooks", "not installed",
-			fmt.Sprintf("Run `ox hooks install --%s` or `ox doctor --fix`", strings.ToLower(agentName)))
+			fmt.Sprintf("Run `%s` or `ox doctor --fix`", integrateInstallHint(integrateFlag)))
 	}
 
 	// CLI detected but no project config - suggest hooks (info/skipped, not error)
 	return SkippedCheck(agentName+" hooks", "CLI detected, no project config",
-		fmt.Sprintf("Run `ox hooks install --%s` to enable for this project", strings.ToLower(agentName)))
+		fmt.Sprintf("Run `%s` to enable for this project", integrateInstallHint(integrateFlag)))
 }
 
 // checkOpenCodeHooks checks if OpenCode hooks are properly installed
 func checkOpenCodeHooks(fix bool) checkResult {
-	return checkAgentHooks(&OpenCodeAgent{}, "OpenCode", fix)
+	return checkAgentHooks(&OpenCodeAgent{}, "OpenCode", "opencode", fix)
 }
 
 // checkGeminiHooks checks if Gemini CLI hooks are properly installed
 func checkGeminiHooks(fix bool) checkResult {
-	return checkAgentHooks(&GeminiAgent{}, "Gemini CLI", fix)
+	return checkAgentHooks(&GeminiAgent{}, "Gemini CLI", "gemini", fix)
 }
 
 // detection functions for AI coding tools
@@ -439,7 +448,7 @@ func detectCodex() bool {
 
 // checkCodexHooks checks if Codex CLI hooks are properly installed
 func checkCodexHooks(fix bool) checkResult {
-	return checkAgentHooks(&CodexAgent{}, "Codex", fix)
+	return checkAgentHooks(&CodexAgent{}, "Codex", "codex", fix)
 }
 
 // detectAmp checks if Amp CLI is installed or configured
@@ -449,7 +458,7 @@ func detectAmp() bool {
 
 // checkAmpHooks checks if Amp CLI integration is properly installed
 func checkAmpHooks(fix bool) checkResult {
-	return checkAgentHooks(&AmpAgent{}, "Amp", fix)
+	return checkAgentHooks(&AmpAgent{}, "Amp", "amp", fix)
 }
 
 // checkInstructionFileMarkers checks that all detected agent instruction files
