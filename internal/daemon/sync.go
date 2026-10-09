@@ -2612,9 +2612,12 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 		if !gitserver.TestAllowFileTransport {
 			cloneArgs = append(cloneArgs, "-c", "protocol.file.allow=never")
 		}
+		// core.symlinks=false: a symlink committed to the Ledger checks out as a
+		// plain file, so the AGENTS.md written below (and every later write)
+		// cannot follow one out of the clone. See ledger.disableSymlinks.
 		cloneArgs = append(cloneArgs,
 			"-c", "protocol.ext.allow=never",
-			"clone", "--quiet", "--", cloneURL, tempPath,
+			"clone", "--quiet", "--config", "core.symlinks=false", "--", cloneURL, tempPath,
 		)
 		// NewNetworkCmd sets GIT_TERMINAL_PROMPT=0 so a credential gap fails
 		// fast instead of EOFing on a username prompt in the daemon's TTY-less
