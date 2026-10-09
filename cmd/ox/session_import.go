@@ -224,12 +224,29 @@ func importSignalContext(parent context.Context) (context.Context, context.Cance
 	return ctx, stop
 }
 
+// importInvocationEnvironment excludes installed project integrations from runtime
+// detection: a coworker's terminal can contain .codex/ without running Codex.
+// The agentx registry still recognizes runtime markers and explicit AGENT_ENV.
+type importInvocationEnvironment struct {
+	agentx.Environment
+}
+
+func (importInvocationEnvironment) IsDir(string) bool { return false }
+
+func importAgentContext(ctx context.Context, env agentx.Environment) bool {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	agent, _ := agentx.NewDetectorWithEnv(importInvocationEnvironment{env}).Detect(ctx)
+	return agent != nil
+}
+
 // parseImportOptions validates limits before discovery or any summarizer can run.
 func parseImportOptions(cmd *cobra.Command) (importOptions, *importFailure) {
 	var o importOptions
 	o.jsonOut, _ = cmd.Root().PersistentFlags().GetBool("json")
 	jsonSet := cmd.Root().PersistentFlags().Changed("json")
-	o.agentCtx = agentx.IsAgentContext()
+	o.agentCtx = importAgentContext(cmd.Context(), agentx.NewSystemEnvironment())
 	if o.agentCtx && !jsonSet {
 		o.jsonOut = true
 	}

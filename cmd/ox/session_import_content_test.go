@@ -27,6 +27,7 @@ func TestImportContent_ReadOnlyNormalizedExcerpts(t *testing.T) {
 	path := f.add(t, pastSession{agent: nativeimport.AgentCodex, id: e2eCodexA, start: start, prompt: loginPrompt, reply: "Last reply", entries: []adapters.RawEntry{
 		{Role: "user", Content: "<environment_context>cwd</environment_context>"},
 		{Role: "user", Content: "# AGENTS.md instructions for this project"},
+		{Role: "user", Content: `<external_codex_apps_open_page>{"page_id":null}</external_codex_apps_open_page>`},
 		{Role: "user", Content: loginPrompt},
 		{Role: "assistant", Content: "Investigating"},
 		{Role: "tool", ToolName: "exec_command", ToolInput: `{"cmd":"gh auth token"}`, CallID: "credential"},
@@ -47,7 +48,8 @@ func TestImportContent_ReadOnlyNormalizedExcerpts(t *testing.T) {
 	assert.Equal(t, "content_preview", result.Status)
 	assert.Equal(t, loginPrompt, result.Preview.OpeningRequest)
 	require.Len(t, result.Preview.Prompts, 2)
-	assert.Equal(t, 2, result.Preview.Prompts[0].EntryIndex)
+	assert.Equal(t, 3, result.Preview.Prompts[0].EntryIndex)
+	assert.Contains(t, result.Preview.Entries[2].Content, "<external_codex_apps_open_page>", "app context remains available in the retained conversation")
 	assert.Equal(t, "Last reply", result.Preview.LastReply)
 	assert.NotContains(t, out.String(), "a-secret-without-token-shape")
 	assert.Contains(t, out.String(), "REDACTED")
@@ -69,6 +71,23 @@ func TestImportContent_ReadOnlyNormalizedExcerpts(t *testing.T) {
 	require.NoError(t, os.WriteFile(path, []byte("changed session"), 0600))
 	_, err = load(context.Background(), e2eCodexA)
 	assert.ErrorIs(t, err, errImportSourceChanged)
+}
+
+func TestImportContextPrompt_VendorMetadataAndHumanXML(t *testing.T) {
+	for _, tc := range []struct {
+		name, content string
+		context       bool
+	}{
+		{"Codex app context", `<external_codex_apps_open_page>{"page_id":null}</external_codex_apps_open_page>`, true},
+		{"leading whitespace", "\n  <external_codex_apps_open_page>{}</external_codex_apps_open_page>", true},
+		{"human XML request", "<widget>Build this component</widget>", false},
+		{"human explanation", "Explain <external_codex_apps_open_page> metadata", false},
+		{"ordinary request", "Create a simple hello world program in python", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.context, isImportContextPrompt(tc.content))
+		})
+	}
 }
 
 func TestImportReview_SelectionConfirmationAndSourceChanges(t *testing.T) {

@@ -109,7 +109,8 @@ node --check cmd/ox/session_import_browser.js
 python3 scripts/session_import_testbed_test.py
 ```
 
-Browser tests require Chrome/Chromium. To capture desktop, mobile, and dark-mode
+The reader opens in your default browser, including Safari; Chrome/Chromium is
+required only by the automated `chromedp` browser tests. To capture desktop, mobile, and dark-mode
 QA images, add `-args -import-browser-screenshots=/private/tmp/ox-import-qa` to
 the browser test command. Real-adapter fixture tests build the adapter binaries
 from this checkout; fast `-short` tests omit that build.

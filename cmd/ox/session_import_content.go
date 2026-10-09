@@ -241,7 +241,7 @@ func importPreviewBytes(p *importContentPreview) int {
 // become the session's label or its human prompt navigation anchors.
 func isImportContextPrompt(content string) bool {
 	s := strings.TrimSpace(content)
-	for _, prefix := range []string{"<environment_context>", "<permissions instructions>", "<instructions>", "<system-reminder>", "<local-command-caveat>", "<command-name>", "# AGENTS.md instructions"} {
+	for _, prefix := range []string{"<environment_context>", "<permissions instructions>", "<instructions>", "<system-reminder>", "<local-command-caveat>", "<command-name>", "<external_codex_", "# AGENTS.md instructions"} {
 		if strings.HasPrefix(s, prefix) {
 			return true
 		}
