@@ -12,10 +12,12 @@ Import a document, media file, or video URL into team context
 
 Import a document, media file, or video URL for onboarding and knowledge sharing.
 
-Imports are stored with LFS-backed content and git-tracked metadata in the
-team context repo — including media files (mp4, mov, webm, m4a, mp3, wav, …),
-which are transcribed and summarized server-side after import. Supports
-Loom, Cap, and direct video URLs.
+Audio and video files (m4a, mp3, wav, webm, ogg, opus, flac, aac, wma, mp4,
+mov, m4v) upload to SageOx as recordings, which are transcribed and
+summarized server-side. Large files upload in parallel parts with retries,
+and files over 50 MB report progress on stderr. Other files are stored with
+LFS-backed content and git-tracked metadata in the team context repo.
+Supports Loom, Cap, and direct video URLs.
 
 Team context is a conversation store; Knowledge Bubbles are Curator-authored
 syntheses and are not an import target (ox ADR-028).
@@ -23,7 +25,7 @@ syntheses and are not an import target (ox ADR-028).
   ox import report.pdf --text extracted.md
   ox import report.pdf --title "Q2 Review"        # override the filename-derived title
   ox import notes.md --date 2026-01-15
-  ox import ./standup.mp4                       # media file into the team (git-tracked, transcribed)
+  ox import ./standup.mp4                       # recording upload, then transcribed and summarized
   ox import https://www.loom.com/share/abc123 --title "Architecture Review"
   ox import https://cap.link/abc123 --title "Sprint Retro"
   ox import --list                              # find import IDs
@@ -42,13 +44,13 @@ ox import <file|url> [flags]
 ### Options
 
 ```
-      --date string     date for filing (YYYY-MM-DD, default: auto-detect from metadata)
+      --date string     date for filing, or when audio/video was recorded (YYYY-MM-DD, default: auto-detect from metadata)
       --force           re-import even if content hash already exists
   -h, --help            help for import
       --list            list imports and their processing status
-      --status string   check processing status of a URL import (use --list to find IDs)
+      --status string   check processing status of a media or URL import (use --list to find IDs)
       --team string     team ID (or slug/name when inside a repo)
-      --text string     path to pre-extracted text/markdown for indexing (optional)
+      --text string     path to pre-extracted text/markdown for indexing (optional; keeps audio/video on the document path)
       --title string    display title (defaults to filename for file imports)
       --watch           poll --status until processing completes or fails
 ```

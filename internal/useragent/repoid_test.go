@@ -3,6 +3,7 @@ package useragent
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -135,6 +136,31 @@ func TestRepoID_SurvivesRoundTrip(t *testing.T) {
 
 	assert.Equal(t, "repo_01hxyz9abc", got.Get(HeaderRepoID))
 	assert.Contains(t, got.Get("User-Agent"), "ox/", "existing headers must be unaffected")
+}
+
+// TestClientType_SurvivesRoundTrip proves every SageOx API request declares the
+// cli surface on the wire.
+//
+// Failure prevented: the server falling back to User-Agent sniffing for ox
+// traffic, which is the guesswork the declared header exists to replace.
+func TestClientType_SurvivesRoundTrip(t *testing.T) {
+	ResetForTesting()
+	defer ResetForTesting()
+
+	var got http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+	}))
+	defer srv.Close()
+
+	req, err := NewRequest(t.Context(), http.MethodPost, srv.URL, nil)
+	require.NoError(t, err)
+	resp, err := srv.Client().Do(req)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	assert.Equal(t, "cli", got.Get(HeaderClientType))
+	assert.True(t, strings.HasPrefix(got.Get("User-Agent"), "ox/"), "User-Agent must be unchanged, got %q", got.Get("User-Agent"))
 }
 
 func repeat(s string, n int) string {

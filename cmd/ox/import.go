@@ -50,10 +50,12 @@ var importCmd = &cobra.Command{
 	Short: "Import a document, media file, or video URL into team context",
 	Long: `Import a document, media file, or video URL for onboarding and knowledge sharing.
 
-Imports are stored with LFS-backed content and git-tracked metadata in the
-team context repo — including media files (mp4, mov, webm, m4a, mp3, wav, …),
-which are transcribed and summarized server-side after import. Supports
-Loom, Cap, and direct video URLs.
+Audio and video files (m4a, mp3, wav, webm, ogg, opus, flac, aac, wma, mp4,
+mov, m4v) upload to SageOx as recordings, which are transcribed and
+summarized server-side. Large files upload in parallel parts with retries,
+and files over 50 MB report progress on stderr. Other files are stored with
+LFS-backed content and git-tracked metadata in the team context repo.
+Supports Loom, Cap, and direct video URLs.
 
 Team context is a conversation store; Knowledge Bubbles are Curator-authored
 syntheses and are not an import target (ox ADR-028).
@@ -61,7 +63,7 @@ syntheses and are not an import target (ox ADR-028).
   ox import report.pdf --text extracted.md
   ox import report.pdf --title "Q2 Review"        # override the filename-derived title
   ox import notes.md --date 2026-01-15
-  ox import ./standup.mp4                       # media file into the team (git-tracked, transcribed)
+  ox import ./standup.mp4                       # recording upload, then transcribed and summarized
   ox import https://www.loom.com/share/abc123 --title "Architecture Review"
   ox import https://cap.link/abc123 --title "Sprint Retro"
   ox import --list                              # find import IDs
@@ -77,13 +79,13 @@ go in agents/rules/, not through ox import.`,
 }
 
 func init() {
-	importCmd.Flags().StringVar(&importFlags.text, "text", "", "path to pre-extracted text/markdown for indexing (optional)")
+	importCmd.Flags().StringVar(&importFlags.text, "text", "", "path to pre-extracted text/markdown for indexing (optional; keeps audio/video on the document path)")
 	importCmd.Flags().SetAnnotation("text", "cobra_annotation_flag_value_name", []string{"file"})
-	importCmd.Flags().StringVar(&importFlags.date, "date", "", "date for filing (YYYY-MM-DD, default: auto-detect from metadata)")
+	importCmd.Flags().StringVar(&importFlags.date, "date", "", "date for filing, or when audio/video was recorded (YYYY-MM-DD, default: auto-detect from metadata)")
 	importCmd.Flags().BoolVar(&importFlags.force, "force", false, "re-import even if content hash already exists")
 	importCmd.Flags().StringVar(&importFlags.team, "team", "", "team ID (or slug/name when inside a repo)")
 	importCmd.Flags().StringVar(&importFlags.title, "title", "", "display title (defaults to filename for file imports)")
-	importCmd.Flags().StringVar(&importFlags.status, "status", "", "check processing status of a URL import (use --list to find IDs)")
+	importCmd.Flags().StringVar(&importFlags.status, "status", "", "check processing status of a media or URL import (use --list to find IDs)")
 	importCmd.Flags().BoolVar(&importFlags.watch, "watch", false, "poll --status until processing completes or fails")
 	importCmd.Flags().BoolVar(&importFlags.list, "list", false, "list imports and their processing status")
 }
@@ -127,9 +129,10 @@ type sidecar struct {
 	CreatedAt string `json:"created_at"`
 }
 
-// importResult is the --json payload for a team document import. recording_id is
-// populated only when the server routes the file to transcription and returns an
-// ID (media files); it can be fed to `ox import --status <id> --watch`.
+// importResult is the --json payload for a team import. recording_id is set for
+// audio/video (and for a document-path media file the server routed to
+// transcription); it can be fed to `ox import --status <id> --watch`. path is
+// set only for files stored in the team context repo.
 type importResult struct {
 	Status      string `json:"status"` // "imported" | "already_imported"
 	Title       string `json:"title,omitempty"`
@@ -141,7 +144,8 @@ type importResult struct {
 	RecordingID string `json:"recording_id,omitempty"`
 }
 
-// runImport uploads a document to the team context's LFS store and commits its pointer files.
+// runImport uploads audio/video through the recording upload route, and any
+// other file to the team context's LFS store with its pointer files committed.
 func runImport(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
 	if ctx == nil {
@@ -205,6 +209,30 @@ func runImport(cmd *cobra.Command, args []string) error {
 	tc, err := resolveImportTeam(projectRoot, ep)
 	if err != nil {
 		return err
+	}
+
+	// audio and video go straight to the recording pipeline. --text keeps a
+	// media file on the document path, which is the only one with a sidecar.
+	if isMediaImportFile(srcPath) && importFlags.text == "" {
+		var recordedAt *time.Time
+		if importFlags.date != "" {
+			recordedAt = &importDate
+		}
+		err := runImportMedia(ctx, cmd, mediaImport{
+			srcPath:     srcPath,
+			size:        srcInfo.Size(),
+			tc:          tc,
+			ep:          ep,
+			docsBaseDir: filepath.Join(tc.Path, "data", "docs"),
+			recordedAt:  recordedAt,
+			jsonOutput:  jsonOutput,
+		})
+		if !errors.Is(err, api.ErrRecordingUploadUnsupported) {
+			return err
+		}
+		// nothing was uploaded; an older server still takes media through the
+		// document path and transcribes it from there
+		cli.PrintWarningTo(cmd.ErrOrStderr(), "This server does not accept recording uploads (HTTP 404); importing through the team context document path instead")
 	}
 
 	// data/ is excluded from the team context sparse checkout (deny list in
@@ -985,6 +1013,8 @@ func detectContentType(filename string, content []byte) string {
 		return "video/mp4"
 	case ".mov":
 		return "video/quicktime"
+	case ".m4v":
+		return "video/x-m4v"
 	case ".mkv":
 		return "video/x-matroska"
 	case ".avi":
