@@ -77,3 +77,24 @@ func TestConfigureOneShotCommand_CancelLifecycle(t *testing.T) {
 		}
 	})
 }
+
+// A descendant that outlives the adapter and keeps the output pipes open for a
+// while must not fail an otherwise-complete one-shot read; this is what a
+// scheduler stall on a saturated host looks like to cmd.Wait.
+func TestExternalAdapter_OneShotToleratesSlowPipeDrain(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "ox-adapter-slowdrain")
+	contents := "#!/bin/sh\nsleep 0.5 &\nprintf '{\"ok\":true}\\n'\nexit 0\n"
+	if err := os.WriteFile(script, []byte(contents), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ea := NewExternalAdapterWithInfo(script, &adapterprotocol.InfoResponse{Name: "slowdrain"})
+	out, err := ea.execOneShot("read-from-offset")
+	if err != nil {
+		t.Fatalf("one-shot failed despite complete adapter output: %v", err)
+	}
+	if string(out) != `{"ok":true}` {
+		t.Fatalf("output = %q", out)
+	}
+}

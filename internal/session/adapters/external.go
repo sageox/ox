@@ -40,10 +40,13 @@ var (
 
 const (
 	defaultOneShotOutputLimit = 64 * 1024 * 1024
-	// After cancellation, a descendant may keep the adapter's inherited output
-	// pipes open even though the direct process has exited. Bound pipe draining
-	// so a timed-out one-shot call returns promptly on every platform.
-	oneShotPipeDrainDelay = 100 * time.Millisecond
+	// After the adapter exits or is canceled, a descendant may keep the
+	// inherited output pipes open. WaitDelay bounds that orphan case, not
+	// normal copying: it must exceed scheduler jitter on a saturated host, or
+	// a complete adapter answer is discarded with "WaitDelay expired before
+	// I/O complete". oneShotTimeout stays the real deadline. Same order as
+	// gitutil's gitWaitDelay.
+	oneShotPipeDrainDelay = 2 * time.Second
 )
 
 // ExternalAdapter implements Adapter and IncrementalReader by calling an

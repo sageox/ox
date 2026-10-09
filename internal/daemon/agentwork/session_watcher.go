@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -588,7 +589,8 @@ func (m *SessionWatcherManager) pollSession(
 		entries, newOffset, err := reader.ReadFromOffset(aw.sessionFile, offset)
 		if err != nil {
 			m.logger.Warn("handle-based session read failed",
-				"session", aw.sessionName, "adapter", aw.adapterName, "offset", offset, "error", err)
+				"session", aw.sessionName, "adapter", aw.adapterName, "offset", offset, "error", err,
+				"transient", isPipeDrainTimeout(err))
 			continue
 		}
 		if len(entries) == 0 {
@@ -677,4 +679,11 @@ func resolveAdapter(name string) (adapters.Adapter, error) {
 		return nil, fmt.Errorf("unknown adapter: %q", name)
 	}
 	return adapter, nil
+}
+
+// isPipeDrainTimeout reports whether err is the os/exec WaitDelay expiry. The
+// adapter already answered; the host was too loaded to drain its pipes in
+// time, so the next poll retries with the cursor unchanged.
+func isPipeDrainTimeout(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "WaitDelay expired")
 }
