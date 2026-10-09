@@ -20,8 +20,11 @@ import (
 	"github.com/sageox/ox/internal/codedb/index"
 	"github.com/sageox/ox/internal/codedb/store"
 	"github.com/sageox/ox/internal/config"
+	gh "github.com/sageox/ox/internal/github"
+	"github.com/sageox/ox/internal/githubmirror"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/paths"
+	"github.com/sageox/ox/internal/repotools"
 )
 
 // CodeDBManager manages CodeDB indexing in the daemon.
@@ -68,6 +71,15 @@ type CodeDBManager struct {
 	// Used by CheckFreshness to skip the expensive doIndex pipeline when nothing changed.
 	// Empty on daemon startup → first CheckFreshness always runs (catches offline changes).
 	lastIndexedHead string // format: "refs/heads/main:abc123..."
+
+	// lastIndexedBoard is index.BoardFingerprint of the team bulletin board's
+	// github posts at the last doIndex that covered them. CheckFreshness treats a
+	// moved board like a moved HEAD: teammates' PRs reach the board through the
+	// Team Context pull without touching this repo's git state.
+	lastIndexedBoard string
+	// githubRepo caches "owner/name" of the project's GitHub remote, used to pick
+	// this repo's posts off the shared board. Cleared when the project root moves.
+	githubRepo string
 
 	// dirty-only refresh state (separate lifecycle from full indexing)
 	dirtyRefreshing  bool
@@ -729,6 +741,14 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 		}
 	}
 
+	// index the team bulletin board's mirrored GitHub posts. Must run after the
+	// Ledger stage: a board post wins over a Ledger snapshot for the same number.
+	// Local indexing only — payload.URL indexes some other repo, whose PRs these
+	// are not.
+	if payload.URL == "" {
+		m.indexGitHubBoard(ctx, db, pw)
+	}
+
 	// cache stats from the still-open DB connection so Stats() never has to reopen
 	cachedStats := queryStatsFromDB(db, dataDir)
 
@@ -784,6 +804,94 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 		CommentDurationMs: commentDuration.Milliseconds(),
 		TotalDurationMs:   totalDuration.Milliseconds(),
 	}, nil
+}
+
+// indexGitHubBoard is the board stage of doIndex. It is non-fatal like the
+// Ledger stage: the mirror is an enrichment, and a bad post must not fail a
+// code index.
+func (m *CodeDBManager) indexGitHubBoard(ctx context.Context, db *codedb.DB, pw *ProgressWriter) {
+	postsDir := m.boardPostsDir()
+	if postsDir == "" {
+		return
+	}
+	// taken before indexing: a post that lands mid-stage then reads as "changed"
+	// on the next CheckFreshness instead of being recorded as already indexed
+	fingerprint := index.BoardFingerprint(postsDir)
+
+	// a project without a GitHub remote has no posts on the board to find
+	if repo := m.githubRepoFullName(); repo != "" {
+		if pw != nil {
+			_ = pw.WriteStage("github-board", "Indexing GitHub board posts...")
+		}
+		start := time.Now()
+		stats, err := db.IndexGitHubBoard(ctx, postsDir, repo, func(msg string) {
+			if pw != nil {
+				_ = pw.WriteMessage(msg)
+			}
+		})
+		switch {
+		case err != nil:
+			m.logger.Warn("github board indexing failed", "error", err)
+		case stats.PRsIndexed > 0 || stats.IssuesIndexed > 0:
+			m.logger.Info("codedb stage complete", "stage", "github-board", "duration", time.Since(start).Round(time.Millisecond), "prs", stats.PRsIndexed, "issues", stats.IssuesIndexed)
+		}
+	}
+
+	// A canceled or timed-out stage may have skipped posts, so leave the
+	// fingerprint stale and let the next check retry. Any other outcome records
+	// it, including failure: otherwise a persistent error would re-run the whole
+	// pipeline on every freshness check.
+	if ctx.Err() == nil {
+		m.mu.Lock()
+		m.lastIndexedBoard = fingerprint
+		m.mu.Unlock()
+	}
+}
+
+// boardPostsDir returns the directory holding the team bulletin board's github
+// posts for this project, or "" when the project has no Team Context checkout.
+// The directory may not exist yet; the mirror creates it with the first post.
+func (m *CodeDBManager) boardPostsDir() string {
+	m.mu.Lock()
+	projectRoot := m.projectRoot
+	m.mu.Unlock()
+
+	teamContext := config.FindRepoTeamContext(projectRoot)
+	if teamContext == nil || teamContext.Path == "" {
+		return ""
+	}
+	return githubmirror.PostsDir(teamContext.Path)
+}
+
+// githubRepoFullName returns "owner/name" for the project's GitHub remote, or
+// "" when there is none. It resolves the remote the same way the GitHub sync
+// does, so the board is read for the repo the mirror writes for. Only a
+// successful resolution is cached, so adding a remote later is picked up.
+func (m *CodeDBManager) githubRepoFullName() string {
+	m.mu.Lock()
+	if m.githubRepo != "" {
+		repo := m.githubRepo
+		m.mu.Unlock()
+		return repo
+	}
+	projectRoot := m.projectRoot
+	m.mu.Unlock()
+
+	urls, err := repotools.GetRemoteURLsForDir(projectRoot)
+	if err != nil {
+		m.logger.Debug("codedb board: no git remotes", "error", err)
+		return ""
+	}
+	for _, url := range urls {
+		if owner, name, ok := gh.ParseGitHubRemote(url); ok {
+			repo := owner + "/" + name
+			m.mu.Lock()
+			m.githubRepo = repo
+			m.mu.Unlock()
+			return repo
+		}
+	}
+	return ""
 }
 
 // readHeadFingerprint returns a cheap fingerprint of the current git HEAD state.
@@ -870,6 +978,21 @@ func readHeadFingerprintGit(ctx context.Context, repoPath string) string {
 	return refName + ":" + hashOut
 }
 
+// boardChanged reports whether the team bulletin board's github posts differ
+// from what the last index covered. A teammate's PR reaches the board through
+// the Team Context pull, which never moves this repo's HEAD, so without this the
+// HEAD pre-check would leave board posts unindexed until the next commit.
+func (m *CodeDBManager) boardChanged() bool {
+	postsDir := m.boardPostsDir()
+	if postsDir == "" {
+		return false
+	}
+	current := index.BoardFingerprint(postsDir)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return current != m.lastIndexedBoard
+}
+
 // CheckFreshness checks if the index needs refreshing and triggers a background
 // re-index if needed. If no index exists yet, creates the initial index.
 // This is non-blocking and safe to call from the scheduler or daemon startup.
@@ -891,7 +1014,7 @@ func (m *CodeDBManager) CheckFreshness(ctx context.Context) {
 		m.mu.Lock()
 		cached := m.lastIndexedHead
 		m.mu.Unlock()
-		if cached != "" && cached == fingerprint {
+		if cached != "" && cached == fingerprint && !m.boardChanged() {
 			dataDir := m.resolveSharedDataDir()
 			if _, err := os.Stat(dataDir); err == nil {
 				m.logger.Debug("codedb freshness check skipped, HEAD unchanged")
@@ -1290,6 +1413,7 @@ func (m *CodeDBManager) UpdateProjectRoot(path string) {
 	}
 	old := m.projectRoot
 	m.projectRoot = path
+	m.githubRepo = "" // the new root may have different remotes
 	m.logger.Info("codedb project root updated", "old", old, "new", path)
 }
 

@@ -127,9 +127,27 @@ type TeamContextInfo struct {
 	MemoryMonthly        []string `json:"memory_monthly,omitempty"`         // available monthly summary files
 	ObservationGuideHint string   `json:"observation_guide_hint,omitempty"` // path to memory/GUIDE.md (read when needed)
 
+	// GitHubBoard points at the team's read-only GitHub mirror board. A pointer
+	// only: post bodies are never read. Set only when the board holds at least
+	// one unexpired post for THIS repo, so a team that does not mirror this
+	// repo (or whose posts all aged out) pays nothing.
+	GitHubBoard *GitHubBoardInfo `json:"github_board,omitempty"`
+
 	// sync health
 	Stale      bool   `json:"stale,omitempty"`       // true if last sync exceeds staleness threshold
 	StaleSince string `json:"stale_since,omitempty"` // human-readable duration since last sync
+}
+
+// GitHubBoardInfo is the prime pointer to the github bulletin board.
+type GitHubBoardInfo struct {
+	// Dir is the absolute path of <team>/bulletin/github/posts.
+	Dir string `json:"dir"`
+	// ThisRepo is the filename glob that selects this repo's posts, e.g.
+	// "acme-api-*" (a post file is <slug>-<sha>.md, and a slug starts with the
+	// repo's "{owner}-{name}-" prefix).
+	ThisRepo string `json:"this_repo"`
+	// Live counts this repo's posts whose .meta.json expires_at is after now.
+	Live int `json:"live"`
 }
 
 // OtherTeams lists non-primary team contexts available to the agent.
