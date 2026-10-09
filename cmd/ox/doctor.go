@@ -1387,6 +1387,8 @@ var ledgerGitHealthOrder = []string{
 	CheckSlugGitignoreMissing,
 	CheckSlugSessionIDsBackfilled,
 	CheckSlugGitHubDataMigration,
+	// read-only report on the daemon's GitHub mirror relay; order-independent.
+	CheckSlugGitHubMirror,
 }
 
 // checkLedgerGitHealth runs every check registered in the "Ledger Git Health"
@@ -1422,8 +1424,10 @@ func checkLedgerGitHealth(opts doctorOptions) []checkResult {
 
 		result := check.Run(opts.shouldFix(slug))
 		// the checkout .gitignore check reports "skipped" when no checkout
-		// exists; that is not a finding worth a row.
-		if result.skipped && slug == CheckSlugGitignoreMissing {
+		// exists; that is not a finding worth a row. The GitHub mirror check
+		// reports "skipped" when the mirror never ran on this machine, which
+		// is the common case and likewise not worth a row.
+		if result.skipped && (slug == CheckSlugGitignoreMissing || slug == CheckSlugGitHubMirror) {
 			continue
 		}
 		checks = append(checks, result)

@@ -539,6 +539,10 @@ func optionsFromCommand(t *testing.T, command string) importOptions {
 			agent, ok := parseImportAgent(fields[i])
 			require.True(t, ok, command)
 			opts.summarizer = agent
+		case "--parallel":
+			i++
+			_, err := fmt.Sscan(fields[i], &opts.parallel)
+			require.NoError(t, err, command)
 		case "--from-test-data":
 			i++
 			opts.testData = strings.Trim(fields[i], "'") // shell-quoted; test paths hold no spaces
@@ -1214,7 +1218,8 @@ func TestImportE2E_InteractiveRunAsksFirst(t *testing.T) {
 	r := f.run(t, importOptions{})
 	assert.ErrorIs(t, r.err, cli.ErrSilent, "a failed session fails the run")
 	assert.Contains(t, r.out, "[1/3]")
-	assert.Contains(t, r.out, "summarizing… ready")
+	assert.Contains(t, r.out, "[1/3] summarizing claude "+nativeShortID(e2eClaudeA))
+	assert.Contains(t, r.out, "[1/3] claude "+nativeShortID(e2eClaudeA)+" ready")
 	assert.Contains(t, r.out, "failed\n      summary: the model is overloaded\n      retry: ox session import --session "+e2eCodexA+"\n")
 	assert.Contains(t, r.out, "skipped: not worth sharing")
 	assert.Contains(t, r.out, "/c/ses_")
@@ -1376,7 +1381,7 @@ func TestImportE2E_EachFailureHoldsOnlyItsSession(t *testing.T) {
 		require.Equal(t, "uploaded", s.Outcome, s.Detail)
 		assert.Equal(t, "uploaded", r.session(t, e2eClaudeA).Outcome)
 		assert.Equal(t, 6, f.summarizer.calls(), "three attempts each")
-		assert.Contains(t, f.summarizer.prompts[1], "Your previous answer was rejected", "a retry says what was wrong")
+		assert.Contains(t, strings.Join(f.summarizer.prompts, "\n"), "Your previous answer was rejected", "a retry says what was wrong")
 		meta := remoteMeta(t, f.barePath, s.SessionName)
 		assert.True(t, strings.HasPrefix(meta.Title, "Every Ledger push"), "the fallback title is the first prompt: %q", meta.Title)
 		assert.Contains(t, meta.Summary, "Summary written from the session's prompts")
@@ -1442,7 +1447,7 @@ func TestImportE2E_SessionThatChangesBeforeItsTurnIsLeft(t *testing.T) {
 			appendClaudePrompt(t, later, e2eClaudeB, f.projectRoot, "one more question", start.Add(2*time.Hour))
 		}
 	}
-	r := f.run(t, importOptions{yes: true, jsonOut: true})
+	r := f.run(t, importOptions{yes: true, jsonOut: true, parallel: 1})
 	require.NoError(t, r.err, r.out)
 	assert.Equal(t, "uploaded", r.session(t, e2eClaudeA).Outcome)
 	changed := r.session(t, e2eClaudeB)

@@ -90,15 +90,7 @@ func TwoPhaseClone(ctx context.Context, cloneURL, repoPath string, kind manifest
 	// from here on it lives in .git/config. Host-scoped to the clone host so
 	// it never fires for unrelated remotes. Best-effort — file:// test clones
 	// have no host and unshallow is non-fatal anyway.
-	if host := cloneHost(cloneURL); host != "" {
-		if err := InstallCredentialHelper(repoPath, HelperConfig{
-			Host:    host,
-			Command: DefaultHelperCommand(),
-		}); err != nil {
-			slog.Warn("two-phase clone: failed to install credential helper",
-				"path", repoPath, "host", host, "error", err)
-		}
-	}
+	installCloneHelper(repoPath, cloneURL)
 
 	// materialize only .sageox/ to read the manifest.
 	// use --no-cone mode to support both file and directory patterns in Phase 2.
@@ -189,15 +181,37 @@ func phaseOneCloneArgs(cloneURL, repoPath string) []string {
 	return args
 }
 
-// cloneHost extracts the host from a clone URL for credential-helper scoping.
-// Returns "" for URLs without an https host (e.g. file:// test clones), in
-// which case no helper is installed.
+// installCloneHelper writes the credential helper for cloneURL's host into the
+// clone's .git/config. Best-effort: a failure is logged, never returned.
+func installCloneHelper(repoPath, cloneURL string) {
+	u, err := url.Parse(cloneURL)
+	if err != nil {
+		return
+	}
+	scheme, host := helperTarget(u)
+	if host == "" {
+		return
+	}
+	if err := InstallCredentialHelper(repoPath, HelperConfig{
+		Scheme:  scheme,
+		Host:    host,
+		Command: DefaultHelperCommand(),
+	}); err != nil {
+		slog.Warn("two-phase clone: failed to install credential helper",
+			"path", repoPath, "host", host, "error", err)
+	}
+}
+
+// cloneHost extracts the credential-helper host from a clone URL.
+// Returns "" for URLs that get no helper (file://, ssh, non-loopback http), in
+// which case no helper is installed. See helperTarget.
 func cloneHost(cloneURL string) string {
 	u, err := url.Parse(cloneURL)
-	if err != nil || u.Scheme != "https" {
+	if err != nil {
 		return ""
 	}
-	return u.Hostname()
+	_, host := helperTarget(u)
+	return host
 }
 
 // ValidateTeamContextClone checks that a freshly cloned team context has

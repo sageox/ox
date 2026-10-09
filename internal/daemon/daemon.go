@@ -1363,6 +1363,14 @@ func (d *Daemon) initComponents() time.Duration {
 		if d.codedb != nil {
 			githubSync.SetCodeDBManager(d.codedb)
 		}
+		// the settings fetcher is created after this block, so the flag is
+		// looked up lazily; nil settings (not fetched yet) mean the mirror is off
+		githubSync.SetMirrorRelayer(newProjectGitHubMirrorRelayer(d.config.ProjectRoot, func() *flags.CLISettingsResponse {
+			if d.settingsFetcher == nil {
+				return nil
+			}
+			return d.settingsFetcher.CachedSettings()
+		}, d.heartbeat.GetAuthToken, d.logger))
 		d.scheduler.SetGitHubSyncManager(githubSync)
 	}
 	d.scheduler.SetTelemetryCallback(func(syncType, operation, status string, duration time.Duration) {

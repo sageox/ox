@@ -34,6 +34,7 @@ const ledgerSyncFix = "run `ox doctor`"
 // current, not stale.
 var blockingLedgerIssueTypes = map[string]bool{
 	daemon.IssueTypeSyncBackoff:          true,
+	daemon.IssueTypeCloneFailed:          true,
 	daemon.IssueTypeGitLock:              true,
 	daemon.IssueTypeDiverged:             true,
 	daemon.IssueTypeMergeConflict:        true,
@@ -116,6 +117,7 @@ func ledgerSyncBlockers(f ledgerSyncFacts) []ledgerSyncBlocker {
 // or the commits behind that it causes.
 var ledgerSyncCodeOrder = []string{
 	"inspect_failed",
+	daemon.IssueTypeCloneFailed,
 	daemon.IssueTypeRepoIntegrity,
 	daemon.IssueTypeMergeConflict,
 	daemon.IssueTypeSessionConflictWedge,

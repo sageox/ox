@@ -12,15 +12,23 @@ type PullRequest struct {
 	Labels    []Label    `json:"labels"`
 	CreatedAt time.Time  `json:"created_at"`
 	UpdatedAt time.Time  `json:"updated_at"`
+	ClosedAt  *time.Time `json:"closed_at"`
 	MergedAt  *time.Time `json:"merged_at"`
 	MergeSHA  string     `json:"merge_commit_sha"`
 	HTMLURL   string     `json:"html_url"`
 	Draft     bool       `json:"draft"`
+	// AuthorAssociation is GitHub's relationship of the author to the repo
+	// (OWNER, MEMBER, COLLABORATOR, CONTRIBUTOR, NONE, ...). The mirror derives
+	// its trust tier from it, never from text.
+	AuthorAssociation string `json:"author_association"`
 }
 
-// GitHubUser is a minimal GitHub user reference.
+// GitHubUser is a minimal GitHub user reference. ID is the numeric account id,
+// the only identity the mirror trusts; Type is "User" or "Bot".
 type GitHubUser struct {
 	Login string `json:"login"`
+	ID    int64  `json:"id"`
+	Type  string `json:"type"`
 }
 
 // Label is a GitHub issue/PR label.
@@ -37,6 +45,9 @@ type Comment struct {
 	Path      string     `json:"path,omitempty"`
 	Line      *int       `json:"line,omitempty"`
 	CreatedAt time.Time  `json:"created_at"`
+	UpdatedAt time.Time  `json:"updated_at"`
+	// AuthorAssociation: see PullRequest.AuthorAssociation.
+	AuthorAssociation string `json:"author_association"`
 }
 
 // Issue represents a GitHub issue from the REST API.
@@ -53,9 +64,38 @@ type Issue struct {
 	UpdatedAt time.Time  `json:"updated_at"`
 	ClosedAt  *time.Time `json:"closed_at"`
 	HTMLURL   string     `json:"html_url"`
+	// AuthorAssociation: see PullRequest.AuthorAssociation.
+	AuthorAssociation string `json:"author_association"`
 	// PullRequest is non-nil when this "issue" is actually a PR.
 	// Used to filter out PRs from issue listings.
 	PullRequest *struct{} `json:"pull_request,omitempty"`
+}
+
+// Review is one review a person or bot left on a pull request. State is
+// APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED or PENDING. SubmittedAt is
+// the zero time for a PENDING review, which GitHub has not submitted yet.
+type Review struct {
+	ID                int64      `json:"id"`
+	User              GitHubUser `json:"user"`
+	State             string     `json:"state"`
+	SubmittedAt       time.Time  `json:"submitted_at"`
+	AuthorAssociation string     `json:"author_association"`
+}
+
+// PRFile is one file changed by a pull request. Only the path is kept; the
+// mirror never relays diffs.
+type PRFile struct {
+	Filename string `json:"filename"`
+}
+
+// RepoInfo is the subset of GET /repos/{owner}/{repo} the mirror needs.
+// Private is what lets the server enforce the team's private-repo opt-in.
+type RepoInfo struct {
+	ID       int64      `json:"id"`
+	Name     string     `json:"name"`
+	FullName string     `json:"full_name"`
+	Private  bool       `json:"private"`
+	Owner    GitHubUser `json:"owner"`
 }
 
 // ListIssuesOptions controls pagination and filtering for ListIssues.

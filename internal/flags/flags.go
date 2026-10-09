@@ -39,6 +39,11 @@ type Flags struct {
 	// default off, and deliberately without a FEATURE_* env override, so
 	// nothing local can turn it on.
 	BulletinEnabled bool
+	// GitHubMirrorEnabled gates the daemon's GitHub mirror relay (epic
+	// ox-zjuv). Same shape as BulletinEnabled: a server-evaluated rollout,
+	// default off, and deliberately without a FEATURE_* env override, so
+	// nothing local can turn on a relay that publishes to the team's board.
+	GitHubMirrorEnabled bool
 
 	// Kill switches — default false (not activated).
 	// Any source setting these true disables the capability.
@@ -63,6 +68,8 @@ type Patch struct {
 	AttestEnabled   *bool
 	TraceEnabled    *bool
 	BulletinEnabled *bool
+	// GitHubMirrorEnabled has no EnvProvider mapping by design.
+	GitHubMirrorEnabled *bool
 
 	DisableFileDeleteTools *bool
 	DisableShellExecTools  *bool
@@ -110,6 +117,8 @@ func Defaults() Flags {
 		AttestEnabled:   false, // experimental; hidden and unregistered until enabled
 		TraceEnabled:    false, // local trace capture pilot; explicit opt-in also required
 		BulletinEnabled: false, // server-enrolled pilot; no env override by design
+
+		GitHubMirrorEnabled: false, // server-evaluated rollout; no env override by design
 	}
 }
 

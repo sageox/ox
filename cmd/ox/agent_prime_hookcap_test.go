@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/xml"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -188,6 +189,57 @@ func TestTopLevelSections_SelfClosingLineOpensNoSection(t *testing.T) {
 	}
 	assert.Equal(t, []string{"team-knowledge/docs", "team-knowledge/team-rules", "team-knowledge/memory"}, names,
 		"every child after the self-closing bulletin line must still be a trim candidate")
+}
+
+// Both bulletin pointers are self-closing and ride with the <team-knowledge>
+// wrapper, so the trimmer never offers either as a candidate and never defers
+// one. The github pointer adds ~0.5 KB that nothing can shed; this pins that a
+// prime carrying both still fits the cap, keeps both pointers, and still trims
+// the sections that follow them.
+//
+// Failure prevented: the github pointer being swallowed into a pseudo-section
+// (or deferred) under the hook cap, so a hook-driven session never learns the
+// board exists — or its extra bytes pushing a normal prime back over 10,000
+// characters and returning to the 2 KB-preview failure.
+func TestOutputAgentPrimeXML_HookBudgetKeepsBothBulletinPointers(t *testing.T) {
+	fullPath := filepath.Join(t.TempDir(), "prime", "Oxcap2-full.xml")
+	var buf bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&buf)
+	out := agentPrimeOutput{
+		AgentID:            "Oxcap2",
+		Status:             "fresh",
+		HookOutputBudget:   primeHookBudget,
+		HookFullBundlePath: fullPath,
+		TeamContext: &teamContextInfo{
+			TeamID: "team-1", TeamName: "Acme",
+			BulletinHint:  "/t/bulletin/general/posts",
+			GitHubBoard:   &prime.GitHubBoardInfo{Dir: "/t/bulletin/github/posts", ThisRepo: "acme-api-*", Live: 12},
+			TeamRules:     []teamdocs.TeamRule{{Name: "retry-policy", Visibility: "always", AbsPath: "/t/r.md", Body: strings.Repeat("retry with backoff. ", 60)}},
+			MemoryContent: strings.Repeat("- memory\n", 40),
+		},
+	}
+	for i := 0; i < 30; i++ {
+		out.TeamContext.TeamDocs = append(out.TeamContext.TeamDocs, teamdocs.TeamDoc{Name: fmt.Sprintf("doc-%02d.md", i), Title: "Doc", When: strings.Repeat("when the upload service retries ", 3), Path: "/t/docs/x.md"})
+	}
+	_, err := outputAgentPrimeXML(cmd, out)
+	require.NoError(t, err)
+
+	emitted := buf.String()
+	assert.LessOrEqual(t, len(emitted), primeHookBudget)
+	require.Contains(t, emitted, "<deferred path=\"", "the fixture must be over the cap to exercise the trimmer")
+	assert.Contains(t, emitted, `<bulletin dir="/t/bulletin/general/posts"`, "the general pointer must survive the trim")
+	assert.Contains(t, emitted, `<bulletin board="github" dir="/t/bulletin/github/posts" this-repo="acme-api-*" live="12"`, "the github pointer must survive the trim")
+	assert.Contains(t, emitted, "retry-policy", "the always-rule must survive the trim")
+	wellFormed(t, emitted)
+
+	var names []string
+	for _, s := range trimCandidates(emitted) {
+		names = append(names, s.name)
+	}
+	for _, n := range names {
+		assert.NotContains(t, n, "bulletin", "a self-closing pointer is never a trim candidate")
+	}
 }
 
 // TestFitPrimeToHookCap_KeepsTheHeldBackSkillReportOverCatalogs: the report is a
