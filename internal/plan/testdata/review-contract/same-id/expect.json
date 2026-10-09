@@ -1,0 +1,7 @@
+{
+  "summary": "Two round ids, each saved twice. r-0004-retry repeats the same payload after h1 was resolved: it assembles once and does not reopen h1. r-0005-conflict carries a different payload the second time: its h3 mark is hidden, with only a log line.",
+  "items": [
+    {"anchor": "h1", "reviewer": "Ana", "status": "request-change", "open": false, "resolution": "addressed"},
+    {"anchor": "h2", "reviewer": "Ana", "status": "flag", "open": true}
+  ]
+}

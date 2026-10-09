@@ -1,8 +1,11 @@
 package plan
 
 import (
+	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -318,4 +321,75 @@ func find(items []MergedItem, anchor string) *MergedItem {
 		}
 	}
 	return nil
+}
+
+// TestReviewContractFixtures pins what `ox plan feedback show --json`
+// (AssembleReview + CorruptFeedbackRounds) returns for each shared fixture in
+// testdata/review-contract, the fixtures
+// docs/specs/plan-review-ledger-contract.md publishes for other hosts and
+// release measurements. Failure prevented: a reader change silently
+// reinterprets review data that released CLIs and other hosts read too.
+func TestReviewContractFixtures(t *testing.T) {
+	t.Parallel()
+	type item struct {
+		Anchor       string `json:"anchor"`
+		Reviewer     string `json:"reviewer"`
+		Status       string `json:"status"`
+		Open         bool   `json:"open"`
+		Resolution   string `json:"resolution,omitempty"`
+		RemappedFrom string `json:"remapped_from,omitempty"`
+	}
+	const root = "testdata/review-contract"
+	fixtures, err := os.ReadDir(root)
+	if err != nil || len(fixtures) == 0 {
+		t.Fatalf("read fixtures: %v (%d found)", err, len(fixtures))
+	}
+	for _, f := range fixtures {
+		t.Run(f.Name(), func(t *testing.T) {
+			t.Parallel()
+			raw, err := os.ReadFile(filepath.Join(root, f.Name(), "expect.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var want struct {
+				Summary       string   `json:"summary"`
+				Items         []item   `json:"items"`
+				CorruptRounds []string `json:"corrupt_rounds"`
+			}
+			dec := json.NewDecoder(bytes.NewReader(raw))
+			dec.DisallowUnknownFields()
+			if err := dec.Decode(&want); err != nil {
+				t.Fatalf("decode expect.json: %v", err)
+			}
+
+			dir := filepath.Join(root, f.Name(), "plan")
+			merged, err := AssembleReview(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got []item
+			for _, it := range merged {
+				g := item{Anchor: it.Anchor, Reviewer: it.Reviewer, Status: string(it.Status), Open: it.Open, RemappedFrom: it.RemappedFrom}
+				if it.Resolution != nil {
+					g.Resolution = string(it.Resolution.State)
+				}
+				got = append(got, g)
+			}
+			if !slices.Equal(got, want.Items) {
+				t.Errorf("items:\n got %+v\nwant %+v", got, want.Items)
+			}
+
+			corrupt, err := CorruptFeedbackRounds(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var gotCorrupt []string
+			for _, p := range corrupt {
+				gotCorrupt = append(gotCorrupt, feedbackSubdir+"/"+filepath.Base(p))
+			}
+			if !slices.Equal(gotCorrupt, want.CorruptRounds) {
+				t.Errorf("corrupt_rounds = %v, want %v", gotCorrupt, want.CorruptRounds)
+			}
+		})
+	}
 }

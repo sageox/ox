@@ -1,0 +1,8 @@
+{
+  "summary": "A torn round, a damaged per-entry resolution and a damaged remaps.json. Only the torn round is reported; the damaged resolution silently leaves h2 open and remaps.json is ignored with a log line.",
+  "items": [
+    {"anchor": "h1", "reviewer": "Ana", "status": "request-change", "open": true},
+    {"anchor": "h2", "reviewer": "Ana", "status": "flag", "open": true}
+  ],
+  "corrupt_rounds": ["feedback/round-20261001-020000.000000000-r-0006-torn.json"]
+}
