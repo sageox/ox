@@ -585,6 +585,85 @@ func TestParsePost_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestParsePost_RoundTripGhostAuthor is the deleted-account property: a comment
+// whose GitHub user is gone is read back as its own comment, credited to
+// "ghost", with its text intact and the comments around it untouched. It must
+// hold whether or not the post carries comment_metadata, because the two fail
+// differently: with metadata the count mismatch makes the whole post invalid,
+// without it the heading line becomes body text of the previous comment.
+func TestParsePost_RoundTripGhostAuthor(t *testing.T) {
+	t.Parallel()
+
+	ghosts := []struct {
+		name   string
+		author githubmirror.Author
+	}{
+		{name: "login from the fetcher", author: githubmirror.Author{Login: githubmirror.GhostLogin, Association: "NONE"}},
+		{name: "login missing entirely", author: githubmirror.Author{Association: "NONE"}},
+	}
+	for _, g := range ghosts {
+		for _, withMetadata := range []bool{true, false} {
+			name := g.name + " without comment_metadata"
+			if withMetadata {
+				name = g.name + " with comment_metadata"
+			}
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+
+				item := githubmirror.Item{
+					Kind: githubmirror.KindPullRequest, Number: 70, State: githubmirror.StateOpen,
+					Title: "Deleted account", Body: "desc", Author: g.author,
+					CreatedAt: ts(10, 1, 9), LastMaterialChangeAt: ts(10, 4, 9),
+					Comments: []githubmirror.Comment{
+						{ID: 1, Author: reviewer, Body: "before", CreatedAt: ts(10, 2, 9)},
+						{ID: 2, Author: g.author, Body: "left by an account that no longer exists", CreatedAt: ts(10, 3, 9)},
+						{ID: 3, Author: member, Body: "after", CreatedAt: ts(10, 4, 9)},
+					},
+				}
+				rendered := mirrortest.RenderPost(repo, item, nil)
+				if !withMetadata {
+					rendered = dropCommentMetadata(t, rendered)
+				}
+
+				post, err := githubmirror.ParsePost(rendered)
+				if err != nil {
+					t.Fatalf("ParsePost: %v\n%s", err, rendered)
+				}
+				assertComments(t, post.Comments, []githubmirror.PostComment{
+					{Login: "avery-dev", Trust: githubmirror.TrustMember, CreatedAt: ts(10, 2, 9), Body: "before"},
+					{Login: githubmirror.GhostLogin, Trust: githubmirror.TrustExternal, CreatedAt: ts(10, 3, 9), Body: "left by an account that no longer exists"},
+					{Login: "devon-dev", Trust: githubmirror.TrustMember, CreatedAt: ts(10, 4, 9), Body: "after"},
+				})
+			})
+		}
+	}
+}
+
+// dropCommentMetadata removes the comment_metadata block from a rendered post's
+// front matter, leaving the shape of a post written before inline locations
+// were recorded.
+func dropCommentMetadata(t *testing.T, rendered []byte) []byte {
+	t.Helper()
+
+	var kept []string
+	inBlock := false
+	for _, line := range strings.Split(string(rendered), "\n") {
+		switch {
+		case line == "comment_metadata:":
+			inBlock = true
+		case inBlock && strings.HasPrefix(line, "  "):
+		default:
+			inBlock = false
+			kept = append(kept, line)
+		}
+	}
+	out := strings.Join(kept, "\n")
+	if strings.Contains(out, "comment_metadata") {
+		t.Fatalf("comment_metadata survived:\n%s", out)
+	}
+	return []byte(out)
+}
+
 // TestParsePost_RoundTripStructureLines is the escaping property: whatever line
 // an author writes, whoever they are, it comes back byte for byte and the
 // comments around it are neither lost nor joined by a forged one.

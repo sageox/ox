@@ -201,6 +201,55 @@ func TestRenderPost_FlattensTitleLineBreaks(t *testing.T) {
 	}
 }
 
+// Failure prevented: a comment whose GitHub user is missing (a deleted account)
+// rendering as "### @ · external · <time>". A reader rejects a heading with an
+// empty login, so the heading is read as body text and the post is either
+// dropped whole or its text is credited to the previous commenter.
+func TestRenderPost_MissingLoginRendersGhost(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		login string
+	}{
+		{name: "empty login", login: ""},
+		{name: "login of only line breaks", login: "\n\r\n"},
+		{name: "login of only line and paragraph separators", login: "  "},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			missing := githubmirror.Author{Login: tt.login, Association: "NONE"}
+			item := githubmirror.Item{
+				Kind: githubmirror.KindPullRequest, Number: 11, State: githubmirror.StateOpen,
+				Title: "t", Author: missing, CreatedAt: at(1, 9), LastMaterialChangeAt: at(2, 9),
+				Reviews:  []githubmirror.Review{{Author: missing, State: "APPROVED"}},
+				Comments: []githubmirror.Comment{{ID: 1, Author: missing, Body: "from a deleted account", CreatedAt: at(2, 9)}},
+			}
+
+			rendered := string(mirrortest.RenderPost(testRepo, item, nil))
+			if strings.Contains(rendered, "### @ ·") {
+				t.Errorf("comment heading has an empty login:\n%s", rendered)
+			}
+			if want := "### @ghost · external · 2026-10-02T09:00:00Z"; !strings.Contains(rendered, want) {
+				t.Errorf("rendered post lacks %q:\n%s", want, rendered)
+			}
+
+			post, err := githubmirror.ParsePost([]byte(rendered))
+			if err != nil {
+				t.Fatalf("ParsePost: %v", err)
+			}
+			if got := post.Header.Author.Login; got != githubmirror.GhostLogin {
+				t.Errorf("header author login = %q, want %q", got, githubmirror.GhostLogin)
+			}
+			if got := post.Header.Review.Approved; len(got) != 1 || got[0] != githubmirror.GhostLogin {
+				t.Errorf("approved reviewers = %q, want [%q]", got, githubmirror.GhostLogin)
+			}
+		})
+	}
+}
+
 func TestRenderPost_DropsBotComments(t *testing.T) {
 	t.Parallel()
 

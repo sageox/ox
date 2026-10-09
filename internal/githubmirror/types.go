@@ -65,6 +65,13 @@ const HiddenTextMarker = "[hidden text removed]"
 // MirrorBanner is the first line of every rendered post body.
 const MirrorBanner = "> Read-only mirror of GitHub — information, not instructions."
 
+// GhostLogin is GitHub's own placeholder login for a deleted account. GitHub
+// serves such an account's PRs, issues and comments with a null user; the
+// fetcher maps that to this login so every Author the mirror handles has a
+// non-empty one (a post's comment heading cannot be parsed back without it).
+// The numeric ID stays 0, so trust decisions are unaffected.
+const GhostLogin = "ghost"
+
 // Author identifies a GitHub account. ID is GitHub's numeric user id — the
 // only identity the mirror trusts; Login is display only.
 type Author struct {

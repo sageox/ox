@@ -74,9 +74,9 @@ func postHeader(repo githubmirror.Repo, it githubmirror.Item, trust string, with
 	for _, r := range it.Reviews {
 		switch r.State {
 		case "APPROVED":
-			review.Approved = append(review.Approved, r.Author.Login)
+			review.Approved = append(review.Approved, renderLogin(r.Author.Login))
 		case "CHANGES_REQUESTED":
-			review.ChangesRequested = append(review.ChangesRequested, r.Author.Login)
+			review.ChangesRequested = append(review.ChangesRequested, renderLogin(r.Author.Login))
 		}
 	}
 
@@ -90,7 +90,7 @@ func postHeader(repo githubmirror.Repo, it githubmirror.Item, trust string, with
 		Draft:  it.Draft,
 		Title:  it.Title,
 		Author: githubmirror.PostAuthor{
-			Login:       it.Author.Login,
+			Login:       renderLogin(it.Author.Login),
 			ID:          it.Author.ID,
 			Association: it.Author.Association,
 		},
@@ -185,7 +185,7 @@ func titleLine(it githubmirror.Item) string {
 func renderDescription(it githubmirror.Item, trust string) string {
 	switch trust {
 	case githubmirror.TrustBot:
-		return fmt.Sprintf("Opened by the bot @%s. Its text is not mirrored.", oneLine(it.Author.Login))
+		return fmt.Sprintf("Opened by the bot @%s. Its text is not mirrored.", renderLogin(it.Author.Login))
 	case githubmirror.TrustExternal:
 		return quote(escapeStructure(normalize(it.Body)))
 	default:
@@ -196,7 +196,7 @@ func renderDescription(it githubmirror.Item, trust string) string {
 // renderComment returns the heading block and, when there is one, the body block.
 func renderComment(c githubmirror.Comment, withheld bool) []string {
 	tier := githubmirror.TrustOf(c.Author)
-	heading := fmt.Sprintf("### @%s · %s · %s", oneLine(c.Author.Login), tier, c.CreatedAt.UTC().Format(time.RFC3339))
+	heading := fmt.Sprintf("### @%s · %s · %s", renderLogin(c.Author.Login), tier, c.CreatedAt.UTC().Format(time.RFC3339))
 
 	var body string
 	switch {
@@ -278,6 +278,17 @@ func normalize(s string) string {
 		end--
 	}
 	return strings.Join(lines[start:end], "\n")
+}
+
+// renderLogin is a login as the post shows it. A comment heading is
+// "### @login · tier · time" and a reader rejects one with an empty login, so a
+// missing login (the fetcher already maps a deleted account to GhostLogin; this
+// is the backstop) is shown as GitHub's own placeholder rather than as "### @ ·".
+func renderLogin(login string) string {
+	if flat := oneLine(login); flat != "" {
+		return flat
+	}
+	return githubmirror.GhostLogin
 }
 
 // oneLine collapses every line break (and the Unicode line/paragraph

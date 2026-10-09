@@ -107,8 +107,11 @@ func finishItem(it Item) Item {
 }
 
 // humanComments merges the groups, drops bot comments (returning how many),
-// cleans each kept body and orders the result by (CreatedAt, ID). The result is
-// never nil so it encodes as [].
+// cleans each kept body and inline path and orders the result by
+// (CreatedAt, ID). The path is author controlled like a PR's file list (a
+// contributor chooses the file name), so it gets the same cleanup: hidden text
+// is removed, counted, and kept out of the change hash. The result is never
+// nil so it encodes as [].
 func humanComments(c *cleaner, groups ...[]SourceComment) (kept []Comment, bots int) {
 	kept = []Comment{}
 	for _, group := range groups {
@@ -128,7 +131,7 @@ func humanComments(c *cleaner, groups ...[]SourceComment) (kept []Comment, bots 
 				Body:      c.clean(sc.Body),
 				CreatedAt: sc.CreatedAt,
 				UpdatedAt: sc.UpdatedAt,
-				Path:      sc.Path,
+				Path:      c.clean(sc.Path),
 				Line:      line,
 			})
 		}

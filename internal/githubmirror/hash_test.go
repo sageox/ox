@@ -234,6 +234,28 @@ func TestChangeHash_HiddenTextEditsAreInvisible(t *testing.T) {
 	}
 }
 
+// Failure prevented: an edit made only inside a hidden span of an inline
+// comment's file path (invisible to people, and already stripped from the
+// post) re-publishing the post. The path is hashed, so it has to be hashed
+// after cleanup like every other text field.
+func TestChangeHash_HiddenPathEditsAreInvisible(t *testing.T) {
+	t.Parallel()
+	build := func(path string) string {
+		in := newPRInputs()
+		in.inline[0].Path = path
+		return in.build().ChangeHash
+	}
+	if a, b := build("docs/a.md<!-- v1 -->"), build("docs/a.md<!-- v2, entirely different text -->"); a != b {
+		t.Errorf("an edit inside a hidden comment in the path changed the hash: %s vs %s", a, b)
+	}
+	if a, b := build("docs/a\u200b.md"), build("docs/a\u200b\u200b\u200b.md"); a != b {
+		t.Errorf("a longer invisible run in the path changed the hash: %s vs %s", a, b)
+	}
+	if a, b := build("docs/a.md"), build("docs/a.md<!-- v1 -->"); a == b {
+		t.Errorf("hidden text appearing in the path must change the hash (the post gains a marker)")
+	}
+}
+
 // Failure prevented: a hash built by concatenation, where moving a character
 // between adjacent fields collides.
 func TestChangeHash_FieldBoundariesCannotShift(t *testing.T) {

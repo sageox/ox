@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/githubmirror"
+	"github.com/sageox/ox/internal/githubmirror/mirrortest"
 	"github.com/sageox/ox/internal/ledger"
 )
 
@@ -127,7 +128,7 @@ func TestMirrorFetcher_ListPullRequestsMapsIdentityAndLifecycle(t *testing.T) {
 		},
 		{
 			Number: 1292, Title: "Author account deleted", Body: "x", State: "closed",
-			Author:    githubmirror.Author{Association: "NONE"},
+			Author:    githubmirror.Author{Login: githubmirror.GhostLogin, Association: "NONE"},
 			Labels:    []string{},
 			CreatedAt: mustTime(t, "2026-10-05T08:00:00Z"), UpdatedAt: mustTime(t, "2026-10-05T09:00:00Z"),
 			ClosedAt: &closedDeleted,
@@ -363,6 +364,156 @@ func assertComments(t *testing.T, got, want []githubmirror.SourceComment) {
 	for i := range want {
 		if !reflect.DeepEqual(got[i], want[i]) {
 			t.Errorf("comment %d mismatch\n got: %+v\nwant: %+v", want[i].ID, got[i], want[i])
+		}
+	}
+}
+
+// Failure prevented: a deleted GitHub account (a null user on the wire) reaching
+// the relay with an empty login. The reader of a rendered post rejects a
+// comment heading with an empty login, so the whole post would be dropped from
+// CodeDB and prime.
+func TestMirrorFetcher_NullUserMapsToGhost(t *testing.T) {
+	t.Parallel()
+
+	wantGhost := githubmirror.Author{Login: githubmirror.GhostLogin, Association: "NONE"}
+	const created = `"created_at":"2026-10-02T10:00:00Z","updated_at":"2026-10-02T10:00:00Z"`
+
+	tests := []struct {
+		name string
+		path string
+		body string
+		got  func(f *MirrorFetcher) (githubmirror.Author, error)
+	}{
+		{
+			name: "pull request author",
+			path: "/repos/acme/api/pulls",
+			body: `[{"number":1,"title":"t","body":"","state":"open","user":null,"author_association":"NONE","labels":[],` + created + `,"html_url":"u"}]`,
+			got: func(f *MirrorFetcher) (githubmirror.Author, error) {
+				prs, err := f.ListPullRequests(context.Background(), "acme", "api", time.Time{})
+				if err != nil || len(prs) != 1 {
+					return githubmirror.Author{}, fmt.Errorf("prs=%d err=%w", len(prs), err)
+				}
+				return prs[0].Author, nil
+			},
+		},
+		{
+			name: "issue author",
+			path: "/repos/acme/api/issues",
+			body: `[{"number":1,"title":"t","body":"","state":"open","user":null,"author_association":"NONE","labels":[],` + created + `,"html_url":"u"}]`,
+			got: func(f *MirrorFetcher) (githubmirror.Author, error) {
+				issues, err := f.ListIssues(context.Background(), "acme", "api", time.Time{})
+				if err != nil || len(issues) != 1 {
+					return githubmirror.Author{}, fmt.Errorf("issues=%d err=%w", len(issues), err)
+				}
+				return issues[0].Author, nil
+			},
+		},
+		{
+			name: "conversation comment author",
+			path: "/repos/acme/api/issues/7/comments",
+			body: `[{"id":1,"user":null,"author_association":"NONE","body":"b",` + created + `}]`,
+			got: func(f *MirrorFetcher) (githubmirror.Author, error) {
+				comments, err := f.ListIssueComments(context.Background(), "acme", "api", 7)
+				if err != nil || len(comments) != 1 {
+					return githubmirror.Author{}, fmt.Errorf("comments=%d err=%w", len(comments), err)
+				}
+				return comments[0].Author, nil
+			},
+		},
+		{
+			name: "inline review comment author",
+			path: "/repos/acme/api/pulls/7/comments",
+			body: `[{"id":1,"user":null,"author_association":"NONE","body":"b","path":"a.go","line":3,` + created + `}]`,
+			got: func(f *MirrorFetcher) (githubmirror.Author, error) {
+				comments, err := f.ListReviewComments(context.Background(), "acme", "api", 7)
+				if err != nil || len(comments) != 1 {
+					return githubmirror.Author{}, fmt.Errorf("comments=%d err=%w", len(comments), err)
+				}
+				return comments[0].Author, nil
+			},
+		},
+		{
+			name: "reviewer",
+			path: "/repos/acme/api/pulls/7/reviews",
+			body: `[{"id":1,"user":null,"state":"APPROVED","submitted_at":"2026-10-02T10:00:00Z","author_association":"NONE"}]`,
+			got: func(f *MirrorFetcher) (githubmirror.Author, error) {
+				reviews, err := f.ListReviews(context.Background(), "acme", "api", 7)
+				if err != nil || len(reviews) != 1 {
+					return githubmirror.Author{}, fmt.Errorf("reviews=%d err=%w", len(reviews), err)
+				}
+				return reviews[0].Author, nil
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := NewMirrorFetcher(newMirrorTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != tt.path {
+					t.Errorf("path = %q, want %q", r.URL.Path, tt.path)
+				}
+				_, _ = w.Write([]byte(tt.body))
+			})))
+
+			got, err := tt.got(f)
+			if err != nil {
+				t.Fatalf("fetch: %v", err)
+			}
+			if got != wantGhost {
+				t.Errorf("author = %+v, want %+v (GitHub's placeholder login, id 0 so trust is unchanged)", got, wantGhost)
+			}
+		})
+	}
+}
+
+// Failure prevented: the customer-visible consequence of a deleted commenter.
+// Run through the real fetcher, builder, reference renderer and parser: the
+// comment must survive with its own text, credited to "ghost", and the comments
+// around it must not absorb it or be lost with the post.
+func TestMirrorFetcher_DeletedCommenterSurvivesRender(t *testing.T) {
+	t.Parallel()
+
+	const comments = `[
+	  {"id":1,"user":{"login":"avery-dev","id":5550102,"type":"User"},"author_association":"COLLABORATOR",
+	   "body":"before","created_at":"2026-10-02T10:00:00Z","updated_at":"2026-10-02T10:00:00Z"},
+	  {"id":2,"user":null,"author_association":"NONE",
+	   "body":"written by an account that no longer exists","created_at":"2026-10-02T11:00:00Z","updated_at":"2026-10-02T11:00:00Z"},
+	  {"id":3,"user":{"login":"devon-dev","id":5550101,"type":"User"},"author_association":"MEMBER",
+	   "body":"after","created_at":"2026-10-02T12:00:00Z","updated_at":"2026-10-02T12:00:00Z"}
+	]`
+	f := NewMirrorFetcher(newMirrorTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(comments))
+	})))
+
+	fetched, err := f.ListIssueComments(context.Background(), "acme", "api", 7)
+	if err != nil {
+		t.Fatalf("ListIssueComments: %v", err)
+	}
+	repo := githubmirror.Repo{Owner: "acme", Name: "api", FullName: "acme/api", ID: 42}
+	issue := githubmirror.SourceIssue{
+		Number: 7, Title: "t", State: "open",
+		Author:    githubmirror.Author{Login: "devon-dev", ID: 5550101, Association: "MEMBER", Type: "User"},
+		CreatedAt: mustTime(t, "2026-10-01T09:00:00Z"), UpdatedAt: mustTime(t, "2026-10-02T12:00:00Z"),
+		HTMLURL: "https://github.com/acme/api/issues/7",
+	}
+
+	item := githubmirror.BuildIssue(repo, issue, fetched)
+	post, err := githubmirror.ParsePost(mirrortest.RenderPost(repo, item, nil))
+	if err != nil {
+		t.Fatalf("ParsePost: %v (a deleted commenter made the whole post unreadable)", err)
+	}
+
+	want := []struct{ login, body string }{
+		{"avery-dev", "before"},
+		{githubmirror.GhostLogin, "written by an account that no longer exists"},
+		{"devon-dev", "after"},
+	}
+	if len(post.Comments) != len(want) {
+		t.Fatalf("got %d comments, want %d: %+v", len(post.Comments), len(want), post.Comments)
+	}
+	for i, w := range want {
+		if got := post.Comments[i]; got.Login != w.login || got.Body != w.body {
+			t.Errorf("comment %d = %q %q, want %q %q", i, got.Login, got.Body, w.login, w.body)
 		}
 	}
 }
