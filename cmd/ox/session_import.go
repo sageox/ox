@@ -192,6 +192,8 @@ const (
 		"a session in progress can be imported once it finishes."
 )
 
+// runSessionImport validates the Cobra invocation, keeps preflight and review
+// inside the interrupt lifetime, and delegates the import flow.
 func runSessionImport(cmd *cobra.Command, _ []string) error {
 	opts, failure := parseImportOptions(cmd)
 	out := cmd.OutOrStdout()
@@ -233,6 +235,8 @@ type importInvocationEnvironment struct {
 
 func (importInvocationEnvironment) IsDir(string) bool { return false }
 
+// importAgentContext detects an AI coworker from runtime evidence. Installed
+// project integration directories do not imply an AI invocation.
 func importAgentContext(ctx context.Context, env agentx.Environment) bool {
 	if ctx == nil {
 		ctx = context.Background()

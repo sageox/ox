@@ -812,7 +812,8 @@ func (s *SyncScheduler) waitClones(timeout time.Duration) {
 	}
 }
 
-// Start starts the sync scheduler.
+// Start runs the scheduler until cancellation, then joins the delayed startup
+// pull before returning. Tracked background clones receive a bounded drain period.
 func (s *SyncScheduler) Start(ctx context.Context) {
 	s.ctx = ctx
 
@@ -1337,6 +1338,8 @@ func escalateSessionConflictSeverity(tracker *IssueTracker, issue *DaemonIssue, 
 	}
 }
 
+// doPull serializes Ledger pulls and applies retry/backoff policy. Discovery and
+// pull work honor ctx; a missing Ledger starts a tracked clone with daemon lifetime.
 func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, forceSync bool, refreshSparse bool) error {
 	ctx, span := perf.Start(ctx, "daemon:do_pull")
 	defer span.End()

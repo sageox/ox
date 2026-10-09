@@ -89,6 +89,8 @@ type importReviewModel struct {
 	finished bool
 }
 
+// newImportReviewModel copies the supplied ready-session selection.
+// Initialization does not widen an explicit selection or select additional rows.
 func newImportReviewModel(ctx context.Context, dest importDestination, cands []*importCandidate, load importPreviewLoader) *importReviewModel {
 	m := &importReviewModel{
 		ctx: ctx, dest: dest, cands: cands, load: load,
@@ -103,6 +105,8 @@ func newImportReviewModel(ctx context.Context, dest importDestination, cands []*
 
 func (m *importReviewModel) Init() tea.Cmd { return m.loadVisible() }
 
+// Update applies navigation, eligibility-limited selection, and async previews.
+// Once review ends, late replies cannot change selection or restart loads.
 func (m *importReviewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.finished {
 		return m, nil
@@ -175,6 +179,8 @@ func (m *importReviewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// selectedIDs returns selected ready IDs in discovery order, preserving an
+// explicit empty selection.
 func (m *importReviewModel) selectedIDs() []string {
 	ids := make([]string, 0)
 	for _, c := range m.cands {
@@ -185,6 +191,9 @@ func (m *importReviewModel) selectedIDs() []string {
 	return ids
 }
 
+// rememberPreview retains bounded excerpts and a short row label, never full
+// normalized entries. Eviction keeps the focused excerpt and preserves labels
+// for other rows.
 func (m *importReviewModel) rememberPreview(id string, p *importContentPreview) {
 	preview := &importTerminalPreview{
 		OpeningRequest: importTerminalExcerpt(p.OpeningRequest, 2048),
@@ -291,6 +300,8 @@ func (m *importReviewModel) detailWidth() int {
 	return m.width
 }
 
+// visibleRange computes a bounded window of two-line session rows around the
+// focused candidate.
 func (m *importReviewModel) visibleRange() (int, int) {
 	rows := max(1, m.listHeight()/2)
 	start := max(0, m.cursor-rows/2)
@@ -298,6 +309,8 @@ func (m *importReviewModel) visibleRange() (int, int) {
 	return start, min(len(m.cands), start+rows)
 }
 
+// View renders a terminal-bounded frame with split panes when wide and stacked
+// excerpts when narrow. A finished model renders nothing.
 func (m *importReviewModel) View() tea.View {
 	if m.finished {
 		return tea.NewView("")
@@ -398,6 +411,8 @@ func (m *importReviewModel) clampScroll() {
 	m.scroll = max(0, min(m.scroll, len(m.detailLines(m.detailWidth()))-m.detailHeight()))
 }
 
+// detailLines wraps controlled metadata and bounded cached excerpts for scrolling.
+// It never expands or reads the full retained conversation.
 func (m *importReviewModel) detailLines(width int) []string {
 	if len(m.cands) == 0 {
 		return []string{"Native sessions from this repo will appear here."}
@@ -455,6 +470,8 @@ func sanitizeImportText(s string) string {
 	}, ansi.Strip(s))
 }
 
+// importTerminalExcerpt sanitizes native text and limits display by Unicode runes.
+// Truncation affects the terminal excerpt, not the imported content.
 func importTerminalExcerpt(s string, limit int) string {
 	runes := []rune(strings.TrimSpace(sanitizeImportText(s)))
 	if len(runes) <= limit {

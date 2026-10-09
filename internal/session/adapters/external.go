@@ -613,6 +613,9 @@ func (ea *ExternalAdapter) execOneShotWithin(timeout time.Duration, subcommand s
 	return ea.execOneShotContext(context.Background(), timeout, subcommand, args...)
 }
 
+// execOneShotContext runs one subprocess with bounded combined output and caller
+// cancellation. Caller errors retain their identity; the adapter deadline and
+// output limit keep their distinct sentinels.
 func (ea *ExternalAdapter) execOneShotContext(parent context.Context, timeout time.Duration, subcommand string, args ...string) ([]byte, error) {
 	if err := parent.Err(); err != nil {
 		return nil, err

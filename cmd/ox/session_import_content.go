@@ -46,6 +46,8 @@ type importReviewResult struct {
 
 var errImportSourceChanged = errors.New("session changed since discovery; restart the preview")
 
+// importSnapshot returns the immutable reviewed byte pin when available,
+// otherwise the metadata captured at discovery.
 func importSnapshot(c *importCandidate) importSourceSnapshot {
 	if reviewed := c.reviewedSnapshot.Load(); reviewed != nil {
 		return *reviewed
@@ -53,6 +55,9 @@ func importSnapshot(c *importCandidate) importSourceSnapshot {
 	return importSourceSnapshot{Size: c.Session.Size, ModTime: c.Session.ModTime}
 }
 
+// snapshotMatches checks metadata and, for a reviewed pin, the content digest.
+// Cancellation and unreadable sources return false; callers preserve context
+// errors separately from source changes.
 func snapshotMatches(ctx context.Context, path string, snapshot importSourceSnapshot) bool {
 	info, err := os.Stat(path)
 	if err != nil || info.Size() != snapshot.Size || !info.ModTime().Equal(snapshot.ModTime) {
@@ -223,6 +228,9 @@ func newImportPreviewLoader(env *importEnv, cands []*importCandidate) importPrev
 	}
 }
 
+// importPreviewBytes estimates cache cost, charging both retained tool text and
+// duplicated prompt excerpts. It estimates string and entry cost rather than
+// exact heap usage.
 func importPreviewBytes(p *importContentPreview) int {
 	if p == nil {
 		return 0
@@ -241,7 +249,7 @@ func importPreviewBytes(p *importContentPreview) int {
 // become the session's label or its human prompt navigation anchors.
 func isImportContextPrompt(content string) bool {
 	s := strings.TrimSpace(content)
-	for _, prefix := range []string{"<environment_context>", "<permissions instructions>", "<instructions>", "<system-reminder>", "<local-command-caveat>", "<command-name>", "<external_codex_", "# AGENTS.md instructions"} {
+	for _, prefix := range []string{"<environment_context>", "<permissions instructions>", "<instructions>", "<system-reminder>", "<local-command-caveat>", "<command-name>", "<external_codex_apps_open_page>", "# AGENTS.md instructions"} {
 		if strings.HasPrefix(s, prefix) {
 			return true
 		}
@@ -249,6 +257,8 @@ func isImportContextPrompt(content string) bool {
 	return false
 }
 
+// renderImportContent emits the already-redacted preview as JSON or terminal-safe
+// text. Rendering neither summarizes nor publishes the session.
 func renderImportContent(out io.Writer, opts importOptions, dest importDestination, c *importCandidate, p *importContentPreview) error {
 	if opts.jsonOut {
 		return cli.PrintJSONTo(out, struct {
@@ -270,6 +280,9 @@ func renderImportContent(out io.Writer, opts importOptions, dest importDestinati
 	return nil
 }
 
+// validateImportReview accepts unique ready IDs and revalidates their sources,
+// preserving reviewed digests when available. Empty selection is valid; returned
+// snapshots carry the selection's source pins into the locked replan.
 func validateImportReview(ctx context.Context, cands []*importCandidate, result importReviewResult) (map[string]importSourceSnapshot, error) {
 	ready := make(map[string]*importCandidate)
 	for _, c := range cands {

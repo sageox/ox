@@ -111,6 +111,9 @@ func PreviewEntries(projectRoot string, raw []adapters.RawEntry) ([]session.Entr
 	return entries, nil
 }
 
+// convertRedactedEntries normalizes records and applies configured redaction to
+// messages and tool fields, refusing invalid policy. Callers must still run the
+// raw writer for command-correlated redaction.
 func convertRedactedEntries(projectRoot string, raw []adapters.RawEntry) ([]session.Entry, error) {
 	entries := session.ConvertRawEntries(raw)
 	redactor, problems := session.NewRedactorWithCustomRules(projectRoot)

@@ -81,6 +81,7 @@ func TestImportContextPrompt_VendorMetadataAndHumanXML(t *testing.T) {
 		{"Codex app context", `<external_codex_apps_open_page>{"page_id":null}</external_codex_apps_open_page>`, true},
 		{"leading whitespace", "\n  <external_codex_apps_open_page>{}</external_codex_apps_open_page>", true},
 		{"human XML request", "<widget>Build this component</widget>", false},
+		{"similar human XML request", "<external_codex_widget>Build this component</external_codex_widget>", false},
 		{"human explanation", "Explain <external_codex_apps_open_page> metadata", false},
 		{"ordinary request", "Create a simple hello world program in python", false},
 	} {
@@ -88,6 +89,32 @@ func TestImportContextPrompt_VendorMetadataAndHumanXML(t *testing.T) {
 			assert.Equal(t, tc.context, isImportContextPrompt(tc.content))
 		})
 	}
+}
+
+// Human-authored XML must remain navigable even when its tag resembles Codex metadata.
+func TestImportContent_HumanXMLRemainsOpeningRequest(t *testing.T) {
+	f := newImportFixture(t)
+	prompt := "<external_codex_widget>Build this component</external_codex_widget>"
+	f.add(t, pastSession{agent: nativeimport.AgentCodex, id: e2eCodexA,
+		start:  time.Date(2026, 9, 16, 9, 0, 0, 0, time.UTC),
+		prompt: prompt, reply: "I will build it", entries: []adapters.RawEntry{
+			{Role: "user", Content: `<external_codex_apps_open_page>{"page_id":null}</external_codex_apps_open_page>`},
+			{Role: "user", Content: prompt},
+			{Role: "assistant", Content: "I will build it"},
+		}})
+	opts := importOptions{preview: true, sessions: []string{e2eCodexA}, jsonOut: true}
+	env, dest := f.envFor(f.ledgerPath, opts)
+	var out bytes.Buffer
+	require.NoError(t, runSessionImportFlow(context.Background(), &out, opts, env, dest))
+	var result struct{ Preview importContentPreview }
+	require.NoError(t, json.Unmarshal(out.Bytes(), &result))
+	assert.Equal(t, prompt, result.Preview.OpeningRequest)
+	require.Len(t, result.Preview.Prompts, 1)
+	assert.Equal(t, prompt, result.Preview.Prompts[0].Content)
+	assert.Equal(t, 1, result.Preview.Prompts[0].EntryIndex)
+	assert.Contains(t, result.Preview.Entries[0].Content, "<external_codex_apps_open_page>")
+	assert.Zero(t, f.store.count())
+	assert.Zero(t, f.summarizer.calls())
 }
 
 func TestImportReview_SelectionConfirmationAndSourceChanges(t *testing.T) {

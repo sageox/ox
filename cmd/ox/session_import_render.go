@@ -85,6 +85,8 @@ func renderImportPreview(w io.Writer, opts importOptions, dest importDestination
 		return cli.PrintJSONTo(w, out)
 	}
 
+	output := &importPreviewWriter{Writer: w}
+	w = output
 	visibility := dest.Visibility
 	if visibility == "public" {
 		visibility = "PUBLIC: anyone can read it"
@@ -155,7 +157,7 @@ func renderImportPreview(w io.Writer, opts importOptions, dest importDestination
 			fmt.Fprintf(w, "Nothing was uploaded. To upload these %d session%s:\n  %s\n", len(selected), plural(len(selected)), importUploadCommand(opts, selected))
 		}
 	}
-	return nil
+	return output.err
 }
 
 func skipLabel(c *importCandidate) string {
@@ -275,4 +277,23 @@ func countValues(m map[string]int) int {
 		n += v
 	}
 	return n
+}
+
+// importPreviewWriter remembers an output failure across formatted preview
+// writes so a broken terminal cannot proceed to upload confirmation.
+type importPreviewWriter struct {
+	io.Writer
+	err error
+}
+
+func (w *importPreviewWriter) Write(p []byte) (int, error) {
+	if w.err != nil {
+		return 0, w.err
+	}
+	n, err := w.Writer.Write(p)
+	if err == nil && n != len(p) {
+		err = io.ErrShortWrite
+	}
+	w.err = err
+	return n, err
 }

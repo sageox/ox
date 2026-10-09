@@ -24,6 +24,9 @@ func (s *SyncScheduler) refreshCredentialsIfNeeded(ctx context.Context) {
 	s.refreshCredentials(ctx, false)
 }
 
+// refreshCredentials serializes endpoint-scoped PAT refresh within ctx. Force
+// bypasses freshness and timer checks, while concurrent requests still share
+// the in-flight refresh.
 func (s *SyncScheduler) refreshCredentials(ctx context.Context, force bool) {
 	if ctx.Err() != nil {
 		return

@@ -80,11 +80,20 @@ func runImportBrowserWithOpen(ctx context.Context, dest importDestination, cands
 	if err != nil {
 		return zero, fmt.Errorf("start local session browser: %w", err)
 	}
+	return serveImportBrowser(ctx, ln, dest, cands, load, open)
+}
+
+// serveImportBrowser owns the supplied loopback listener for the entire review,
+// including startup failures and interrupted requests. Keeping listener ownership
+// here lets the lifecycle be exercised with actual socket closure.
+func serveImportBrowser(ctx context.Context, ln net.Listener, dest importDestination, cands []*importCandidate, load importPreviewLoader, open func(string) error) (importReviewResult, error) {
+	var zero importReviewResult
 	defer ln.Close()
 	secret := make([]byte, 32)
-	if _, err := rand.Read(secret); err != nil {
-		return zero, fmt.Errorf("generate session browser token: %w", err)
-	}
+	// Go 1.26+ crypto/rand.Read fills the entire buffer or terminates the
+	// process if the operating system cannot supply secure randomness.
+	// It cannot return an error; this capability retains 256 bits of entropy.
+	_, _ = rand.Read(secret)
 	b, err := newImportBrowser(ln.Addr().String(), hex.EncodeToString(secret), dest, cands, load)
 	if err != nil {
 		return zero, err
@@ -114,13 +123,14 @@ func runImportBrowserWithOpen(ctx context.Context, dest importDestination, cands
 	case <-ctx.Done():
 		return zero, ctx.Err()
 	case err := <-served:
-		if err == nil || errors.Is(err, http.ErrServerClosed) {
-			err = errors.New("local session browser stopped")
-		}
-		return zero, err
+		// Serve always returns an error. The owned server is shut down only
+		// after this wait, so any exit here interrupted an unfinished review.
+		return zero, fmt.Errorf("local session browser stopped: %w", err)
 	}
 }
 
+// newImportBrowser snapshots structural metadata and selection eligibility for
+// known IDs. It rejects duplicate IDs and omits native-file paths from the catalog.
 func newImportBrowser(host, token string, dest importDestination, cands []*importCandidate, load importPreviewLoader) (*importBrowser, error) {
 	if token == "" || load == nil {
 		return nil, errors.New("session browser requires a preview reader and a token")
@@ -172,6 +182,9 @@ func importBrowserReason(state importState) string {
 	}
 }
 
+// handler serves local assets, known-session previews, and selection callbacks.
+// Every route receives host and privacy protections; API routes also require
+// capability authorization. These routes cannot summarize or publish sessions.
 func (b *importBrowser) handler() http.Handler {
 	mux := http.NewServeMux()
 	asset := func(path, kind string, content []byte) {
@@ -273,6 +286,8 @@ func (b *importBrowser) handler() http.Handler {
 	})
 }
 
+// authorize checks the route method and capability token. POST requires the
+// exact review origin; any supplied foreign Origin is rejected on other methods.
 func (b *importBrowser) authorize(w http.ResponseWriter, r *http.Request, method string) bool {
 	if !importBrowserMethod(w, r, method) {
 		return false
@@ -289,6 +304,8 @@ func (b *importBrowser) authorize(w http.ResponseWriter, r *http.Request, method
 	return true
 }
 
+// finish returns the first accepted selection or cancellation to the terminal.
+// Concurrent or repeated callbacks receive a conflict and cannot replace it.
 func (b *importBrowser) finish(w http.ResponseWriter, result importReviewResult) {
 	b.mu.Lock()
 	defer b.mu.Unlock()

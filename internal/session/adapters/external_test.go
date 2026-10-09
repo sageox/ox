@@ -445,3 +445,20 @@ func TestExternalAdapter_ReadWithTimeout(t *testing.T) {
 		t.Fatalf("ReadWithTimeout error = %v, want ErrInvalidResponse for output that is not the protocol", err)
 	}
 }
+
+// Adapter binaries can be uninstalled or replaced between discovery and read.
+// A startup failure must preserve its filesystem cause and return no entries.
+func TestExternalAdapter_ReadStartupFailure(t *testing.T) {
+	binary := filepath.Join(t.TempDir(), "removed-adapter")
+	ea := NewExternalAdapterWithInfo(binary, &adapterprotocol.InfoResponse{Name: "removed"})
+	entries, err := ea.ReadWithContext(context.Background(), "session", time.Second)
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("read error = %v, want missing executable", err)
+	}
+	if entries != nil {
+		t.Fatalf("read entries = %v, want no response after startup failure", entries)
+	}
+	if !strings.Contains(err.Error(), "read failed") {
+		t.Fatalf("error omits failed operation: %v", err)
+	}
+}
