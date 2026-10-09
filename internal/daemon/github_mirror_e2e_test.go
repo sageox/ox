@@ -345,11 +345,12 @@ func TestGitHubMirror_EndToEnd(t *testing.T) {
 }
 
 // Failure prevented: a reviewer approves again a month after the first relay.
-// The change hash does not move, so the daemon used to drop the item and the
-// board post expired 90 days after the FIRST approval. Driven end to end: the
-// real fetcher reads the new review's time, the real client relays, and the
-// server's sidecar must carry the new expiry while the post itself is untouched.
-func TestGitHubMirror_ReApprovalExtendsThePostsExpiryOnTheBoard(t *testing.T) {
+// The change hash does not move, so the daemon used to drop the item: the board
+// post expired 90 days after the FIRST approval, and readers saw the PR as idle
+// since then. Driven end to end: the real fetcher reads the new review's time,
+// the real client relays, the server republishes the post with the new activity
+// time and expiry, and CodeDB indexes the fresh activity.
+func TestGitHubMirror_ReApprovalRenewsThePostOnTheBoard(t *testing.T) {
 	now := time.Date(2026, 10, 8, 17, 0, 0, 0, time.UTC)
 	var clockMu sync.Mutex
 	clock := func() time.Time { clockMu.Lock(); defer clockMu.Unlock(); return now }
@@ -382,12 +383,9 @@ func TestGitHubMirror_ReApprovalExtendsThePostsExpiryOnTheBoard(t *testing.T) {
 
 	posts := mirror.Posts()
 	require.Len(t, posts, 1)
-	metaPath := strings.TrimSuffix(posts[0], ".md") + ".meta.json"
-	before, err := githubmirror.ReadPostMeta(metaPath)
+	before, err := githubmirror.ReadPostMeta(strings.TrimSuffix(posts[0], ".md") + ".meta.json")
 	require.NoError(t, err)
 	require.True(t, before.ExpiresAt.Equal(firstApproval.Add(githubmirror.Window)), "precondition: expiry starts at the first approval + 90d")
-	postBytes, err := os.ReadFile(posts[0])
-	require.NoError(t, err)
 	requestsBefore := len(mirror.Requests())
 
 	// a month later the same reviewer approves again
@@ -402,19 +400,30 @@ func TestGitHubMirror_ReApprovalExtendsThePostsExpiryOnTheBoard(t *testing.T) {
 	relayer.Run(ctx, target)
 
 	assert.Len(t, mirror.Requests(), requestsBefore+1, "the re-approval is relayed")
-	assert.Equal(t, posts, mirror.Posts(), "same post, same file name")
-	afterBytes, err := os.ReadFile(posts[0])
-	require.NoError(t, err)
-	assert.Equal(t, postBytes, afterBytes, "the post bytes are not rewritten")
-	after, err := githubmirror.ReadPostMeta(metaPath)
+	renewed := mirror.Posts()
+	require.Len(t, renewed, 1, "the renewed post replaces the old one; never two posts for one PR")
+	_, statErr := os.Stat(posts[0])
+	assert.True(t, os.IsNotExist(statErr), "the previous version is gone")
+	after, err := githubmirror.ReadPostMeta(strings.TrimSuffix(renewed[0], ".md") + ".meta.json")
 	require.NoError(t, err)
 	assert.True(t, after.ExpiresAt.Equal(secondApproval.Add(githubmirror.Window)),
 		"expires_at = %v, want the second approval + 90d = %v", after.ExpiresAt, secondApproval.Add(githubmirror.Window))
 
+	// readers see the fresh activity too: `ox code prs` must not report a PR
+	// approved a minute ago as idle for a month
+	db, err := codedb.Open(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	_, err = db.IndexGitHubBoard(ctx, githubmirror.PostsDir(teamContext), "acme/api", nil)
+	require.NoError(t, err)
+	var updatedAt int64
+	require.NoError(t, db.Store().QueryRow("SELECT updated_at FROM pull_requests WHERE number = ?", 7).Scan(&updatedAt))
+	assert.Equal(t, secondApproval.Unix(), updatedAt, "CodeDB's activity time is the re-approval, not the first approval")
+
 	st, err := githubmirror.LoadState(target.LedgerPath)
 	require.NoError(t, err)
 	item := st.Items[githubmirror.SourceKey("acme", "api", githubmirror.KindPullRequest, 7)]
-	assert.Equal(t, githubmirror.ResultCurrent, item.Status, "the server already had this content")
+	assert.Equal(t, githubmirror.ResultAccepted, item.Status, "the post was republished with its new activity time")
 	assert.True(t, item.LastMaterialChangeAt.Equal(secondApproval))
 
 	// nothing further: the same GitHub state is skipped for free

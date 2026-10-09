@@ -178,74 +178,65 @@ func TestServer_AcceptsThenReportsCurrent(t *testing.T) {
 	}
 }
 
-// Failure prevented: a re-approval (or a close and reopen) moves an item's
-// last material change without moving its hash. If the server answers "current"
-// and leaves the expiry alone, the post disappears 90 days after the FIRST
-// approval while people are still working on it.
-func TestServer_LaterMaterialChangeExtendsTheExpiryOnly(t *testing.T) {
+// Failure prevented: a re-approval (same change hash, later activity) left the
+// post as it was. It then expired 90 days after the first approval, and readers
+// that index the rendered last_material_change showed the PR as idle since then.
+func TestServer_LaterMaterialChangeRepublishesThePost(t *testing.T) {
 	t.Parallel()
 	srv, dir := newServer(t)
 	item := prItem(1287, "sha256:aaa1", "Mirror GitHub activity") // last change at(5, 9)
 	if got := onlyResult(t, relay(t, srv, batch(item))); got.Status != githubmirror.ResultAccepted {
 		t.Fatalf("setup: first relay = %+v", got)
 	}
-	posts := srv.Posts()
-	if len(posts) != 1 {
-		t.Fatalf("setup: got %d posts", len(posts))
-	}
-	metaPath := strings.TrimSuffix(posts[0], ".md") + ".meta.json"
-	postBefore := readFile(t, posts[0])
-	metaBefore, err := githubmirror.ReadPostMeta(metaPath)
-	if err != nil {
-		t.Fatal(err)
+	before := srv.Posts()
+	if len(before) != 1 {
+		t.Fatalf("setup: got %d posts", len(before))
 	}
 
 	// same hash, activity 30 days later
 	later := item
 	later.LastMaterialChangeAt = at(35, 9)
-	got := onlyResult(t, relay(t, srv, batch(later)))
-	if got.Status != githubmirror.ResultCurrent {
-		t.Fatalf("same hash, later activity = %+v, want current", got)
+	if got := onlyResult(t, relay(t, srv, batch(later))); got.Status != githubmirror.ResultAccepted {
+		t.Fatalf("same hash, later activity = %+v, want accepted (republished)", got)
 	}
 
-	metaAfter, err := githubmirror.ReadPostMeta(metaPath)
+	after := srv.Posts()
+	if len(after) != 1 || after[0] == before[0] {
+		t.Fatalf("posts = %v, want exactly one new post replacing %v", after, before)
+	}
+	post, err := githubmirror.ParsePost([]byte(readFile(t, after[0])))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := later.LastMaterialChangeAt.Add(githubmirror.Window); !metaAfter.ExpiresAt.Equal(want) {
-		t.Errorf("expires_at = %v, want the later activity + 90d = %v (it stayed at %v)", metaAfter.ExpiresAt, want, metaBefore.ExpiresAt)
+	if !post.Header.LastMaterialChange.Equal(later.LastMaterialChangeAt) {
+		t.Errorf("rendered last_material_change = %v, want the later activity %v", post.Header.LastMaterialChange, later.LastMaterialChangeAt)
 	}
-	if after := srv.Posts(); len(after) != 1 || after[0] != posts[0] || readFile(t, posts[0]) != postBefore {
-		t.Errorf("the post itself must not change: %v", after)
+	meta, err := githubmirror.ReadPostMeta(strings.TrimSuffix(after[0], ".md") + ".meta.json")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if metaAfter.Path != metaBefore.Path || metaAfter.Slug != metaBefore.Slug || metaAfter.SourceKey != metaBefore.SourceKey ||
-		!metaAfter.CreatedAt.Equal(metaBefore.CreatedAt) {
-		t.Errorf("only expires_at may change:\n before %+v\n after  %+v", metaBefore, metaAfter)
-	}
-	if raw := readFile(t, metaPath); !strings.Contains(raw, `"change_hash": "sha256:aaa1"`) {
-		t.Errorf("the server's own change_hash was lost from the meta:\n%s", raw)
+	if want := later.LastMaterialChangeAt.Add(githubmirror.Window); !meta.ExpiresAt.Equal(want) {
+		t.Errorf("expires_at = %v, want the later activity + 90d = %v", meta.ExpiresAt, want)
 	}
 
-	// the extension survives a server restart: it lives in the files
+	// an older or equal timestamp is already on the board, also after a
+	// restart: the server's memory is its files
 	other := mirrortest.New(t, dir)
-	earlier := item
-	earlier.LastMaterialChangeAt = at(10, 9)
-	if got := onlyResult(t, relay(t, other, batch(earlier))); got.Status != githubmirror.ResultCurrent {
-		t.Fatalf("earlier activity = %+v, want current", got)
+	for _, at := range []time.Time{at(10, 9), later.LastMaterialChangeAt} {
+		again := item
+		again.LastMaterialChangeAt = at
+		if got := onlyResult(t, relay(t, other, batch(again))); got.Status != githubmirror.ResultCurrent {
+			t.Errorf("activity at %v = %+v, want current", at, got)
+		}
 	}
-	// and an older timestamp never shortens a post's life
-	metaKept, err := githubmirror.ReadPostMeta(metaPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !metaKept.ExpiresAt.Equal(metaAfter.ExpiresAt) {
-		t.Errorf("an earlier last_material_change_at shortened expires_at to %v, want it kept at %v", metaKept.ExpiresAt, metaAfter.ExpiresAt)
+	if kept := other.Posts(); len(kept) != 1 || kept[0] != after[0] {
+		t.Errorf("an older timestamp must not touch the post: %v", kept)
 	}
 }
 
-// Failure prevented: the extension path publishes a duplicate, or touches a
-// neighboring item, when only one item's activity moved.
-func TestServer_ExtensionIsPerItemAndNeverPublishesTwice(t *testing.T) {
+// Failure prevented: renewing one item publishes a duplicate, or touches a
+// neighboring item, when only that item's activity moved.
+func TestServer_RenewalIsPerItemAndNeverPublishesTwice(t *testing.T) {
 	t.Parallel()
 	srv, _ := newServer(t)
 	first := prItem(1, "sha256:one", "First")
@@ -255,8 +246,8 @@ func TestServer_ExtensionIsPerItemAndNeverPublishesTwice(t *testing.T) {
 	moved := first
 	moved.LastMaterialChangeAt = at(40, 9)
 	resp := relay(t, srv, batch(moved, second))
-	if len(resp.Results) != 2 || resp.Results[0].Status != githubmirror.ResultCurrent || resp.Results[1].Status != githubmirror.ResultCurrent {
-		t.Fatalf("results = %+v, want current for both", resp.Results)
+	if len(resp.Results) != 2 || resp.Results[0].Status != githubmirror.ResultAccepted || resp.Results[1].Status != githubmirror.ResultCurrent {
+		t.Fatalf("results = %+v, want accepted for the renewed item and current for the other", resp.Results)
 	}
 	if posts := srv.Posts(); len(posts) != 2 {
 		t.Fatalf("got %d posts, want 2: %v", len(posts), posts)

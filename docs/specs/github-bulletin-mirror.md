@@ -143,9 +143,10 @@ source key at this hash), `rejected` with a reason. Repo results: `enabled`, `no
 
 A re-approval, or a close and reopen between two cycles, can advance `last_material_change_at`
 without changing the hash. The daemon relays such an item again. When the hash matches the live
-post for the source key and `last_material_change_at` is later, the server extends that post's
-`expires_at` to `last_material_change_at + 90d` and answers `current`; the post bytes do not change.
-With no live post for the key it publishes and answers `accepted`.
+post for the source key but `last_material_change_at` is later, the server republishes the post with
+the new `last_material_change` and `expires_at = last_material_change_at + 90d` (replacing the
+previous file like any other change) and answers `accepted`, so readers that index the rendered
+header see the fresh activity. An equal or earlier timestamp answers `current` and changes nothing.
 
 ### Rendered post
 
@@ -234,8 +235,10 @@ Ledger sync.
 
 One cycle is bounded to 10 minutes, under the 15-minute sync interval. Running out of time is not
 a failure (no error, no backoff, and no success either): what was relayed is recorded, the cursors
-stay put, and the next cycle continues. Items already built when time runs out still get a
-one-minute relay window of their own, so a slow repo does not redo the same work every cycle.
+stay put, and the next cycle continues. Work already paid for is never thrown away: if time runs
+out mid-listing, the newest items already listed get a one-minute window to be built, and items
+already built get a one-minute window to be relayed. A repo whose listing alone outlasts the budget
+therefore still publishes its newest items every cycle instead of restarting the same crawl.
 
 State lives in `<ledger>/.sageox/cache/github_mirror/state.json` (local-only, never committed). It
 records the team it relayed to; a different team (after a re-`ox init`) starts fresh. The

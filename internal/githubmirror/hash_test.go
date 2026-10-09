@@ -3,6 +3,7 @@ package githubmirror
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"reflect"
 	"regexp"
@@ -447,7 +448,7 @@ func assertKeysSorted(t *testing.T, raw []byte) {
 	var stack []*frame
 	for {
 		tok, err := dec.Token()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			return
 		}
 		if err != nil {

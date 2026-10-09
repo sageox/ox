@@ -228,6 +228,9 @@ type SourceReview struct {
 // updated at or after since, newest first.
 type Fetcher interface {
 	Repo(ctx context.Context, owner, name string) (Repo, error)
+	// ListPullRequests and ListIssues list newest first. When ctx ends mid-way
+	// they return the items already listed together with the context error;
+	// any other failure returns no items.
 	ListPullRequests(ctx context.Context, owner, name string, since time.Time) ([]SourcePR, error)
 	// ListIssues returns issues only — pull requests are filtered out.
 	ListIssues(ctx context.Context, owner, name string, since time.Time) ([]SourceIssue, error)

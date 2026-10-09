@@ -20,7 +20,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/githubmirror"
 )
 
@@ -97,8 +96,9 @@ type injectedFailure struct {
 // accepts under githubmirror.PostsDir(teamContextDir). It holds no state of its
 // own beyond those files, so a second Server on the same directory picks up
 // where the first left off. A repeat of a live post's change hash answers
-// current; if its last_material_change_at is later, the post's expires_at is
-// extended in the sidecar first (the post bytes never change). Safe for
+// current, unless its last_material_change_at is later: then the post is
+// republished with the new activity time and expiry (readers index the
+// rendered last_material_change) and the answer is accepted. Safe for
 // concurrent use.
 type Server struct {
 	srv *httptest.Server
@@ -340,16 +340,18 @@ func (s *Server) publish(repo githubmirror.Repo, it githubmirror.Item, key strin
 		return "", "", err
 	}
 	for _, p := range previous {
-		if p.meta.ChangeHash == it.ChangeHash {
-			if _, statErr := os.Stat(p.mdPath); statErr == nil {
-				// The hash covers who approved, not when, so a re-approval or a
-				// close and reopen can move the expiry clock without it. The
-				// post bytes stay; only its life is extended, never shortened.
-				if err := extendExpiry(p, it); err != nil {
-					return "", "", err
-				}
-				return githubmirror.ResultCurrent, "", nil
-			}
+		if p.meta.ChangeHash != it.ChangeHash {
+			continue
+		}
+		if _, statErr := os.Stat(p.mdPath); statErr != nil {
+			continue
+		}
+		// The hash covers who approved, not when, so a re-approval or a close
+		// and reopen can move the activity clock without it. Such a relay is
+		// republished below with the new last_material_change and expiry;
+		// anything else is already on the board.
+		if !it.LastMaterialChangeAt.UTC().Add(githubmirror.Window).After(p.meta.ExpiresAt) {
+			return githubmirror.ResultCurrent, "", nil
 		}
 	}
 
@@ -419,25 +421,6 @@ func (s *Server) publish(repo githubmirror.Repo, it githubmirror.Item, key strin
 		}
 	}
 	return githubmirror.ResultAccepted, "", nil
-}
-
-// extendExpiry moves a live post's expires_at to the item's last material
-// change + the window when that is later. Only the sidecar changes.
-func extendExpiry(p storedPost, it githubmirror.Item) error {
-	expiresAt := it.LastMaterialChangeAt.UTC().Add(githubmirror.Window)
-	if !expiresAt.After(p.meta.ExpiresAt) {
-		return nil
-	}
-	meta := p.meta
-	meta.ExpiresAt = expiresAt
-	metaJSON, err := json.MarshalIndent(meta, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encode post meta: %w", err)
-	}
-	if err := fileutil.AtomicWriteBytes(p.metaPath, append(metaJSON, '\n'), 0o644); err != nil {
-		return fmt.Errorf("extend post expiry: %w", err)
-	}
-	return nil
 }
 
 // storedFor finds the posts on disk for a source key by reading their meta

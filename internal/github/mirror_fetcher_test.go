@@ -699,6 +699,55 @@ func TestMirrorFetcher_ErrorsKeepTheirCause(t *testing.T) {
 	}
 }
 
+// Failure prevented: the relay's cycle budget ends a slow listing of a busy
+// repo. If the pages already fetched are thrown away, every cycle restarts the
+// same crawl and nothing ever reaches the board. Running out of time is the one
+// failure that keeps the completed pages (newest first); any other failure
+// still returns nothing (TestMirrorFetcher_FailedCallReturnsNoPartialData).
+func TestMirrorFetcher_ListingOutOfTimeKeepsCompletedPages(t *testing.T) {
+	t.Parallel()
+
+	// page 1 answers at once, page 2 never answers
+	slowAfterFirstPage := func() http.Handler {
+		list := &pagedList{items: rawList(150, func(i int) string {
+			return fmt.Sprintf(`{"number":%d,"state":"open","updated_at":"2026-10-01T00:00:00Z"}`, i+1)
+		})}
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if queryInt(r, "page", 1) >= 2 {
+				<-r.Context().Done()
+				return
+			}
+			list.ServeHTTP(w, r)
+		})
+	}
+	listings := map[string]func(f *MirrorFetcher, ctx context.Context) (int, error){
+		"pull requests": func(f *MirrorFetcher, ctx context.Context) (int, error) {
+			got, err := f.ListPullRequests(ctx, "acme", "api", time.Time{})
+			return len(got), err
+		},
+		"issues": func(f *MirrorFetcher, ctx context.Context) (int, error) {
+			got, err := f.ListIssues(ctx, "acme", "api", time.Time{})
+			return len(got), err
+		},
+	}
+	for name, list := range listings {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := NewMirrorFetcher(newMirrorTestClient(t, slowAfterFirstPage()))
+			ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+			defer cancel()
+
+			n, err := list(f, ctx)
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("err = %v, want one wrapping context.DeadlineExceeded", err)
+			}
+			if n == 0 || n >= 150 {
+				t.Errorf("got %d items, want the first page's items (more than 0, fewer than 150)", n)
+			}
+		})
+	}
+}
+
 // Failure prevented: a failure on page 2 returns page 1 plus an error; a caller
 // that ignores the error (or logs and continues) publishes a truncated list as
 // complete. Every failed call must return nothing.

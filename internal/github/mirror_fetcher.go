@@ -2,6 +2,7 @@ package github
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -14,7 +15,10 @@ import (
 // (ErrGitHubAuth, ErrGitHubRateLimited, ledger.ErrGitHubNotFound) so the relay
 // can back off by cause. A failed call never returns partial data: a truncated
 // list that looks like a complete one would make the relay treat items as
-// gone.
+// gone. The one exception is a listing whose context ran out: it returns the
+// pages GitHub already served, newest first, together with the context error,
+// so a relay whose time budget ended a slow crawl can still publish the newest
+// items instead of restarting the same crawl every cycle.
 type MirrorFetcher struct {
 	client *Client
 }
@@ -50,7 +54,10 @@ func (f *MirrorFetcher) ListPullRequests(ctx context.Context, owner, name string
 		Since:     since,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("list pull requests %s/%s: %w", owner, name, err)
+		err = fmt.Errorf("list pull requests %s/%s: %w", owner, name, err)
+		if !outOfTime(err) {
+			return nil, err
+		}
 	}
 
 	result := make([]githubmirror.SourcePR, len(prs))
@@ -70,7 +77,7 @@ func (f *MirrorFetcher) ListPullRequests(ctx context.Context, owner, name string
 			HTMLURL:   pr.HTMLURL,
 		}
 	}
-	return result, nil
+	return result, err
 }
 
 // ListIssues returns issues only. GitHub's issues endpoint also lists pull
@@ -84,7 +91,10 @@ func (f *MirrorFetcher) ListIssues(ctx context.Context, owner, name string, sinc
 		Since:     since,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("list issues %s/%s: %w", owner, name, err)
+		err = fmt.Errorf("list issues %s/%s: %w", owner, name, err)
+		if !outOfTime(err) {
+			return nil, err
+		}
 	}
 
 	result := make([]githubmirror.SourceIssue, len(issues))
@@ -102,7 +112,13 @@ func (f *MirrorFetcher) ListIssues(ctx context.Context, owner, name string, sinc
 			HTMLURL:   issue.HTMLURL,
 		}
 	}
-	return result, nil
+	return result, err
+}
+
+// outOfTime reports whether a listing stopped because its context ended, the
+// one failure after which the pages already served are still worth keeping.
+func outOfTime(err error) bool {
+	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)
 }
 
 func (f *MirrorFetcher) ListIssueComments(ctx context.Context, owner, name string, number int) ([]githubmirror.SourceComment, error) {

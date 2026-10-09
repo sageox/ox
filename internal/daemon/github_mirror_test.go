@@ -59,8 +59,11 @@ type mirrorFakeFetcher struct {
 	// repo-level calls).
 	fail func(method string, number int) error
 	// hang makes a call block until its context ends: a GitHub that stopped
-	// answering. Only ListIssueComments honors it.
-	hang        func(method string, number int) bool
+	// answering. ListIssueComments and the two listings honor it.
+	hang func(method string, number int) bool
+	// listPartial is how many of the newest items a hung listing returns with
+	// its context error: the pages GitHub served before it went quiet.
+	listPartial int
 	release     chan struct{} // closed at test end so no hung call outlives the test
 	releaseOnce sync.Once
 	calls       map[string]int
@@ -144,12 +147,11 @@ func (f *mirrorFakeFetcher) Repo(_ context.Context, owner, _ string) (githubmirr
 	return f.repo, nil
 }
 
-func (f *mirrorFakeFetcher) ListPullRequests(_ context.Context, owner, _ string, since time.Time) ([]githubmirror.SourcePR, error) {
+func (f *mirrorFakeFetcher) ListPullRequests(ctx context.Context, owner, _ string, since time.Time) ([]githubmirror.SourcePR, error) {
 	if err := f.record("ListPullRequests", owner, 0); err != nil {
 		return nil, err
 	}
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.sinces["ListPullRequests"] = since
 	var out []githubmirror.SourcePR
 	for _, pr := range f.prs {
@@ -158,6 +160,13 @@ func (f *mirrorFakeFetcher) ListPullRequests(_ context.Context, owner, _ string,
 		}
 	}
 	slices.SortStableFunc(out, func(a, b githubmirror.SourcePR) int { return b.UpdatedAt.Compare(a.UpdatedAt) })
+	partial := min(f.listPartial, len(out))
+	f.mu.Unlock()
+	if err := f.hung(ctx, "ListPullRequests", 0); err != nil {
+		// like the real fetcher: a listing that ran out of time keeps the pages
+		// it finished, newest first
+		return out[:partial], err
+	}
 	return out, nil
 }
 
@@ -1928,6 +1937,51 @@ func TestGitHubMirror_CycleBudgetEndsASlowCycleWithoutFailingIt(t *testing.T) {
 	st = h.state()
 	assert.True(t, st.ColdStartDone)
 	assert.True(t, st.PullRequestCursor.Equal(mirrorTestNow.Add(-time.Hour)))
+}
+
+// Failure prevented: on a repo busy enough that listing alone outlasts the
+// cycle budget, the pages already listed were thrown away and every cycle
+// restarted the same crawl, so nothing ever reached the board. The newest
+// listed items are relayed instead, and the cursor holds until a listing
+// finishes, so the older ones follow once GitHub keeps up.
+func TestGitHubMirror_SlowListingStillRelaysTheNewestItems(t *testing.T) {
+	t.Parallel()
+	h := newMirrorHarness(t, withMirrorCycleTimeout(200*time.Millisecond))
+	h.noIssues = true
+	seedPRs(h, 5)
+	var stuck atomic.Bool
+	stuck.Store(true)
+	h.fetcher.listPartial = 2 // PRs 1 and 2 are the newest
+	h.fetcher.hang = func(method string, _ int) bool {
+		return stuck.Load() && method == "ListPullRequests"
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.run()
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the cycle outlived its time budget")
+	}
+
+	assert.Equal(t, []int{1, 2}, h.relay.relayedNumbers(), "the newest listed items reach the board even though the listing did not finish")
+	st := h.state()
+	assert.Empty(t, st.LastError, "running out of time is not a failure")
+	assert.True(t, st.NextAllowedAt.IsZero())
+	assert.True(t, st.PullRequestCursor.IsZero(), "an unfinished listing must not move the cursor past items it never saw")
+	assert.False(t, st.ColdStartDone)
+
+	stuck.Store(false)
+	h.advance(15 * time.Minute)
+	h.run()
+
+	assert.Equal(t, []int{1, 2, 3, 4, 5}, h.relay.relayedNumbers(), "once a listing finishes, only the rest is relayed")
+	st = h.state()
+	assert.True(t, st.ColdStartDone)
+	assert.False(t, st.PullRequestCursor.IsZero())
 }
 
 // Failure prevented: the time budget only bounds the happy path. A real

@@ -55,10 +55,12 @@ const (
 	// "syncing" and skip the Ledger's next GitHub sync.
 	githubMirrorCycleTimeout = 10 * time.Minute
 
-	// githubMirrorRelayGrace is the window the relay of already-built items gets
-	// after the cycle budget ran out during collection. Those items cost GitHub
-	// calls to build; throwing them away would let a slow repo repeat the same
-	// work every cycle and never finish.
+	// githubMirrorRelayGrace is the window already-fetched work gets after the
+	// cycle budget ran out: the newest items of a listing the budget cut short
+	// get one to be built, and items already built get one to be relayed.
+	// Throwing either away would let a slow repo repeat the same work every
+	// cycle and never finish. Worst case a cycle runs budget + 2 × grace (12
+	// minutes), still under the 15-minute sync interval.
 	githubMirrorRelayGrace = time.Minute
 )
 
@@ -469,6 +471,9 @@ type mirrorCycle struct {
 	// outOfTime is set when the time budget, not a failure or a shutdown, ended
 	// the cycle early.
 	outOfTime bool
+	// listIncomplete is set when the budget ended the listing itself; only the
+	// newest items were listed, so the cursors must not move.
+	listIncomplete bool
 
 	// counters, for the summary log
 	listed, skipped, detailed, notFound, unchanged, expired int
@@ -487,11 +492,17 @@ func (c *mirrorCycle) run(ctx context.Context) error {
 	defer cancel()
 
 	err := c.runWithin(ctx, work)
-	if err != nil && ctx.Err() == nil &&
-		errors.Is(work.Err(), context.DeadlineExceeded) && errors.Is(err, context.DeadlineExceeded) {
+	if budgetSpent(ctx, work, err) {
 		c.outOfTime = true
 	}
 	return err
+}
+
+// budgetSpent reports whether err is the cycle's time budget running out,
+// rather than a failure or the daemon shutting down.
+func budgetSpent(ctx, work context.Context, err error) bool {
+	return err != nil && ctx.Err() == nil &&
+		errors.Is(work.Err(), context.DeadlineExceeded) && errors.Is(err, context.DeadlineExceeded)
 }
 
 // runWithin does the cycle's work. GitHub and relay calls use work, which
@@ -501,9 +512,19 @@ func (c *mirrorCycle) runWithin(ctx, work context.Context) error {
 		return err
 	}
 
-	candidates, err := c.list(work)
-	if err != nil {
-		return err
+	candidates, listErr := c.list(work)
+	if listErr != nil {
+		// A listing the budget cut short still returned its newest items. They
+		// get a short window of their own instead of being dropped: a repo whose
+		// listing alone outlasts the budget would otherwise restart the same
+		// crawl every cycle and publish nothing.
+		if !budgetSpent(ctx, work, listErr) || len(candidates) == 0 {
+			return listErr
+		}
+		c.listIncomplete = true
+		var stop context.CancelFunc
+		work, stop = context.WithTimeout(ctx, githubMirrorRelayGrace)
+		defer stop()
 	}
 	c.listed = len(candidates)
 
@@ -525,6 +546,11 @@ func (c *mirrorCycle) runWithin(ctx, work context.Context) error {
 	}
 	if buildErr != nil {
 		return buildErr
+	}
+	if c.listIncomplete {
+		// items older than the ones listed were never seen; the cursors and the
+		// cold-start mark wait for a listing that finishes
+		return listErr
 	}
 
 	// Each cursor moves only when nothing was left behind, so the next cycle
@@ -586,37 +612,42 @@ func (c *mirrorCycle) since(cursor time.Time) time.Time {
 }
 
 // list returns the PRs and issues updated since each kind's own bound, newest
-// first, and notes the newest updated_at of each kind for its cursor.
+// first, and notes the newest updated_at of each kind for its cursor. When a
+// listing fails, what was already listed is returned with the error: the
+// fetcher only hands back items when the context ran out, and only the caller
+// knows whether that was the time budget.
 func (c *mirrorCycle) list(ctx context.Context) ([]mirrorCandidate, error) {
 	var out []mirrorCandidate
+	newestFirst := func() []mirrorCandidate {
+		slices.SortStableFunc(out, func(a, b mirrorCandidate) int { return b.updatedAt.Compare(a.updatedAt) })
+		return out
+	}
 
 	if c.target.PullRequests {
 		prs, err := c.fetcher.ListPullRequests(ctx, c.target.Owner, c.target.Repo, c.since(c.st.PullRequestCursor))
-		if err != nil {
-			return nil, fmt.Errorf("list pull requests: %w", err)
-		}
 		for i := range prs {
 			out = append(out, mirrorCandidate{kind: githubmirror.KindPullRequest, number: prs[i].Number, updatedAt: prs[i].UpdatedAt, pr: &prs[i]})
 			if prs[i].UpdatedAt.After(c.newestPR) {
 				c.newestPR = prs[i].UpdatedAt
 			}
 		}
+		if err != nil {
+			return newestFirst(), fmt.Errorf("list pull requests: %w", err)
+		}
 	}
 	if c.target.Issues {
 		issues, err := c.fetcher.ListIssues(ctx, c.target.Owner, c.target.Repo, c.since(c.st.IssueCursor))
-		if err != nil {
-			return nil, fmt.Errorf("list issues: %w", err)
-		}
 		for i := range issues {
 			out = append(out, mirrorCandidate{kind: githubmirror.KindIssue, number: issues[i].Number, updatedAt: issues[i].UpdatedAt, issue: &issues[i]})
 			if issues[i].UpdatedAt.After(c.newestIssue) {
 				c.newestIssue = issues[i].UpdatedAt
 			}
 		}
+		if err != nil {
+			return newestFirst(), fmt.Errorf("list issues: %w", err)
+		}
 	}
-
-	slices.SortStableFunc(out, func(a, b mirrorCandidate) int { return b.updatedAt.Compare(a.updatedAt) })
-	return out, nil
+	return newestFirst(), nil
 }
 
 // collect walks the listing newest first and builds the items that need
