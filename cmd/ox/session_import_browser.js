@@ -11,9 +11,16 @@
   const state = { rows: [], selected: new Set(), focus: '', query: '', filter: 'all', finished: false, submitting: false, request: 0 };
   // Keep only the current conversation in the DOM. The CLI owns the bounded
   // preview cache and rechecks the source snapshot on every detail request.
-  const openings = new Map(), pending = new Map(), failed = new Set();
+  const openings = new Map(), pending = new Map(), failed = new Set(), queryMatches = new Set();
+  // Copy short labels so a substring cannot keep a long pasted request alive.
+  // Full requests exist only while searching or reading the current detail.
+  const openingLabel = opening => {
+    const text = opening || 'No opening request available';
+    const label = Array.from(text.slice(0, text.length > 240 ? 239 : 240)).join('');
+    return text.length > 240 ? label + '…' : label;
+  };
   const labels = { ready: 'Ready', ineligible: 'Unavailable', in_progress: 'In progress', already_imported: 'Already imported', recorded_live: 'Recorded by ox', needs_summarizer: 'Needs a summarizer', not_shared: 'Kept local' };
-  let observer, detailAbort;
+  let observer, detailAbort, scanAbort;
   const agentLabel = agent => agent === 'claude' ? 'Claude Code' : agent === 'codex' ? 'Codex' : agent;
   const dateLabel = value => value && !Number.isNaN(Date.parse(value)) ? new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', year: 'numeric' }).format(new Date(value)) : 'Date unavailable';
   const announce = message => { $('announcement').textContent = message; };
@@ -28,25 +35,31 @@
     $('submit').disabled = state.submitting || state.finished;
   }
   async function getOpening(id) {
-    if (openings.has(id) || failed.has(id) || state.finished) return;
-    if (pending.has(id)) return pending.get(id);
-    const promise = api(`/api/preview?id=${encodeURIComponent(id)}&excerpt=1`).then(preview => {
-      openings.set(id, preview.opening_request || 'No opening request available');
+    if (openings.has(id) || failed.has(id) || state.finished || state.query) return;
+    if (pending.has(id)) return pending.get(id).promise;
+    const controller = new AbortController();
+    const promise = api(`/api/preview?id=${encodeURIComponent(id)}&excerpt=1`, undefined, controller.signal).then(preview => {
+      if (controller.signal.aborted || state.finished) return;
+      openings.set(id, openingLabel(preview.opening_request));
       const title = document.querySelector(`[data-title="${CSS.escape(id)}"]`);
       if (title) title.textContent = openings.get(id);
-      if (state.query) renderList();
     }).catch(() => {
+      if (controller.signal.aborted || state.finished) return;
       failed.add(id);
       const title = document.querySelector(`[data-title="${CSS.escape(id)}"]`);
       if (title) title.textContent = 'Content preview unavailable';
-    }).finally(() => pending.delete(id));
-    pending.set(id, promise);
+    }).finally(() => { if (pending.get(id)?.promise === promise) pending.delete(id); });
+    pending.set(id, { promise, controller });
     return promise;
+  }
+  function cancelOpeningLoads() {
+    for (const request of pending.values()) request.controller.abort();
+    pending.clear();
   }
   function renderList() {
     if (observer) observer.disconnect();
     const q = state.query.toLowerCase();
-    const shown = state.rows.filter(row => (state.filter === 'all' || (state.filter === 'ready' ? row.state === 'ready' : row.state !== 'ready')) && (!q || `${row.native_id} ${agentLabel(row.agent)} ${openings.get(row.native_id) || ''}`.toLowerCase().includes(q)));
+    const shown = state.rows.filter(row => (state.filter === 'all' || (state.filter === 'ready' ? row.state === 'ready' : row.state !== 'ready')) && (!q || queryMatches.has(row.native_id) || `${row.native_id} ${agentLabel(row.agent)}`.toLowerCase().includes(q)));
     $('list-count').textContent = `${shown.length} shown · ${state.rows.length} total`;
     const fragment = document.createDocumentFragment();
     for (const row of shown) {
@@ -73,8 +86,11 @@
     $('session-detail').replaceChildren(node('p', 'muted', 'Reading the redacted conversation…'));
     try {
       const preview = await api(`/api/preview?id=${encodeURIComponent(id)}`, undefined, detailAbort.signal);
-      openings.set(id, preview.opening_request || 'No opening request available'); failed.delete(id);
       if (state.focus !== id || state.request !== request || state.finished) return;
+      openings.set(id, openingLabel(preview.opening_request)); failed.delete(id);
+      if (state.query) {
+        (preview.opening_request || '').toLowerCase().includes(state.query.toLowerCase()) ? queryMatches.add(id) : queryMatches.delete(id);
+      }
       renderList(); renderDetail(preview);
     } catch (error) {
       if (state.focus !== id || state.request !== request || state.finished) return;
@@ -123,26 +139,47 @@
   let scanGeneration = 0;
   async function scanOpenings() {
     const generation = ++scanGeneration;
+    scanAbort?.abort(); cancelOpeningLoads(); queryMatches.clear();
+    renderList();
     if (!state.query) { $('scan-status').textContent = ''; return; }
-    const queue = state.rows.filter(row => !openings.has(row.native_id) && !failed.has(row.native_id));
+    const controller = scanAbort = new AbortController(), query = state.query.toLowerCase();
+    // Labels cannot answer a new full-text query. Stream at most two complete
+    // openings, retain only matching IDs and copied labels, then discard text.
+    const queue = state.rows.filter(row => !failed.has(row.native_id));
     let next = 0, completed = 0;
     $('scan-status').textContent = queue.length ? 'Searching requests…' : '';
-    const worker = async () => { while (next < queue.length && generation === scanGeneration && !state.finished) { const row = queue[next++]; await getOpening(row.native_id); completed++; if (generation === scanGeneration) $('scan-status').textContent = completed < queue.length ? `Reading ${completed}/${queue.length}` : ''; } };
+    const worker = async () => {
+      while (next < queue.length && generation === scanGeneration && !state.finished) {
+        const row = queue[next++], id = row.native_id;
+        try {
+          const preview = await api(`/api/preview?id=${encodeURIComponent(id)}&excerpt=1`, undefined, controller.signal);
+          if (generation !== scanGeneration || controller.signal.aborted || state.finished) return;
+          openings.set(id, openingLabel(preview.opening_request));
+          if ((preview.opening_request || '').toLowerCase().includes(query)) queryMatches.add(id);
+        } catch (error) {
+          if (generation !== scanGeneration || controller.signal.aborted || state.finished) return;
+          failed.add(id); queryMatches.delete(id);
+        }
+        completed++; renderList();
+        $('scan-status').textContent = completed < queue.length ? `Reading ${completed}/${queue.length}` : '';
+      }
+    };
     await Promise.all([worker(), worker()]);
-    if (generation === scanGeneration && state.query && failed.size) $('scan-status').textContent = `${failed.size} unreadable`;
+    if (generation === scanGeneration && !state.finished && state.query && failed.size) $('scan-status').textContent = `${failed.size} unreadable`;
   }
   async function finish(canceled) {
     if (state.submitting || state.finished) return;
     state.submitting = true; updateCount();
     try {
       await api(canceled ? '/api/cancel' : '/api/selection', canceled ? {} : { ids: state.rows.filter(row => state.selected.has(row.native_id)).map(row => row.native_id) });
-      state.finished = true; ++state.request; ++scanGeneration; observer?.disconnect(); detailAbort?.abort();
+      state.finished = true; ++state.request; ++scanGeneration; observer?.disconnect(); detailAbort?.abort(); scanAbort?.abort(); cancelOpeningLoads();
+      $('scan-status').textContent = '';
       document.querySelectorAll('button,input,select').forEach(el => { el.disabled = true; });
       announce(canceled ? 'Review canceled. Nothing was imported. You can close this tab.' : 'Your selection returned to the terminal. Review and confirm there to import. You can close this tab.');
     } catch (error) { announce(error.message + ' Your selection is still here.'); }
     finally { state.submitting = false; updateCount(); }
   }
-  $('search').addEventListener('input', event => { state.query = event.target.value; renderList(); scanOpenings(); });
+  $('search').addEventListener('input', event => { state.query = event.target.value; scanOpenings(); });
   $('eligibility').addEventListener('change', event => { state.filter = event.target.value; renderList(); });
   $('all').addEventListener('click', () => { state.rows.filter(row => row.state === 'ready').forEach(row => state.selected.add(row.native_id)); renderList(); updateCount(); });
   $('none').addEventListener('click', () => { state.selected.clear(); renderList(); updateCount(); });

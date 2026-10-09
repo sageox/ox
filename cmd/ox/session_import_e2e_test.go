@@ -387,7 +387,7 @@ func (f *importFixture) add(t *testing.T, s pastSession) string {
 }
 
 // readNative is the adapter: it answers only for the exact file it is given.
-func (f *importFixture) readNative(_ nativeimport.Agent, path string) ([]adapters.RawEntry, error) {
+func (f *importFixture) readNative(_ context.Context, _ nativeimport.Agent, path string) ([]adapters.RawEntry, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.reads = append(f.reads, path)

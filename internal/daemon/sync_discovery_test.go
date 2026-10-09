@@ -40,7 +40,7 @@ func TestRefreshCredentials_DedupWithinWindow(t *testing.T) {
 	s := newDiscoveryTestScheduler(t)
 
 	// first call sets the timestamp
-	s.refreshCredentialsIfNeeded()
+	s.refreshCredentialsIfNeeded(context.Background())
 
 	s.mu.Lock()
 	firstStamp := s.lastCredentialRefresh
@@ -48,7 +48,7 @@ func TestRefreshCredentials_DedupWithinWindow(t *testing.T) {
 	assert.False(t, firstStamp.IsZero(), "first call should set lastCredentialRefresh")
 
 	// second call within 5min window should be a no-op (dedup)
-	s.refreshCredentialsIfNeeded()
+	s.refreshCredentialsIfNeeded(context.Background())
 
 	s.mu.Lock()
 	secondStamp := s.lastCredentialRefresh
@@ -70,7 +70,7 @@ func TestRefreshCredentials_AllowsAfterWindow(t *testing.T) {
 	s.mu.Unlock()
 
 	// call should proceed past the dedup check and update the timestamp
-	s.refreshCredentialsIfNeeded()
+	s.refreshCredentialsIfNeeded(context.Background())
 
 	s.mu.Lock()
 	newStamp := s.lastCredentialRefresh
@@ -90,7 +90,7 @@ func TestRefreshCredentials_ConcurrentCalls(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			s.refreshCredentialsIfNeeded()
+			s.refreshCredentialsIfNeeded(context.Background())
 		}()
 	}
 	wg.Wait()
@@ -139,16 +139,16 @@ func TestCredentialRotation_RevocationAndRecovery(t *testing.T) {
 				BearerTokenHash: gitserver.BearerTokenFingerprint("oxt_test_1ljPfr"),
 			}))
 			t.Setenv("SAGEOX_TOKEN", "oxt_test_1ljPfX") // invalid checksum
-			s.refreshCredentialsIfNeeded()
+			s.refreshCredentialsIfNeeded(context.Background())
 			require.Zero(t, calls.Load(), "a malformed bearer must never reach the API")
 			t.Setenv("SAGEOX_TOKEN", "oxt_test_1ljPfr")
-			s.refreshCredentialsIfNeeded()
+			s.refreshCredentialsIfNeeded(context.Background())
 			require.Zero(t, calls.Load())
 			t.Setenv("SAGEOX_TOKEN", "oxt_rotated_1lKvCA")
 			for i, revoked := range []bool{true, false} {
 				rejected.Store(revoked)
 				if mode == "refresh" {
-					s.refreshCredentials(!revoked)
+					s.refreshCredentials(context.Background(), !revoked)
 				} else {
 					s.lastTeamDiscovery = time.Time{}
 					s.discoverTeams(context.Background())
@@ -168,7 +168,7 @@ func TestCredentialRotation_RevocationAndRecovery(t *testing.T) {
 					require.Equal(t, gitserver.BearerTokenFingerprint("oxt_rotated_1lKvCA"), creds.BearerTokenHash)
 				}
 			}
-			s.refreshCredentialsIfNeeded()
+			s.refreshCredentialsIfNeeded(context.Background())
 			require.EqualValues(t, 2, calls.Load(), "a matching fresh PAT must not refresh again")
 			if mode == "discovery" {
 				cachePath := filepath.Join(credDir, "sageox", "git-credentials-"+endpoint.NormalizeSlug(server.URL)+".json")
@@ -255,7 +255,7 @@ func TestLedgerPull_AuthFailureRefreshesFreshPAT(t *testing.T) {
 		Token: "old-pat", ExpiresAt: time.Now().Add(24 * time.Hour),
 		BearerTokenHash: gitserver.BearerTokenFingerprint("oxt_test_1ljPfr"),
 	}))
-	s.refreshCredentialsIfNeeded()
+	s.refreshCredentialsIfNeeded(context.Background())
 	previousHelper := gitserver.DefaultHelperCommand()
 	gitserver.SetHelperCommand("!true")
 	t.Cleanup(func() { gitserver.SetHelperCommand(previousHelper) })

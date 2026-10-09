@@ -119,7 +119,17 @@ data, scope fresh XDG directories to that command:
 
 ```sh
 ox_import_checks=$(mktemp -d)
+ox_import_runtime=$(mktemp -d /tmp/ox-import-runtime.XXXXXX)
+DOCKER_HOST="${DOCKER_HOST:-$(docker context inspect --format '{{.Endpoints.docker.Host}}')}" \
+TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock \
+OX_XDG_DISABLE= \
 XDG_CONFIG_HOME="$ox_import_checks/config" \
 XDG_DATA_HOME="$ox_import_checks/data" \
+XDG_STATE_HOME="$ox_import_checks/state" \
+XDG_RUNTIME_DIR="$ox_import_runtime" \
 XDG_CACHE_HOME="$ox_import_checks/cache" make test-preflight
 ```
+
+The separate short runtime directory keeps daemon and KB locks independent
+between runs. The Docker settings let Testcontainers reach the active local
+Docker context, including Colima on macOS.

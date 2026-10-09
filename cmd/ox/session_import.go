@@ -202,7 +202,7 @@ func runSessionImport(cmd *cobra.Command, _ []string) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
+	ctx, stop := importSignalContext(ctx)
 	defer stop()
 	env, dest, failure := importPreflight(ctx, opts)
 	if failure != nil {
@@ -214,6 +214,14 @@ func runSessionImport(cmd *cobra.Command, _ []string) error {
 		fmt.Fprintln(cmd.ErrOrStderr(), "Reading sessions from test data in "+opts.testData)
 	}
 	return runSessionImportFlow(ctx, out, opts, env, dest)
+}
+
+// importSignalContext covers preflight and review as well as the import. Its
+// signal registration must end on cancellation while final publication drains.
+func importSignalContext(parent context.Context) (context.Context, context.CancelFunc) {
+	ctx, stop := signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM)
+	context.AfterFunc(ctx, stop)
+	return ctx, stop
 }
 
 // parseImportOptions validates limits before discovery or any summarizer can run.

@@ -154,17 +154,7 @@ func (ea *ExternalAdapter) FindSessionFile(lookup SessionLookup) (string, error)
 
 // Read calls the adapter's read subcommand.
 func (ea *ExternalAdapter) Read(sessionPath string) ([]RawEntry, error) {
-	out, err := ea.execOneShot("read", "--session-file", sessionPath)
-	if err != nil {
-		return nil, err
-	}
-
-	var result adapterprotocol.ReadResult
-	if err := json.Unmarshal(out, &result); err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrInvalidResponse, err)
-	}
-
-	return protocolToInternal(result.Entries), nil
+	return ea.ReadWithContext(context.Background(), sessionPath, ea.oneShotTimeout)
 }
 
 // ReadWithTimeout reads a session like Read, within a caller-chosen deadline.
@@ -172,7 +162,13 @@ func (ea *ExternalAdapter) Read(sessionPath string) ([]RawEntry, error) {
 // batch allows; the output limit still applies, so an oversized session fails
 // with ErrAdapterOutputLimit instead of being cut short.
 func (ea *ExternalAdapter) ReadWithTimeout(sessionPath string, timeout time.Duration) ([]RawEntry, error) {
-	out, err := ea.execOneShotWithin(timeout, "read", "--session-file", sessionPath)
+	return ea.ReadWithContext(context.Background(), sessionPath, timeout)
+}
+
+// ReadWithContext reads within the caller's lifetime and the adapter deadline.
+// Cancellation stops the subprocess and its descendants before returning.
+func (ea *ExternalAdapter) ReadWithContext(ctx context.Context, sessionPath string, timeout time.Duration) ([]RawEntry, error) {
+	out, err := ea.execOneShotContext(ctx, timeout, "read", "--session-file", sessionPath)
 	if err != nil {
 		return nil, err
 	}
@@ -614,6 +610,13 @@ func (ea *ExternalAdapter) execOneShot(subcommand string, args ...string) ([]byt
 
 // execOneShotWithin is execOneShot with a caller-chosen deadline.
 func (ea *ExternalAdapter) execOneShotWithin(timeout time.Duration, subcommand string, args ...string) ([]byte, error) {
+	return ea.execOneShotContext(context.Background(), timeout, subcommand, args...)
+}
+
+func (ea *ExternalAdapter) execOneShotContext(parent context.Context, timeout time.Duration, subcommand string, args ...string) ([]byte, error) {
+	if err := parent.Err(); err != nil {
+		return nil, err
+	}
 	if subcommand == "find-session" {
 		if err := validateRepoRootArg(args, true); err != nil {
 			return nil, fmt.Errorf("pre-flight check for %s %s: %w", ea.binaryPath, subcommand, err)
@@ -621,7 +624,7 @@ func (ea *ExternalAdapter) execOneShotWithin(timeout time.Duration, subcommand s
 	}
 
 	cmdArgs := append([]string{subcommand}, args...)
-	timeoutCtx, timeoutCancel := context.WithTimeout(context.Background(), timeout)
+	timeoutCtx, timeoutCancel := context.WithTimeout(parent, timeout)
 	defer timeoutCancel()
 	ctx, outputCancel := context.WithCancel(timeoutCtx)
 	defer outputCancel()
@@ -641,6 +644,9 @@ func (ea *ExternalAdapter) execOneShotWithin(timeout time.Duration, subcommand s
 	cmd.Stderr = &stderr
 
 	err := runOneShotCommand(cmd)
+	if err := parent.Err(); err != nil {
+		return nil, err
+	}
 	if timeoutCtx.Err() == context.DeadlineExceeded {
 		return nil, fmt.Errorf("%w: %s %s", ErrAdapterTimeout, ea.binaryPath, subcommand)
 	}

@@ -164,8 +164,11 @@ func newImportPreviewLoader(env *importEnv, cands []*importCandidate) importPrev
 			}
 			return cached, nil
 		}
-		raw, err := env.deps.readNative(c.Session.Agent, c.Session.Path)
+		raw, err := env.deps.readNative(ctx, c.Session.Agent, c.Session.Path)
 		if err != nil {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			return nil, errors.New("session content is unavailable")
 		}
 		entries, err := nativeimport.PreviewEntries(env.projectRoot, raw)
