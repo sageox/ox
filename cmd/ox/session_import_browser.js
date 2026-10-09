@@ -12,6 +12,10 @@
   // Keep only the current conversation in the DOM. The CLI owns the bounded
   // preview cache and rechecks the source snapshot on every detail request.
   const openings = new Map(), pending = new Map(), failed = new Set(), queryMatches = new Set();
+  // Row elements keep only structural metadata and bounded labels. Reuse them
+  // across results and filters so keyboard focus survives arriving requests.
+  const rowViews = new Map();
+  let shownCount = 0, emptyNotice;
   // Copy short labels so a substring cannot keep a long pasted request alive.
   // Full requests exist only while searching or reading the current detail.
   const openingLabel = opening => {
@@ -41,13 +45,11 @@
     const promise = api(`/api/preview?id=${encodeURIComponent(id)}&excerpt=1`, undefined, controller.signal).then(preview => {
       if (controller.signal.aborted || state.finished) return;
       openings.set(id, openingLabel(preview.opening_request));
-      const title = document.querySelector(`[data-title="${CSS.escape(id)}"]`);
-      if (title) title.textContent = openings.get(id);
+      updateRow(id); updateListCount();
     }).catch(() => {
       if (controller.signal.aborted || state.finished) return;
       failed.add(id);
-      const title = document.querySelector(`[data-title="${CSS.escape(id)}"]`);
-      if (title) title.textContent = 'Content preview unavailable';
+      updateRow(id); updateListCount();
     }).finally(() => { if (pending.get(id)?.promise === promise) pending.delete(id); });
     pending.set(id, { promise, controller });
     return promise;
@@ -56,33 +58,64 @@
     for (const request of pending.values()) request.controller.abort();
     pending.clear();
   }
-  function renderList() {
-    if (observer) observer.disconnect();
+  function rowVisible(row) {
     const q = state.query.toLowerCase();
-    const shown = state.rows.filter(row => (state.filter === 'all' || (state.filter === 'ready' ? row.state === 'ready' : row.state !== 'ready')) && (!q || queryMatches.has(row.native_id) || `${row.native_id} ${agentLabel(row.agent)}`.toLowerCase().includes(q)));
-    $('list-count').textContent = `${shown.length} shown · ${state.rows.length} total`;
-    const fragment = document.createDocumentFragment();
-    for (const row of shown) {
-      const id = row.native_id;
-      const item = node('div', `session${id === state.focus ? ' active' : ''}${row.state !== 'ready' ? ' unavailable' : ''}`);
-      const check = node('input'); check.type = 'checkbox'; check.checked = state.selected.has(id); check.disabled = row.state !== 'ready' || state.finished; check.dataset.select = id;
-      check.setAttribute('aria-label', `Include session ${id.slice(0, 8)}`);
-      check.addEventListener('change', () => { check.checked ? state.selected.add(id) : state.selected.delete(id); updateCount(); });
-      const button = node('button'); button.type = 'button'; button.dataset.focus = id; button.setAttribute('aria-pressed', String(id === state.focus));
-      const title = node('strong', '', openings.get(id) || (failed.has(id) ? 'Content preview unavailable' : 'Loading opening request…')); title.dataset.title = id;
-      button.append(title, node('small', '', `${agentLabel(row.agent)} · ${dateLabel(row.started_at)} · ${row.messages} messages`), node('small', 'state', `${labels[row.state] || 'Unavailable'} · ${id.slice(0, 8)}`));
-      button.addEventListener('click', () => focus(id)); item.append(check, button); fragment.append(item);
+    return (state.filter === 'all' || (state.filter === 'ready' ? row.state === 'ready' : row.state !== 'ready')) && (!q || queryMatches.has(row.native_id) || `${row.native_id} ${agentLabel(row.agent)}`.toLowerCase().includes(q));
+  }
+  function createRow(row) {
+    const id = row.native_id, item = node('div', 'session');
+    item.hidden = true; item.style.display = 'none';
+    const check = node('input'); check.type = 'checkbox'; check.dataset.select = id;
+    check.setAttribute('aria-label', `Include session ${id.slice(0, 8)}`);
+    check.addEventListener('change', () => { check.checked ? state.selected.add(id) : state.selected.delete(id); updateCount(); });
+    const button = node('button'); button.type = 'button'; button.dataset.focus = id;
+    const title = node('strong'); title.dataset.title = id;
+    button.append(title, node('small', '', `${agentLabel(row.agent)} · ${dateLabel(row.started_at)} · ${row.messages} messages`), node('small', 'state', `${labels[row.state] || 'Unavailable'} · ${id.slice(0, 8)}`));
+    button.addEventListener('click', () => focus(id)); item.append(check, button);
+    return { row, item, check, button, title, visible: false };
+  }
+  function updateRow(id) {
+    const view = rowViews.get(id);
+    if (!view) return;
+    const { row, item, check, button, title } = view, visible = rowVisible(row);
+    if (view.visible !== visible) {
+      view.visible = visible; shownCount += visible ? 1 : -1;
+      // Author .session display:grid overrides the browser's [hidden] rule.
+      item.hidden = !visible; item.style.display = visible ? '' : 'none';
     }
-    if (!shown.length) fragment.append(node('p', 'muted notice', 'No matching sessions. Your selection is preserved.'));
-    $('session-list').replaceChildren(fragment);
-    observer = new IntersectionObserver(entries => { for (const entry of entries) if (entry.isIntersecting) { observer.unobserve(entry.target); getOpening(entry.target.dataset.focus); } }, { root: document.querySelector('.picker'), rootMargin: '80px' });
-    for (const button of $('session-list').querySelectorAll('[data-focus]')) observer.observe(button);
+    item.classList.toggle('active', id === state.focus);
+    item.classList.toggle('unavailable', row.state !== 'ready');
+    check.checked = state.selected.has(id); check.disabled = row.state !== 'ready' || state.finished;
+    button.setAttribute('aria-pressed', String(id === state.focus));
+    const label = openings.get(id) || (failed.has(id) ? 'Content preview unavailable' : 'Loading opening request…');
+    if (title.textContent !== label) title.textContent = label;
+    if (visible && !state.query && !openings.has(id) && !failed.has(id) && !state.finished) observer.observe(button);
+    else observer.unobserve(button);
+  }
+  function updateListCount() {
+    const text = `${shownCount} shown · ${state.rows.length} total`;
+    if ($('list-count').textContent !== text) $('list-count').textContent = text;
+    if (emptyNotice) { emptyNotice.hidden = shownCount !== 0; emptyNotice.style.display = shownCount ? 'none' : ''; }
+  }
+  function renderList() {
+    observer ||= new IntersectionObserver(entries => { for (const entry of entries) if (entry.isIntersecting) { observer.unobserve(entry.target); getOpening(entry.target.dataset.focus); } }, { root: document.querySelector('.picker'), rootMargin: '80px' });
+    const fragment = document.createDocumentFragment();
+    for (const row of state.rows) {
+      const id = row.native_id;
+      if (!rowViews.has(id)) {
+        const view = createRow(row); rowViews.set(id, view); fragment.append(view.item);
+      }
+      updateRow(id);
+    }
+    if (fragment.childNodes.length) $('session-list').append(fragment);
+    if (!emptyNotice) { emptyNotice = node('p', 'muted notice', 'No matching sessions. Your selection is preserved.'); $('session-list').append(emptyNotice); }
+    updateListCount();
   }
   async function focus(id) {
     if (state.finished) return;
     detailAbort?.abort(); detailAbort = new AbortController();
-    state.focus = id; const request = ++state.request;
-    renderList();
+    const previous = state.focus; state.focus = id; const request = ++state.request;
+    updateRow(previous); updateRow(id); updateListCount();
     $('session-detail').replaceChildren(node('p', 'muted', 'Reading the redacted conversation…'));
     try {
       const preview = await api(`/api/preview?id=${encodeURIComponent(id)}`, undefined, detailAbort.signal);
@@ -91,10 +124,11 @@
       if (state.query) {
         (preview.opening_request || '').toLowerCase().includes(state.query.toLowerCase()) ? queryMatches.add(id) : queryMatches.delete(id);
       }
-      renderList(); renderDetail(preview);
+      updateRow(id); updateListCount(); renderDetail(preview);
     } catch (error) {
       if (state.focus !== id || state.request !== request || state.finished) return;
       failed.add(id);
+      updateRow(id); updateListCount();
       const retry = node('button', '', 'Retry preview'); retry.type = 'button'; retry.addEventListener('click', () => { failed.delete(id); focus(id); });
       $('session-detail').replaceChildren(node('h2', '', 'Preview unavailable'), node('p', 'muted', error.message), retry);
     }
@@ -160,7 +194,7 @@
           if (generation !== scanGeneration || controller.signal.aborted || state.finished) return;
           failed.add(id); queryMatches.delete(id);
         }
-        completed++; renderList();
+        completed++; updateRow(id); updateListCount();
         $('scan-status').textContent = completed < queue.length ? `Reading ${completed}/${queue.length}` : '';
       }
     };
