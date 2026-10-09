@@ -1009,6 +1009,32 @@ func TestUploadProgress(t *testing.T) {
 	assert.Equal(t, "Uploading big.mp4: 200.0 MB / 200.0 MB (100%)", lines[2])
 }
 
+// TestUploadProgress_Terminal redraws one line in place on a terminal: at most
+// five times a second, always at 100%, and blank-padded so a shorter line
+// fully covers a longer one.
+// Failure prevented: a terminal flooded with redraws, a final "(100%)" line
+// left with stale characters from the line under it, or the next output
+// starting on the progress line.
+func TestUploadProgress_Terminal(t *testing.T) {
+	var buf bytes.Buffer
+	total := int64(1 << 30)
+	p := &uploadProgress{w: &buf, name: "big.mp4", total: total, tty: true}
+
+	p.add(total / 2) // first draw
+	// pin the clock inside the throttle window so the next draws are skipped
+	p.lastDraw = time.Now().Add(time.Hour)
+	p.add(1)         // throttled
+	p.add(-total)    // a failed attempt un-counted past zero clamps at 0; throttled
+	p.add(total * 2) // clamped at 100%, which always draws
+	p.finish()
+
+	assert.Equal(t,
+		"\rUploading big.mp4: 512.0 MB / 1.0 GB (50%)"+
+			"\rUploading big.mp4: 1.0 GB / 1.0 GB (100%) "+
+			"\n",
+		buf.String())
+}
+
 // TestMediaContentTypesMatchServerPairing pins the MIME ox declares for each
 // media extension to one api-go's mediaformats pairs with that extension.
 // Failure prevented: a 400 "content_type does not match file extension" on

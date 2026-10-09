@@ -57,6 +57,77 @@ func TestRequestRecordingUpload_Errors(t *testing.T) {
 	}
 }
 
+// TestRecordingUpload_ClientFailures covers the answers the client itself
+// rejects before or after the round trip.
+// Failure prevented: a 2xx with an unusable body treated as an upload slot, a
+// confirm sent for an empty recording ID, or a dropped connection reported as
+// anything but a network error.
+func TestRecordingUpload_ClientFailures(t *testing.T) {
+	req := &RecordingUploadRequest{Filename: "a.m4a", Size: 1}
+	tests := []struct {
+		name    string
+		status  int
+		body    string
+		down    bool
+		call    func(*RepoClient) error
+		wantMsg string
+	}{
+		{name: "upload: unknown context type", call: func(c *RepoClient) error {
+			_, err := c.RequestRecordingUpload(t.Context(), "repo", "team_1", "", req)
+			return err
+		}, wantMsg: "invalid context type"},
+		{name: "upload: 2xx that is not JSON", status: http.StatusOK, body: "<html>", call: func(c *RepoClient) error {
+			_, err := c.RequestRecordingUpload(t.Context(), ContextTypeTeam, "team_1", "", req)
+			return err
+		}, wantMsg: "decode recording upload response"},
+		{name: "upload: 2xx without a recording ID", status: http.StatusOK, body: `{"upload_url":"https://s3/x"}`, call: func(c *RepoClient) error {
+			_, err := c.RequestRecordingUpload(t.Context(), ContextTypeTeam, "team_1", "", req)
+			return err
+		}, wantMsg: "has no recording_id"},
+		{name: "upload: server unreachable", down: true, call: func(c *RepoClient) error {
+			_, err := c.RequestRecordingUpload(t.Context(), ContextTypeTeam, "team_1", "", req)
+			return err
+		}, wantMsg: "network error"},
+		{name: "confirm: unknown context type", call: func(c *RepoClient) error {
+			_, err := c.ConfirmRecordingUpload(t.Context(), "repo", "team_1", "rec_1", nil)
+			return err
+		}, wantMsg: "invalid context type"},
+		{name: "confirm: empty recording ID", call: func(c *RepoClient) error {
+			_, err := c.ConfirmRecordingUpload(t.Context(), ContextTypeTeam, "team_1", "", nil)
+			return err
+		}, wantMsg: "recording ID is required"},
+		{name: "confirm: non-2xx with no body", status: http.StatusInternalServerError, call: func(c *RepoClient) error {
+			_, err := c.ConfirmRecordingUpload(t.Context(), ContextTypeTeam, "team_1", "rec_1", nil)
+			return err
+		}, wantMsg: "HTTP 500"},
+		{name: "confirm: 2xx that is not JSON", status: http.StatusOK, body: "<html>", call: func(c *RepoClient) error {
+			_, err := c.ConfirmRecordingUpload(t.Context(), ContextTypeTeam, "team_1", "rec_1", nil)
+			return err
+		}, wantMsg: "decode confirm response"},
+		{name: "confirm: server unreachable", down: true, call: func(c *RepoClient) error {
+			_, err := c.ConfirmRecordingUpload(t.Context(), ContextTypeTeam, "team_1", "rec_1", nil)
+			return err
+		}, wantMsg: "network error"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tt.status)
+				_, _ = io.WriteString(w, tt.body)
+			}))
+			if tt.down {
+				srv.Close()
+			} else {
+				defer srv.Close()
+			}
+
+			err := tt.call(NewRepoClientWithEndpoint(srv.URL))
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantMsg)
+		})
+	}
+}
+
 // TestRequestRecordingUpload_IdempotencyKey: the key rides the header when
 // given and is absent otherwise.
 // Failure prevented: a re-presign the server treats as a new upload (a second
