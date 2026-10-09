@@ -389,7 +389,12 @@ def run(args: argparse.Namespace) -> int:
             print(f"\n── {job.label}: {status} in {elapsed:.0f}s", flush=True)
             sys.stdout.write(job.log.read_text(encoding="utf-8", errors="replace"))
             sys.stdout.flush()
-            diagnostic = finalize_test_events(job.timings, job.process.returncode != 0)
+            try:
+                diagnostic = finalize_test_events(job.timings, job.process.returncode != 0)
+            except OSError as error:
+                print(f"test-split: unable to finalize events for {job.label} ({job.timings}): {error}; retaining original events",
+                      file=sys.stderr, flush=True)
+                diagnostic = ""
             if diagnostic:
                 print(f"Package-level failure context (full events retained in {job.timings}):", flush=True)
                 sys.stdout.write(diagnostic)

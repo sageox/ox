@@ -336,6 +336,79 @@ class DiagnosticArtifactsTest(unittest.TestCase):
         retained = [json.loads(line) for line in self.path.read_text(encoding="utf-8").splitlines()]
         self.assertEqual(self.events(), retained, "the existing CI-uploaded timing path includes full failed-shard output")
 
+    def test_finalization_error_collects_other_processes_and_all_artifacts(self):
+        """An optional diagnostic failure preserves pass/fail status and merges."""
+        for first_failed in (False, True):
+            with self.subTest(first_failed=first_failed):
+                work = self.root / ("failed-work" if first_failed else "passed-work")
+                release = self.root / ("failed-release" if first_failed else "passed-release")
+                jobs = [test_split.Job(name, work, name) for name in ("first", "second")]
+                producer = self.root / "two-jobs.py"
+                producer.write_text(
+                    "import json, pathlib, sys, time\n"
+                    "failed, wait, release = int(sys.argv[1]), int(sys.argv[2]), pathlib.Path(sys.argv[3])\n"
+                    "args = sys.argv[4:]\n"
+                    "deadline = time.monotonic() + 5\n"
+                    "while wait and not release.exists():\n"
+                    "    if time.monotonic() > deadline: sys.exit(9)\n"
+                    "    time.sleep(0.005)\n"
+                    "events = " + repr(self.events(failed=False)) + "\n"
+                    "if failed: events[-1]['Action'] = 'fail'\n"
+                    "pathlib.Path(args[args.index('--jsonfile')+1]).write_text(''.join(json.dumps(e)+'\\n' for e in events))\n"
+                    "cover = next(a.split('=',1)[1] for a in args if a.startswith('-coverprofile='))\n"
+                    "pathlib.Path(cover).write_text('mode: atomic\\nx.go:1.1,1.9 1 1\\n')\n"
+                    "name = 'second' if wait else 'first'\n"
+                    'xml = f\'<testsuites><testsuite name="{name}" tests="1" failures="{failed}" errors="0" skipped="0" time="0.1"><testcase name="{name}" /></testsuite></testsuites>\'\n'
+                    "pathlib.Path(args[args.index('--junitfile')+1]).write_text(xml)\n"
+                    "sys.exit(failed)\n", encoding="utf-8")
+                for index, job in enumerate(jobs):
+                    job.command = test_split.gotestsum_command(
+                        [sys.executable, str(producer), str(int(first_failed and index == 0)), str(index), str(release)],
+                        job, [], [], ["./internal/daemon"])
+                cover = self.root / "merged.cover"
+                junit = self.root / "merged.junit.xml"
+                args = test_split.argparse.Namespace(go="go", gotestsum="fake", work_dir=str(work), split=[], group=[], weights=None,
+                                                    only="rest", go_flags=[], packages=[], coverprofile=str(cover), junit=str(junit), timings=str(self.path))
+                finalize = test_split.finalize_test_events
+
+                def interrupted_finalization(path, failed):
+                    """Fail first finalization while the second process waits on a marker."""
+                    if path == jobs[0].timings:
+                        self.assertIsNone(jobs[1].process.poll(), "the second process must still be running")
+                        release.touch()
+                        raise OSError("injected finalization error")
+                    return finalize(path, failed)
+
+                console, errors = io.StringIO(), io.StringIO()
+                try:
+                    with mock.patch.object(test_split, "build_jobs", return_value=jobs), \
+                            mock.patch.object(test_split, "finalize_test_events", side_effect=interrupted_finalization), \
+                            contextlib.redirect_stdout(console), contextlib.redirect_stderr(errors):
+                        result = test_split.run(args)
+                    self.assertEqual(int(first_failed), result)
+                    self.assertEqual([int(first_failed), 0], [job.process.poll() for job in jobs])
+                    self.assertTrue(all(job.handle.closed for job in jobs))
+                    self.assertIn("unable to finalize events for first", errors.getvalue())
+                    self.assertIn(str(jobs[0].timings), errors.getvalue())
+                    self.assertIn("injected finalization error", errors.getvalue())
+                    self.assertIn("x.go:1.1,1.9 1 2", cover.read_text(encoding="utf-8"))
+                    suites = ET.parse(junit).getroot()
+                    self.assertEqual("2", suites.get("tests"))
+                    self.assertEqual(str(int(first_failed)), suites.get("failures"))
+                    self.assertEqual(["first", "second"], [suite.get("name") for suite in suites])
+                    first_events = self.events(failed=first_failed)
+                    original = "".join(json.dumps(event) + "\n" for event in first_events).encode()
+                    self.assertEqual(original, jobs[0].timings.read_bytes())
+                    retained = [json.loads(line) for line in self.path.read_text(encoding="utf-8").splitlines()]
+                    self.assertEqual(first_events + [event for event in self.events(failed=False) if event["Action"] == "pass"], retained)
+                finally:
+                    release.touch()
+                    for job in jobs:
+                        if job.process is not None:
+                            job.process.wait(timeout=5)
+                        if job.handle is not None:
+                            job.handle.close()
+
 
 class WeightsTest(unittest.TestCase):
     def test_repository_weights_file_loads(self):
