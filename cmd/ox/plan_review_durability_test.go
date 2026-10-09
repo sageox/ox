@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -281,10 +282,20 @@ func TestPlanReviewDurability_RacingClonesKeepEveryRecord(t *testing.T) {
 	if n := feedbackRoundsOnRemote(t, origin); n != 3 {
 		t.Fatalf("remote rounds = %d, want 3", n)
 	}
-	if n := strings.Count(remoteFiles(t, origin), "/feedback/resolutions/"); n != 3 {
-		t.Fatalf("remote resolutions = %d, want 3", n)
+	fresh := filepath.Join(clone(), filepath.FromSlash(rel))
+	resolutions, err := plan.LoadResolutions(fresh)
+	if err != nil {
+		t.Fatal(err)
 	}
-	items, err := plan.AssembleReview(filepath.Join(clone(), filepath.FromSlash(rel)))
+	var notes []string
+	for _, r := range resolutions {
+		notes = append(notes, r.Note)
+	}
+	slices.Sort(notes)
+	if want := []string{"reviewer-0", "reviewer-1", "reviewer-2"}; !slices.Equal(notes, want) {
+		t.Fatalf("a fresh clone should read every clone's resolution, got notes %v, want %v", notes, want)
+	}
+	items, err := plan.AssembleReview(fresh)
 	if err != nil || len(items) != 3 {
 		t.Fatalf("a fresh clone should assemble one item per reviewer, got %+v (err %v)", items, err)
 	}

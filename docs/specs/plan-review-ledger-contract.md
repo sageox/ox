@@ -199,25 +199,32 @@ except `resolutions.json`.
 
 ### 3.5 Confined create-only publication
 
-1. Open the plan dir as an `os.Root`.
-2. Refuse a symlink or non-directory at any existing component of the
-   record's directory (`os.Root` alone follows in-root symlinks).
-3. Write a dot-prefixed temporary with `O_CREATE|O_EXCL`, fsync, close.
-4. `link(2)` it to the record name. It fails rather than replace any existing
-   name, live or dangling symlinks included. Fsync the directory, remove the
-   temporary.
-5. On `EEXIST`, apply the write check in 3.4.
+1. Walk from the plan dir to the record's directory one component at a time,
+   each opened relative to its parent's handle without following a symlink
+   (`openat` with `O_NOFOLLOW|O_DIRECTORY`), creating the missing ones. A
+   symlink or non-directory fails the publication, including one swapped in
+   after an earlier check. `os.Root` alone is not enough: it follows a symlink
+   that stays inside the root.
+2. Write a dot-prefixed temporary relative to that directory handle with
+   `O_CREATE|O_EXCL|O_NOFOLLOW`, fsync, close.
+3. `linkat(2)` it to the record name on the same handle. It fails rather than
+   replace any existing name, live or dangling symlinks included. Fsync the
+   directory, remove the temporary.
+4. On `EEXIST`, apply the write check in 3.4.
 
 Readers skip dot-prefixed names, so a temporary is never a record. A spike
-during #1287 (macOS, Go 1.27) confirmed each step: no overwrite, no write
-through a symlinked name or directory inside or outside the plan, no
-traversal, nothing written outside the plan, and one record left by 16
-concurrent publishers. #1288 implements it, with those cases as its tests.
+during #1287 (macOS, Go 1.27) confirmed the outcomes with an `os.Root` plus a
+check of each component: no overwrite, no write through a symlinked name or
+directory inside or outside the plan, no traversal, nothing written outside
+the plan, and one record left by 16 concurrent publishers. That version
+leaves a window between check and use, which the handle-relative walk above
+closes. #1288 implements it, with those cases as its tests.
 
 ### 3.6 Bounded capture
 
-- Reads the worktree through an `os.Root`, so unsynced records are included
-  and no symlink is followed.
+- Reads the worktree with the same no-follow walk as 3.5, so unsynced records
+  are included and a component swapped for a symlink between listing and read
+  is a failed read, not followed.
 - Every entry under `feedback/` and `feedback/resolutions/` is either a known
   record or a reported failure: unrecognized, not a regular file, over a limit,
   undecodable, gone after listing, or replaced between listing and read.
