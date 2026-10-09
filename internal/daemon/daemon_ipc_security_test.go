@@ -143,6 +143,8 @@ type murmurPublishCompletionHandler struct {
 	completed chan<- struct{}
 }
 
+// Handle signals only after the rejected publish's warning has been forwarded.
+// Waiting for that signal prevents asynchronous logging against an ended test.
 func (h murmurPublishCompletionHandler) Handle(ctx context.Context, record slog.Record) error {
 	err := h.Handler.Handle(ctx, record)
 	if record.Message == "murmur publish failed" {

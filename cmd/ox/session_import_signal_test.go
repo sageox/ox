@@ -92,6 +92,9 @@ func TestImportInterrupt_SecondSignalKillsFinalPush(t *testing.T) {
 	}
 }
 
+// runImportSignalProbe runs in the child test process and holds final publication
+// after the first interrupt. A second interrupt must terminate this process
+// instead of remaining captured by the canceled import's signal registration.
 func runImportSignalProbe(t *testing.T) {
 	t.Helper()
 	f := newImportFixture(t)

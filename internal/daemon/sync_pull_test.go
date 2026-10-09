@@ -227,6 +227,9 @@ func TestSyncScheduler_PullTeamContext_CorruptRepoRenameFailure(t *testing.T) {
 	assert.DirExists(t, tcPath, "the corrupt clone is still there for the next cycle to retry")
 }
 
+// A configured local Team Context must produce successful sync status. Isolate
+// auth and shared team data too: a real bearer can refresh credentials and add
+// unrelated teams even when the test's refresh timestamp is recent.
 func TestSyncScheduler_TeamContextIntegration(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test")
@@ -237,8 +240,6 @@ func TestSyncScheduler_TeamContextIntegration(t *testing.T) {
 		t.Skip("git not available")
 	}
 
-	// Isolate auth and shared team data as well as git credentials. A real
-	// bearer can trigger credential refresh even with a recent refresh time.
 	t.Setenv("OX_XDG_DISABLE", "")
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_DATA_HOME", t.TempDir())

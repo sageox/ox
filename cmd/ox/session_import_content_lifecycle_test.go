@@ -26,6 +26,8 @@ type importDigestBoundaryContext struct {
 	action func()
 }
 
+// Err injects a real filesystem change at a known hash poll, exposing races
+// inside digest validation without relying on goroutine timing.
 func (c *importDigestBoundaryContext) Err() error {
 	c.checks++
 	if c.checks == c.at {
@@ -174,6 +176,8 @@ func TestImportContent_CanceledQueueDoesNotEnterNativeReader(t *testing.T) {
 
 type importQueueCancelContext struct{ *importDigestBoundaryContext }
 
+// Err intentionally returns the state from before cancellation. The queued
+// reader must observe Done even when its immediately preceding Err check was nil.
 func (c *importQueueCancelContext) Err() error {
 	before := c.Context.Err()
 	_ = c.importDigestBoundaryContext.Err()

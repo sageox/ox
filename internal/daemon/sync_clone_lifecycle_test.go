@@ -43,6 +43,8 @@ func setupCloneLifecycleLedgerHTTP(t *testing.T) string {
 	return server.URL
 }
 
+// newCloneLifecycleScheduler isolates credentials and workspace registration,
+// and joins background clones before temporary repositories are cleaned up.
 func newCloneLifecycleScheduler(t *testing.T, cloneURL string) (*SyncScheduler, string) {
 	t.Helper()
 	isolateCredentialsWithDir(t)
@@ -55,6 +57,8 @@ func newCloneLifecycleScheduler(t *testing.T, cloneURL string) (*SyncScheduler, 
 	return s, ledgerPath
 }
 
+// requireCloneRecorded compares actual Git HEAD with persisted sync and registry
+// state: a directory alone does not prove a background clone finished correctly.
 func requireCloneRecorded(t *testing.T, s *SyncScheduler, id, repoPath string) {
 	t.Helper()
 	out, err := exec.Command("git", "-C", repoPath, "rev-parse", "--verify", "HEAD").CombinedOutput()
@@ -69,6 +73,8 @@ func requireCloneRecorded(t *testing.T, s *SyncScheduler, id, repoPath string) {
 	require.False(t, ws.ConfigLastSync.IsZero(), "status must show synced before the next scheduler tick")
 }
 
+// Hold every clone slot until the initiating request ends. Daemon-owned cloning
+// must still finish and persist the actual Git HEAD after that request is canceled.
 func TestCloneLifecycle_RequestCancellationDoesNotCancelDaemonClone(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: real Git clone")
@@ -80,8 +86,6 @@ func TestCloneLifecycle_RequestCancellationDoesNotCancelDaemonClone(t *testing.T
 	requestCtx, requestCancel := context.WithCancel(context.Background())
 	t.Cleanup(requestCancel)
 
-	// Hold all clone slots until the request has gone away. The clone's
-	// sync-state write must still be able to read Git HEAD afterwards.
 	for range maxConcurrentClones {
 		s.cloneSem <- struct{}{}
 	}
@@ -110,6 +114,9 @@ func TestCloneLifecycle_RequestCancellationDoesNotCancelDaemonClone(t *testing.T
 	requireCloneRecorded(t, s, "ledger", ledgerPath)
 }
 
+// Anti-entropy and watcher paths must repair missing Ledger and Team Context
+// workspaces through real Git clones, including maintenance before Start sets a
+// scheduler context, then record those clones as synced.
 func TestCloneLifecycle_AntiEntropyAndWatcherRepairMissingWorkspaces(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("CGI Git HTTP fixture requires Unix process semantics")
@@ -162,6 +169,8 @@ func TestCloneLifecycle_AntiEntropyAndWatcherRepairMissingWorkspaces(t *testing.
 	}
 }
 
+// A workspace cloned by another caller must be recognized as healthy, with its
+// HEAD backfilled and stale retry/doctor failures cleared instead of recloning.
 func TestCloneLifecycle_ExistingPeerCloneBackfillsSyncState(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: real Git clone")
@@ -186,6 +195,8 @@ func TestCloneLifecycle_ExistingPeerCloneBackfillsSyncState(t *testing.T) {
 	require.False(t, found, "a completed clone must clear the failure shown by doctor")
 }
 
+// Once the daemon is canceled, a live request cannot resurrect discovery or
+// cloning. Shutdown must leave missing-workspace state intact without retry errors.
 func TestCloneLifecycle_CanceledMaintenancePreservesMissingWorkspace(t *testing.T) {
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -225,6 +236,8 @@ func TestCloneLifecycle_CanceledMaintenancePreservesMissingWorkspace(t *testing.
 	require.False(t, inFlight)
 }
 
+// A clone discovered through the API belongs to the daemon after the request
+// ends. It must finish, persist sync state and save its path for the next startup.
 func TestCloneLifecycle_APIDiscoveryContinuesAfterRequestCancellation(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: real Git clone and cloud discovery")

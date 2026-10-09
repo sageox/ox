@@ -29,6 +29,8 @@ func importTUIKey(m *importReviewModel, code rune) tea.Cmd {
 	return command
 }
 
+// importTUIProgramOptions keeps the real Bubble Tea input decoder and event loop
+// while supplying deterministic streams and disabling terminal rendering/signals.
 func importTUIProgramOptions(input io.Reader) importTerminalOptions {
 	return importTerminalOptions{program: []tea.ProgramOption{
 		tea.WithInput(input), tea.WithOutput(io.Discard), tea.WithoutRenderer(),
@@ -165,6 +167,8 @@ func TestImportTerminalSelectionKeyboard(t *testing.T) {
 	require.False(t, m.canceled, "an empty reviewed selection must not silently become all ready sessions")
 }
 
+// Cancel, browser handoff and selection completion must remain distinct exit
+// intents; each ends rendering without silently substituting another action.
 func TestImportTerminalExitIntents(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -214,6 +218,8 @@ func TestImportTerminalLatePreviewKeepsFocusAndSelection(t *testing.T) {
 	require.Contains(t, strings.Join(m.detailLines(80), "\n"), "Build the terminal game")
 }
 
+// Opening a large history must load only visible rows with at most two pending
+// reads, rather than reading every native session before the coworker navigates.
 func TestImportTerminalReadsOnlyVisibleRowsAndBoundsConcurrency(t *testing.T) {
 	cands := make([]*importCandidate, 100)
 	for i := range cands {
@@ -240,6 +246,8 @@ func TestImportTerminalReadsOnlyVisibleRowsAndBoundsConcurrency(t *testing.T) {
 	require.Less(t, len(m.previews)+len(m.pending), len(cands), "opening the picker must not read the entire history")
 }
 
+// An unreadable preview must show the failure while preserving selection;
+// missing content cannot be replaced by a fabricated final reply.
 func TestImportTerminalUnavailablePreview(t *testing.T) {
 	m := newImportReviewModel(context.Background(), importDestination{}, importTUITestCandidates(), nil)
 	m.Update(importPreviewLoadedMsg{id: "first-session", err: errors.New("file disappeared")})
@@ -250,6 +258,8 @@ func TestImportTerminalUnavailablePreview(t *testing.T) {
 	require.NotContains(t, view, "Last AI reply")
 }
 
+// Untrusted controls cannot escape into the terminal, even in narrow layouts.
+// Unicode content and scrolling must remain usable without exceeding its bounds.
 func TestImportTerminalNarrowViewAndSafeNativeText(t *testing.T) {
 	m := newImportReviewModel(context.Background(), importDestination{Team: "test", Visibility: "private"}, importTUITestCandidates(), nil)
 	m.rememberPreview("first-session", &importContentPreview{
@@ -325,6 +335,8 @@ func TestImportTerminalExcerptCacheIsBoundedAndReloadsOnFocus(t *testing.T) {
 	require.Equal(t, []string{"first-session"}, m.selectedIDs())
 }
 
+// An already imported session remains inspectable with its Ledger reference,
+// but its explanation must not make it selectable for another import.
 func TestImportTerminalSkippedSessionExplanation(t *testing.T) {
 	c := importTUITestCandidates()[2]
 	c.Covered = "2026-10-01T10-30-devon-OxOLD2"
@@ -336,6 +348,8 @@ func TestImportTerminalSkippedSessionExplanation(t *testing.T) {
 	require.Empty(t, m.selectedIDs(), "readable skipped content must stay unselectable")
 }
 
+// Public visibility and absent excerpts must be explicit. An empty native reply
+// or a nil loader response cannot imply that the session completed successfully.
 func TestImportTerminalPublicDestinationAndMissingExcerpts(t *testing.T) {
 	m := newImportReviewModel(context.Background(), importDestination{Team: "Math Blitz", Visibility: "public"}, importTUITestCandidates(), nil)
 	m.rememberPreview("first-session", &importContentPreview{})
@@ -349,6 +363,8 @@ func TestImportTerminalPublicDestinationAndMissingExcerpts(t *testing.T) {
 	require.Contains(t, ansi.Strip(m.detailView()), "session reader returned no content")
 }
 
+// An empty history must accept navigation and selection keys without inventing
+// a candidate, scheduling content reads or panicking.
 func TestImportTerminalEmptyHistory(t *testing.T) {
 	m := newImportReviewModel(context.Background(), importDestination{}, nil, nil)
 	require.Nil(t, m.Init())

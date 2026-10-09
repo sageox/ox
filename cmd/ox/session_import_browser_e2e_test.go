@@ -24,6 +24,8 @@ import (
 // or CLI flag is introduced. Screenshots are optional local QA artifacts.
 var importBrowserScreenshots = flag.String("import-browser-screenshots", "", "directory for session import browser QA screenshots")
 
+// importBrowserChrome owns a fresh browser and its deadline so a failed DOM
+// assertion cannot leave Chrome or its contexts running after test cleanup.
 func importBrowserChrome(t *testing.T) context.Context {
 	t.Helper()
 	if testing.Short() {
@@ -43,6 +45,8 @@ func importBrowserChrome(t *testing.T) context.Context {
 	return ctx
 }
 
+// serveImportBrowserChrome exercises the actual loopback handler and token URL;
+// only the native content reader is replaced for the browser fixture.
 func serveImportBrowserChrome(t *testing.T, load importPreviewLoader) (*importBrowser, string) {
 	t.Helper()
 	ln := mustLoopbackListener(t)
@@ -54,6 +58,8 @@ func serveImportBrowserChrome(t *testing.T, load importPreviewLoader) (*importBr
 	return b, b.origin + "/#token=secret"
 }
 
+// browserFixturePreview includes literal HTML, ordered prompts and a failed tool
+// call so the page must render source text safely without inventing completion.
 func browserFixturePreview(_ context.Context, id string) (*importContentPreview, error) {
 	opening := "Next for Math Blitz: a persistent high-score table."
 	last := "The concurrency test reproduced lost updates. File locking now serializes writers; all 96 tests pass. Nothing is committed."

@@ -352,6 +352,9 @@ func TestSyncScheduler_PullTeamContexts_NoTeamContextsConfigured(t *testing.T) {
 	assert.Empty(t, scheduler.TeamContextStatus())
 }
 
+// Two configured local Team Contexts must retain independent successful status.
+// Isolate auth and shared team data: real credentials can discover extra teams
+// and contaminate the registry despite a recent refresh timestamp.
 func TestSyncScheduler_TeamContextMultiple(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test")
@@ -362,8 +365,6 @@ func TestSyncScheduler_TeamContextMultiple(t *testing.T) {
 		t.Skip("git not available")
 	}
 
-	// Isolate auth and shared team data as well as git credentials. A real
-	// bearer can trigger credential refresh even with a recent refresh time.
 	t.Setenv("OX_XDG_DISABLE", "")
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_DATA_HOME", t.TempDir())

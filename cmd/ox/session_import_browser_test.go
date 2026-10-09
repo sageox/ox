@@ -27,6 +27,8 @@ const (
 	importBrowserOtherID = "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb"
 )
 
+// importBrowserCandidates combines selectable and already imported sessions with
+// private native paths, testing both eligibility and catalog path omission.
 func importBrowserCandidates() []*importCandidate {
 	started := time.Date(2026, time.October, 1, 14, 20, 0, 0, time.UTC)
 	return []*importCandidate{
@@ -35,6 +37,8 @@ func importBrowserCandidates() []*importCandidate {
 	}
 }
 
+// importBrowserTestLoader returns HTML-shaped source text and an uncertain reply;
+// the API must preserve both as conversation data rather than presentation.
 func importBrowserTestLoader(_ context.Context, id string) (*importContentPreview, error) {
 	return &importContentPreview{
 		NativeID: id, OpeningRequest: "Fix <img src=x onerror=alert(1)> without losing data", LastReply: "Done? Check the result.",
@@ -50,6 +54,8 @@ func newImportBrowserTest(t *testing.T, load importPreviewLoader) *importBrowser
 	return b
 }
 
+// importBrowserRequest supplies valid capability and origin headers by default.
+// Security cases change one gate without accidentally failing another first.
 func importBrowserRequest(b *importBrowser, method, path, body string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(method, b.origin+path, strings.NewReader(body))
 	req.Header.Set("X-Import-Token", b.token)

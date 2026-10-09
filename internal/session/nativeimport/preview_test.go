@@ -45,6 +45,8 @@ func TestPreviewEntriesMatchesImportedRecording(t *testing.T) {
 	assert.JSONEq(t, string(storedJSON), string(encoded))
 }
 
+// An invalid custom redaction rule must return no preview entries, rather than
+// falling back to readable but unredacted native content.
 func TestPreviewEntriesRefusesInvalidPolicy(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	root := t.TempDir()

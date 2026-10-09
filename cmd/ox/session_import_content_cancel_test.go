@@ -48,6 +48,9 @@ func init() {
 	os.Exit(0)
 }
 
+// importCancellationAdapter registers this test executable as a real native
+// adapter and restores the global registry at cleanup. Its subprocess handshake
+// exercises cancellation through production read code, so callers must serialize.
 func importCancellationAdapter(t *testing.T) *adapters.ExternalAdapter {
 	t.Helper()
 	binary, err := os.Executable()
@@ -79,6 +82,9 @@ func importCancellationAdapter(t *testing.T) *adapters.ExternalAdapter {
 	return adapter
 }
 
+// Two stalled native subprocesses occupy every preview reader slot. With no
+// release file present, a newly focused session can load only if cancellation
+// stops both processes and releases those slots promptly.
 func TestImportContent_CanceledAdapterReadsReleasePreviewSlots(t *testing.T) {
 	projectRoot := t.TempDir()
 	importCancellationAdapter(t)
@@ -136,8 +142,6 @@ func TestImportContent_CanceledAdapterReadsReleasePreviewSlots(t *testing.T) {
 		read.cancel()
 	}
 
-	// No release file is present: this can succeed only if cancellation reaches
-	// the running adapter processes and frees both loader semaphore slots.
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	preview, err := load(ctx, "fast")
@@ -156,6 +160,8 @@ func TestImportContent_CanceledAdapterReadsReleasePreviewSlots(t *testing.T) {
 	}
 }
 
+// Cancellation during the actual native read must preserve context.Canceled,
+// remove incomplete staging and reach neither the summarizer nor publication.
 func TestImportPreparation_CancelStopsNativeAdapterAndRemovesStaging(t *testing.T) {
 	f := newImportFixture(t)
 	path := f.add(t, pastSession{agent: nativeimport.AgentClaude, id: e2eClaudeA,
@@ -204,6 +210,8 @@ func TestImportPreparation_CancelStopsNativeAdapterAndRemovesStaging(t *testing.
 	assert.Zero(t, f.store.count())
 }
 
+// A pre-canceled review must never launch an adapter, rather than launching it
+// and relying on a later kill to avoid native content access.
 func TestImportNativeAdapter_AlreadyCanceledDoesNotStartRead(t *testing.T) {
 	adapter := importCancellationAdapter(t)
 	path := filepath.Join(t.TempDir(), "slow-canceled")

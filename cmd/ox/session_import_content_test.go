@@ -21,6 +21,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// Preview excerpts must use import retention and redaction, exclude bootstrap
+// context from human anchors, and create no recording or summary. Cached content
+// must still be rejected after the native source changes.
 func TestImportContent_ReadOnlyNormalizedExcerpts(t *testing.T) {
 	f := newImportFixture(t)
 	start := time.Date(2026, 9, 16, 9, 0, 0, 0, time.UTC)
@@ -73,6 +76,8 @@ func TestImportContent_ReadOnlyNormalizedExcerpts(t *testing.T) {
 	assert.ErrorIs(t, err, errImportSourceChanged)
 }
 
+// Only leading vendor bootstrap metadata is context. Human XML and mentions
+// of those tags inside a request must remain visible human prompts.
 func TestImportContextPrompt_VendorMetadataAndHumanXML(t *testing.T) {
 	for _, tc := range []struct {
 		name, content string
@@ -117,6 +122,9 @@ func TestImportContent_HumanXMLRemainsOpeningRequest(t *testing.T) {
 	assert.Zero(t, f.summarizer.calls())
 }
 
+// Review preserves exact, empty and canceled selections but cannot authorize
+// upload by itself. Terminal confirmation remains required, and a source edit
+// during that confirmation must be refused before publication.
 func TestImportReview_SelectionConfirmationAndSourceChanges(t *testing.T) {
 	for _, scenario := range []string{"select one", "clear all", "cancel", "decline", "changed during confirmation", "unknown", "duplicate"} {
 		t.Run(scenario, func(t *testing.T) {
@@ -195,6 +203,8 @@ func TestImportReview_SelectionConfirmationAndSourceChanges(t *testing.T) {
 	}
 }
 
+// Real vendor adapters and native fixtures must produce usable retained entries;
+// mock records alone cannot detect drift in the vendors' session formats.
 func TestImportContent_RealAdapterFixtures(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: builds actual vendor adapter binaries")
@@ -232,6 +242,8 @@ func TestImportContent_RealAdapterFixtures(t *testing.T) {
 	}
 }
 
+// A browser request from a noninteractive invocation must remain a metadata
+// preview, without waiting for a callback, reading content or starting uploads.
 func TestImportReview_NoninteractiveBrowserFallback(t *testing.T) {
 	f := newImportFixture(t)
 	f.add(t, pastSession{agent: nativeimport.AgentClaude, id: e2eClaudeA, start: time.Now().Add(-48 * time.Hour), prompt: loginPrompt, reply: "Fixed."})
@@ -248,6 +260,8 @@ func TestImportReview_NoninteractiveBrowserFallback(t *testing.T) {
 	assert.Zero(t, f.store.count())
 }
 
+// Content lookup accepts the same case-insensitive ID prefixes as selection,
+// while unreadable adapters return a controlled error without private diagnostics.
 func TestImportContent_UppercasePrefixAndUnavailableContent(t *testing.T) {
 	f := newImportFixture(t)
 	f.add(t, pastSession{agent: nativeimport.AgentClaude, id: e2eClaudeA, start: time.Now().Add(-48 * time.Hour), prompt: loginPrompt, reply: "Fixed."})
@@ -268,6 +282,8 @@ func TestImportContent_UppercasePrefixAndUnavailableContent(t *testing.T) {
 	assert.NotContains(t, out.String(), "adapter unavailable")
 }
 
+// Native terminal escapes must not clear the screen or spoof its title. Text
+// preview still shows the human request and last reply without staged artifacts.
 func TestImportContent_TextPreviewIsSafeAndReadOnly(t *testing.T) {
 	f := newImportFixture(t)
 	f.add(t, pastSession{agent: nativeimport.AgentClaude, id: e2eClaudeA, start: time.Now().Add(-48 * time.Hour), prompt: "Fix the cookie\x1b[2J\x1b]0;spoofed\x07", reply: "Fixed."})
@@ -286,6 +302,9 @@ func TestImportContent_TextPreviewIsSafeAndReadOnly(t *testing.T) {
 	assert.True(t, os.IsNotExist(err))
 }
 
+// Unknown IDs, cancellation, invalid redaction and changing sources must expose
+// no partial content. Adapter diagnostics stay private and failures never reach
+// the summarizer or object store.
 func TestImportContent_RefusesUnavailableUnsafeOrChangingSources(t *testing.T) {
 	for _, scenario := range []string{"unknown", "canceled before read", "reader error", "invalid policy", "changed during read", "canceled during read", "changed selection"} {
 		t.Run(scenario, func(t *testing.T) {

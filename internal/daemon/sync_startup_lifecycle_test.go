@@ -50,6 +50,8 @@ func TestTeamSyncStartup_CancelWhileWaiting(t *testing.T) {
 	assert.Zero(t, calls.Load(), "cancellation before the delay must skip the pull")
 }
 
+// Cancellation must win when the startup timer is already ready; a stopped
+// scheduler cannot start one last pull just because both select cases are runnable.
 func TestTeamSyncStartup_AlreadyCanceledSkipsReadyTimer(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -59,6 +61,8 @@ func TestTeamSyncStartup_AlreadyCanceledSkipsReadyTimer(t *testing.T) {
 	assert.Zero(t, calls.Load(), "an already-canceled context must skip even an immediate pull")
 }
 
+// The startup callback must receive its caller's context and complete before
+// its done signal, so shutdown can join the same lifetime instead of detached work.
 func TestTeamSyncStartup_RunsPullAfterDelay(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -110,6 +114,8 @@ type startupPullGateHandler struct {
 	gate func()
 }
 
+// Handle holds the real startup pull at its first log before Git work, making
+// Start's completion join observable without guessing when the goroutine runs.
 func (h *startupPullGateHandler) Handle(ctx context.Context, record slog.Record) error {
 	if record.Message == "syncing team contexts" {
 		h.gate()

@@ -33,6 +33,8 @@ func newDiscoveryTestScheduler(t *testing.T) *SyncScheduler {
 	return s
 }
 
+// Repeated lazy refresh with the same bearer inside the dedup window must not
+// advance the refresh timestamp and continuously postpone the next allowed attempt.
 func TestRefreshCredentials_DedupWithinWindow(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: git operations")
@@ -57,6 +59,8 @@ func TestRefreshCredentials_DedupWithinWindow(t *testing.T) {
 		"second call within dedup window should not update timestamp")
 }
 
+// An elapsed dedup window must permit a new refresh; a prior attempt cannot
+// suppress credential maintenance indefinitely.
 func TestRefreshCredentials_AllowsAfterWindow(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: git operations")
@@ -79,6 +83,8 @@ func TestRefreshCredentials_AllowsAfterWindow(t *testing.T) {
 		"call after dedup window should update timestamp")
 }
 
+// Concurrent lazy refresh calls must safely share refresh state and leave a
+// valid attempt timestamp; the race detector exercises their synchronization.
 func TestRefreshCredentials_ConcurrentCalls(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: git operations")
@@ -110,6 +116,9 @@ func newCredentialDiscoveryScheduler(t *testing.T, server *httptest.Server) (*Sy
 	return newDiscoveryTestScheduler(t), credDir
 }
 
+// Bearer rotation must bypass dedup without destroying a usable cached PAT on
+// revocation. Recovery replaces credentials and clears the auth issue; unchanged
+// or failed persistence must not incorrectly change cache identity.
 func TestCredentialRotation_RevocationAndRecovery(t *testing.T) {
 	for _, mode := range []string{"refresh", "discovery"} {
 		t.Run(mode, func(t *testing.T) {
@@ -235,6 +244,8 @@ func TestTeamDiscovery_RefreshesPersonalBearerAndHonorsCancellation(t *testing.T
 	require.Equal(t, "cached-pat", creds.Token)
 }
 
+// A real Git authentication failure must force API credential refresh even when
+// the cached PAT and bearer fingerprint look fresh enough for lazy refresh to skip.
 func TestLedgerPull_AuthFailureRefreshesFreshPAT(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: real Git fetch")

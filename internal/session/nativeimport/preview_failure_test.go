@@ -41,6 +41,8 @@ func TestPreviewEntriesRejectsUnserializableEntry(t *testing.T) {
 	assert.NotContains(t, string(data), `"type":"footer"`, "an incomplete recording must not acquire a success footer")
 }
 
+// Invalid redaction policy must be rejected before the destination is opened,
+// so refusing an import cannot truncate a previously valid raw recording.
 func TestWriteRawInvalidPolicyPreservesExistingRecording(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("OX_XDG_DISABLE", "")

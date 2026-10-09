@@ -19,14 +19,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// rewriteImportReplyPreservingMetadata changes valid conversation content while
+// retaining IDs, timestamps, counts, size and mtime. Metadata-only checks cannot
+// detect this rewrite.
 func rewriteImportReplyPreservingMetadata(t *testing.T, path string) {
 	t.Helper()
 	info, err := os.Stat(path)
 	require.NoError(t, err)
 	before, err := os.ReadFile(path)
 	require.NoError(t, err)
-	// Retain valid native JSON, IDs, timestamps, counts, size and mtime while
-	// changing conversation content — the rewrite metadata cannot detect.
 	after := bytes.Replace(before, []byte("Fixed."), []byte("Other."), 1)
 	require.NotEqual(t, before, after)
 	require.Equal(t, len(before), len(after))
@@ -38,6 +39,8 @@ func rewriteImportReplyPreservingMetadata(t *testing.T, path string) {
 	require.True(t, info.ModTime().Equal(updated.ModTime()))
 }
 
+// reviewedImportHashFixture discovers one native session without reading it.
+// The caller must load its preview to establish the reviewed content digest.
 func reviewedImportHashFixture(t *testing.T) (*importFixture, *importEnv, importDestination, *importCandidate, importPreviewLoader) {
 	t.Helper()
 	f := newImportFixture(t)
@@ -222,6 +225,8 @@ type importDigestCancelContext struct {
 	cancelAt int
 }
 
+// Err cancels at a chosen digest poll, making cancellation inside a streamed
+// hash deterministic without sleeps or a production-only test hook.
 func (c *importDigestCancelContext) Err() error {
 	c.checks++
 	if c.checks == c.cancelAt {
@@ -230,6 +235,8 @@ func (c *importDigestCancelContext) Err() error {
 	return c.Context.Err()
 }
 
+// importCancelDuringDigest chooses the poll that interrupts hashing and owns
+// context cleanup, allowing tests to distinguish pre-read and digest cancellation.
 func importCancelDuringDigest(t *testing.T, cancelAt int) *importDigestCancelContext {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -269,6 +276,8 @@ func TestImportPrepare_HashCancellationPreservesInterrupt(t *testing.T) {
 	}
 }
 
+// An interrupt during the final source digest must return context.Canceled,
+// not a changed-source skip, and must prevent every upload.
 func TestImportPublish_HashCancellationPreservesInterrupt(t *testing.T) {
 	f, env, _, c, load := reviewedImportHashFixture(t)
 	_, err := load(context.Background(), c.Session.NativeID)
@@ -285,6 +294,8 @@ func TestImportPublish_HashCancellationPreservesInterrupt(t *testing.T) {
 	assert.Zero(t, f.store.count())
 }
 
+// Review validation must retain cancellation identity during hashing instead
+// of treating an interrupted read as a changed native source.
 func TestImportReview_HashCancellationPreservesInterrupt(t *testing.T) {
 	_, _, _, c, load := reviewedImportHashFixture(t)
 	_, err := load(context.Background(), c.Session.NativeID)
