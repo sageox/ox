@@ -15,83 +15,126 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestPersistCursorSourceBoundary_PreservesFirstOverlapAndPrimeWrite(t *testing.T) {
+func TestPrepareCursorHookBoundary_PreservesFirstOverlapAndPrimeWrite(t *testing.T) {
 	isolateSessionMarkerDir(t)
-	const nativeID = "123e4567-e89b-12d3-a456-426614174000"
-	first := CursorSourceBoundary{WorkspacePath: "/workspace", SourcePath: "/source", GenerationID: "generation-a", KnownZero: true}
-	marker, err := persistCursorSourceBoundary(nativeID, string(agentx.CursorEventBeforeSubmitPrompt), first, false)
+	raw, projectRoot, homeDir, sourcePath := cursorInputFixture(t, "")
+	input, err := normalizeCursorHookInput(raw, projectRoot, homeDir)
+	require.NoError(t, err)
+	marker, err := prepareCursorHookBoundary(input, string(agentx.CursorEventBeforeSubmitPrompt))
 	require.NoError(t, err)
 	require.NotNil(t, marker.CursorSourceBoundary)
-	assert.Equal(t, "generation-a", marker.CursorSourceBoundary.GenerationID)
+	first := *marker.CursorSourceBoundary
+	assert.True(t, first.KnownZero)
 	assert.False(t, marker.IsPrimed(), "boundary-only marker must not suppress a real prime")
 
-	second := first
-	second.GenerationID = "generation-b"
-	second.Offset = 10
-	marker, err = persistCursorSourceBoundary(nativeID, string(agentx.CursorEventSessionStart), second, false)
+	// The later export cannot advance an overlapping sessionStart's boundary.
+	require.NoError(t, os.MkdirAll(filepath.Dir(sourcePath), 0o700))
+	require.NoError(t, os.WriteFile(sourcePath, []byte(cursorHostUser+cursorHostTerminal), 0o600))
+	input.SourcePending = false
+	input.GenerationID = ""
+	marker, err = prepareCursorHookBoundary(input, string(agentx.CursorEventSessionStart))
 	require.NoError(t, err)
-	assert.Equal(t, "generation-a", marker.CursorSourceBoundary.GenerationID, "overlapping sessionStart keeps earliest boundary")
+	assert.Equal(t, first, *marker.CursorSourceBoundary)
 
 	require.NoError(t, WriteSessionMarker(&SessionMarker{
-		AgentID: nativeID[:6], AgentSessionID: nativeID, PrimedAt: time.Now(),
+		AgentID: "Oxcur1", AgentSessionID: input.ConversationID, PrimedAt: time.Now(),
 	}))
-	stored, err := ReadSessionMarker(nativeID)
+	stored, err := ReadSessionMarker(input.ConversationID)
 	require.NoError(t, err)
 	require.True(t, stored.IsPrimed())
 	require.NotNil(t, stored.CursorSourceBoundary)
-	assert.Equal(t, "generation-a", stored.CursorSourceBoundary.GenerationID, "ordinary prime write must preserve pending boundary")
+	assert.Equal(t, first, *stored.CursorSourceBoundary, "ordinary prime write must preserve pending boundary")
 }
 
-func TestPersistCursorSourceBoundary_BindsFirstPromptGenerationWithoutReplacingSessionStartBoundary(t *testing.T) {
+func TestPrepareCursorHookBoundary_BindsFirstPromptGenerationWithoutReplacingSessionStartBoundary(t *testing.T) {
 	isolateSessionMarkerDir(t)
-	const nativeID = "123e4567-e89b-12d3-a456-426614174003"
-	sessionStart := CursorSourceBoundary{
-		WorkspacePath: "/workspace", SourcePath: "/source", Offset: 7,
-		SourcePrefixSHA256: "session-start-prefix",
-	}
-	_, err := persistCursorSourceBoundary(nativeID, string(agentx.CursorEventSessionStart), sessionStart, false)
+	old := cursorHostUser + cursorHostTerminal
+	raw, projectRoot, homeDir, sourcePath := cursorInputFixture(t, old)
+	input, err := normalizeCursorHookInput(raw, projectRoot, homeDir)
 	require.NoError(t, err)
+	input.GenerationID = ""
+	marker, err := prepareCursorHookBoundary(input, string(agentx.CursorEventSessionStart))
+	require.NoError(t, err)
+	startHash := marker.CursorSourceBoundary.SourcePrefixSHA256
 
-	firstPrompt := sessionStart
-	firstPrompt.GenerationID = "generation-one"
-	firstPrompt.Offset = 19 // later prompt EOF must not replace sessionStart's boundary
-	firstPrompt.SourcePrefixSHA256 = "later-prefix"
-	marker, err := persistCursorSourceBoundary(nativeID, string(agentx.CursorEventBeforeSubmitPrompt), firstPrompt, false)
+	firstPrompt := old + cursorHostUser
+	require.NoError(t, os.WriteFile(sourcePath, []byte(firstPrompt), 0o600))
+	input.GenerationID = "generation-one"
+	marker, err = prepareCursorHookBoundary(input, string(agentx.CursorEventBeforeSubmitPrompt))
 	require.NoError(t, err)
 	require.NotNil(t, marker.CursorSourceBoundary)
 	assert.Equal(t, "generation-one", marker.CursorSourceBoundary.GenerationID)
-	assert.Equal(t, int64(7), marker.CursorSourceBoundary.Offset)
-	assert.Equal(t, "session-start-prefix", marker.CursorSourceBoundary.SourcePrefixSHA256)
+	assert.Equal(t, int64(len(old)), marker.CursorSourceBoundary.Offset)
+	assert.Equal(t, startHash, marker.CursorSourceBoundary.SourcePrefixSHA256)
 
-	secondPrompt := firstPrompt
-	secondPrompt.GenerationID = "generation-two"
-	secondPrompt.Offset = 29
-	secondPrompt.SourcePrefixSHA256 = "new-generation-prefix"
-	marker, err = persistCursorSourceBoundary(nativeID, string(agentx.CursorEventBeforeSubmitPrompt), secondPrompt, false)
+	secondPrompt := firstPrompt + cursorHostAnswer + cursorHostTerminal + cursorHostUser
+	require.NoError(t, os.WriteFile(sourcePath, []byte(secondPrompt), 0o600))
+	input.GenerationID = "generation-two"
+	marker, err = prepareCursorHookBoundary(input, string(agentx.CursorEventBeforeSubmitPrompt))
 	require.NoError(t, err)
 	assert.Equal(t, "generation-two", marker.CursorSourceBoundary.GenerationID)
-	assert.Equal(t, int64(29), marker.CursorSourceBoundary.Offset)
-	assert.Equal(t, "new-generation-prefix", marker.CursorSourceBoundary.SourcePrefixSHA256)
+	assert.Equal(t, int64(len(secondPrompt)), marker.CursorSourceBoundary.Offset)
+	wantHash, err := cursorPrefixSHA256(sourcePath, int64(len(secondPrompt)))
+	require.NoError(t, err)
+	assert.Equal(t, wantHash, marker.CursorSourceBoundary.SourcePrefixSHA256)
 }
 
-func TestPersistCursorSourceBoundary_RefreshesNewGenerationOnlyWhenInactive(t *testing.T) {
-	isolateSessionMarkerDir(t)
-	const nativeID = "123e4567-e89b-12d3-a456-426614174000"
-	first := CursorSourceBoundary{WorkspacePath: "/workspace", SourcePath: "/source", GenerationID: "generation-a", Offset: 3}
-	_, err := persistCursorSourceBoundary(nativeID, string(agentx.CursorEventBeforeSubmitPrompt), first, false)
+func TestPrepareCursorHookBoundary_RefreshesNewGenerationOnlyWhenInactive(t *testing.T) {
+	f := newCursorHostFixture(t)
+	f.write(t, cursorHostUser+cursorHostTerminal)
+	input, err := normalizeCursorHookInput(f.input(t, "beforeSubmitPrompt", "generation-a").RawBytes, f.root, f.home)
 	require.NoError(t, err)
-	second := first
-	second.GenerationID = "generation-b"
-	second.Offset = 9
-
-	marker, err := persistCursorSourceBoundary(nativeID, string(agentx.CursorEventBeforeSubmitPrompt), second, true)
+	marker, err := prepareCursorHookBoundary(input, string(agentx.CursorEventBeforeSubmitPrompt))
 	require.NoError(t, err)
-	assert.Equal(t, "generation-a", marker.CursorSourceBoundary.GenerationID)
+	first := *marker.CursorSourceBoundary
+	state := f.record(t)
 
-	marker, err = persistCursorSourceBoundary(nativeID, string(agentx.CursorEventBeforeSubmitPrompt), second, false)
+	second := cursorHostUser + cursorHostTerminal + cursorHostUser
+	f.write(t, second)
+	input.GenerationID = "generation-b"
+	marker, err = prepareCursorHookBoundary(input, string(agentx.CursorEventBeforeSubmitPrompt))
+	require.NoError(t, err)
+	assert.Equal(t, first, *marker.CursorSourceBoundary, "a live recording keeps its original source boundary")
+
+	require.NoError(t, session.ClearRecordingStateAt(state.SessionPath, state.SessionID))
+	marker, err = prepareCursorHookBoundary(input, string(agentx.CursorEventBeforeSubmitPrompt))
 	require.NoError(t, err)
 	assert.Equal(t, "generation-b", marker.CursorSourceBoundary.GenerationID)
-	assert.Equal(t, int64(9), marker.CursorSourceBoundary.Offset)
+	assert.Equal(t, int64(len(second)), marker.CursorSourceBoundary.Offset)
+}
+
+func TestPrepareCursorHookBoundary_RejectsRebinding(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(*cursorNativeInput, *session.RecordingState)
+		want   string
+	}{
+		{"workspace", func(input *cursorNativeInput, _ *session.RecordingState) { input.WorkspacePath += "-other" }, "workspace-mismatch"},
+		{"source", func(input *cursorNativeInput, _ *session.RecordingState) { input.SourcePath += "-other" }, "workspace-mismatch"},
+		{"recording conversation", func(_ *cursorNativeInput, state *session.RecordingState) {
+			state.AgentSessionID = "123e4567-e89b-12d3-a456-426614174001"
+		}, "identity-conflict"},
+		{"recording adapter", func(_ *cursorNativeInput, state *session.RecordingState) { state.AdapterName = "claude-code" }, "identity-conflict"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newCursorHostFixture(t)
+			input, err := normalizeCursorHookInput(f.input(t, "beforeSubmitPrompt", "generation-a").RawBytes, f.root, f.home)
+			require.NoError(t, err)
+			marker, err := prepareCursorHookBoundary(input, string(agentx.CursorEventBeforeSubmitPrompt))
+			require.NoError(t, err)
+			first := *marker.CursorSourceBoundary
+			state := f.record(t)
+			require.NoError(t, session.UpdateRecordingStateAt(state.SessionPath, state.SessionID, func(current *session.RecordingState) {
+				tc.change(input, current)
+			}))
+			input.GenerationID = "generation-b"
+			_, err = prepareCursorHookBoundary(input, string(agentx.CursorEventBeforeSubmitPrompt))
+			require.ErrorContains(t, err, tc.want)
+			stored, err := ReadSessionMarker(input.ConversationID)
+			require.NoError(t, err)
+			assert.Equal(t, first, *stored.CursorSourceBoundary)
+		})
+	}
 }
 
 func TestStartSessionRecordingCursor_UsesSavedBoundaryAndKeepsNativeIdentity(t *testing.T) {

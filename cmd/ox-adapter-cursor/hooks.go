@@ -508,7 +508,7 @@ func upsertCursorHook(entries []cursorHookEntry, executable, event string) ([]cu
 	wantCommand := cursorHookCommand(executable, event)
 	firstOwned := -1
 	changed := false
-	updated := make([]cursorHookEntry, 0, len(entries)+1)
+	updated := make([]cursorHookEntry, 0, len(entries))
 	for _, entry := range entries {
 		if !isOwnedCursorHook(entry.command, event, wantCommand) {
 			updated = append(updated, entry)
@@ -538,7 +538,7 @@ func upsertCursorHook(entries []cursorHookEntry, executable, event string) ([]cu
 }
 
 func makeCursorHookEntry(command string, existing map[string]json.RawMessage) (cursorHookEntry, bool, error) {
-	object := make(map[string]json.RawMessage, len(existing)+2)
+	object := make(map[string]json.RawMessage, len(existing))
 	for key, value := range existing {
 		object[key] = value
 	}

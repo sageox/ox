@@ -159,7 +159,8 @@ func startCursorWatch(t *testing.T, mgr *SessionWatcherManager, f *cursorWatcher
 
 func TestCursorWatcher_CapturesExactSourceAndMetadataAdvance(t *testing.T) {
 	installCursorWatcherAdapter(t)
-	old := `{"type":"turn_ended","status":"success"}` + "\n"
+	old := `{"role":"user","content":"PRE_RECORDING_SENTINEL"}` + "\n" +
+		`{"type":"turn_ended","status":"success"}` + "\n"
 	source := old + `{"type":"metadata","model":"fixture"}` + "\n" +
 		`{"role":"user","content":"first"}` + "\n" +
 		`{"role":"assistant","content":"second"}` + "\n" +
@@ -180,8 +181,8 @@ func TestCursorWatcher_CapturesExactSourceAndMetadataAdvance(t *testing.T) {
 	assert.Equal(t, watcherSHA256([]byte(source)), state.SourcePrefixSHA256)
 	assert.Equal(t, 2, countRawJSONLEntries(t, filepath.Join(f.cachePath, artifactRaw)))
 	raw, err := os.ReadFile(filepath.Join(f.cachePath, artifactRaw))
-	assert.NotContains(t, string(raw), "old", "pre-recording prefix must not be replayed")
 	require.NoError(t, err)
+	assert.NotContains(t, string(raw), "PRE_RECORDING_SENTINEL", "pre-recording prefix must not be replayed")
 	assert.Contains(t, string(raw), `"ts":"0001-01-01T00:00:00Z"`, "unknown native timestamps are retained")
 }
 

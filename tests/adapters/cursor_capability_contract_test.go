@@ -5,10 +5,12 @@ package adapters_test
 import (
 	"bytes"
 	"encoding/json"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -32,14 +34,56 @@ func TestCursorCapabilityContract(t *testing.T) {
 		t.Fatalf("Cursor runtime descriptors = %+v", info)
 	}
 
-	for capability, args := range map[string][]string{
-		"session_reader":     {"read", "--session-file", "/nonexistent/cursor.jsonl"},
-		"incremental_reader": {"read-from-offset", "--session-file", "/nonexistent/cursor.jsonl", "--offset", "0"},
-		"hook_installer":     {"check-hooks", "--repo-root", t.TempDir(), "--scope", "project"},
-	} {
-		if output := run(t, bin, args...); strings.Contains(output, "not implemented") {
-			t.Errorf("Cursor capability %s is not wired: %s", capability, output)
+	first := `{"role":"user","message":{"content":[{"type":"text","text":"capability user"}]}}` + "\n"
+	source := first + `{"role":"assistant","message":{"content":[{"type":"text","text":"capability assistant"}]}}` + "\n" +
+		`{"type":"turn_ended","status":"success"}` + "\n"
+	sourcePath := filepath.Join(t.TempDir(), "session.jsonl")
+	if err := os.WriteFile(sourcePath, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wantEntries := []adapterprotocol.RawEntry{
+		{Role: adapterprotocol.RoleUser, Content: "capability user"},
+		{Role: adapterprotocol.RoleAssistant, Content: "capability assistant"},
+	}
+	runReader := func(t *testing.T, result any, args ...string) {
+		t.Helper()
+		output, err := exec.Command(bin, args...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("Cursor %s failed: %v: %s", args[0], err, output)
 		}
+		if err := json.Unmarshal(output, result); err != nil {
+			t.Fatalf("Cursor %s returned invalid JSON: %v: %s", args[0], err, output)
+		}
+	}
+	t.Run("session_reader", func(t *testing.T) {
+		var result adapterprotocol.ReadResult
+		runReader(t, &result, "read", "--session-file", sourcePath)
+		if !reflect.DeepEqual(result.Entries, wantEntries) || result.Skipped != 1 {
+			t.Fatalf("Cursor read = %+v, want entries %v and one skipped terminal row", result, wantEntries)
+		}
+	})
+	t.Run("incremental_reader", func(t *testing.T) {
+		for _, tc := range []struct {
+			name    string
+			offset  int
+			entries []adapterprotocol.RawEntry
+		}{
+			{"initial", 0, wantEntries},
+			{"resume", len(first), wantEntries[1:]},
+			{"eof", len(source), []adapterprotocol.RawEntry{}},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				var result adapterprotocol.ReadFromOffsetResult
+				runReader(t, &result, "read-from-offset", "--session-file", sourcePath, "--offset", strconv.Itoa(tc.offset))
+				if !reflect.DeepEqual(result.Entries, tc.entries) || result.NewOffset != int64(len(source)) {
+					t.Fatalf("Cursor read-from-offset = %+v, want entries %v and offset %d", result, tc.entries, len(source))
+				}
+			})
+		}
+	})
+
+	if output := run(t, bin, "check-hooks", "--repo-root", t.TempDir(), "--scope", "project"); strings.Contains(output, "not implemented") {
+		t.Errorf("Cursor capability hook_installer is not wired: %s", output)
 	}
 
 	shutdown, err := json.Marshal(adapterprotocol.Request{ID: 1, Method: adapterprotocol.MethodShutdown})

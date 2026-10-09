@@ -18,6 +18,9 @@ import (
 )
 
 func TestCursorDescriptorSkillsReconcileWithoutLegacyCapability(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: builds the Cursor adapter binary")
+	}
 	if runtime.GOOS == "windows" {
 		t.Skip("adapter invocation recorder uses a POSIX shell")
 	}

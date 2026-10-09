@@ -12,14 +12,25 @@ VERSION := $(shell grep 'Version.*=' internal/version/version.go | head -1 | sed
 BUILD_TIME := $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 GIT_COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 GOPATH := $(shell go env GOPATH)
+# sq: $(1) with each ' written as '\'' so it can sit inside single quotes in
+# a recipe and reach the shell as plain text, never as code.
+sq = $(subst ','\'',$(1))
 # go install writes to GOBIN when set, overriding GOPATH/bin — resolve the
 # same way here so PATH guidance and the `ox doctor` hint below point at
 # where the binary actually landed, not always GOPATH/bin.
 GOBIN := $(shell go env GOBIN)
-INSTALL_BIN := $(if $(strip $(GOBIN)),$(GOBIN),$(GOPATH)/bin)
-# sq: $(1) with each ' written as '\'' so it can sit inside single quotes in
-# a recipe and reach the shell as plain text, never as code.
-sq = $(subst ','\'',$(1))
+GOPATH_FIRST := $(shell ox_gopath='$(call sq,$(GOPATH))'; printf '%s' "$${ox_gopath%%:*}")
+INSTALL_BIN := $(if $(strip $(GOBIN)),$(GOBIN),$(GOPATH_FIRST)/bin)
+# Canonicalize once per recipe and use that exact directory for all writes.
+# Uninstalling a directory that no longer exists is an idempotent no-op.
+define resolve-install-bin
+ox_bin='$(call sq,$(INSTALL_BIN))'; \
+test -n "$$ox_bin" || { echo "Refusing empty install directory" >&2; exit 1; }; \
+$(if $(filter install,$(1)),mkdir -p -- "$$ox_bin" || exit $$?;,if [ ! -e "$$ox_bin" ] && [ ! -L "$$ox_bin" ]; then exit 0; fi;) \
+ox_bin=$$(CDPATH= cd -- "$$ox_bin" && pwd -P) || exit $$?; \
+while [ "$${ox_bin#//}" != "$$ox_bin" ]; do ox_bin=$${ox_bin#/}; done; \
+case "$$ox_bin" in /|/bin|/sbin|/usr/bin|/usr/sbin) echo "Refusing unsafe install directory: $$ox_bin" >&2; exit 1;; esac
+endef
 LDFLAGS := -ldflags "-X github.com/sageox/ox/internal/version.Version=$(VERSION) -X github.com/sageox/ox/internal/version.BuildDate=$(BUILD_TIME) -X github.com/sageox/ox/internal/version.GitCommit=$(GIT_COMMIT)"
 ADAPTER_LDFLAGS := -ldflags "-s -w"
 
@@ -108,7 +119,7 @@ install: install-ox install-adapters ## Install ox and adapters to $GOPATH/bin
 	@echo "  Releases self-update via \`ox upgrade\` and keep ox and its 11 adapter"
 	@echo "  binaries together on PATH."
 	@echo "─────────────────────────────────────────────────────────────────────"
-	@ox_bin='$(call sq,$(INSTALL_BIN))'; \
+	@$(call resolve-install-bin); \
 	case ":$$PATH:" in \
 		*":$$ox_bin:"*) ;; \
 		*) \
@@ -135,27 +146,29 @@ install: install-ox install-adapters ## Install ox and adapters to $GOPATH/bin
 	printf 'Next: run `%s doctor` to confirm your AI coworker can actually see this install.\n' "$$ox_cmd"
 
 install-ox: ## Install ox to $GOPATH/bin
-	@echo 'Installing $(BINARY_NAME) to $(call sq,$(GOPATH))/bin...'
-	$(GO) install $(LDFLAGS) ./cmd/ox
-	@echo 'Installed $(BINARY_NAME) to $(call sq,$(GOPATH))/bin/$(BINARY_NAME)'
+	@$(call resolve-install-bin,install); \
+	echo "Installing $(BINARY_NAME) to $$ox_bin..."; \
+	GOBIN="$$ox_bin" $(GO) install $(LDFLAGS) ./cmd/ox || exit $$?; \
+	echo "Installed $(BINARY_NAME) to $$ox_bin/$(BINARY_NAME)"
 
 install-adapters: ## Install bundled adapters to $GOPATH/bin
-	@echo 'Installing adapters to $(call sq,$(GOPATH))/bin...'
-	@for adapter in $(ADAPTERS); do \
-		$(GO) install $(ADAPTER_LDFLAGS) ./cmd/$$adapter; \
+	@$(call resolve-install-bin,install); \
+	echo "Installing adapters to $$ox_bin..."; \
+	for adapter in $(ADAPTERS); do \
+		GOBIN="$$ox_bin" $(GO) install $(ADAPTER_LDFLAGS) ./cmd/$$adapter || exit $$?; \
 		echo "  Installed $$adapter"; \
 	done
 
 uninstall: uninstall-ox uninstall-adapters ## Remove ox-owned binaries from the install directory
 
 uninstall-ox:
-	@test -n "$(INSTALL_BIN)" && test "$(INSTALL_BIN)" != "/" && test "$(INSTALL_BIN)" != "/bin" || { echo "Refusing unsafe install directory: $(INSTALL_BIN)"; exit 1; }
-	@rm -f "$(INSTALL_BIN)/$(BINARY_NAME)"
+	@$(call resolve-install-bin); \
+	rm -f "$$ox_bin/$(BINARY_NAME)"
 
 uninstall-adapters:
-	@test -n "$(INSTALL_BIN)" && test "$(INSTALL_BIN)" != "/" && test "$(INSTALL_BIN)" != "/bin" || { echo "Refusing unsafe install directory: $(INSTALL_BIN)"; exit 1; }
-	@for adapter in $(ADAPTERS); do \
-		rm -f "$(INSTALL_BIN)/$$adapter"; \
+	@$(call resolve-install-bin); \
+	for adapter in $(ADAPTERS); do \
+		rm -f "$$ox_bin/$$adapter" || exit $$?; \
 	done
 
 clean: ## Remove build artifacts
@@ -751,7 +764,7 @@ coverage-ratchet-diff: test-all ## Enforce package + changed-line coverage vs CO
 	@python3 scripts/coverage_ratchet.py coverage.out --require-provenance coverage.out.provenance.json --diff-base $(COVERAGE_BASE)
 
 coverage-ratchet-test: ## Test the coverage ratchet parser and failure semantics
-	@cd scripts && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v coverage_ratchet_test.py test_tiers_test.py test_metrics_test.py test_split_test.py session_import_testbed_test.py
+	@cd scripts && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v coverage_ratchet_test.py test_tiers_test.py test_metrics_test.py test_split_test.py session_import_testbed_test.py make_install_test.py
 
 # The instrumented binary lands in its OWN directory, not shared bin/, because
 # ox discovers adapters as siblings of the running binary. In bin/ it saw every

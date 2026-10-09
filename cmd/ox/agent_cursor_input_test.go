@@ -166,7 +166,7 @@ func TestNormalizeCursorHookInput_ReboundCapturedFreshStartupFixtures(t *testing
 	// so the test neither consults a desktop export nor relaxes identity checks.
 	rebind := func(name, conversationID string) []byte {
 		t.Helper()
-		path := cursorEvidenceHookPath(t, name)
+		path := cursorDesktopHookFixturePath(t, name)
 		data, err := os.ReadFile(path)
 		require.NoError(t, err)
 		var fields map[string]any
@@ -187,7 +187,8 @@ func TestNormalizeCursorHookInput_ReboundCapturedFreshStartupFixtures(t *testing
 	require.NoError(t, err)
 	assert.Equal(t, "generation-1", before.GenerationID)
 	assert.True(t, before.SourcePending)
-	beforeBoundary, err := cursorBoundaryForHook(before, string(agentx.CursorEventBeforeSubmitPrompt))
+	isolateSessionMarkerDir(t)
+	_, err = prepareCursorHookBoundary(before, string(agentx.CursorEventBeforeSubmitPrompt))
 	require.NoError(t, err)
 
 	start, err := normalizeCursorHookInput(rebind("0002-sessionStart", firstID), projectRoot, homeDir)
@@ -197,10 +198,7 @@ func TestNormalizeCursorHookInput_ReboundCapturedFreshStartupFixtures(t *testing
 	require.NoError(t, err)
 	assert.Empty(t, startBoundary.GenerationID)
 
-	isolateSessionMarkerDir(t)
-	_, err = persistCursorSourceBoundary(firstID, string(agentx.CursorEventBeforeSubmitPrompt), beforeBoundary, false)
-	require.NoError(t, err)
-	marker, err := persistCursorSourceBoundary(firstID, string(agentx.CursorEventSessionStart), startBoundary, false)
+	marker, err := prepareCursorHookBoundary(start, string(agentx.CursorEventSessionStart))
 	require.NoError(t, err)
 	assert.Equal(t, "generation-1", marker.CursorSourceBoundary.GenerationID)
 
@@ -220,15 +218,15 @@ func TestNormalizeCursorHookInput_ReboundCapturedFreshStartupFixtures(t *testing
 	}
 }
 
-func cursorEvidenceHookPath(t *testing.T, name string) string {
+func cursorDesktopHookFixturePath(t *testing.T, name string) string {
 	t.Helper()
 	_, testFile, _, ok := runtime.Caller(0)
 	if !ok {
-		t.Fatal("locate Cursor evidence fixture")
+		t.Fatal("locate Cursor desktop fixture")
 	}
-	path := filepath.Join(filepath.Dir(testFile), "..", "..", ".context", "cursor-adapter", "evidence", "redacted-candidate", "hooks", name+".stdin.json")
+	path := filepath.Join(filepath.Dir(testFile), "..", "ox-adapter-cursor", "testdata", "desktop", "hooks", name+".stdin.json")
 	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("Cursor evidence fixture %s is unavailable: %v", name, err)
+		t.Fatalf("Cursor desktop fixture %s is unavailable: %v", name, err)
 	}
 	return path
 }

@@ -80,6 +80,9 @@ func decodeCursorCompiled[T any](t *testing.T, result cursorCompiledResult) T {
 }
 
 func TestCursorCompiledConformance(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: builds the Cursor adapter binary")
+	}
 	if runtime.GOOS == "windows" {
 		t.Skip("native hook sibling fixture is Unix-specific")
 	}

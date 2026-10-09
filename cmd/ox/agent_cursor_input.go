@@ -301,32 +301,3 @@ func cursorManualStartBoundary(projectRoot, conversationID string) (string, int6
 	}
 	return sourcePath, offset, hash, nil
 }
-
-// persistCursorSourceBoundary keeps the earliest usable boundary for overlapping
-// sessionStart/beforeSubmitPrompt hooks. A later beforeSubmitPrompt may replace
-// an inactive marker only for a new generation, which starts a new recording.
-func persistCursorSourceBoundary(agentSessionID, event string, boundary CursorSourceBoundary, activeRecording bool) (*SessionMarker, error) {
-	return UpdateSessionMarker(agentSessionID, func(marker *SessionMarker) error {
-		existing := marker.CursorSourceBoundary
-		if existing != nil {
-			switch {
-			case existing.GenerationID == boundary.GenerationID:
-				return nil
-			// Cursor emits an empty generation ID for sessionStart. The
-			// first following prompt gives that already-selected boundary its
-			// generation without sampling a later EOF. A later inactive
-			// generation may then select its own boundary normally.
-			case existing.GenerationID == "" && event == string(agentx.CursorEventBeforeSubmitPrompt):
-				marker.CursorSourceBoundary.GenerationID = boundary.GenerationID
-				return nil
-			case activeRecording:
-				return nil
-			case event == string(agentx.CursorEventSessionStart):
-				return nil
-			}
-		}
-		copy := boundary
-		marker.CursorSourceBoundary = &copy
-		return nil
-	})
-}

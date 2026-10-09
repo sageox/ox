@@ -288,6 +288,9 @@ func runIntegrateInstall(cmd *cobra.Command, args []string) error {
 		if err := installExternalAdapterHooks("cursor", false); err != nil {
 			return fmt.Errorf("installing Cursor Agents Window integration: %w", err)
 		}
+		if err := installAdapterInventory(findGitRoot(), "cursor"); err != nil {
+			return fmt.Errorf("installing Cursor Agents Window assets: %w", err)
+		}
 
 		cli.PrintSuccess("Installed Cursor Agents Window project-level integration")
 		userCfg, _ := config.LoadUserConfig()
