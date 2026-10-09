@@ -24,6 +24,12 @@ import (
 // runaway file must not be able to exhaust the daemon's memory.
 const maxBoardPostBytes = 4 << 20
 
+// ErrBoardPostsFailed is wrapped by the error IndexGitHubBoard returns when
+// posts of this repo could not be written to the index. The posts that did
+// index are kept and counted in the returned stats; the failed ones are not
+// recorded as indexed, so a later run tries them again.
+var ErrBoardPostsFailed = errors.New("github board posts failed to index")
+
 // boardItemKey identifies one PR or issue on the board. The board is shared by
 // every repo on the team, so a number alone is only unique once the repo
 // filter has run.
@@ -43,6 +49,12 @@ type boardPost struct {
 // repoFullName ("owner/name") and upserts them into CodeDB's pull_requests and
 // issues tables with their comments.
 //
+// alsoRepos are further spellings of the same repo. The relay publishes under
+// GitHub's current name, and after a rename or transfer the git remote can
+// still carry the old one, so a caller passes both; posts written before the
+// rename keep the old name until they expire. Names compare case-insensitively
+// and blanks are ignored.
+//
 // Run it AFTER IndexGitHubData: a board post wins over a Ledger snapshot for
 // the same number. The server scans every post for prompt injection before it
 // publishes, so the board is the safer of the two sources, and the two writers
@@ -58,17 +70,24 @@ type boardPost struct {
 // snapshot lands; an mtime-only skip would leave that Ledger row in place and
 // silently demote the board.
 //
+// A post that fails to index does not stop the others. It is not recorded as
+// indexed, and the call returns the stats so far with an error wrapping
+// ErrBoardPostsFailed, so the caller can decide whether to try again. A post
+// that cannot be parsed, or belongs to another repo, is not a failure: trying
+// again changes nothing.
+//
 // Rows are never deleted: a post expires 90 days after the item's last change,
 // but GitHub remains the source of truth for what the item was.
-func IndexGitHubBoard(ctx context.Context, s *store.Store, postsDir, repoFullName string, progress ProgressFunc) (*GitHubIndexStats, error) {
+func IndexGitHubBoard(ctx context.Context, s *store.Store, postsDir, repoFullName string, progress ProgressFunc, alsoRepos ...string) (*GitHubIndexStats, error) {
 	stats := &GitHubIndexStats{}
+	repos := boardRepoSet(append([]string{repoFullName}, alsoRepos...))
 	// without a repo name the repo filter below can never match; return before
 	// reading and parsing the whole shared board for nothing
-	if postsDir == "" || repoFullName == "" {
+	if postsDir == "" || len(repos) == 0 {
 		return stats, nil
 	}
 
-	posts, err := pickBoardPosts(ctx, postsDir, repoFullName)
+	posts, err := pickBoardPosts(ctx, postsDir, repos)
 	if err != nil {
 		return stats, err
 	}
@@ -82,7 +101,8 @@ func IndexGitHubBoard(ctx context.Context, s *store.Store, postsDir, repoFullNam
 		knownMtimes = make(map[string]int64)
 	}
 
-	var changed int
+	var changed, failed int
+	var firstFailure error
 	for _, bp := range posts {
 		if err := ctx.Err(); err != nil {
 			return stats, err
@@ -104,6 +124,10 @@ func IndexGitHubBoard(ctx context.Context, s *store.Store, postsDir, repoFullNam
 		}
 		if indexErr != nil {
 			slog.Warn("index github board post failed, skipping", "path", bp.path, "error", indexErr)
+			failed++
+			if firstFailure == nil {
+				firstFailure = indexErr
+			}
 			continue
 		}
 		// the mtime captured before the read, so an edit racing the read shows
@@ -121,15 +145,49 @@ func IndexGitHubBoard(ctx context.Context, s *store.Store, postsDir, repoFullNam
 	if stats.PRsIndexed > 0 || stats.IssuesIndexed > 0 {
 		slog.Info("github board indexed", "prs", stats.PRsIndexed, "issues", stats.IssuesIndexed)
 	}
+	if failed > 0 {
+		return stats, fmt.Errorf("%w: %d of %d changed posts, first: %w", ErrBoardPostsFailed, failed, changed, firstFailure)
+	}
 	return stats, nil
 }
 
-// BoardFingerprint is a cheap change marker for a board posts directory: the
-// number of posts and the newest post mtime. The daemon compares it between
-// freshness checks so a board-only change (a teammate's PR landing in the Team
-// Context pull) re-runs the GitHub stages even though git HEAD did not move.
-// It returns "" when the directory is missing or unreadable.
-func BoardFingerprint(postsDir string) string {
+// boardRepoSet lowercases repo names into a set, dropping blanks.
+func boardRepoSet(names []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		if name = strings.ToLower(strings.TrimSpace(name)); name != "" {
+			set[name] = struct{}{}
+		}
+	}
+	return set
+}
+
+// BoardFingerprint is a cheap change marker for one repo's posts in a board
+// posts directory: how many there are and the newest mtime. The daemon compares
+// it between freshness checks so a board-only change (a teammate's PR landing
+// in the Team Context pull) re-runs the GitHub stages even though git HEAD did
+// not move.
+//
+// The board holds every team repo's posts, but only this repo's can change what
+// the index holds, so only post files whose name starts with one of
+// slugPrefixes (githubmirror.SlugPrefix of each spelling of the repo) are
+// counted. Another repo's post must not send this project through the whole
+// index pipeline. The file name is only a prefilter: a sibling repo whose name
+// extends this one shares the prefix and is over-counted, which costs a
+// harmless re-run, never a missed one.
+//
+// It returns "" when there is no prefix to watch (the project has no GitHub
+// remote) or the directory is missing or unreadable.
+func BoardFingerprint(postsDir string, slugPrefixes ...string) string {
+	prefixes := make([]string, 0, len(slugPrefixes))
+	for _, prefix := range slugPrefixes {
+		if prefix != "" { // "" matches every file; it means "unknown repo", not "all repos"
+			prefixes = append(prefixes, prefix)
+		}
+	}
+	if len(prefixes) == 0 {
+		return ""
+	}
 	entries, err := os.ReadDir(postsDir)
 	if err != nil {
 		return ""
@@ -137,7 +195,7 @@ func BoardFingerprint(postsDir string) string {
 	var count int
 	var newest int64
 	for _, entry := range entries {
-		if !isBoardPostName(entry) {
+		if !isBoardPostName(entry) || !hasAnyPrefix(entry.Name(), prefixes) {
 			continue
 		}
 		info, err := entry.Info()
@@ -152,15 +210,25 @@ func BoardFingerprint(postsDir string) string {
 	return fmt.Sprintf("%d:%d", count, newest)
 }
 
+func hasAnyPrefix(name string, prefixes []string) bool {
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // isBoardPostName reports whether a directory entry is a post file. Posts sit
 // beside their .meta.json, which this indexer does not read.
 func isBoardPostName(entry fs.DirEntry) bool {
 	return entry.Type().IsRegular() && strings.HasSuffix(entry.Name(), ".md")
 }
 
-// pickBoardPosts returns, for each PR/issue of repoFullName on the board, the
-// one post that should back its row, ordered by kind then number.
-func pickBoardPosts(ctx context.Context, postsDir, repoFullName string) ([]boardPost, error) {
+// pickBoardPosts returns, for each PR/issue of this repo on the board, the
+// one post that should back its row, ordered by kind then number. repos is the
+// lowercased set of names that count as this repo.
+func pickBoardPosts(ctx context.Context, postsDir string, repos map[string]struct{}) ([]boardPost, error) {
 	entries, err := os.ReadDir(postsDir)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil // no board yet: the mirror is off or has not synced
@@ -177,7 +245,7 @@ func pickBoardPosts(ctx context.Context, postsDir, repoFullName string) ([]board
 		if !isBoardPostName(entry) {
 			continue
 		}
-		bp, ok := readBoardPost(filepath.Join(postsDir, entry.Name()), entry, repoFullName)
+		bp, ok := readBoardPost(filepath.Join(postsDir, entry.Name()), entry, repos)
 		if !ok {
 			continue
 		}
@@ -205,7 +273,7 @@ func pickBoardPosts(ctx context.Context, postsDir, repoFullName string) ([]board
 // back a row: an unreadable or unparseable file (logged — a bad post must not
 // fail the stage), a post that is not a GitHub mirror post, or a post for
 // another repo (silent — that is the normal state of a shared board).
-func readBoardPost(path string, entry fs.DirEntry, repoFullName string) (boardPost, bool) {
+func readBoardPost(path string, entry fs.DirEntry, repos map[string]struct{}) (boardPost, bool) {
 	info, err := entry.Info()
 	if err != nil {
 		return boardPost{}, false // removed since the listing
@@ -227,7 +295,7 @@ func readBoardPost(path string, entry fs.DirEntry, repoFullName string) (boardPo
 	}
 
 	header := post.Header
-	if header.Source != "github" || !strings.EqualFold(header.Repo, repoFullName) {
+	if _, ours := repos[strings.ToLower(header.Repo)]; header.Source != "github" || !ours {
 		return boardPost{}, false
 	}
 	if header.Kind != githubmirror.KindPullRequest && header.Kind != githubmirror.KindIssue {

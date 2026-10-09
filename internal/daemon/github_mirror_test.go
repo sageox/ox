@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -34,8 +35,9 @@ import (
 var mirrorTestNow = time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
 
 var (
-	mirrorMember = githubmirror.Author{Login: "devon-dev", ID: 5550101, Association: "MEMBER", Type: "User"}
-	mirrorBot    = githubmirror.Author{Login: "dependabot[bot]", ID: 49699333, Association: "NONE", Type: "Bot"}
+	mirrorMember   = githubmirror.Author{Login: "devon-dev", ID: 5550101, Association: "MEMBER", Type: "User"}
+	mirrorReviewer = githubmirror.Author{Login: "avery-dev", ID: 5550102, Association: "MEMBER", Type: "User"}
+	mirrorBot      = githubmirror.Author{Login: "dependabot[bot]", ID: 49699333, Association: "NONE", Type: "Bot"}
 )
 
 // --- fakes ---------------------------------------------------------------
@@ -55,10 +57,15 @@ type mirrorFakeFetcher struct {
 	returnAll      bool
 	// fail returns an error for one call: method name and item number (0 for
 	// repo-level calls).
-	fail   func(method string, number int) error
-	calls  map[string]int
-	sinces map[string]time.Time
-	owners []string // owner argument of every call, as the fetcher saw it
+	fail func(method string, number int) error
+	// hang makes a call block until its context ends: a GitHub that stopped
+	// answering. Only ListIssueComments honors it.
+	hang        func(method string, number int) bool
+	release     chan struct{} // closed at test end so no hung call outlives the test
+	releaseOnce sync.Once
+	calls       map[string]int
+	sinces      map[string]time.Time
+	owners      []string // owner argument of every call, as the fetcher saw it
 }
 
 func newMirrorFakeFetcher() *mirrorFakeFetcher {
@@ -68,8 +75,27 @@ func newMirrorFakeFetcher() *mirrorFakeFetcher {
 		reviewComments: map[int][]githubmirror.SourceComment{},
 		reviews:        map[int][]githubmirror.SourceReview{},
 		files:          map[int][]string{},
+		release:        make(chan struct{}),
 		calls:          map[string]int{},
 		sinces:         map[string]time.Time{},
+	}
+}
+
+func (f *mirrorFakeFetcher) releaseHung() { f.releaseOnce.Do(func() { close(f.release) }) }
+
+// hung blocks while the call is configured to hang, and reports why it stopped.
+func (f *mirrorFakeFetcher) hung(ctx context.Context, method string, number int) error {
+	f.mu.Lock()
+	hang := f.hang
+	f.mu.Unlock()
+	if hang == nil || !hang(method, number) {
+		return nil
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-f.release:
+		return errors.New("fake github released at test end")
 	}
 }
 
@@ -152,8 +178,11 @@ func (f *mirrorFakeFetcher) ListIssues(_ context.Context, owner, _ string, since
 	return out, nil
 }
 
-func (f *mirrorFakeFetcher) ListIssueComments(_ context.Context, owner, _ string, number int) ([]githubmirror.SourceComment, error) {
+func (f *mirrorFakeFetcher) ListIssueComments(ctx context.Context, owner, _ string, number int) ([]githubmirror.SourceComment, error) {
 	if err := f.record("ListIssueComments", owner, number); err != nil {
+		return nil, err
+	}
+	if err := f.hung(ctx, "ListIssueComments", number); err != nil {
 		return nil, err
 	}
 	f.mu.Lock()
@@ -211,7 +240,8 @@ func (f *mirrorFakeFetcher) addComment(number int, c githubmirror.SourceComment)
 type mirrorFakeRelay struct {
 	mu         sync.Mutex
 	requests   []githubmirror.RelayRequest
-	repoStatus string // default "enabled"
+	teams      []string // the team ref of each request, parallel to requests
+	repoStatus string   // default "enabled"
 	// fail returns an error for one request, before any response is built.
 	fail func(req githubmirror.RelayRequest) error
 	// verdict picks an item's outcome; default is accepted.
@@ -220,10 +250,15 @@ type mirrorFakeRelay struct {
 	respond func(req githubmirror.RelayRequest) *githubmirror.RelayResponse
 }
 
-func (r *mirrorFakeRelay) RelayGitHubMirrorItems(_ context.Context, _ string, req githubmirror.RelayRequest) (*githubmirror.RelayResponse, error) {
+func (r *mirrorFakeRelay) RelayGitHubMirrorItems(ctx context.Context, teamRef string, req githubmirror.RelayRequest) (*githubmirror.RelayResponse, error) {
+	// like the real client, a call made on a finished context goes nowhere
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("network error: %w", err)
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.requests = append(r.requests, req)
+	r.teams = append(r.teams, teamRef)
 	if r.fail != nil {
 		if err := r.fail(req); err != nil {
 			return nil, err
@@ -264,6 +299,22 @@ func (r *mirrorFakeRelay) batchSizes() []int {
 		sizes = append(sizes, len(req.Items))
 	}
 	return sizes
+}
+
+// relayedTo lists the item numbers of every request sent to the given team.
+func (r *mirrorFakeRelay) relayedTo(teamRef string) []int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var numbers []int
+	for i, req := range r.requests {
+		if r.teams[i] != teamRef {
+			continue
+		}
+		for _, it := range req.Items {
+			numbers = append(numbers, it.Number)
+		}
+	}
+	return numbers
 }
 
 // relayedNumbers lists the item numbers of every request, in order.
@@ -315,6 +366,8 @@ type mirrorHarness struct {
 	teamRef      string
 	teamPathFunc func() string
 	budget       int
+	cycleTimeout time.Duration
+	enabledFunc  func() bool // replaces the enabled switch when set
 	owner, repo  string
 	noPRs        bool
 	noIssues     bool
@@ -323,6 +376,14 @@ type mirrorHarness struct {
 type mirrorHarnessOption func(*mirrorHarness)
 
 func withMirrorBudget(n int) mirrorHarnessOption { return func(h *mirrorHarness) { h.budget = n } }
+
+func withMirrorCycleTimeout(d time.Duration) mirrorHarnessOption {
+	return func(h *mirrorHarness) { h.cycleTimeout = d }
+}
+
+func withMirrorEnabledFunc(fn func() bool) mirrorHarnessOption {
+	return func(h *mirrorHarness) { h.enabledFunc = fn }
+}
 
 func newMirrorHarness(t *testing.T, opts ...mirrorHarnessOption) *mirrorHarness {
 	t.Helper()
@@ -343,13 +404,18 @@ func newMirrorHarness(t *testing.T, opts ...mirrorHarnessOption) *mirrorHarness 
 	for _, opt := range opts {
 		opt(h)
 	}
+	t.Cleanup(h.fetcher.releaseHung)
+	enabled := func() bool {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		return h.enabled
+	}
+	if h.enabledFunc != nil {
+		enabled = h.enabledFunc
+	}
 	logger := slog.New(slog.NewTextHandler(h.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	h.relayer = NewGitHubMirrorRelayer(GitHubMirrorDeps{
-		Enabled: func() bool {
-			h.mu.Lock()
-			defer h.mu.Unlock()
-			return h.enabled
-		},
+		Enabled: enabled,
 		AuthToken: func() string {
 			h.mu.Lock()
 			defer h.mu.Unlock()
@@ -371,9 +437,17 @@ func newMirrorHarness(t *testing.T, opts ...mirrorHarnessOption) *mirrorHarness 
 			return h.now
 		},
 		DetailBudget: h.budget,
+		CycleTimeout: h.cycleTimeout,
 		Logger:       logger,
 	})
 	return h
+}
+
+// setTeam changes the team the project belongs to, as re-running ox init does.
+func (h *mirrorHarness) setTeam(ref string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.teamRef = ref
 }
 
 func (h *mirrorHarness) clock() time.Time {
@@ -505,7 +579,8 @@ func TestGitHubMirror_ColdStartRelaysOnlyUnexpiredItemsAndSetsCursor(t *testing.
 
 	st := h.state()
 	assert.True(t, st.ColdStartDone)
-	assert.Equal(t, h.clock().Add(-2*time.Hour), st.Cursor, "cursor is the newest listed updated_at")
+	assert.Equal(t, h.clock().Add(-2*time.Hour), st.PullRequestCursor, "each kind's cursor is its newest listed updated_at")
+	assert.Equal(t, h.clock().Add(-3*time.Hour), st.IssueCursor)
 	assert.Equal(t, h.clock(), st.LastSuccessAt)
 	assert.Empty(t, st.LastError)
 	assert.Equal(t, githubmirror.RepoEnabled, st.RepoStatus)
@@ -577,7 +652,7 @@ func TestGitHubMirror_NewHumanCommentRelaysExactlyThatItem(t *testing.T) {
 	assert.Equal(t, 2, last.Items[0].Number)
 	require.Len(t, last.Items[0].Comments, 1)
 	assert.Equal(t, 4, h.fetcher.detailCalls()-detailBefore, "four detail calls for the one changed PR, none for the rest")
-	assert.Equal(t, h.clock().Add(-time.Minute), h.state().Cursor)
+	assert.Equal(t, h.clock().Add(-time.Minute), h.state().PullRequestCursor)
 }
 
 // Failure prevented: a bot commenting on a PR (coverage, dependabot, CI)
@@ -647,14 +722,14 @@ func TestGitHubMirror_DetailBudgetExhaustionKeepsCursorAndNextRunFinishes(t *tes
 	h.run()
 	st := h.state()
 	assert.Equal(t, []int{1, 2}, h.relay.relayedNumbers(), "newest items first")
-	assert.True(t, st.Cursor.IsZero(), "cursor holds while items are left behind")
+	assert.True(t, st.PullRequestCursor.IsZero(), "cursor holds while items are left behind")
 	assert.False(t, st.ColdStartDone)
 	assert.Equal(t, 8, h.fetcher.detailCalls(), "two PRs at four calls each")
 
 	h.advance(15 * time.Minute)
 	h.run()
 	assert.Equal(t, []int{1, 2, 3, 4}, h.relay.relayedNumbers())
-	assert.True(t, h.state().Cursor.IsZero())
+	assert.True(t, h.state().PullRequestCursor.IsZero())
 
 	h.advance(15 * time.Minute)
 	h.run()
@@ -662,7 +737,7 @@ func TestGitHubMirror_DetailBudgetExhaustionKeepsCursorAndNextRunFinishes(t *tes
 	assert.Equal(t, []int{1, 2, 3, 4, 5}, h.relay.relayedNumbers(), "each item relayed exactly once across cycles")
 	assert.Equal(t, 20, h.fetcher.detailCalls(), "no item was fetched twice")
 	assert.True(t, st.ColdStartDone)
-	assert.Equal(t, mirrorTestNow.Add(-time.Hour), st.Cursor)
+	assert.Equal(t, mirrorTestNow.Add(-time.Hour), st.PullRequestCursor)
 }
 
 // Failure prevented: PRs a bot touched recently but nobody has discussed in
@@ -859,7 +934,7 @@ func TestGitHubMirror_BackoffByCause(t *testing.T) {
 			assert.Equal(t, h.clock().Add(tt.wantBackoff), st.NextAllowedAt)
 			assert.Equal(t, tt.wantStatus, st.RepoStatus)
 			assert.True(t, st.LastSuccessAt.IsZero())
-			assert.True(t, st.Cursor.IsZero(), "a failed cycle must not move the cursor")
+			assert.True(t, st.PullRequestCursor.IsZero() && st.IssueCursor.IsZero(), "a failed cycle must not move the cursors")
 			assert.Empty(t, relayedKeys(st), "nothing is remembered as relayed when the cycle failed")
 			stats := h.relayer.Stats()
 			require.NotNil(t, stats)
@@ -952,7 +1027,7 @@ func TestGitHubMirror_RateLimitMidwayRelaysWhatWasBuiltAndHoldsTheCursor(t *test
 	assert.Equal(t, []int{1, 2}, h.relay.relayedNumbers(), "items built before the limit are still relayed")
 	assert.Contains(t, st.Items, h.prKey(1))
 	assert.NotContains(t, st.Items, h.prKey(3))
-	assert.True(t, st.Cursor.IsZero())
+	assert.True(t, st.PullRequestCursor.IsZero())
 	assert.Equal(t, h.clock().Add(30*time.Minute), st.NextAllowedAt)
 }
 
@@ -1114,7 +1189,7 @@ func TestGitHubMirror_UnintelligibleResultsAreRetriedNotRemembered(t *testing.T)
 	assert.Contains(t, st.Items, h.prKey(1))
 	assert.NotContains(t, st.Items, h.prKey(2), "unknown status is not done")
 	assert.NotContains(t, st.Items, h.prKey(3), "a missing result is not done")
-	assert.True(t, st.Cursor.IsZero(), "the cursor holds so the next cycle revisits them")
+	assert.True(t, st.PullRequestCursor.IsZero(), "the cursor holds so the next cycle revisits them")
 	assert.False(t, st.ColdStartDone)
 	assert.Empty(t, st.LastError)
 	assert.Equal(t, 1, strings.Count(h.logs.String(), "not fully understood"), "logged once at Warn")
@@ -1157,9 +1232,10 @@ func TestGitHubMirror_StateForAnotherRepoIsDiscarded(t *testing.T) {
 	h := newMirrorHarness(t)
 	seedPRs(h, 1)
 	other := &githubmirror.State{
-		Version: githubmirror.StateVersion,
-		Repo:    "someone/else",
-		Cursor:  mirrorTestNow,
+		Version:           githubmirror.StateVersion,
+		Repo:              "someone/else",
+		PullRequestCursor: mirrorTestNow,
+		IssueCursor:       mirrorTestNow,
 		Items: map[string]githubmirror.ItemState{
 			h.prKey(1): {UpdatedAt: mirrorTestNow.Add(-time.Hour), Status: githubmirror.ResultAccepted, RelayedAt: mirrorTestNow},
 		},
@@ -1170,6 +1246,7 @@ func TestGitHubMirror_StateForAnotherRepoIsDiscarded(t *testing.T) {
 
 	assert.Equal(t, []int{1}, h.relay.relayedNumbers())
 	assert.Equal(t, "acme/api", h.state().Repo)
+	assert.Equal(t, h.clock().Add(-githubmirror.Window), h.fetcher.since("ListPullRequests"), "another repo's cursor is not inherited")
 }
 
 // Failure prevented: an item deleted or transferred between the listing and
@@ -1200,13 +1277,15 @@ func TestGitHubMirror_ListingNeverReachesBeyondTheWindow(t *testing.T) {
 	t.Parallel()
 	h := newMirrorHarness(t)
 	seedPRs(h, 1)
+	stale := mirrorTestNow.Add(-200 * 24 * time.Hour)
 	require.NoError(t, githubmirror.SaveState(h.ledgerPath, &githubmirror.State{
-		Version: githubmirror.StateVersion, Repo: "acme/api", Cursor: mirrorTestNow.Add(-200 * 24 * time.Hour),
+		Version: githubmirror.StateVersion, Repo: "acme/api", PullRequestCursor: stale, IssueCursor: stale,
 	}))
 
 	h.run()
 
 	assert.Equal(t, mirrorTestNow.Add(-githubmirror.Window), h.fetcher.since("ListPullRequests"))
+	assert.Equal(t, mirrorTestNow.Add(-githubmirror.Window), h.fetcher.since("ListIssues"))
 }
 
 // Failure prevented: private PR text leaking into daemon logs, which are
@@ -1274,11 +1353,20 @@ func TestGitHubMirrorFeatureOn(t *testing.T) {
 		{"settings not fetched yet", func() *flags.CLISettingsResponse { return nil }, false},
 		{"server sends no opinion", func() *flags.CLISettingsResponse { return &flags.CLISettingsResponse{} }, false},
 		{"server says off", func() *flags.CLISettingsResponse {
-			return &flags.CLISettingsResponse{Features: flags.CLIFeatures{GitHubMirror: &no}}
+			return &flags.CLISettingsResponse{FetchedAt: time.Now(), Features: flags.CLIFeatures{GitHubMirror: &no}}
 		}, false},
 		{"server says on", func() *flags.CLISettingsResponse {
-			return &flags.CLISettingsResponse{Features: flags.CLIFeatures{GitHubMirror: &yes}}
+			return &flags.CLISettingsResponse{FetchedAt: time.Now(), Features: flags.CLIFeatures{GitHubMirror: &yes}}
 		}, true},
+		{"server said on a while ago but the refresh is still within twice its interval", func() *flags.CLISettingsResponse {
+			return &flags.CLISettingsResponse{FetchedAt: time.Now().Add(-flags.CLISettingsMaxAge - time.Minute), Features: flags.CLIFeatures{GitHubMirror: &yes}}
+		}, true},
+		{"server said on but the cache is older than twice the refresh interval", func() *flags.CLISettingsResponse {
+			return &flags.CLISettingsResponse{FetchedAt: time.Now().Add(-2*flags.CLISettingsMaxAge - time.Minute), Features: flags.CLIFeatures{GitHubMirror: &yes}}
+		}, false},
+		{"server said on but the fetch time was never recorded", func() *flags.CLISettingsResponse {
+			return &flags.CLISettingsResponse{Features: flags.CLIFeatures{GitHubMirror: &yes}}
+		}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1356,14 +1444,14 @@ type syncWithMirror struct {
 // fake GitHub and whose mirror half is the harness's relayer. Environment is
 // pinned so a developer's own OX_GITHUB_SYNC* settings cannot change the test,
 // which is why callers cannot run in parallel.
-func newSyncWithMirror(t *testing.T) *syncWithMirror {
+func newSyncWithMirror(t *testing.T, opts ...mirrorHarnessOption) *syncWithMirror {
 	t.Helper()
 	t.Setenv("GITHUB_TOKEN", "github-token")
 	t.Setenv(config.EnvGitHubSync, "enabled")
 	t.Setenv(config.EnvGitHubSyncPRs, "enabled")
 	t.Setenv(config.EnvGitHubSyncIssues, "enabled")
 
-	h := newMirrorHarness(t)
+	h := newMirrorHarness(t, opts...)
 	seedColdStart(h)
 	fakeLedger := &ledgerFetcherFake{}
 	issues := NewIssueTracker()
@@ -1595,4 +1683,328 @@ func TestGitHubMirror_RepoVisibilityUnknownRelaysNothing(t *testing.T) {
 	h.run()
 
 	assert.Equal(t, relaysBefore, h.relay.requestCount(), "no relay on stale visibility")
+}
+
+// --- expiry refresh when the hash does not change ------------------------
+
+func mirrorApproval(id int64, at time.Time) githubmirror.SourceReview {
+	return githubmirror.SourceReview{ID: id, Author: mirrorReviewer, State: "APPROVED", SubmittedAt: at}
+}
+
+// Failure prevented: a reviewer approves a PR again (or the PR is closed and
+// reopened) after the first relay. The change hash covers who approved, not
+// when, so it does not move; the daemon dropped the item as "unchanged" and the
+// post expired 90 days after the first approval even though people kept
+// working on the PR.
+func TestGitHubMirror_ReApprovalIsRelayedAgainSoTheExpiryMoves(t *testing.T) {
+	t.Parallel()
+	h := newMirrorHarness(t)
+	h.noIssues = true
+	first := h.clock().Add(-time.Hour)
+	pr := mirrorPR(1, first)
+	pr.CreatedAt = first.Add(-time.Hour)
+	h.fetcher.setPR(pr)
+	h.fetcher.reviews[1] = []githubmirror.SourceReview{mirrorApproval(1, first)}
+
+	h.run()
+	require.Equal(t, []int{1}, h.relay.relayedNumbers())
+	require.True(t, h.state().Items[h.prKey(1)].LastMaterialChangeAt.Equal(first))
+
+	// a month later the same reviewer approves again
+	h.advance(30 * 24 * time.Hour)
+	again := h.clock().Add(-time.Minute)
+	pr.UpdatedAt = again
+	h.fetcher.setPR(pr)
+	h.fetcher.reviews[1] = append(h.fetcher.reviews[1], mirrorApproval(2, again))
+
+	h.run()
+
+	assert.Equal(t, []int{1, 1}, h.relay.relayedNumbers(), "the re-approval must reach the server, or the post expires on the first approval's clock")
+	reqs := h.relay.requests
+	require.Len(t, reqs, 2)
+	assert.Equal(t, reqs[0].Items[0].ChangeHash, reqs[1].Items[0].ChangeHash, "precondition: the hash really did not move")
+	assert.True(t, reqs[1].Items[0].LastMaterialChangeAt.Equal(again))
+	assert.True(t, h.state().Items[h.prKey(1)].LastMaterialChangeAt.Equal(again), "the remembered activity time moves with it")
+
+	// control: the same GitHub state again is still skipped for free
+	h.fetcher.returnAll = true
+	h.advance(15 * time.Minute)
+	detailBefore := h.fetcher.detailCalls()
+	h.run()
+	assert.Equal(t, []int{1, 1}, h.relay.relayedNumbers())
+	assert.Equal(t, detailBefore, h.fetcher.detailCalls())
+}
+
+// Failure prevented: a PR whose only activity is old was remembered as expired;
+// when its reviewer approves again it is live, but the "same hash" shortcut
+// kept it off the board for good.
+func TestGitHubMirror_FreshApprovalRevivesAnItemMarkedExpired(t *testing.T) {
+	t.Parallel()
+	h := newMirrorHarness(t)
+	h.noIssues = true
+	now := h.clock()
+	old := now.Add(-100 * 24 * time.Hour)
+	pr := mirrorPR(1, now.Add(-24*time.Hour)) // a bot touched it yesterday
+	pr.CreatedAt = old.Add(-time.Hour)
+	h.fetcher.setPR(pr)
+	h.fetcher.reviews[1] = []githubmirror.SourceReview{mirrorApproval(1, old)}
+
+	h.run()
+	require.Empty(t, h.relay.relayedNumbers(), "precondition: nothing alive to publish")
+	require.Equal(t, githubMirrorReasonExpired, h.state().Items[h.prKey(1)].Reason)
+
+	// control: another bot bump changes updated_at only; it stays off the board
+	h.advance(time.Hour)
+	pr.UpdatedAt = h.clock().Add(-time.Minute)
+	h.fetcher.setPR(pr)
+	h.run()
+	assert.Empty(t, h.relay.relayedNumbers(), "bot noise must not revive an expired item")
+	assert.Equal(t, githubMirrorReasonExpired, h.state().Items[h.prKey(1)].Reason)
+
+	// the reviewer approves again: same hash, activity is now fresh
+	h.advance(time.Hour)
+	again := h.clock().Add(-time.Minute)
+	pr.UpdatedAt = again
+	h.fetcher.setPR(pr)
+	h.fetcher.reviews[1] = append(h.fetcher.reviews[1], mirrorApproval(2, again))
+
+	h.run()
+
+	assert.Equal(t, []int{1}, h.relay.relayedNumbers(), "fresh human activity puts the item back on the board")
+	item := h.state().Items[h.prKey(1)]
+	assert.Equal(t, githubmirror.ResultAccepted, item.Status)
+	assert.Empty(t, item.Reason)
+	assert.True(t, item.LastMaterialChangeAt.Equal(again))
+}
+
+// --- relay history belongs to one team -----------------------------------
+
+// Failure prevented: re-running ox init points the repo at another team while
+// the Ledger (and so the saved relay history) stays. The new team's board has
+// none of the posts, but the daemon believes everything was already relayed and
+// sends nothing.
+func TestGitHubMirror_ChangingTeamStartsOverSoTheNewBoardIsPopulated(t *testing.T) {
+	t.Parallel()
+	h := newMirrorHarness(t)
+	seedColdStart(h)
+	h.run()
+	require.Equal(t, []int{1, 2, 3}, sortedCopy(h.relay.relayedTo("team_1")))
+
+	h.setTeam("team_2")
+	h.advance(15 * time.Minute)
+	h.fetcher.returnAll = true
+	h.run()
+
+	assert.Equal(t, []int{1, 2, 3}, sortedCopy(h.relay.relayedTo("team_2")), "the new team's board gets the existing posts")
+	assert.Equal(t, "team_2", h.state().Team)
+	assert.Contains(t, h.logs.String(), "belongs to another team")
+
+	// control: the same team again relays nothing more
+	requestsBefore := h.relay.requestCount()
+	h.advance(15 * time.Minute)
+	h.run()
+	assert.Equal(t, requestsBefore, h.relay.requestCount())
+}
+
+// Failure prevented: a state file written before teams were recorded is thrown
+// away on upgrade, re-crawling a repo's whole window for nothing.
+func TestGitHubMirror_StateWithoutATeamIsAdoptedNotDiscarded(t *testing.T) {
+	t.Parallel()
+	h := newMirrorHarness(t)
+	seedPRs(h, 1)
+	h.noIssues = true
+	h.run()
+	st := h.state()
+	st.Team = ""
+	require.NoError(t, githubmirror.SaveState(h.ledgerPath, st))
+	relaysBefore := h.relay.requestCount()
+
+	h.fetcher.returnAll = true
+	h.advance(15 * time.Minute)
+	h.run()
+
+	assert.Equal(t, relaysBefore, h.relay.requestCount(), "history without a team still counts")
+	assert.Equal(t, "team_1", h.state().Team, "and is claimed by the team that adopts it")
+}
+
+// --- one cursor per kind -------------------------------------------------
+
+// Failure prevented: PR-only cycles advance a shared cursor to today; when
+// issue sync is switched on later, issues are listed from just before that
+// cursor and every still-live issue updated earlier in the 90-day window never
+// reaches the board.
+func TestGitHubMirror_EnablingIssuesLaterListsTheirWholeBacklog(t *testing.T) {
+	t.Parallel()
+	h := newMirrorHarness(t)
+	h.noIssues = true
+	now := h.clock()
+	h.fetcher.prs = []githubmirror.SourcePR{mirrorPR(1, now.Add(-time.Hour))}
+	h.fetcher.issues = []githubmirror.SourceIssue{mirrorIssue(3, now.Add(-30*24*time.Hour))}
+
+	h.run()
+	require.Equal(t, []int{1}, h.relay.relayedNumbers())
+
+	h.noIssues = false
+	h.advance(15 * time.Minute)
+	h.run()
+
+	assert.Equal(t, []int{1, 3}, h.relay.relayedNumbers(), "an issue from 30 days ago is still live and must be relayed")
+	assert.Equal(t, h.clock().Add(-githubmirror.Window), h.fetcher.since("ListIssues"), "a kind that never ran lists its whole window")
+
+	st := h.state()
+	assert.True(t, st.PullRequestCursor.Equal(now.Add(-time.Hour)), "the PR cursor is the newest PR")
+	assert.True(t, st.IssueCursor.Equal(now.Add(-30*24*time.Hour)), "the issue cursor is the newest issue, not the PR's")
+}
+
+// Failure prevented: a kind that is switched off still has its cursor moved by
+// the other kind's progress.
+func TestGitHubMirror_DisabledKindKeepsItsCursorStill(t *testing.T) {
+	t.Parallel()
+	h := newMirrorHarness(t)
+	seedColdStart(h)
+	h.noPRs = true
+
+	h.run()
+
+	st := h.state()
+	assert.True(t, st.PullRequestCursor.IsZero(), "pull requests were never listed")
+	assert.True(t, st.IssueCursor.Equal(h.clock().Add(-3*time.Hour)))
+	assert.Zero(t, h.fetcher.count("ListPullRequests"))
+
+	// and each kind lists from its own cursor
+	h.noPRs = false
+	h.advance(15 * time.Minute)
+	h.run()
+	assert.Equal(t, h.clock().Add(-githubmirror.Window), h.fetcher.since("ListPullRequests"))
+	assert.Equal(t, mirrorTestNow.Add(-3*time.Hour).Add(-githubMirrorCursorOverlap), h.fetcher.since("ListIssues"))
+}
+
+// --- cycle time budget ---------------------------------------------------
+
+// Failure prevented: a GitHub that stops answering keeps one relay cycle alive
+// past the sync interval; the sync manager stays "syncing" and the Ledger's own
+// GitHub sync is skipped. Running out of time is not a failure either: no
+// backoff, no error, and the next cycle finishes the job.
+func TestGitHubMirror_CycleBudgetEndsASlowCycleWithoutFailingIt(t *testing.T) {
+	t.Parallel()
+	h := newMirrorHarness(t, withMirrorCycleTimeout(200*time.Millisecond))
+	h.noIssues = true
+	seedPRs(h, 3)
+	var stuck atomic.Bool
+	stuck.Store(true)
+	h.fetcher.hang = func(method string, number int) bool {
+		return stuck.Load() && method == "ListIssueComments" && number == 3
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.run()
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the cycle outlived its time budget")
+	}
+
+	st := h.state()
+	assert.Empty(t, st.LastError, "running out of time is not a failure")
+	assert.True(t, st.LastErrorAt.IsZero())
+	assert.True(t, st.NextAllowedAt.IsZero(), "no backoff: the next cycle should simply continue")
+	assert.Equal(t, []int{1, 2}, h.relay.relayedNumbers(), "items built before the budget ended are still relayed")
+	assert.Contains(t, st.Items, h.prKey(1))
+	assert.Contains(t, st.Items, h.prKey(2))
+	assert.NotContains(t, st.Items, h.prKey(3))
+	assert.True(t, st.PullRequestCursor.IsZero(), "the cursor holds so the unfinished item is revisited")
+	assert.Contains(t, h.logs.String(), "ran out of time")
+	require.NotNil(t, h.relayer.Stats())
+	assert.Empty(t, h.relayer.Stats().LastError)
+
+	stuck.Store(false)
+	h.advance(15 * time.Minute)
+	h.run()
+
+	assert.Equal(t, []int{1, 2, 3}, h.relay.relayedNumbers(), "the next cycle relays only what was left")
+	st = h.state()
+	assert.True(t, st.ColdStartDone)
+	assert.True(t, st.PullRequestCursor.Equal(mirrorTestNow.Add(-time.Hour)))
+}
+
+// Failure prevented: the time budget only bounds the happy path. A real
+// failure (a refused relay) that lands while the budget is still open must keep
+// its backoff, and a parent cancellation (daemon shutdown) must stay
+// "interrupted", not "partial".
+func TestGitHubMirror_BudgetDoesNotMaskRealFailures(t *testing.T) {
+	t.Parallel()
+	h := newMirrorHarness(t, withMirrorCycleTimeout(time.Minute))
+	seedColdStart(h)
+	h.relay.fail = func(githubmirror.RelayRequest) error { return api.ErrGitHubMirrorNotEnabled }
+
+	h.run()
+
+	st := h.state()
+	assert.NotEmpty(t, st.LastError)
+	assert.Equal(t, h.clock().Add(24*time.Hour), st.NextAllowedAt)
+
+	h2 := newMirrorHarness(t, withMirrorCycleTimeout(time.Minute))
+	seedColdStart(h2)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	h2.relayer.Run(ctx, h2.target())
+	assert.Empty(t, h2.state().LastError, "shutting down records nothing")
+	assert.NotContains(t, h2.logs.String(), "ran out of time")
+}
+
+// Failure prevented: a slow mirror keeps the sync manager "syncing" past the
+// next interval, so the Ledger's own GitHub sync is skipped until it ends.
+func TestGitHubSync_SlowMirrorDoesNotHoldBackTheNextLedgerSync(t *testing.T) {
+	s := newSyncWithMirror(t, withMirrorCycleTimeout(200*time.Millisecond))
+	s.fetcher.hang = func(method string, _ int) bool { return method == "ListIssueComments" }
+
+	s.manager.CheckAndSync(context.Background(), s.ledgerPath)
+	require.Eventually(t, func() bool { return s.ledger.calls() >= 1 }, 5*time.Second, 10*time.Millisecond, "the Ledger half ran")
+	require.Eventually(t, func() bool { return !s.manager.Status().Syncing }, 5*time.Second, 10*time.Millisecond,
+		"the sync manager must be free again once the mirror's budget is spent")
+
+	s.manager.CheckAndSync(context.Background(), s.ledgerPath)
+	require.Eventually(t, func() bool { return s.ledger.calls() >= 2 }, 5*time.Second, 10*time.Millisecond, "the next Ledger cycle runs")
+	require.Eventually(t, func() bool { return !s.manager.Status().Syncing }, 5*time.Second, 10*time.Millisecond)
+	assert.Empty(t, s.manager.Status().LastError)
+	assert.Zero(t, s.issues.Count())
+}
+
+// --- stale cached settings -----------------------------------------------
+
+// Failure prevented: the server turns the mirror off (revoked, incident) but
+// the daemon's settings refresh keeps failing; the last cached "on" is trusted
+// forever and the daemon keeps publishing to the team board.
+func TestGitHubMirror_StaleCachedSettingsMakeNoCalls(t *testing.T) {
+	t.Parallel()
+	yes := true
+	var mu sync.Mutex
+	settings := &flags.CLISettingsResponse{
+		FetchedAt: time.Now().Add(-3 * flags.CLISettingsMaxAge),
+		Features:  flags.CLIFeatures{GitHubMirror: &yes},
+	}
+	current := func() *flags.CLISettingsResponse {
+		mu.Lock()
+		defer mu.Unlock()
+		cp := *settings
+		return &cp
+	}
+	h := newMirrorHarness(t, withMirrorEnabledFunc(func() bool { return githubMirrorFeatureOn(current) }))
+	seedColdStart(h)
+
+	h.run()
+
+	assert.Zero(t, h.totalCalls(), "settings older than twice the refresh interval are no opinion: the mirror stays off")
+	_, err := os.Stat(githubmirror.StatePath(h.ledgerPath))
+	assert.ErrorIs(t, err, os.ErrNotExist)
+
+	// a successful refresh turns it back on
+	mu.Lock()
+	settings.FetchedAt = time.Now()
+	mu.Unlock()
+	h.run()
+	assert.Equal(t, []int{1, 2, 3}, sortedCopy(h.relay.relayedNumbers()))
 }

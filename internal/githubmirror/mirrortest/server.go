@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/githubmirror"
 )
 
@@ -95,7 +96,10 @@ type injectedFailure struct {
 // POST /api/v1/teams/{team}/github-mirror/items and writes the posts it
 // accepts under githubmirror.PostsDir(teamContextDir). It holds no state of its
 // own beyond those files, so a second Server on the same directory picks up
-// where the first left off. Safe for concurrent use.
+// where the first left off. A repeat of a live post's change hash answers
+// current; if its last_material_change_at is later, the post's expires_at is
+// extended in the sidecar first (the post bytes never change). Safe for
+// concurrent use.
 type Server struct {
 	srv *httptest.Server
 	dir string
@@ -338,6 +342,12 @@ func (s *Server) publish(repo githubmirror.Repo, it githubmirror.Item, key strin
 	for _, p := range previous {
 		if p.meta.ChangeHash == it.ChangeHash {
 			if _, statErr := os.Stat(p.mdPath); statErr == nil {
+				// The hash covers who approved, not when, so a re-approval or a
+				// close and reopen can move the expiry clock without it. The
+				// post bytes stay; only its life is extended, never shortened.
+				if err := extendExpiry(p, it); err != nil {
+					return "", "", err
+				}
 				return githubmirror.ResultCurrent, "", nil
 			}
 		}
@@ -409,6 +419,25 @@ func (s *Server) publish(repo githubmirror.Repo, it githubmirror.Item, key strin
 		}
 	}
 	return githubmirror.ResultAccepted, "", nil
+}
+
+// extendExpiry moves a live post's expires_at to the item's last material
+// change + the window when that is later. Only the sidecar changes.
+func extendExpiry(p storedPost, it githubmirror.Item) error {
+	expiresAt := it.LastMaterialChangeAt.UTC().Add(githubmirror.Window)
+	if !expiresAt.After(p.meta.ExpiresAt) {
+		return nil
+	}
+	meta := p.meta
+	meta.ExpiresAt = expiresAt
+	metaJSON, err := json.MarshalIndent(meta, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode post meta: %w", err)
+	}
+	if err := fileutil.AtomicWriteBytes(p.metaPath, append(metaJSON, '\n'), 0o644); err != nil {
+		return fmt.Errorf("extend post expiry: %w", err)
+	}
+	return nil
 }
 
 // storedFor finds the posts on disk for a source key by reading their meta

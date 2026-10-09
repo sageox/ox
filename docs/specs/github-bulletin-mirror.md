@@ -71,13 +71,17 @@ From GitHub's `author_association` and user type — never from text.
 | `member` | `OWNER`, `MEMBER`, `COLLABORATOR` |
 | `external` | everything else, including a missing association |
 
+A comment whose GitHub account was deleted arrives with a null user. It is credited to `ghost`
+(GitHub's own placeholder login) with author id 0, so its heading still parses.
+
 ### What the daemon relays
 
 `Build` turns fetched GitHub data into an `Item`:
 
 1. **Bot comments are dropped** and counted in `omitted.bot_comments`. Bot-authored items are still
    relayed; the server renders them as a one-line summary.
-2. **Cleanup** runs on title, body, every comment, every label and every file path: HTML comments
+2. **Cleanup** runs on title, body, every comment, every label and every file path (inline comment
+   paths included): HTML comments
    (`<!-- … -->`, including an unterminated one, which runs to the end of the text) and invisible
    characters are removed — U+00AD, U+115F–U+1160, U+180E, U+200B–U+200F, U+202A–U+202E,
    U+2060–U+2064, U+2066–U+2069, U+3164, U+FEFF, U+FFA0, and the tag block U+E0000–U+E007F (the
@@ -136,6 +140,12 @@ The caller is a signed-in person (team membership is checked); the server publis
 Item results: `accepted` (a post will be (re)published), `current` (the server already holds this
 source key at this hash), `rejected` with a reason. Repo results: `enabled`, `not_opted_in`,
 `not_linked`, `not_eligible` — anything but `enabled` backs the repo off for 24h.
+
+A re-approval, or a close and reopen between two cycles, can advance `last_material_change_at`
+without changing the hash. The daemon relays such an item again. When the hash matches the live
+post for the source key and `last_material_change_at` is later, the server extends that post's
+`expires_at` to `last_material_change_at + 90d` and answers `current`; the post bytes do not change.
+With no live post for the key it publishes and answers `accepted`.
 
 ### Rendered post
 
@@ -208,29 +218,45 @@ Runs inside the existing GitHub sync cycle (`GitHubSyncManager.doSync`), after t
 the same GitHub token, remote detection and on/off config. A relay failure never fails or delays the
 Ledger sync.
 
-1. **Gate:** server feature `features.github_mirror` (from `/api/v1/cli/settings`, no env override),
+1. **Gate:** server feature `features.github_mirror` (from `/api/v1/cli/settings`, no env override;
+   cached settings older than two hours, or with no fetch time, count as off),
    a GitHub remote, a token, the team's Team Context checkout present, not inside a backoff window.
-2. **Cursor:** cold start lists items updated in the last 90 days; afterwards it lists items updated
-   since the cursor (minus a 5-minute overlap).
+2. **Cursor:** one per kind. A cold start lists items updated in the last 90 days; afterwards each
+   kind lists items updated since its own cursor (minus a 5-minute overlap). A disabled kind's cursor
+   does not move, so enabling it later picks up its whole 90-day backlog.
 3. **Skip cheaply:** an item whose GitHub `updated_at` equals the remembered one is skipped without
    per-item API calls.
 4. **Budget:** at most 100 items get per-item detail calls per cycle; the cursor only advances when
    every listed item was processed, so a large cold start completes over several cycles.
-5. **Build, hash, filter:** unchanged hash → remember and skip; already expired → skip.
+5. **Build, hash, filter:** unchanged hash and no later `last_material_change_at` → remember and
+   skip; already expired → skip.
 6. **Relay** in batches of 50; record each result in the state file.
 
-State lives in `<ledger>/.sageox/cache/github_mirror/state.json` (local-only, never committed). The
+One cycle is bounded to 10 minutes, under the 15-minute sync interval. Running out of time is not
+a failure (no error, no backoff, and no success either): what was relayed is recorded, the cursors
+stay put, and the next cycle continues. Items already built when time runs out still get a
+one-minute relay window of their own, so a slow repo does not redo the same work every cycle.
+
+State lives in `<ledger>/.sageox/cache/github_mirror/state.json` (local-only, never committed). It
+records the team it relayed to; a different team (after a re-`ox init`) starts fresh. The
 daemon logs single-line key=value records and exposes last relay time, backlog and last error through
 `ox status`.
 
 ## Readers
+
+Both readers identify this repo by the canonical GitHub name the relay recorded in its state file and
+by the git remote's spelling, so a renamed or transferred repo keeps its posts without prime making a
+network call. File names are only a prefilter: every slug of a repo starts with the owner-name part
+cut to the shortest length any item number can force; `source_key` decides.
 
 - **Prime** adds one pointer when the board has live posts for this repo:
   `<bulletin board="github" dir="…" this-repo="{owner}-{name}-*" live="N" hint="…"/>`. It never loads
   post bodies.
 - **CodeDB** indexes the board's posts for this repo into the existing `pull_requests` / `issues`
   tables after the Ledger snapshots, so a board post wins over a Ledger snapshot for the same number.
-  Rows stay after a post expires; GitHub remains the source of truth.
+  Rows stay after a post expires; GitHub remains the source of truth. Only this repo's posts trigger
+  a re-index. A post that fails to index is retried on the next freshness checks, at most three
+  times for the same board state, so a persistent failure cannot cause a rebuild storm.
 - **ox doctor** warns when the mirror is enabled but has not succeeded in 24 hours, shows the last
   error, and names a repo the server refused.
 

@@ -343,3 +343,83 @@ func TestGitHubMirror_EndToEnd(t *testing.T) {
 	assert.Empty(t, stats.LastError, fmt.Sprintf("stats: %+v", stats))
 	assert.Equal(t, githubmirror.RepoEnabled, stats.RepoStatus)
 }
+
+// Failure prevented: a reviewer approves again a month after the first relay.
+// The change hash does not move, so the daemon used to drop the item and the
+// board post expired 90 days after the FIRST approval. Driven end to end: the
+// real fetcher reads the new review's time, the real client relays, and the
+// server's sidecar must carry the new expiry while the post itself is untouched.
+func TestGitHubMirror_ReApprovalExtendsThePostsExpiryOnTheBoard(t *testing.T) {
+	now := time.Date(2026, 10, 8, 17, 0, 0, 0, time.UTC)
+	var clockMu sync.Mutex
+	clock := func() time.Time { clockMu.Lock(); defer clockMu.Unlock(); return now }
+	advance := func(d time.Duration) { clockMu.Lock(); now = now.Add(d); clockMu.Unlock() }
+
+	devon := e2eUser{Login: "devon-dev", ID: 5550101, Type: "User"}
+	avery := e2eUser{Login: "avery-dev", ID: 5550102, Type: "User"}
+
+	github := newFakeGitHub()
+	created := now.Add(-48 * time.Hour)
+	firstApproval := now.Add(-47 * time.Hour)
+	github.pulls[7] = &e2eItem{
+		Number: 7, Title: "Tighten the relay retry", Body: "Backs off on 429.",
+		State: "open", User: devon, Association: "MEMBER", Labels: []any{},
+		CreatedAt: created, UpdatedAt: firstApproval,
+		HTMLURL: "https://github.com/acme/api/pull/7",
+	}
+	github.reviews[7] = []map[string]any{
+		{"id": 77, "user": avery, "state": "APPROVED", "submitted_at": firstApproval, "author_association": "MEMBER"},
+	}
+	ghSrv := httptest.NewServer(github)
+	t.Cleanup(ghSrv.Close)
+
+	teamContext := t.TempDir()
+	mirror := mirrortest.New(t, teamContext, mirrortest.WithNow(clock))
+	relayer, target := e2eTeammate(t, ghSrv.URL, mirror.URL(), teamContext, clock)
+	ctx := context.Background()
+
+	relayer.Run(ctx, target)
+
+	posts := mirror.Posts()
+	require.Len(t, posts, 1)
+	metaPath := strings.TrimSuffix(posts[0], ".md") + ".meta.json"
+	before, err := githubmirror.ReadPostMeta(metaPath)
+	require.NoError(t, err)
+	require.True(t, before.ExpiresAt.Equal(firstApproval.Add(githubmirror.Window)), "precondition: expiry starts at the first approval + 90d")
+	postBytes, err := os.ReadFile(posts[0])
+	require.NoError(t, err)
+	requestsBefore := len(mirror.Requests())
+
+	// a month later the same reviewer approves again
+	advance(30 * 24 * time.Hour)
+	secondApproval := clock().Add(-time.Minute)
+	github.mu.Lock()
+	github.reviews[7] = append(github.reviews[7],
+		map[string]any{"id": 78, "user": avery, "state": "APPROVED", "submitted_at": secondApproval, "author_association": "MEMBER"})
+	github.pulls[7].UpdatedAt = secondApproval
+	github.mu.Unlock()
+
+	relayer.Run(ctx, target)
+
+	assert.Len(t, mirror.Requests(), requestsBefore+1, "the re-approval is relayed")
+	assert.Equal(t, posts, mirror.Posts(), "same post, same file name")
+	afterBytes, err := os.ReadFile(posts[0])
+	require.NoError(t, err)
+	assert.Equal(t, postBytes, afterBytes, "the post bytes are not rewritten")
+	after, err := githubmirror.ReadPostMeta(metaPath)
+	require.NoError(t, err)
+	assert.True(t, after.ExpiresAt.Equal(secondApproval.Add(githubmirror.Window)),
+		"expires_at = %v, want the second approval + 90d = %v", after.ExpiresAt, secondApproval.Add(githubmirror.Window))
+
+	st, err := githubmirror.LoadState(target.LedgerPath)
+	require.NoError(t, err)
+	item := st.Items[githubmirror.SourceKey("acme", "api", githubmirror.KindPullRequest, 7)]
+	assert.Equal(t, githubmirror.ResultCurrent, item.Status, "the server already had this content")
+	assert.True(t, item.LastMaterialChangeAt.Equal(secondApproval))
+
+	// nothing further: the same GitHub state is skipped for free
+	requestsBefore = len(mirror.Requests())
+	advance(15 * time.Minute)
+	relayer.Run(ctx, target)
+	assert.Len(t, mirror.Requests(), requestsBefore)
+}

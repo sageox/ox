@@ -41,7 +41,7 @@ func assertFreshState(t *testing.T, s *State) {
 	if s.Items == nil || len(s.Items) != 0 {
 		t.Errorf("Items = %v, want a non-nil empty map", s.Items)
 	}
-	if s.ColdStartDone || !s.Cursor.IsZero() || s.Repo != "" {
+	if s.ColdStartDone || !s.PullRequestCursor.IsZero() || !s.IssueCursor.IsZero() || s.Repo != "" || s.Team != "" {
 		t.Errorf("fresh state carries leftovers: %+v", s)
 	}
 }
@@ -72,17 +72,19 @@ func TestSaveLoadState_RoundTrip(t *testing.T) {
 	t.Parallel()
 	ledger := t.TempDir()
 	in := &State{
-		Repo:          "acme/api",
-		Cursor:        at(100),
-		ColdStartDone: true,
-		LastAttemptAt: at(101),
-		LastSuccessAt: at(99),
-		LastError:     "relay: 503",
-		LastErrorAt:   at(98),
-		NextAllowedAt: at(102),
-		RepoStatus:    RepoEnabled,
-		RepoMeta:      &Repo{Owner: "acme", Name: "api", FullName: "acme/api", ID: 4242, Private: true},
-		RepoMetaAt:    at(97),
+		Repo:              "acme/api",
+		Team:              "team_acme",
+		PullRequestCursor: at(100),
+		IssueCursor:       at(90),
+		ColdStartDone:     true,
+		LastAttemptAt:     at(101),
+		LastSuccessAt:     at(99),
+		LastError:         "relay: 503",
+		LastErrorAt:       at(98),
+		NextAllowedAt:     at(102),
+		RepoStatus:        RepoEnabled,
+		RepoMeta:          &Repo{Owner: "acme", Name: "api", FullName: "acme/api", ID: 4242, Private: true},
+		RepoMetaAt:        at(97),
 		Items: map[string]ItemState{
 			"github.com/acme/api/pull/1287": {
 				UpdatedAt:            at(50),
@@ -121,6 +123,30 @@ func TestSaveLoadState_RoundTrip(t *testing.T) {
 	}
 	if out.RepoMeta == nil || !out.RepoMeta.Private {
 		t.Errorf("RepoMeta lost: %+v", out.RepoMeta)
+	}
+	if out.Team != "team_acme" || !out.PullRequestCursor.Equal(at(100)) || !out.IssueCursor.Equal(at(90)) {
+		t.Errorf("team or per-kind cursors lost: team=%q pr=%v issue=%v", out.Team, out.PullRequestCursor, out.IssueCursor)
+	}
+}
+
+// Failure prevented: a state file written before relay history recorded its
+// team (or before cursors were per kind) failing to load, which would throw the
+// history away on upgrade. It must load, with no team claimed.
+func TestLoadState_FileFromBeforeTeamsAndPerKindCursors(t *testing.T) {
+	t.Parallel()
+	ledger := t.TempDir()
+	writeStateFile(t, ledger, []byte(`{"version":1,"repo":"acme/api","cursor":"2026-10-01T00:00:00Z","cold_start_done":true,`+
+		`"items":{"github.com/acme/api/pull/1":{"change_hash":"sha256:abc","status":"accepted"}}}`))
+
+	s, err := LoadState(ledger)
+	if err != nil {
+		t.Fatalf("an older state file must load: %v", err)
+	}
+	if s.Repo != "acme/api" || !s.ColdStartDone || len(s.Items) != 1 {
+		t.Errorf("history lost: %+v", s)
+	}
+	if s.Team != "" || !s.PullRequestCursor.IsZero() || !s.IssueCursor.IsZero() {
+		t.Errorf("an older file must claim no team and no cursors: team=%q pr=%v issue=%v", s.Team, s.PullRequestCursor, s.IssueCursor)
 	}
 }
 
@@ -385,9 +411,9 @@ func TestState_PruneEdgeCases(t *testing.T) {
 	})
 	t.Run("keeps the other fields", func(t *testing.T) {
 		t.Parallel()
-		s := &State{Repo: "acme/api", Cursor: at(5), ColdStartDone: true, Items: map[string]ItemState{"old": {}}}
+		s := &State{Repo: "acme/api", Team: "team_acme", PullRequestCursor: at(5), IssueCursor: at(4), ColdStartDone: true, Items: map[string]ItemState{"old": {}}}
 		s.Prune(at(0))
-		if s.Repo != "acme/api" || !s.ColdStartDone || !s.Cursor.Equal(at(5)) {
+		if s.Repo != "acme/api" || s.Team != "team_acme" || !s.ColdStartDone || !s.PullRequestCursor.Equal(at(5)) || !s.IssueCursor.Equal(at(4)) {
 			t.Errorf("Prune touched non-item fields: %+v", s)
 		}
 	})

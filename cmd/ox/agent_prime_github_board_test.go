@@ -212,7 +212,7 @@ func TestLoadGitHubBoard(t *testing.T) {
 			project := gitRepoWithRemote(t, tt.remote)
 
 			info := &teamContextInfo{TeamID: "team-1"}
-			loadGitHubBoard(info, teamDir, project, now)
+			loadGitHubBoard(info, teamDir, project, nil, now)
 
 			if tt.wantLive == 0 {
 				assert.Nil(t, info.GitHubBoard, "no live post for this repo means no pointer")
@@ -224,6 +224,171 @@ func TestLoadGitHubBoard(t *testing.T) {
 			assert.Equal(t, githubmirror.PostsDir(teamDir), info.GitHubBoard.Dir)
 		})
 	}
+}
+
+// ledgerWithRelayState makes a Ledger checkout whose relay state says the repo
+// the remote calls remote is, on GitHub, canonical.
+func ledgerWithRelayState(t *testing.T, remote, canonicalOwner, canonicalName string) func() string {
+	t.Helper()
+	ledgerPath := t.TempDir()
+	require.NoError(t, githubmirror.SaveState(ledgerPath, &githubmirror.State{
+		Repo: remote,
+		RepoMeta: &githubmirror.Repo{
+			Owner: canonicalOwner, Name: canonicalName, FullName: canonicalOwner + "/" + canonicalName,
+		},
+	}))
+	return func() string { return ledgerPath }
+}
+
+// TestLoadGitHubBoard_LongRepoNames: Slug shortens a long owner-name to fit the
+// bulletin board's 80-character slug rule, so a file name filter built from the
+// full name rejects every post of that repo.
+//
+// Failure prevented: a repo with a long name has live posts on the board and
+// prime never points its coworkers at them.
+func TestLoadGitHubBoard_LongRepoNames(t *testing.T) {
+	now := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
+	future := now.Add(30 * 24 * time.Hour)
+
+	tests := []struct {
+		name, owner, repo string
+		number            int
+	}{
+		{"long name, small number", "acme", strings.Repeat("very-long-repo-name-", 5), 1},
+		{"long name, large number", "acme", strings.Repeat("very-long-repo-name-", 5), 123456789},
+		{"long owner and name", strings.Repeat("o", 39), strings.Repeat("repo", 25), 42},
+		{"punctuation at the cut", "acme", strings.Repeat("a", 48) + "---.---" + strings.Repeat("b", 40), 7},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			teamDir := t.TempDir()
+			plantGitHubPosts(t, teamDir,
+				githubPost{owner: tt.owner, name: tt.repo, kind: githubmirror.KindPullRequest, number: tt.number, expiresAt: future},
+				githubPost{owner: tt.owner, name: tt.repo, kind: githubmirror.KindIssue, number: tt.number + 1, expiresAt: future},
+				githubPost{owner: "acme", name: "web", kind: githubmirror.KindPullRequest, number: 1, expiresAt: future},
+			)
+			project := gitRepoWithRemote(t, "https://github.com/"+tt.owner+"/"+tt.repo+".git")
+
+			info := &teamContextInfo{TeamID: "team-1"}
+			loadGitHubBoard(info, teamDir, project, nil, now)
+
+			require.NotNil(t, info.GitHubBoard, "live posts for a long-named repo must produce a pointer")
+			assert.Equal(t, 2, info.GitHubBoard.Live)
+			glob := info.GitHubBoard.ThisRepo
+			require.True(t, strings.HasSuffix(glob, "*"))
+			matches, err := filepath.Glob(filepath.Join(info.GitHubBoard.Dir, glob+".md"))
+			require.NoError(t, err)
+			assert.Len(t, matches, 2, "the pointer's glob %q must find this repo's posts", glob)
+		})
+	}
+}
+
+// TestLoadGitHubBoard_RenamedRepo: the relay publishes under GitHub's current
+// name and records it in its state file; the git remote may still say the old
+// one. Prime reads the recorded name locally, never the network.
+//
+// Failure prevented: after a repo rename or transfer prime computes the wrong
+// file-name and source-key prefixes and stops pointing at the repo's posts.
+func TestLoadGitHubBoard_RenamedRepo(t *testing.T) {
+	now := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
+	future := now.Add(30 * 24 * time.Hour)
+	past := now.Add(-time.Hour)
+
+	posts := []githubPost{
+		{owner: "acme", name: "api-v2", kind: githubmirror.KindPullRequest, number: 5, expiresAt: future},
+		{owner: "acme", name: "api-v2", kind: githubmirror.KindIssue, number: 8, expiresAt: past},
+		{owner: "acme", name: "api", kind: githubmirror.KindPullRequest, number: 6, expiresAt: future},
+		{owner: "other", name: "service", kind: githubmirror.KindPullRequest, number: 7, expiresAt: future},
+	}
+
+	tests := []struct {
+		name     string
+		ledger   func(t *testing.T) func() string
+		wantLive int
+		wantGlob string
+	}{
+		{
+			name:     "the canonical name and the pre-rename name are both this repo",
+			ledger:   func(t *testing.T) func() string { return ledgerWithRelayState(t, "acme/api", "acme", "api-v2") },
+			wantLive: 2, // #5 under the new name, #6 from before the rename; #8 expired, #7 is another repo's
+			wantGlob: "acme-api-v2-*",
+		},
+		{
+			name:     "no relay state: only the remote's name is known",
+			ledger:   func(t *testing.T) func() string { return func() string { return t.TempDir() } },
+			wantLive: 1, // #6; the new name's posts are not recognizable without the relay's record
+			wantGlob: "acme-api-*",
+		},
+		{
+			name:     "no ledger",
+			ledger:   func(t *testing.T) func() string { return func() string { return "" } },
+			wantLive: 1,
+			wantGlob: "acme-api-*",
+		},
+		{
+			name:     "relay state for another repo is not trusted",
+			ledger:   func(t *testing.T) func() string { return ledgerWithRelayState(t, "acme/web", "acme", "web-v2") },
+			wantLive: 1,
+			wantGlob: "acme-api-*",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			teamDir := t.TempDir()
+			plantGitHubPosts(t, teamDir, posts...)
+			project := gitRepoWithRemote(t, "https://github.com/acme/api.git")
+
+			info := &teamContextInfo{TeamID: "team-1"}
+			loadGitHubBoard(info, teamDir, project, tt.ledger(t), now)
+
+			require.NotNil(t, info.GitHubBoard)
+			assert.Equal(t, tt.wantLive, info.GitHubBoard.Live)
+			assert.Equal(t, tt.wantGlob, info.GitHubBoard.ThisRepo, "the glob names the canonical slug prefix when the relay recorded one")
+		})
+	}
+
+	t.Run("a sidecar without source_key falls back to the canonical slug", func(t *testing.T) {
+		teamDir := t.TempDir()
+		plantGitHubPosts(t, teamDir, githubPost{owner: "acme", name: "api-v2", kind: githubmirror.KindPullRequest, number: 9, expiresAt: future, noSourceKey: true})
+		project := gitRepoWithRemote(t, "https://github.com/acme/api.git")
+
+		info := &teamContextInfo{TeamID: "team-1"}
+		loadGitHubBoard(info, teamDir, project, ledgerWithRelayState(t, "acme/api", "acme", "api-v2"), now)
+		require.NotNil(t, info.GitHubBoard)
+		assert.Equal(t, 1, info.GitHubBoard.Live)
+	})
+
+	t.Run("only the renamed repo's expired posts means no pointer", func(t *testing.T) {
+		teamDir := t.TempDir()
+		plantGitHubPosts(t, teamDir, githubPost{owner: "acme", name: "api-v2", kind: githubmirror.KindPullRequest, number: 5, expiresAt: past})
+		project := gitRepoWithRemote(t, "https://github.com/acme/api.git")
+
+		info := &teamContextInfo{TeamID: "team-1"}
+		loadGitHubBoard(info, teamDir, project, ledgerWithRelayState(t, "acme/api", "acme", "api-v2"), now)
+		assert.Nil(t, info.GitHubBoard)
+	})
+}
+
+// TestLoadGitHubBoard_LedgerLookupIsLazy: prime is a hot path. The ledger path
+// costs a repository lookup, so it is only resolved once the board has posts
+// and the project is a GitHub repo.
+func TestLoadGitHubBoard_LedgerLookupIsLazy(t *testing.T) {
+	now := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
+	boom := func() string {
+		t.Error("ledger path looked up although there was nothing to resolve")
+		return ""
+	}
+
+	t.Run("empty board", func(t *testing.T) {
+		teamDir := t.TempDir()
+		require.NoError(t, os.MkdirAll(githubmirror.PostsDir(teamDir), 0o755))
+		loadGitHubBoard(&teamContextInfo{}, teamDir, gitRepoWithRemote(t, "https://github.com/acme/api.git"), boom, now)
+	})
+	t.Run("not a GitHub repo", func(t *testing.T) {
+		teamDir := t.TempDir()
+		plantGitHubPosts(t, teamDir, githubPost{owner: "acme", name: "api", kind: githubmirror.KindPullRequest, number: 1, expiresAt: now.Add(time.Hour)})
+		loadGitHubBoard(&teamContextInfo{}, teamDir, gitRepoWithRemote(t, "https://gitlab.com/acme/api.git"), boom, now)
+	})
 }
 
 // TestLoadGitHubBoard_NeverOpensAPost: the pointer is computed from sidecars.
@@ -245,7 +410,7 @@ func TestLoadGitHubBoard_NeverOpensAPost(t *testing.T) {
 	require.NoError(t, os.Mkdir(matches[0], 0o755))
 
 	info := &teamContextInfo{TeamID: "team-1"}
-	loadGitHubBoard(info, teamDir, gitRepoWithRemote(t, "https://github.com/acme/api.git"), now)
+	loadGitHubBoard(info, teamDir, gitRepoWithRemote(t, "https://github.com/acme/api.git"), nil, now)
 	require.NotNil(t, info.GitHubBoard)
 	assert.Equal(t, 1, info.GitHubBoard.Live)
 

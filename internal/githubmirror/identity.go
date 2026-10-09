@@ -39,10 +39,34 @@ func Slug(owner, name, kind string, number int) string {
 	return prefix + "-" + suffix
 }
 
-// SlugPrefix is the "{owner}-{name}-" prefix every slug for the repo starts
-// with (before any truncation a very long owner/name would force).
+// maxInt64Digits is the length of the longest item number Slug can be given
+// (math.MaxInt64 has 19 digits).
+const maxInt64Digits = 19
+
+// slugPrefixBudget is how much of the "{owner}-{name}" stem survives in every
+// slug, whatever the kind and item number: Slug gives the stem
+// maxSlugLen - len("{pr|issue}-{n}") - 1, which is smallest for the longest
+// suffix, "issue-" plus a 19-digit number.
+const slugPrefixBudget = maxSlugLen - len("issue-") - maxInt64Digits - 1
+
+// SlugPrefix is a string every slug of the repo starts with, for any kind and
+// any item number: a file-name prefilter, never a full identity (source_key
+// decides). A name that fits is "{owner}-{name}-". A name too long to always
+// fit is cut to the part Slug keeps for every item number, with no dash
+// appended, because the stem ends there and the slug may continue with more
+// of it. "" means the owner and name have no slug-worthy characters.
 func SlugPrefix(owner, name string) string {
-	return slugify(owner+"-"+name) + "-"
+	stem := slugify(owner + "-" + name)
+	if stem == "" {
+		return ""
+	}
+	if len(stem) <= slugPrefixBudget {
+		return stem + "-"
+	}
+	// slugify output is ASCII, so cutting by byte is safe. The cut may end in
+	// a dash. That is still a prefix: where Slug trims a dash off its own cut,
+	// it puts one back as the separator before the suffix.
+	return stem[:slugPrefixBudget]
 }
 
 // slugify lowercases s and collapses every run of characters outside

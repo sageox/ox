@@ -48,6 +48,18 @@ const (
 	// githubMirrorReasonExpired marks an item whose newest human activity is
 	// already older than the post lifetime.
 	githubMirrorReasonExpired = "expired"
+
+	// githubMirrorCycleTimeout bounds one relay cycle. It sits below the
+	// 15-minute default GitHub sync interval because the mirror runs inside the
+	// sync cycle: a cycle that outlived the interval would keep the sync manager
+	// "syncing" and skip the Ledger's next GitHub sync.
+	githubMirrorCycleTimeout = 10 * time.Minute
+
+	// githubMirrorRelayGrace is the window the relay of already-built items gets
+	// after the cycle budget ran out during collection. Those items cost GitHub
+	// calls to build; throwing them away would let a slow repo repeat the same
+	// work every cycle and never finish.
+	githubMirrorRelayGrace = time.Minute
 )
 
 // MirrorRelayClient is the mirror API surface the relay needs.
@@ -78,6 +90,8 @@ type GitHubMirrorDeps struct {
 	Now func() time.Time
 	// DetailBudget defaults to defaultGitHubMirrorDetailBudget.
 	DetailBudget int
+	// CycleTimeout bounds one cycle; defaults to githubMirrorCycleTimeout.
+	CycleTimeout time.Duration
 	Logger       *slog.Logger
 }
 
@@ -130,6 +144,9 @@ func NewGitHubMirrorRelayer(deps GitHubMirrorDeps) *GitHubMirrorRelayer {
 	if deps.DetailBudget <= 0 {
 		deps.DetailBudget = defaultGitHubMirrorDetailBudget
 	}
+	if deps.CycleTimeout <= 0 {
+		deps.CycleTimeout = githubMirrorCycleTimeout
+	}
 	if deps.Logger == nil {
 		deps.Logger = slog.Default()
 	}
@@ -163,13 +180,16 @@ func newProjectGitHubMirrorRelayer(projectRoot string, settings func() *flags.CL
 }
 
 // githubMirrorFeatureOn is the server's features.github_mirror verdict. No
-// settings yet, or a server that does not send the flag, both mean off.
+// settings yet, a server that does not send the flag, or cached settings too
+// old to trust (the refresh has been failing) all mean off: the shared
+// resolver treats a stale cache as "no opinion", so a flag the server has since
+// revoked cannot stay on indefinitely.
 func githubMirrorFeatureOn(settings func() *flags.CLISettingsResponse) bool {
 	if settings == nil {
 		return false
 	}
-	s := settings()
-	return s != nil && s.Features.GitHubMirror != nil && *s.Features.GitHubMirror
+	// DaemonProvider reads memory only, so there is nothing for a context to cancel
+	return flags.Resolve(context.Background(), flags.DaemonProvider{CachedSettings: settings()}).GitHubMirrorEnabled
 }
 
 // resolveMirrorAuthToken mirrors SettingsFetcher.resolveAuthToken: the
@@ -221,7 +241,8 @@ func (r *GitHubMirrorRelayer) publish(st *githubmirror.State) {
 
 // Run executes one relay cycle. Every gate miss is a quiet return with no
 // network calls. All failures are recorded in the state file and logged; none
-// is returned.
+// is returned. A cycle is bounded by deps.CycleTimeout; running out of time is
+// logged and saved like progress, not recorded as a failure.
 func (r *GitHubMirrorRelayer) Run(ctx context.Context, target MirrorTarget) {
 	if !r.runMu.TryLock() {
 		r.deps.Logger.Debug("github mirror skipped: previous cycle still running")
@@ -263,7 +284,7 @@ func (r *GitHubMirrorRelayer) Run(ctx context.Context, target MirrorTarget) {
 	}
 
 	fullName := target.Owner + "/" + target.Repo
-	st := r.loadState(target.LedgerPath, fullName)
+	st := r.loadState(target.LedgerPath, fullName, teamRef)
 	if now.Before(st.NextAllowedAt) {
 		log.Debug("github mirror in backoff", "repo", fullName, "until", st.NextAllowedAt.Format(time.RFC3339))
 		r.publish(st)
@@ -279,6 +300,7 @@ func (r *GitHubMirrorRelayer) Run(ctx context.Context, target MirrorTarget) {
 		relay:   r.deps.NewRelay(authToken),
 		st:      st,
 		now:     now,
+		timeout: r.deps.CycleTimeout,
 		log:     log,
 	}
 	err := cycle.run(ctx)
@@ -290,6 +312,12 @@ func (r *GitHubMirrorRelayer) Run(ctx context.Context, target MirrorTarget) {
 	case ctx.Err() != nil && errors.Is(err, ctx.Err()):
 		// shutting down is not a failure: keep what was learned, record nothing
 		log.Debug("github mirror cycle interrupted", "repo", fullName)
+	case cycle.outOfTime:
+		// A slow repo is not a broken one: no backoff and no error. What was
+		// finished is saved below, the cursors stayed put, and the next cycle
+		// picks up the rest. Success is not claimed either, since the cycle did
+		// not complete.
+		log.Info("github mirror cycle ran out of time; unfinished items continue next cycle", "repo", fullName, "budget", cycle.timeout.String())
 	default:
 		r.recordFailure(st, now, err)
 		log.Warn("github mirror cycle failed", "repo", fullName, "error", st.LastError, "backoff_until", backoffAttr(st, now))
@@ -305,9 +333,10 @@ func (r *GitHubMirrorRelayer) Run(ctx context.Context, target MirrorTarget) {
 }
 
 // loadState returns the repo's state, or a fresh one when the file is
-// unreadable or belongs to another repo. Losing it only costs repeat relays
-// the server ignores, so it never blocks the mirror.
-func (r *GitHubMirrorRelayer) loadState(ledgerPath, fullName string) *githubmirror.State {
+// unreadable or belongs to another repo or team. Losing it only costs repeat
+// relays the server ignores, so it never blocks the mirror. A state that
+// records no team (written before teams were recorded) is adopted, not dropped.
+func (r *GitHubMirrorRelayer) loadState(ledgerPath, fullName, teamRef string) *githubmirror.State {
 	st, err := githubmirror.LoadState(ledgerPath)
 	if err != nil {
 		r.deps.Logger.Warn("github mirror state unreadable, starting fresh", "repo", fullName, "error", mirrorText(err))
@@ -319,10 +348,17 @@ func (r *GitHubMirrorRelayer) loadState(ledgerPath, fullName string) *githubmirr
 		r.deps.Logger.Info("github mirror state belongs to another repo, starting fresh", "repo", fullName, "state_repo", st.Repo)
 		st = &githubmirror.State{Version: githubmirror.StateVersion}
 	}
+	if st.Team != "" && st.Team != teamRef {
+		// everything remembered was sent to another team's board; this team's
+		// board has none of it, so skipping those items would leave it empty
+		r.deps.Logger.Info("github mirror state belongs to another team, starting fresh", "repo", fullName, "team", teamRef, "state_team", st.Team)
+		st = &githubmirror.State{Version: githubmirror.StateVersion}
+	}
 	if st.Items == nil {
 		st.Items = map[string]githubmirror.ItemState{}
 	}
 	st.Repo = fullName
+	st.Team = teamRef
 	return st
 }
 
@@ -422,7 +458,17 @@ type mirrorCycle struct {
 	relay   MirrorRelayClient
 	st      *githubmirror.State
 	now     time.Time
+	timeout time.Duration // the cycle's time budget
 	log     *slog.Logger
+
+	// newestPR and newestIssue are the newest updated_at listed for each kind
+	// this cycle; zero when the kind was not listed. They become the cursors
+	// once the cycle leaves nothing behind.
+	newestPR, newestIssue time.Time
+
+	// outOfTime is set when the time budget, not a failure or a shutdown, ended
+	// the cycle early.
+	outOfTime bool
 
 	// counters, for the summary log
 	listed, skipped, detailed, notFound, unchanged, expired int
@@ -433,33 +479,64 @@ type mirrorCycle struct {
 	cursorAdvanced                                          bool
 }
 
+// run bounds the cycle by its time budget. ctx is the daemon's: its
+// cancellation is a shutdown. The budget running out is a different thing, and
+// outOfTime tells the two apart.
 func (c *mirrorCycle) run(ctx context.Context) error {
-	if err := c.refreshRepo(ctx); err != nil {
+	work, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+
+	err := c.runWithin(ctx, work)
+	if err != nil && ctx.Err() == nil &&
+		errors.Is(work.Err(), context.DeadlineExceeded) && errors.Is(err, context.DeadlineExceeded) {
+		c.outOfTime = true
+	}
+	return err
+}
+
+// runWithin does the cycle's work. GitHub and relay calls use work, which
+// carries the budget; ctx is the daemon's.
+func (c *mirrorCycle) runWithin(ctx, work context.Context) error {
+	if err := c.refreshRepo(work); err != nil {
 		return err
 	}
 
-	candidates, err := c.list(ctx)
+	candidates, err := c.list(work)
 	if err != nil {
 		return err
 	}
 	c.listed = len(candidates)
 
-	pending, buildErr := c.collect(ctx, candidates)
+	pending, buildErr := c.collect(work, candidates)
 
-	// relay what was built even when collection stopped early: the per-item
-	// calls were already paid for
-	if relayErr := c.relayPending(ctx, pending); relayErr != nil {
+	// Relay what was built even when collection stopped early: the per-item
+	// calls were already paid for. If the budget is what stopped it, the relay
+	// gets a short window of its own; on the spent context it would fail at
+	// once, and a repo slow enough to hit the budget would redo the same work
+	// every cycle and never finish.
+	relayCtx := work
+	if work.Err() != nil && ctx.Err() == nil {
+		var stop context.CancelFunc
+		relayCtx, stop = context.WithTimeout(ctx, githubMirrorRelayGrace)
+		defer stop()
+	}
+	if relayErr := c.relayPending(relayCtx, pending); relayErr != nil {
 		return relayErr
 	}
 	if buildErr != nil {
 		return buildErr
 	}
 
-	// the cursor moves only when nothing was left behind, so the next cycle
-	// re-lists exactly the unfinished items; the ones done are skipped cheaply
+	// Each cursor moves only when nothing was left behind, so the next cycle
+	// re-lists exactly the unfinished items; the ones done are skipped cheaply.
+	// A kind that was not listed has no newest item and keeps its cursor.
 	if c.deferred == 0 && c.missing == 0 {
-		if len(candidates) > 0 && candidates[0].updatedAt.After(c.st.Cursor) {
-			c.st.Cursor = candidates[0].updatedAt
+		if c.newestPR.After(c.st.PullRequestCursor) {
+			c.st.PullRequestCursor = c.newestPR
+			c.cursorAdvanced = true
+		}
+		if c.newestIssue.After(c.st.IssueCursor) {
+			c.st.IssueCursor = c.newestIssue
 			c.cursorAdvanced = true
 		}
 		c.st.ColdStartDone = true
@@ -494,41 +571,47 @@ func (c *mirrorCycle) refreshRepo(ctx context.Context) error {
 	return nil
 }
 
-// since is the listing lower bound: the cursor less its overlap, never older
-// than the post lifetime (anything older would be expired anyway).
-func (c *mirrorCycle) since() time.Time {
+// since is the listing lower bound for one kind: its cursor less the overlap,
+// never older than the post lifetime (anything older would be expired anyway).
+func (c *mirrorCycle) since(cursor time.Time) time.Time {
 	floor := c.now.Add(-githubmirror.Window)
-	if c.st.Cursor.IsZero() {
+	if cursor.IsZero() {
 		return floor
 	}
-	since := c.st.Cursor.Add(-githubMirrorCursorOverlap)
+	since := cursor.Add(-githubMirrorCursorOverlap)
 	if since.Before(floor) {
 		return floor
 	}
 	return since
 }
 
-// list returns the PRs and issues updated since the bound, newest first.
+// list returns the PRs and issues updated since each kind's own bound, newest
+// first, and notes the newest updated_at of each kind for its cursor.
 func (c *mirrorCycle) list(ctx context.Context) ([]mirrorCandidate, error) {
-	since := c.since()
 	var out []mirrorCandidate
 
 	if c.target.PullRequests {
-		prs, err := c.fetcher.ListPullRequests(ctx, c.target.Owner, c.target.Repo, since)
+		prs, err := c.fetcher.ListPullRequests(ctx, c.target.Owner, c.target.Repo, c.since(c.st.PullRequestCursor))
 		if err != nil {
 			return nil, fmt.Errorf("list pull requests: %w", err)
 		}
 		for i := range prs {
 			out = append(out, mirrorCandidate{kind: githubmirror.KindPullRequest, number: prs[i].Number, updatedAt: prs[i].UpdatedAt, pr: &prs[i]})
+			if prs[i].UpdatedAt.After(c.newestPR) {
+				c.newestPR = prs[i].UpdatedAt
+			}
 		}
 	}
 	if c.target.Issues {
-		issues, err := c.fetcher.ListIssues(ctx, c.target.Owner, c.target.Repo, since)
+		issues, err := c.fetcher.ListIssues(ctx, c.target.Owner, c.target.Repo, c.since(c.st.IssueCursor))
 		if err != nil {
 			return nil, fmt.Errorf("list issues: %w", err)
 		}
 		for i := range issues {
 			out = append(out, mirrorCandidate{kind: githubmirror.KindIssue, number: issues[i].Number, updatedAt: issues[i].UpdatedAt, issue: &issues[i]})
+			if issues[i].UpdatedAt.After(c.newestIssue) {
+				c.newestIssue = issues[i].UpdatedAt
+			}
 		}
 	}
 
@@ -576,7 +659,14 @@ func (c *mirrorCycle) collect(ctx context.Context, candidates []mirrorCandidate)
 			return pending, err
 		}
 
-		if remembered && prev.ChangeHash == item.ChangeHash {
+		// A later last_material_change_at with the same hash is not "unchanged": a
+		// repeated approval, or a close and reopen between two cycles, moves the
+		// expiry clock without moving the hash. Such an item falls through to be
+		// relayed again so the server can extend the post's life. This also
+		// revives an item remembered as expired (those markers keep a zero
+		// last_material_change_at) once fresh human activity puts it back in the
+		// window.
+		if remembered && prev.ChangeHash == item.ChangeHash && !item.LastMaterialChangeAt.After(prev.LastMaterialChangeAt) {
 			// a bot comment, a reaction or a label bumped updated_at; nothing a
 			// reader sees changed
 			prev.UpdatedAt = cand.updatedAt

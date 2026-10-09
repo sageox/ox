@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -85,8 +86,30 @@ omitted: {bot_comments: 0, withheld: 0, hidden_spans: 0}
 
 Description of %s.
 `, repo, number, repo, number, title, number, title, title)
-	name := fmt.Sprintf("post-%d-%s.md", number, filepath.Base(repo))
-	require.NoError(t, os.WriteFile(filepath.Join(p.postsDir, name), []byte(content), 0o644))
+	require.NoError(t, os.WriteFile(p.postPath(repo, number), []byte(content), 0o644))
+}
+
+// postPath is where the server files a pull request post: <slug>-<sha>.md, the
+// name the readers' slug-prefix prefilter relies on.
+func (p boardProject) postPath(repo string, number int) string {
+	owner, name, _ := strings.Cut(repo, "/")
+	slug := githubmirror.Slug(owner, name, githubmirror.KindPullRequest, number)
+	return filepath.Join(p.postsDir, slug+"-aaaa1111.md")
+}
+
+// fingerprint is the board fingerprint the daemon should hold for repos, each
+// "owner/name": only their posts are watched.
+func (p boardProject) fingerprint(repos ...string) string {
+	return index.BoardFingerprint(p.postsDir, slugPrefixesOf(repos)...)
+}
+
+func slugPrefixesOf(repos []string) []string {
+	prefixes := make([]string, 0, len(repos))
+	for _, repo := range repos {
+		owner, name, _ := strings.Cut(repo, "/")
+		prefixes = append(prefixes, githubmirror.SlugPrefix(owner, name))
+	}
+	return prefixes
 }
 
 func (m *CodeDBManager) recordedBoardFingerprint() string {
@@ -116,21 +139,48 @@ func TestCodeDBManager_BoardChanged(t *testing.T) {
 
 	t.Run("follows the board from empty to posts to edits", func(t *testing.T) {
 		t.Parallel()
-		project := newBoardProject(t, "")
+		project := newBoardProject(t, "https://github.com/acme/api.git")
 		mgr := NewCodeDBManager(project.root, codedbTestLogger(), nil)
 
 		// nothing indexed yet and an empty board: the first index records it
 		assert.True(t, mgr.boardChanged(), "an existing board that was never indexed is a change")
-		mgr.lastIndexedBoard = index.BoardFingerprint(project.postsDir)
+		mgr.lastIndexedBoard = project.fingerprint("acme/api")
 		assert.False(t, mgr.boardChanged())
 
 		project.writePost(t, "acme/api", 1, "first")
 		assert.True(t, mgr.boardChanged(), "a teammate's PR landing on the board")
-		mgr.lastIndexedBoard = index.BoardFingerprint(project.postsDir)
+		mgr.lastIndexedBoard = project.fingerprint("acme/api")
 		assert.False(t, mgr.boardChanged())
 
-		require.NoError(t, os.Remove(filepath.Join(project.postsDir, "post-1-api.md")))
+		require.NoError(t, os.Remove(project.postPath("acme/api", 1)))
 		assert.True(t, mgr.boardChanged(), "a post the server removed")
+	})
+
+	t.Run("a project with no GitHub remote has no posts to watch", func(t *testing.T) {
+		t.Parallel()
+		project := newBoardProject(t, "")
+		project.writePost(t, "acme/api", 1, "first")
+		mgr := NewCodeDBManager(project.root, codedbTestLogger(), nil)
+		assert.False(t, mgr.boardChanged())
+	})
+
+	// Failure prevented: another repo's PR sending this project through the
+	// whole index pipeline (open stores, read commit hashes, rebuild dirty
+	// indexes) although nothing it indexes changed.
+	t.Run("another repo's posts are not a change", func(t *testing.T) {
+		t.Parallel()
+		project := newBoardProject(t, "https://github.com/acme/api.git")
+		project.writePost(t, "acme/api", 1, "first")
+		mgr := NewCodeDBManager(project.root, codedbTestLogger(), nil)
+		mgr.lastIndexedBoard = project.fingerprint("acme/api")
+		require.False(t, mgr.boardChanged())
+
+		project.writePost(t, "acme/web", 4, "someone else's change")
+		project.writePost(t, "other/service", 5, "another team repo")
+		assert.False(t, mgr.boardChanged(), "posts for acme/web and other/service")
+
+		project.writePost(t, "acme/api", 2, "second")
+		assert.True(t, mgr.boardChanged(), "a post for this repo")
 	})
 
 	t.Run("a board directory that does not exist yet is not a change", func(t *testing.T) {
@@ -154,21 +204,24 @@ func TestIndexGitHubBoardStage(t *testing.T) {
 		cancel          bool
 		wantTitle       string // title of acme/api #7 in the index; "" means no row
 		wantFingerprint bool   // whether the board fingerprint is recorded afterwards
+		watchesBoard    bool   // whether the project has a repo whose posts it watches
 	}{
 		{
 			name:            "indexes the posts of the repo the GitHub remote names, ignoring case",
 			remote:          "https://github.com/Acme/Api.git",
 			wantTitle:       "acme change",
 			wantFingerprint: true,
+			watchesBoard:    true,
 		},
 		{
 			name:            "scp-style remote resolves too",
 			remote:          "git@github.com:acme/api.git",
 			wantTitle:       "acme change",
 			wantFingerprint: true,
+			watchesBoard:    true,
 		},
 		{
-			name:            "no GitHub remote indexes nothing but still records the board as seen",
+			name:            "no GitHub remote indexes nothing and has no board to watch",
 			remote:          "",
 			wantFingerprint: true,
 		},
@@ -178,10 +231,11 @@ func TestIndexGitHubBoardStage(t *testing.T) {
 			wantFingerprint: true,
 		},
 		{
-			name:      "canceled stage leaves the fingerprint stale so the next check retries",
-			remote:    "https://github.com/acme/api.git",
-			cancel:    true,
-			wantTitle: "",
+			name:         "canceled stage leaves the fingerprint stale so the next check retries",
+			remote:       "https://github.com/acme/api.git",
+			cancel:       true,
+			wantTitle:    "",
+			watchesBoard: true,
 		},
 	}
 	for _, tt := range tests {
@@ -210,10 +264,16 @@ func TestIndexGitHubBoardStage(t *testing.T) {
 			assert.Equal(t, tt.wantTitle, title)
 
 			if tt.wantFingerprint {
-				assert.Equal(t, index.BoardFingerprint(project.postsDir), mgr.recordedBoardFingerprint())
+				if tt.watchesBoard {
+					assert.NotEmpty(t, mgr.recordedBoardFingerprint())
+					assert.Equal(t, project.fingerprint("acme/api"), mgr.recordedBoardFingerprint())
+				} else {
+					assert.Empty(t, mgr.recordedBoardFingerprint(), "no repo, nothing to watch")
+				}
 				assert.False(t, mgr.boardChanged(), "an indexed board must not look changed, or every check re-indexes")
 			} else {
 				assert.Empty(t, mgr.recordedBoardFingerprint())
+				assert.True(t, mgr.boardChanged(), "a stage that did not finish must be retried")
 			}
 		})
 	}
@@ -265,7 +325,7 @@ func TestCheckFreshness_ReindexesWhenOnlyTheBoardChanged(t *testing.T) {
 		head := readHeadFingerprint(context.Background(), project.root)
 		require.NotEmpty(t, head)
 		mgr.lastIndexedHead = head
-		mgr.lastIndexedBoard = index.BoardFingerprint(project.postsDir)
+		mgr.lastIndexedBoard = project.fingerprint("acme/api")
 		require.NoError(t, os.MkdirAll(mgr.resolveSharedDataDir(), 0o755), "the pre-check only trusts the HEAD cache while the index directory exists")
 		return mgr, project, &runs
 	}
@@ -282,7 +342,7 @@ func TestCheckFreshness_ReindexesWhenOnlyTheBoardChanged(t *testing.T) {
 		t.Parallel()
 		mgr, project, runs := setup(t)
 		project.writePost(t, "acme/api", 2, "second")
-		want := index.BoardFingerprint(project.postsDir)
+		want := project.fingerprint("acme/api")
 
 		// the Ledger holds an older snapshot of PR 1, which the board also has: the
 		// board stage must run after the Ledger stage for the post to win
@@ -317,5 +377,193 @@ func TestCheckFreshness_ReindexesWhenOnlyTheBoardChanged(t *testing.T) {
 		mgr.CheckFreshness(context.Background())
 		waitForIndexingDone(t, mgr)
 		assert.Equal(t, int64(1), runs.Load())
+	})
+}
+
+// openUnwritableDB returns a CodeDB whose store is already closed, so every
+// post written to it fails the way a transient database error would.
+func openUnwritableDB(t *testing.T) *codedb.DB {
+	t.Helper()
+	db, err := codedb.Open(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+	return db
+}
+
+func openBoardTestDB(t *testing.T) *codedb.DB {
+	t.Helper()
+	db, err := codedb.Open(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { db.Close() })
+	return db
+}
+
+// TestIndexGitHubBoardStage_RenamedRepo: the relay publishes under GitHub's
+// current name, which the relay records in its state file, while the git remote
+// may still say the old one.
+//
+// Failure prevented: after a repo rename or transfer, new posts carry the new
+// name, the daemon only accepts the remote's spelling, and the repo's PRs and
+// issues quietly stop appearing in ox code prs.
+func TestIndexGitHubBoardStage_RenamedRepo(t *testing.T) {
+	t.Parallel()
+
+	setup := func(t *testing.T) boardProject {
+		t.Helper()
+		project := newBoardProject(t, "https://github.com/acme/api.git")
+		project.writePost(t, "acme/api-v2", 5, "after the rename")
+		project.writePost(t, "acme/api", 6, "before the rename")
+		project.writePost(t, "other/service", 7, "unrelated")
+		return project
+	}
+	recordRename := func(t *testing.T) string {
+		t.Helper()
+		ledgerPath := t.TempDir()
+		require.NoError(t, githubmirror.SaveState(ledgerPath, &githubmirror.State{
+			Repo:     "acme/api",
+			RepoMeta: &githubmirror.Repo{Owner: "acme", Name: "api-v2", FullName: "acme/api-v2"},
+		}))
+		return ledgerPath
+	}
+
+	t.Run("the relay's canonical name and the remote's name are both this repo", func(t *testing.T) {
+		t.Parallel()
+		project := setup(t)
+		db := openBoardTestDB(t)
+		mgr := NewCodeDBManager(project.root, codedbTestLogger(), nil)
+		mgr.SetLedgerPath(recordRename(t))
+
+		mgr.indexGitHubBoard(context.Background(), db, nil)
+
+		title, found := prTitle(t, db, 5)
+		assert.True(t, found, "a post under the new name must be indexed")
+		assert.Equal(t, "after the rename", title)
+		title, found = prTitle(t, db, 6)
+		assert.True(t, found, "a post written before the rename is still this repo's")
+		assert.Equal(t, "before the rename", title)
+		_, found = prTitle(t, db, 7)
+		assert.False(t, found, "another repo's post is not")
+
+		assert.Equal(t, project.fingerprint("acme/api", "acme/api-v2"), mgr.recordedBoardFingerprint())
+		require.False(t, mgr.boardChanged())
+		project.writePost(t, "acme/api-v2", 8, "a later post under the new name")
+		assert.True(t, mgr.boardChanged(), "a new post under the canonical name moves the board")
+	})
+
+	t.Run("without relay state only the remote's spelling is known", func(t *testing.T) {
+		t.Parallel()
+		project := setup(t)
+		db := openBoardTestDB(t)
+		mgr := NewCodeDBManager(project.root, codedbTestLogger(), nil)
+		mgr.SetLedgerPath(t.TempDir())
+
+		mgr.indexGitHubBoard(context.Background(), db, nil)
+
+		_, found := prTitle(t, db, 5)
+		assert.False(t, found)
+		_, found = prTitle(t, db, 6)
+		assert.True(t, found)
+	})
+}
+
+// TestIndexGitHubBoardStage_RetriesFailedPostsBoundedTimes: a post that fails
+// to index keeps the board "changed" so the next freshness check retries it,
+// but only three times for the same board state.
+//
+// Failure prevented, both directions: a transient error losing a post's row for
+// good because the stage recorded the board as indexed; and (incident #1144) a
+// persistent error re-running the whole index pipeline on every freshness
+// check.
+func TestIndexGitHubBoardStage_RetriesFailedPostsBoundedTimes(t *testing.T) {
+	t.Parallel()
+
+	setup := func(t *testing.T) (*CodeDBManager, boardProject) {
+		t.Helper()
+		project := newBoardProject(t, "https://github.com/acme/api.git")
+		project.writePost(t, "acme/api", 1, "first")
+		return NewCodeDBManager(project.root, codedbTestLogger(), nil), project
+	}
+	ctx := context.Background()
+
+	t.Run("two failures stay stale, the third is recorded", func(t *testing.T) {
+		t.Parallel()
+		mgr, project := setup(t)
+		broken := openUnwritableDB(t)
+
+		for attempt := 1; attempt <= 2; attempt++ {
+			mgr.indexGitHubBoard(ctx, broken, nil)
+			assert.NotEqual(t, project.fingerprint("acme/api"), mgr.recordedBoardFingerprint(), "attempt %d", attempt)
+			assert.True(t, mgr.boardChanged(), "attempt %d must be retried by the next freshness check", attempt)
+		}
+
+		mgr.indexGitHubBoard(ctx, broken, nil)
+		assert.Equal(t, project.fingerprint("acme/api"), mgr.recordedBoardFingerprint())
+		assert.False(t, mgr.boardChanged(), "after three attempts a persistent failure stops re-running the pipeline")
+
+		// the pipeline also runs when HEAD moves; the board has not changed, so
+		// the retries must not start over
+		mgr.indexGitHubBoard(ctx, broken, nil)
+		assert.False(t, mgr.boardChanged(), "a given-up board state is not retried on every later run")
+	})
+
+	t.Run("a retry that succeeds indexes the post and records the board", func(t *testing.T) {
+		t.Parallel()
+		mgr, project := setup(t)
+		mgr.indexGitHubBoard(ctx, openUnwritableDB(t), nil)
+		require.True(t, mgr.boardChanged())
+
+		db := openBoardTestDB(t)
+		mgr.indexGitHubBoard(ctx, db, nil)
+		title, found := prTitle(t, db, 1)
+		assert.True(t, found)
+		assert.Equal(t, "first", title)
+		assert.Equal(t, project.fingerprint("acme/api"), mgr.recordedBoardFingerprint())
+		assert.False(t, mgr.boardChanged())
+	})
+
+	t.Run("a clean run resets the count", func(t *testing.T) {
+		t.Parallel()
+		mgr, _ := setup(t)
+		broken := openUnwritableDB(t)
+
+		mgr.indexGitHubBoard(ctx, broken, nil)
+		mgr.indexGitHubBoard(ctx, broken, nil)
+		mgr.indexGitHubBoard(ctx, openBoardTestDB(t), nil)
+		require.False(t, mgr.boardChanged(), "the clean run recorded the board")
+
+		mgr.indexGitHubBoard(ctx, broken, nil)
+		assert.True(t, mgr.boardChanged(), "after a clean run a new failure gets its own retries")
+	})
+
+	t.Run("a changed board resets the count", func(t *testing.T) {
+		t.Parallel()
+		mgr, project := setup(t)
+		broken := openUnwritableDB(t)
+
+		for range 3 {
+			mgr.indexGitHubBoard(ctx, broken, nil)
+		}
+		require.False(t, mgr.boardChanged(), "given up on this board state")
+
+		project.writePost(t, "acme/api", 2, "second")
+		require.True(t, mgr.boardChanged(), "a new post is a new board state")
+		mgr.indexGitHubBoard(ctx, broken, nil)
+		assert.True(t, mgr.boardChanged(), "the new board state gets its own retries")
+	})
+
+	t.Run("a canceled stage stays stale and does not use up a retry", func(t *testing.T) {
+		t.Parallel()
+		mgr, _ := setup(t)
+		canceled, cancel := context.WithCancel(ctx)
+		cancel()
+		broken := openUnwritableDB(t)
+
+		for range 5 {
+			mgr.indexGitHubBoard(canceled, broken, nil)
+		}
+		assert.True(t, mgr.boardChanged())
+		mgr.indexGitHubBoard(ctx, broken, nil)
+		mgr.indexGitHubBoard(ctx, broken, nil)
+		assert.True(t, mgr.boardChanged(), "two real failures are still within the three attempts")
 	})
 }

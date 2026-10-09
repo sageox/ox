@@ -198,6 +198,11 @@ func (m *GitHubSyncManager) runCycle(ctx context.Context, ledgerPath string, inc
 // and touches none of the Ledger sync's state. A panic is contained here: the
 // mirror is feature-flagged and handles server and GitHub data, and the daemon
 // must outlive it.
+//
+// The mirror runs while m.syncing is held, so a slow mirror would make
+// CheckAndSync skip the Ledger's next cycle. Run therefore bounds itself
+// (githubMirrorCycleTimeout, below the sync interval) instead of this method
+// imposing a second deadline.
 func (m *GitHubSyncManager) relayMirror(ctx context.Context, target MirrorTarget) {
 	m.mu.Lock()
 	relayer := m.mirror

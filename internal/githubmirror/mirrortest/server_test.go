@@ -178,6 +178,106 @@ func TestServer_AcceptsThenReportsCurrent(t *testing.T) {
 	}
 }
 
+// Failure prevented: a re-approval (or a close and reopen) moves an item's
+// last material change without moving its hash. If the server answers "current"
+// and leaves the expiry alone, the post disappears 90 days after the FIRST
+// approval while people are still working on it.
+func TestServer_LaterMaterialChangeExtendsTheExpiryOnly(t *testing.T) {
+	t.Parallel()
+	srv, dir := newServer(t)
+	item := prItem(1287, "sha256:aaa1", "Mirror GitHub activity") // last change at(5, 9)
+	if got := onlyResult(t, relay(t, srv, batch(item))); got.Status != githubmirror.ResultAccepted {
+		t.Fatalf("setup: first relay = %+v", got)
+	}
+	posts := srv.Posts()
+	if len(posts) != 1 {
+		t.Fatalf("setup: got %d posts", len(posts))
+	}
+	metaPath := strings.TrimSuffix(posts[0], ".md") + ".meta.json"
+	postBefore := readFile(t, posts[0])
+	metaBefore, err := githubmirror.ReadPostMeta(metaPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// same hash, activity 30 days later
+	later := item
+	later.LastMaterialChangeAt = at(35, 9)
+	got := onlyResult(t, relay(t, srv, batch(later)))
+	if got.Status != githubmirror.ResultCurrent {
+		t.Fatalf("same hash, later activity = %+v, want current", got)
+	}
+
+	metaAfter, err := githubmirror.ReadPostMeta(metaPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := later.LastMaterialChangeAt.Add(githubmirror.Window); !metaAfter.ExpiresAt.Equal(want) {
+		t.Errorf("expires_at = %v, want the later activity + 90d = %v (it stayed at %v)", metaAfter.ExpiresAt, want, metaBefore.ExpiresAt)
+	}
+	if after := srv.Posts(); len(after) != 1 || after[0] != posts[0] || readFile(t, posts[0]) != postBefore {
+		t.Errorf("the post itself must not change: %v", after)
+	}
+	if metaAfter.Path != metaBefore.Path || metaAfter.Slug != metaBefore.Slug || metaAfter.SourceKey != metaBefore.SourceKey ||
+		!metaAfter.CreatedAt.Equal(metaBefore.CreatedAt) {
+		t.Errorf("only expires_at may change:\n before %+v\n after  %+v", metaBefore, metaAfter)
+	}
+	if raw := readFile(t, metaPath); !strings.Contains(raw, `"change_hash": "sha256:aaa1"`) {
+		t.Errorf("the server's own change_hash was lost from the meta:\n%s", raw)
+	}
+
+	// the extension survives a server restart: it lives in the files
+	other := mirrortest.New(t, dir)
+	earlier := item
+	earlier.LastMaterialChangeAt = at(10, 9)
+	if got := onlyResult(t, relay(t, other, batch(earlier))); got.Status != githubmirror.ResultCurrent {
+		t.Fatalf("earlier activity = %+v, want current", got)
+	}
+	// and an older timestamp never shortens a post's life
+	metaKept, err := githubmirror.ReadPostMeta(metaPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !metaKept.ExpiresAt.Equal(metaAfter.ExpiresAt) {
+		t.Errorf("an earlier last_material_change_at shortened expires_at to %v, want it kept at %v", metaKept.ExpiresAt, metaAfter.ExpiresAt)
+	}
+}
+
+// Failure prevented: the extension path publishes a duplicate, or touches a
+// neighboring item, when only one item's activity moved.
+func TestServer_ExtensionIsPerItemAndNeverPublishesTwice(t *testing.T) {
+	t.Parallel()
+	srv, _ := newServer(t)
+	first := prItem(1, "sha256:one", "First")
+	second := prItem(2, "sha256:two", "Second")
+	relay(t, srv, batch(first, second))
+
+	moved := first
+	moved.LastMaterialChangeAt = at(40, 9)
+	resp := relay(t, srv, batch(moved, second))
+	if len(resp.Results) != 2 || resp.Results[0].Status != githubmirror.ResultCurrent || resp.Results[1].Status != githubmirror.ResultCurrent {
+		t.Fatalf("results = %+v, want current for both", resp.Results)
+	}
+	if posts := srv.Posts(); len(posts) != 2 {
+		t.Fatalf("got %d posts, want 2: %v", len(posts), posts)
+	}
+
+	expires := map[string]time.Time{}
+	for _, p := range srv.Posts() {
+		meta, err := githubmirror.ReadPostMeta(strings.TrimSuffix(p, ".md") + ".meta.json")
+		if err != nil {
+			t.Fatal(err)
+		}
+		expires[meta.SourceKey] = meta.ExpiresAt
+	}
+	if want := moved.LastMaterialChangeAt.Add(githubmirror.Window); !expires["github.com/acme/api/pull/1"].Equal(want) {
+		t.Errorf("moved item expires_at = %v, want %v", expires["github.com/acme/api/pull/1"], want)
+	}
+	if want := second.LastMaterialChangeAt.Add(githubmirror.Window); !expires["github.com/acme/api/pull/2"].Equal(want) {
+		t.Errorf("untouched item expires_at = %v, want %v", expires["github.com/acme/api/pull/2"], want)
+	}
+}
+
 func TestServer_NewHashSupersedesThePost(t *testing.T) {
 	t.Parallel()
 	srv, _ := newServer(t)

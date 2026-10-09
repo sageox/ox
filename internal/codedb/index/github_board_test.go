@@ -761,12 +761,153 @@ func TestIndexGitHubBoard_CanceledContext(t *testing.T) {
 	assert.Zero(t, countRows(t, s, `SELECT COUNT(*) FROM pull_requests`))
 }
 
+// boardPRFor renders boardPR for another repo spelling.
+func boardPRFor(repo string, number int, title, lastChange string) string {
+	return strings.ReplaceAll(boardPR(number, title, lastChange), "acme/api", repo)
+}
+
+// TestIndexGitHubBoard_RenamedRepo: the relay publishes under GitHub's current
+// name while the git remote may still carry the old one.
+//
+// Failure prevented: after a repo rename or transfer every new post is
+// published under the new name, the old-name filter rejects all of them, and
+// the repo's PRs and issues silently stop reaching ox code prs.
+func TestIndexGitHubBoard_RenamedRepo(t *testing.T) {
+	t.Parallel()
+
+	const oldName, newName = "acme/api", "acme/api-v2"
+	write := func(t *testing.T, dir string) {
+		t.Helper()
+		writeBoardFile(t, dir, "acme-api-v2-pr-5-aaaa1111.md", boardPRFor(newName, 5, "after the rename", "2026-10-05T00:00:00Z"))
+		writeBoardFile(t, dir, "acme-api-pr-6-bbbb2222.md", boardPRFor(oldName, 6, "before the rename", "2026-10-02T00:00:00Z"))
+		writeBoardFile(t, dir, "other-service-pr-7-cccc3333.md", boardPRFor("other/service", 7, "unrelated", "2026-10-06T00:00:00Z"))
+	}
+	titles := func(t *testing.T, s *store.Store) map[int]string {
+		t.Helper()
+		rows, err := s.Query(`SELECT number, title FROM pull_requests ORDER BY number`)
+		require.NoError(t, err)
+		defer rows.Close()
+		got := map[int]string{}
+		for rows.Next() {
+			var number int
+			var title string
+			require.NoError(t, rows.Scan(&number, &title))
+			got[number] = title
+		}
+		require.NoError(t, rows.Err())
+		return got
+	}
+
+	t.Run("the canonical name and the remote's name are both this repo", func(t *testing.T) {
+		t.Parallel()
+		s := openBoardStore(t)
+		dir := t.TempDir()
+		write(t, dir)
+
+		stats, err := IndexGitHubBoard(context.Background(), s, dir, oldName, nil, newName)
+		require.NoError(t, err)
+		assert.Equal(t, 2, stats.PRsIndexed)
+		assert.Equal(t, map[int]string{5: "after the rename", 6: "before the rename"}, titles(t, s),
+			"a post under the new name is indexed, a pre-rename post is still accepted, an unrelated repo's is not")
+	})
+
+	t.Run("spelling and case of the alias do not matter, and blanks are ignored", func(t *testing.T) {
+		t.Parallel()
+		s := openBoardStore(t)
+		dir := t.TempDir()
+		write(t, dir)
+
+		stats, err := IndexGitHubBoard(context.Background(), s, dir, "ACME/API", nil, "", "Acme/Api-V2", oldName)
+		require.NoError(t, err)
+		assert.Equal(t, 2, stats.PRsIndexed)
+		assert.Equal(t, map[int]string{5: "after the rename", 6: "before the rename"}, titles(t, s))
+	})
+
+	t.Run("without the alias only the remote's name matches", func(t *testing.T) {
+		t.Parallel()
+		s := openBoardStore(t)
+		dir := t.TempDir()
+		write(t, dir)
+
+		_, err := IndexGitHubBoard(context.Background(), s, dir, oldName, nil)
+		require.NoError(t, err)
+		assert.Equal(t, map[int]string{6: "before the rename"}, titles(t, s))
+	})
+}
+
+// TestIndexGitHubBoard_ReportsPostsThatFailToIndex: a post that cannot be
+// written is reported, not just logged, so the daemon can retry it.
+//
+// Failure prevented: a transient database error loses a post's row for good,
+// because the caller saw success and recorded the board as indexed.
+func TestIndexGitHubBoard_ReportsPostsThatFailToIndex(t *testing.T) {
+	t.Parallel()
+
+	t.Run("one failing post is reported and still leaves the others indexed", func(t *testing.T) {
+		t.Parallel()
+		s := openBoardStore(t)
+		dir := t.TempDir()
+		prPath := writeBoardFile(t, dir, boardPRName, boardMemberPR)
+		issuePath := writeBoardFile(t, dir, boardIssueName, boardExternalIssue)
+		// the issue has a comment to insert, so it fails; the PR does not touch this table
+		_, err := s.Exec(`DROP TABLE issue_comments`)
+		require.NoError(t, err)
+
+		stats, err := IndexGitHubBoard(context.Background(), s, dir, boardRepoFullName, nil)
+		require.ErrorIs(t, err, ErrBoardPostsFailed)
+		assert.NotErrorIs(t, err, context.Canceled)
+		require.NotNil(t, stats, "what was indexed is still reported")
+		assert.Equal(t, 1, stats.PRsIndexed)
+		assert.Zero(t, stats.IssuesIndexed)
+
+		assert.Equal(t, 1, countRows(t, s, `SELECT COUNT(*) FROM pull_requests`))
+		assert.Zero(t, countRows(t, s, `SELECT COUNT(*) FROM issues`), "the failed post's transaction is rolled back")
+		assert.Equal(t, 1, countRows(t, s, `SELECT COUNT(*) FROM github_file_mtimes WHERE source_path = ?`, prPath))
+		assert.Zero(t, countRows(t, s, `SELECT COUNT(*) FROM github_file_mtimes WHERE source_path = ?`, issuePath),
+			"a post that failed must not be recorded as indexed, or the next run would skip it")
+	})
+
+	t.Run("a store that cannot be written fails every post", func(t *testing.T) {
+		t.Parallel()
+		s := openBoardStore(t)
+		dir := t.TempDir()
+		writeBoardFile(t, dir, boardPRName, boardMemberPR)
+		require.NoError(t, s.Close())
+
+		stats, err := IndexGitHubBoard(context.Background(), s, dir, boardRepoFullName, nil)
+		require.ErrorIs(t, err, ErrBoardPostsFailed)
+		assert.Zero(t, stats.PRsIndexed+stats.IssuesIndexed)
+	})
+
+	t.Run("skipped files are not failures", func(t *testing.T) {
+		t.Parallel()
+		s := openBoardStore(t)
+		dir := t.TempDir()
+		writeBoardFile(t, dir, boardPRName, boardMemberPR)
+		writeBoardFile(t, dir, boardOtherName, boardOtherRepoPR)
+		writeBoardFile(t, dir, boardBrokenName, "this is not a post\n")
+
+		_, err := IndexGitHubBoard(context.Background(), s, dir, boardRepoFullName, nil)
+		require.NoError(t, err, "another repo's post and an unparseable file cannot be fixed by retrying")
+	})
+}
+
 func TestBoardFingerprint(t *testing.T) {
 	t.Parallel()
 
+	prefix := githubmirror.SlugPrefix("acme", "api")
+
 	t.Run("missing directory has no fingerprint", func(t *testing.T) {
 		t.Parallel()
-		assert.Empty(t, BoardFingerprint(filepath.Join(t.TempDir(), "absent")))
+		assert.Empty(t, BoardFingerprint(filepath.Join(t.TempDir(), "absent"), prefix))
+	})
+
+	t.Run("no repo to watch has no fingerprint", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		writeBoardFile(t, dir, "acme-api-pr-1-aaaa.md", boardPR(1, "one", "2026-10-01T00:00:00Z"))
+		assert.Empty(t, BoardFingerprint(dir), "a project with no GitHub remote watches nothing")
+		assert.Empty(t, BoardFingerprint(dir, ""), "an empty prefix is no repo, not every repo")
 	})
 
 	t.Run("tracks posts coming, going and changing, and ignores everything else", func(t *testing.T) {
@@ -774,29 +915,88 @@ func TestBoardFingerprint(t *testing.T) {
 		dir := t.TempDir()
 		base := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
 
-		empty := BoardFingerprint(dir)
+		empty := BoardFingerprint(dir, prefix)
 		require.NotEmpty(t, empty, "an existing empty board still has a fingerprint")
-		assert.Equal(t, empty, BoardFingerprint(dir), "stable while nothing changes")
+		assert.Equal(t, empty, BoardFingerprint(dir, prefix), "stable while nothing changes")
 
 		first := writeBoardFile(t, dir, "acme-api-pr-1-aaaa.md", boardPR(1, "one", "2026-10-01T00:00:00Z"))
 		setBoardMtime(t, first, base)
-		withOne := BoardFingerprint(dir)
+		withOne := BoardFingerprint(dir, prefix)
 		assert.NotEqual(t, empty, withOne, "a new post changes the fingerprint")
 
 		writeBoardFile(t, dir, "acme-api-pr-1-aaaa.meta.json", "{}")
 		writeBoardFile(t, dir, "notes.txt", "x")
-		assert.Equal(t, withOne, BoardFingerprint(dir), "meta files and strays are not posts")
+		assert.Equal(t, withOne, BoardFingerprint(dir, prefix), "meta files and strays are not posts")
 
 		second := writeBoardFile(t, dir, "acme-api-pr-2-bbbb.md", boardPR(2, "two", "2026-10-01T00:00:00Z"))
 		setBoardMtime(t, second, base.Add(time.Hour))
-		withTwo := BoardFingerprint(dir)
+		withTwo := BoardFingerprint(dir, prefix)
 		assert.NotEqual(t, withOne, withTwo)
 
 		setBoardMtime(t, first, base.Add(2*time.Hour))
-		rewritten := BoardFingerprint(dir)
+		rewritten := BoardFingerprint(dir, prefix)
 		assert.NotEqual(t, withTwo, rewritten, "an in-place rewrite moves the newest mtime")
 
 		require.NoError(t, os.Remove(second))
-		assert.NotEqual(t, rewritten, BoardFingerprint(dir), "a removed post changes the count")
+		assert.NotEqual(t, rewritten, BoardFingerprint(dir, prefix), "a removed post changes the count")
+	})
+}
+
+// TestBoardFingerprint_OnlyThisReposPosts: the board is shared by every repo on
+// the team, and the daemon re-runs its whole index pipeline when the
+// fingerprint moves.
+//
+// Failure prevented: a teammate's PR in a different repo sending this project
+// through the store-opening, index-rebuilding pipeline although nothing this
+// project indexes has changed.
+func TestBoardFingerprint_OnlyThisReposPosts(t *testing.T) {
+	t.Parallel()
+
+	prefix := githubmirror.SlugPrefix("acme", "api")
+	base := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+
+	setup := func(t *testing.T) string {
+		t.Helper()
+		dir := t.TempDir()
+		mine := writeBoardFile(t, dir, "acme-api-pr-1-aaaa1111.md", boardPR(1, "mine", "2026-10-01T00:00:00Z"))
+		setBoardMtime(t, mine, base)
+		return dir
+	}
+
+	t.Run("a post for another repo does not move it", func(t *testing.T) {
+		t.Parallel()
+		dir := setup(t)
+		before := BoardFingerprint(dir, prefix)
+
+		other := writeBoardFile(t, dir, "acme-web-pr-4-bbbb2222.md", boardPR(4, "elsewhere", "2026-10-01T00:00:00Z"))
+		setBoardMtime(t, other, base.Add(24*time.Hour))
+		assert.Equal(t, before, BoardFingerprint(dir, prefix), "an added post for acme/web")
+
+		setBoardMtime(t, other, base.Add(48*time.Hour))
+		assert.Equal(t, before, BoardFingerprint(dir, prefix), "a rewritten post for acme/web")
+
+		require.NoError(t, os.Remove(other))
+		assert.Equal(t, before, BoardFingerprint(dir, prefix), "a removed post for acme/web")
+	})
+
+	t.Run("a post for this repo does", func(t *testing.T) {
+		t.Parallel()
+		dir := setup(t)
+		before := BoardFingerprint(dir, prefix)
+
+		added := writeBoardFile(t, dir, "acme-api-issue-9-cccc3333.md", boardPR(9, "also mine", "2026-10-01T00:00:00Z"))
+		setBoardMtime(t, added, base.Add(24*time.Hour))
+		assert.NotEqual(t, before, BoardFingerprint(dir, prefix))
+	})
+
+	t.Run("every spelling of this repo is watched", func(t *testing.T) {
+		t.Parallel()
+		dir := setup(t)
+		renamed := githubmirror.SlugPrefix("acme", "api-v2")
+		before := BoardFingerprint(dir, prefix, renamed)
+
+		added := writeBoardFile(t, dir, "acme-api-v2-pr-5-dddd4444.md", boardPR(5, "after the rename", "2026-10-01T00:00:00Z"))
+		setBoardMtime(t, added, base.Add(24*time.Hour))
+		assert.NotEqual(t, before, BoardFingerprint(dir, prefix, renamed), "a post under the canonical name moves it")
 	})
 }

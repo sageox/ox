@@ -29,19 +29,28 @@ type ItemState struct {
 // the Ledger's gitignored .sageox/cache/ and is never committed; losing it only
 // costs repeat relays the server ignores.
 type State struct {
-	Version       int                  `json:"version"`
-	Repo          string               `json:"repo"`   // owner/name
-	Cursor        time.Time            `json:"cursor"` // list items updated at/after this
-	ColdStartDone bool                 `json:"cold_start_done"`
-	LastAttemptAt time.Time            `json:"last_attempt_at"`
-	LastSuccessAt time.Time            `json:"last_success_at"`
-	LastError     string               `json:"last_error,omitempty"`
-	LastErrorAt   time.Time            `json:"last_error_at"`
-	NextAllowedAt time.Time            `json:"next_allowed_at"` // backoff
-	RepoStatus    string               `json:"repo_status,omitempty"`
-	RepoMeta      *Repo                `json:"repo_meta,omitempty"`
-	RepoMetaAt    time.Time            `json:"repo_meta_at"`
-	Items         map[string]ItemState `json:"items"` // keyed by SourceKey
+	Version int    `json:"version"`
+	Repo    string `json:"repo"` // owner/name
+	// Team is the team ref the history below was relayed to. History is only
+	// meaningful for the board it was sent to: after a re-init points the repo
+	// at another team, the new board has none of these posts, so the daemon
+	// starts over instead of skipping items it "already relayed".
+	Team string `json:"team,omitempty"`
+	// PullRequestCursor and IssueCursor are per kind: list items of that kind
+	// updated at/after this. A kind that is switched off never moves its cursor,
+	// so turning it on later still lists its whole backlog inside the window.
+	PullRequestCursor time.Time            `json:"pull_request_cursor"`
+	IssueCursor       time.Time            `json:"issue_cursor"`
+	ColdStartDone     bool                 `json:"cold_start_done"`
+	LastAttemptAt     time.Time            `json:"last_attempt_at"`
+	LastSuccessAt     time.Time            `json:"last_success_at"`
+	LastError         string               `json:"last_error,omitempty"`
+	LastErrorAt       time.Time            `json:"last_error_at"`
+	NextAllowedAt     time.Time            `json:"next_allowed_at"` // backoff
+	RepoStatus        string               `json:"repo_status,omitempty"`
+	RepoMeta          *Repo                `json:"repo_meta,omitempty"`
+	RepoMetaAt        time.Time            `json:"repo_meta_at"`
+	Items             map[string]ItemState `json:"items"` // keyed by SourceKey
 }
 
 // StatePath is <ledger>/.sageox/cache/github_mirror/state.json.

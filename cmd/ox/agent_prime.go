@@ -2256,7 +2256,7 @@ func discoverTeamContextWithFallback(projectRoot, repoSlug string, enableEphemer
 	loadTeamMemory(info, tc.Path)
 
 	// github mirror board — a pointer, only when this repo has live posts
-	loadGitHubBoard(info, tc.Path, projectRoot, time.Now())
+	loadGitHubBoard(info, tc.Path, projectRoot, getLedgerPath, time.Now())
 
 	// sync health: check staleness
 	syncState := daemon.LoadSyncState(tc.Path)
@@ -2333,10 +2333,13 @@ func loadTeamMemory(info *teamContextInfo, teamDir string) {
 //
 // Prime is a hot path, so the order is cheapest-first: one directory read, and
 // only if that finds post metadata one `git remote -v` to learn which repo this
-// is. No network, and post bodies are never opened — only the small .meta.json
-// sidecars that carry the expiry. Any failure leaves the pointer unset: a
-// missing pointer costs the coworker one `ls`, a wrong one points it at nothing.
-func loadGitHubBoard(info *teamContextInfo, teamDir, projectRoot string, now time.Time) {
+// is, and then one local read of the relay's state file to learn what GitHub
+// currently calls it. No network, and post bodies are never opened — only the
+// small .meta.json sidecars that carry the expiry. ledgerPath is called at most
+// once, and only once the first two steps found something to resolve. Any
+// failure leaves the pointer unset: a missing pointer costs the coworker one
+// `ls`, a wrong one points it at nothing.
+func loadGitHubBoard(info *teamContextInfo, teamDir, projectRoot string, ledgerPath func() string, now time.Time) {
 	if info == nil || teamDir == "" || projectRoot == "" {
 		return
 	}
@@ -2361,15 +2364,40 @@ func loadGitHubBoard(info *teamContextInfo, teamDir, projectRoot string, now tim
 	if !ok {
 		return
 	}
-	prefix := githubmirror.SlugPrefix(owner, name)
 
-	live := countLiveGitHubPosts(postsDir, entries, prefix, githubRepoKeyPrefix(owner, name), now)
+	// The relay publishes under GitHub's current name, which after a rename or
+	// transfer is not what the remote says. Posts from before the rename keep
+	// the old name until they expire, so both spellings are this repo. The
+	// canonical one goes first: it is what new posts are filed under.
+	spellings := [][2]string{{owner, name}}
+	var ledger string
+	if ledgerPath != nil {
+		ledger = ledgerPath()
+	}
+	if canonicalOwner, canonicalName := githubmirror.CanonicalRepo(ledger, owner, name); !strings.EqualFold(canonicalOwner+"/"+canonicalName, owner+"/"+name) {
+		spellings = [][2]string{{canonicalOwner, canonicalName}, {owner, name}}
+	}
+
+	var slugPrefixes, keyPrefixes []string
+	for _, spelling := range spellings {
+		slugPrefix := githubmirror.SlugPrefix(spelling[0], spelling[1])
+		if slugPrefix == "" {
+			continue // nothing slug-worthy: an empty prefix would match every post
+		}
+		slugPrefixes = append(slugPrefixes, slugPrefix)
+		keyPrefixes = append(keyPrefixes, githubRepoKeyPrefix(spelling[0], spelling[1]))
+	}
+	if len(slugPrefixes) == 0 {
+		return
+	}
+
+	live := countLiveGitHubPosts(postsDir, entries, slugPrefixes, keyPrefixes, now)
 	if live == 0 {
 		return
 	}
 	info.GitHubBoard = &prime.GitHubBoardInfo{
 		Dir:      postsDir,
-		ThisRepo: prefix + "*",
+		ThisRepo: slugPrefixes[0] + "*",
 		Live:     live,
 	}
 }
@@ -2403,28 +2431,39 @@ func githubRepoKeyPrefix(owner, name string) string {
 	return path.Dir(path.Dir(itemKey)) + "/"
 }
 
+// hasAnyPrefix reports whether s starts with any of prefixes.
+func hasAnyPrefix(s string, prefixes []string) bool {
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(s, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // countLiveGitHubPosts counts the posts in entries that belong to one repo and
-// have not expired. Everything is read from the server-written sidecar, never
-// from the post. The file name is only a cheap prefilter (a post file is
-// <slug>-<sha>.meta.json, so a repo's posts all start with its slug prefix).
-// The sidecar's slug and expires_at decide — plus its source_key when it has
-// one, because a slug prefix cannot tell "acme/api" from "acme/api-gateway"
-// and the source key can. A sidecar that cannot be read or decoded is skipped,
-// not counted.
-func countLiveGitHubPosts(postsDir string, entries []os.DirEntry, slugPrefix, keyPrefix string, now time.Time) int {
+// have not expired. slugPrefixes and keyPrefixes list every spelling of the
+// repo (see loadGitHubBoard); a post matching any of them is this repo's.
+// Everything is read from the server-written sidecar, never from the post. The
+// file name is only a cheap prefilter (a post file is <slug>-<sha>.meta.json,
+// so a repo's posts all start with its slug prefix). The sidecar's slug and
+// expires_at decide — plus its source_key when it has one, because a slug
+// prefix cannot tell "acme/api" from "acme/api-gateway" and the source key can.
+// A sidecar that cannot be read or decoded is skipped, not counted.
+func countLiveGitHubPosts(postsDir string, entries []os.DirEntry, slugPrefixes, keyPrefixes []string, now time.Time) int {
 	live := 0
 	for _, entry := range entries {
-		if !isGitHubPostMeta(entry) || !strings.HasPrefix(entry.Name(), slugPrefix) {
+		if !isGitHubPostMeta(entry) || !hasAnyPrefix(entry.Name(), slugPrefixes) {
 			continue
 		}
 		meta, err := githubmirror.ReadPostMeta(filepath.Join(postsDir, entry.Name()))
 		if err != nil {
 			continue
 		}
-		if !strings.HasPrefix(meta.Slug, slugPrefix) || !meta.ExpiresAt.After(now) {
+		if !hasAnyPrefix(meta.Slug, slugPrefixes) || !meta.ExpiresAt.After(now) {
 			continue
 		}
-		if meta.SourceKey != "" && !strings.HasPrefix(meta.SourceKey, keyPrefix) {
+		if meta.SourceKey != "" && !hasAnyPrefix(meta.SourceKey, keyPrefixes) {
 			continue
 		}
 		live++
