@@ -2,7 +2,7 @@
 
 .PHONY: check-no-git-lfs-shell check-raw-writer-chokepoint check-session-meta-rmw check-codedb-guarded-open check-test-tiers test-tiers
 .PHONY: test-all-split test-split-slots test-split-slot coverage-merge-unit warm-test-cache coverage-integration-profile coverage-merge
-.PHONY: help build build-ox build-adapters build-acceptance install install-adapters clean dev run test test-cover test-timings test-all test-slow test-fuzz test-browser test-integration test-acceptance test-acceptance-cover test-acceptance-run test-release test-release-coverage release-stages test-agents test-preflight test-digital-twin test-digital-twin-cover test-cloud-api-twin test-ledger-twin eval eval-smoke eval-no-bash eval-scaffold-check test-sequential test-profile test-watch coverage coverage-report coverage-func coverage-baseline coverage-diff coverage-check coverage-ratchet coverage-ratchet-diff coverage-ratchet-test build-cover coverage-integration smoke-test lint lint-test-env format release release-snapshot dist install-hooks docs docs-check docs-publish refresh-friction-catalog bump-version verify-version check-release-drift beads-setup
+.PHONY: help build build-ox build-adapters build-acceptance install install-adapters uninstall uninstall-ox uninstall-adapters clean dev run test test-cover test-timings test-all test-slow test-fuzz test-browser test-integration test-acceptance test-acceptance-cover test-acceptance-run test-release test-release-coverage release-stages test-agents test-preflight test-digital-twin test-digital-twin-cover test-cloud-api-twin test-ledger-twin eval eval-smoke eval-no-bash eval-scaffold-check test-sequential test-profile test-watch coverage coverage-report coverage-func coverage-baseline coverage-diff coverage-check coverage-ratchet coverage-ratchet-diff coverage-ratchet-test build-cover coverage-integration smoke-test lint lint-test-env format release release-snapshot dist install-hooks docs docs-check docs-publish refresh-friction-catalog bump-version verify-version check-release-drift beads-setup
 
 # Variables
 GO := go
@@ -41,7 +41,7 @@ GOTESTSUM_LEAN = $(if $(filter 1,$(V)),,--hide-summary skipped --format-hide-emp
 TIME_CMD = $(if $(filter 1,$(V)),time,)
 
 # Bundled adapters (shipped in release tarballs alongside ox)
-ADAPTERS := ox-adapter-claude-code ox-adapter-gemini ox-adapter-codex ox-adapter-amp ox-adapter-opencode ox-adapter-pi ox-adapter-omp ox-adapter-aider ox-adapter-droid ox-adapter-goose
+ADAPTERS := ox-adapter-claude-code ox-adapter-gemini ox-adapter-codex ox-adapter-amp ox-adapter-opencode ox-adapter-pi ox-adapter-omp ox-adapter-aider ox-adapter-droid ox-adapter-goose ox-adapter-cursor
 empty :=
 space := $(empty) $(empty)
 comma := ,
@@ -105,7 +105,7 @@ install: install-ox install-adapters ## Install ox and adapters to $GOPATH/bin
 	@echo "    brew install sageox/tap/ox        # recommended"
 	@echo "    Versioned downloads: https://github.com/sageox/ox/releases/latest"
 	@echo ""
-	@echo "  Releases self-update via \`ox upgrade\` and keep ox and its 10 adapter"
+	@echo "  Releases self-update via \`ox upgrade\` and keep ox and its 11 adapter"
 	@echo "  binaries together on PATH."
 	@echo "─────────────────────────────────────────────────────────────────────"
 	@ox_bin='$(call sq,$(INSTALL_BIN))'; \
@@ -144,6 +144,18 @@ install-adapters: ## Install bundled adapters to $GOPATH/bin
 	@for adapter in $(ADAPTERS); do \
 		$(GO) install $(ADAPTER_LDFLAGS) ./cmd/$$adapter; \
 		echo "  Installed $$adapter"; \
+	done
+
+uninstall: uninstall-ox uninstall-adapters ## Remove ox-owned binaries from the install directory
+
+uninstall-ox:
+	@test -n "$(INSTALL_BIN)" && test "$(INSTALL_BIN)" != "/" && test "$(INSTALL_BIN)" != "/bin" || { echo "Refusing unsafe install directory: $(INSTALL_BIN)"; exit 1; }
+	@rm -f "$(INSTALL_BIN)/$(BINARY_NAME)"
+
+uninstall-adapters:
+	@test -n "$(INSTALL_BIN)" && test "$(INSTALL_BIN)" != "/" && test "$(INSTALL_BIN)" != "/bin" || { echo "Refusing unsafe install directory: $(INSTALL_BIN)"; exit 1; }
+	@for adapter in $(ADAPTERS); do \
+		rm -f "$(INSTALL_BIN)/$$adapter"; \
 	done
 
 clean: ## Remove build artifacts

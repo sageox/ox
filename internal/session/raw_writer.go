@@ -133,7 +133,9 @@ func (w *RawWriter) writeEntry(entry *SessionEntry) error {
 
 	// Layer 2: built-in regex redactor (covers ToolInput, ToolOutput,
 	// Content via RedactEntries-style traversal).
-	w.redactor.RedactEntry(entry)
+	redacted := []SessionEntry{*entry}
+	w.redactor.RedactEntries(redacted)
+	*entry = redacted[0]
 
 	// Layer 3: extra detectors (gitleaks-derived rules). Same fields
 	// as layer 2; the extras run AFTER built-ins so layer-2's class-

@@ -1,0 +1,90 @@
+{
+  "scenario": "CHAT-A",
+  "evidence_origin": "Human-operated Cursor desktop; root read exact hook-supplied source only; delayed snapshots after screenshot handoff",
+  "cursor_version": "3.20.21",
+  "conversation_id": "conversation-1",
+  "generation_id": "generation-1",
+  "hook_payload_count": 12,
+  "events": [
+    "beforeSubmitPrompt",
+    "sessionStart",
+    "preToolUse",
+    "beforeShellExecution",
+    "afterShellExecution",
+    "postToolUse",
+    "preToolUse",
+    "beforeShellExecution",
+    "afterShellExecution",
+    "postToolUseFailure",
+    "afterAgentResponse",
+    "stop"
+  ],
+  "context_marker_matches": {
+    "OX_CURSOR_START_CONTEXT": true,
+    "OX_CURSOR_POST_TOOL_CONTEXT": true,
+    "OX_CURSOR_TOOL_FAILURE_CONTEXT": true
+  },
+  "observations": [
+    {
+      "observed_at_utc": "2026-09-14T18:37:31.628757+00:00",
+      "source_path": "<HOME>/.cursor/projects/<CONTROL_PROJECT_KEY>/agent-transcripts/conversation-1/conversation-1.jsonl",
+      "stat_before": {
+        "inode": 303845246,
+        "size": 1707,
+        "mtime_ns": 1789410942924194589
+      },
+      "stat_after": {
+        "inode": 303845246,
+        "size": 1707,
+        "mtime_ns": 1789410942924194589
+      },
+      "stable_during_read": true,
+      "sha256": "f1fd7c4f71a2b08f8d892907e27acdedeec50b8f0cd8f05c0c4f4382d090d407",
+      "snapshot": "capture/delayed-snapshots/chat-a-20260914T183731.628435Z/01.jsonl",
+      "complete_newline": true,
+      "rows": 5,
+      "row_types": [
+        "user",
+        "assistant",
+        "assistant",
+        "assistant",
+        "turn_ended"
+      ]
+    },
+    {
+      "observed_at_utc": "2026-09-14T18:37:34.633404+00:00",
+      "source_path": "<HOME>/.cursor/projects/<CONTROL_PROJECT_KEY>/agent-transcripts/conversation-1/conversation-1.jsonl",
+      "stat_before": {
+        "inode": 303845246,
+        "size": 1707,
+        "mtime_ns": 1789410942924194589
+      },
+      "stat_after": {
+        "inode": 303845246,
+        "size": 1707,
+        "mtime_ns": 1789410942924194589
+      },
+      "stable_during_read": true,
+      "sha256": "f1fd7c4f71a2b08f8d892907e27acdedeec50b8f0cd8f05c0c4f4382d090d407",
+      "snapshot": "capture/delayed-snapshots/chat-a-20260914T183731.628435Z/02.jsonl",
+      "complete_newline": true,
+      "rows": 5,
+      "row_types": [
+        "user",
+        "assistant",
+        "assistant",
+        "assistant",
+        "turn_ended"
+      ]
+    }
+  ],
+  "stable_across_observations": true,
+  "stop_snapshot_sha256": "f1fd7c4f71a2b08f8d892907e27acdedeec50b8f0cd8f05c0c4f4382d090d407",
+  "delayed_matches_stop_snapshot": true,
+  "limitations": [
+    "Observations constrain this run only; do not establish universal final-flush latency.",
+    "Generic hook tool_use_id joins preToolUse to success/failure; saved JSONL tool_use blocks have no IDs and no structured tool results in this sample.",
+    "Reopen, separate chat, compaction, pause/resume, and delayed tool scenario not yet run.",
+    "Session marker env propagation not instrumented; model-visible additional_context was verified."
+  ]
+}

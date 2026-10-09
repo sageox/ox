@@ -1,0 +1,92 @@
+{
+  "scenario": "CHAT-A reopen",
+  "cursor_version": "3.20.21",
+  "conversation_id": "conversation-1",
+  "generation_id_before": "generation-1",
+  "generation_id_after": "generation-2",
+  "same_conversation": true,
+  "same_session_id": true,
+  "different_generation": true,
+  "events": [
+    "beforeSubmitPrompt",
+    "afterAgentResponse",
+    "stop"
+  ],
+  "original_byte_prefix_preserved": true,
+  "old_row_count": 5,
+  "new_row_count": 8,
+  "added_rows": [
+    {
+      "role": "user",
+      "message": {
+        "content": [
+          {
+            "type": "text",
+            "text": "<timestamp>Monday, Sep 14, 2026, 11:42 AM (UTC-7)</timestamp>\n<user_query>\nReply exactly RESUMED_A_NO_TOOL without using any tools.\n</user_query>"
+          }
+        ]
+      }
+    },
+    {
+      "role": "assistant",
+      "message": {
+        "content": [
+          {
+            "type": "text",
+            "text": "RESUMED_A_NO_TOOL"
+          }
+        ]
+      }
+    },
+    {
+      "type": "turn_ended",
+      "status": "success"
+    }
+  ],
+  "delayed_matches_stop_snapshot": true,
+  "stable_across_observations": true,
+  "observations": [
+    {
+      "observed_at_utc": "2026-09-14T18:43:44.609530+00:00",
+      "source_path": "<HOME>/.cursor/projects/<CONTROL_PROJECT_KEY>/agent-transcripts/conversation-1/conversation-1.jsonl",
+      "stat_before": {
+        "inode": 303845246,
+        "size": 2050,
+        "mtime_ns": 1789411341036741629
+      },
+      "stat_after": {
+        "inode": 303845246,
+        "size": 2050,
+        "mtime_ns": 1789411341036741629
+      },
+      "stable_during_read": true,
+      "sha256": "120edb25aeeea91e5425610b4f87dee59438bd2540f1151468cb9ac7af0f5723",
+      "snapshot": "capture/delayed-snapshots/chat-a-reopen-20260914T184344.609332Z/01.jsonl",
+      "complete_newline": true
+    },
+    {
+      "observed_at_utc": "2026-09-14T18:43:47.612675+00:00",
+      "source_path": "<HOME>/.cursor/projects/<CONTROL_PROJECT_KEY>/agent-transcripts/conversation-1/conversation-1.jsonl",
+      "stat_before": {
+        "inode": 303845246,
+        "size": 2050,
+        "mtime_ns": 1789411341036741629
+      },
+      "stat_after": {
+        "inode": 303845246,
+        "size": 2050,
+        "mtime_ns": 1789411341036741629
+      },
+      "stable_during_read": true,
+      "sha256": "120edb25aeeea91e5425610b4f87dee59438bd2540f1151468cb9ac7af0f5723",
+      "snapshot": "capture/delayed-snapshots/chat-a-reopen-20260914T184344.609332Z/02.jsonl",
+      "complete_newline": true
+    }
+  ],
+  "limitations": [
+    "No sessionEnd/workspaceOpen/sessionStart invocation captured around reported quit/reopen; absence of a captured hook is not proof of unsupported capability.",
+    "Probe-session environment marker is empty after reopen; first turn did not instrument it. No fresh-session propagation conclusion yet.",
+    "Extension-host parent PID changed from 11486 to 22555; consistent with relaunch but not an independently recorded app exit.",
+    "Delayed stability is specific to this turn."
+  ]
+}

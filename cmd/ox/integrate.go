@@ -64,6 +64,7 @@ var (
 	integratePiFlag       bool
 	integrateOMPFlag      bool
 	integrateDroidFlag    bool
+	integrateCursorFlag   bool
 	integrateAllFlag      bool
 	integrateForceFlag    bool
 )
@@ -76,7 +77,7 @@ var integrateCmd = &cobra.Command{
 Supported agents:
   Claude Code (default)    JSON hooks in ~/.claude/settings.json
 
-Other agents (Codex, Gemini, Amp, OpenCode, Pi, OMP) can be installed with
+Other agents (Codex, Cursor Agents Window, Gemini, Amp, OpenCode, Pi, OMP) can be installed with
 their respective flags. Run 'ox init' to set up the project with appropriate
 guidance files.
 
@@ -103,7 +104,8 @@ Other agents can be installed with their respective flags:
   --opencode  OpenCode plugin
   --pi        Pi coding agent integration (AGENTS.md marker)
   --omp       OMP integration (.omp/AGENTS.md marker)
-  --droid     Factory Droid hooks`,
+  --droid     Factory Droid hooks
+  --cursor    Cursor Agents Window hooks`,
 	RunE: runIntegrateInstall,
 }
 
@@ -128,7 +130,7 @@ var integrateListCmd = &cobra.Command{
 func hasAnyAgentFlag() bool {
 	return integratePiFlag || integrateOMPFlag || integrateAmpFlag ||
 		integrateCodexFlag || integrateGeminiFlag || integrateOpenCodeFlag ||
-		integrateDroidFlag || integrateUserFlag
+		integrateDroidFlag || integrateCursorFlag || integrateUserFlag
 }
 
 // integrateAgentInfo pairs adapter metadata with its current install status.
@@ -276,6 +278,21 @@ func runIntegrateInstall(cmd *cobra.Command, args []string) error {
 	// if no agent-specific flags, show interactive multi-select
 	if !hasAnyAgentFlag() && cli.IsInteractive() {
 		return runIntegrateInteractive()
+	}
+
+	// Cursor Agents Window installation
+	if integrateCursorFlag {
+		if integrateUserFlag {
+			return fmt.Errorf("user-level Cursor Agents Window integration is unsupported")
+		}
+		if err := installExternalAdapterHooks("cursor", false); err != nil {
+			return fmt.Errorf("installing Cursor Agents Window integration: %w", err)
+		}
+
+		cli.PrintSuccess("Installed Cursor Agents Window project-level integration")
+		userCfg, _ := config.LoadUserConfig()
+		tips.MaybeShow("hooks", tips.WhenMinimal, false, !userCfg.AreTipsEnabled(), false)
+		return nil
 	}
 
 	// Pi installation
@@ -442,6 +459,24 @@ func runIntegrateUninstall(cmd *cobra.Command, args []string) error {
 		if err := uninstallAllIntegrations(integrateForceFlag); err != nil {
 			return fmt.Errorf("uninstalling integrations: %w", err)
 		}
+		return nil
+	}
+
+	// Cursor Agents Window uninstallation
+	if integrateCursorFlag {
+		if integrateUserFlag {
+			return fmt.Errorf("user-level Cursor Agents Window integration is unsupported")
+		}
+		if findGitRoot() == "" {
+			return fmt.Errorf("uninstalling Cursor Agents Window integration: not in a git repository")
+		}
+		if err := uninstallExternalAdapterHooks("cursor", false); err != nil {
+			return fmt.Errorf("uninstalling Cursor Agents Window integration: %w", err)
+		}
+
+		fmt.Println("✓ Cursor Agents Window project-level integration uninstalled")
+		userCfg, _ := config.LoadUserConfig()
+		tips.MaybeShow("hooks", tips.WhenMinimal, false, !userCfg.AreTipsEnabled(), false)
 		return nil
 	}
 
@@ -705,6 +740,12 @@ func uninstallAllIntegrations(force bool) error {
 		installed = append(installed, "OMP (project)")
 	}
 
+	// check Cursor Agents Window
+	cursorInstalled := checkExternalAdapterHooks("cursor", false)
+	if cursorInstalled {
+		installed = append(installed, "Cursor Agents Window (project)")
+	}
+
 	// check git commit hooks
 	gitRoot := findGitRoot()
 	if gitRoot != "" && HasGitHooks(gitRoot) {
@@ -782,6 +823,11 @@ func uninstallAllIntegrations(force bool) error {
 	if ompInstalled {
 		if err := uninstallExternalAdapterHooks("omp", false); err != nil {
 			errors = append(errors, fmt.Sprintf("OMP (project): %v", err))
+		}
+	}
+	if cursorInstalled {
+		if err := uninstallExternalAdapterHooks("cursor", false); err != nil {
+			errors = append(errors, fmt.Sprintf("Cursor Agents Window (project): %v", err))
 		}
 	}
 	if gitRoot != "" {
@@ -863,6 +909,7 @@ func init() {
 	_ = integrateInstallCmd.Flags().MarkHidden("omp")
 	integrateInstallCmd.Flags().BoolVar(&integrateDroidFlag, "droid", false, "install Factory Droid hooks instead of Claude Code hooks")
 	_ = integrateInstallCmd.Flags().MarkHidden("droid")
+	integrateInstallCmd.Flags().BoolVar(&integrateCursorFlag, "cursor", false, "install Cursor Agents Window hooks instead of Claude Code hooks")
 
 	// uninstall flags
 	integrateUninstallCmd.Flags().BoolVar(&integrateUserFlag, "user", false, "uninstall from user-level config")
@@ -882,6 +929,7 @@ func init() {
 	_ = integrateUninstallCmd.Flags().MarkHidden("omp")
 	integrateUninstallCmd.Flags().BoolVar(&integrateDroidFlag, "droid", false, "uninstall Factory Droid hooks instead of Claude Code hooks")
 	_ = integrateUninstallCmd.Flags().MarkHidden("droid")
+	integrateUninstallCmd.Flags().BoolVar(&integrateCursorFlag, "cursor", false, "uninstall Cursor Agents Window hooks instead of Claude Code hooks")
 	_ = integrateUninstallCmd.Flags().MarkHidden("all")
 	_ = integrateUninstallCmd.Flags().MarkHidden("force")
 

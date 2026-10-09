@@ -1,0 +1,4 @@
+{"role":"user","message":{"content":[{"type":"text","text":"<timestamp>Monday, Sep 14, 2026, 11:55 AM (UTC-7)</timestamp>\n<user_query>\nThis is CHAT-DELAY.\n\nRun only this shell command:\nsh -c 'sleep 3; printf FIXTURE_DELAYED_OK'\n\nThen reply exactly FINAL_DELAY_NO_TOOL without another tool call.\n</user_query>"}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"I'll run that exact command, then send the final reply with no further tools."},{"type":"tool_use","name":"Shell","input":{"command":"sh -c 'sleep 3; printf FIXTURE_DELAYED_OK'","block_until_ms":10000,"description":"Sleep 3s then print FIXTURE_DELAYED_OK"}}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"FINAL_DELAY_NO_TOOL"}]}}
+{"type":"turn_ended","status":"success"}

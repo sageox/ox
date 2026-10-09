@@ -101,6 +101,9 @@ func runAgentSessionLog(w io.Writer, inst *agentinstance.Instance, args []string
 	if state == nil {
 		return fmt.Errorf("no active session\nRun 'ox agent %s session start' first", inst.AgentID)
 	}
+	if state.AdapterName == "cursor" {
+		return fmt.Errorf("unsupported-scope: session log cannot add entries to a native Cursor recording")
+	}
 
 	// determine the target file path
 	targetFile := sessionLogTargetFile(state)

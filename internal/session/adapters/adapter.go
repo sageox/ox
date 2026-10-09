@@ -226,6 +226,7 @@ var adapterAliases = map[string]string{
 	"gemini":      "gemini",
 	"gemini-cli":  "gemini",
 	"gemini cli":  "gemini",
+	"cursor":      "cursor",
 
 	// generic adapter fallbacks (remove alias when deep adapter is added)
 	"codex":           "codex",
@@ -236,7 +237,6 @@ var adapterAliases = map[string]string{
 	"omp":             "omp",
 	"oh-my-pi":        "omp",
 	"oh my pi":        "omp",
-	"cursor":          "generic",
 	"windsurf":        "generic",
 	"copilot":         "generic",
 	"aider":           "aider",

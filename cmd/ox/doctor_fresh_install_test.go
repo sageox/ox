@@ -334,6 +334,8 @@ func collectFixableIssues(check checkResult, category string, fixable *[]string)
 // bug #35: checkStorageHealth created an empty ledger directory, which then
 // caused checkGitRepoPaths to fail with "empty directory".
 func TestDoctorFreshCheckout_NoSideEffectDirectories(t *testing.T) {
+	isolateFreshInstallDoctorState(t)
+
 	// create a fresh git repo simulating a checkout that already has .sageox/
 	tmpDir := testGitRepo(t)
 
@@ -381,6 +383,23 @@ func TestDoctorFreshCheckout_NoSideEffectDirectories(t *testing.T) {
 				"health checks must not create filesystem state", dir)
 		}
 	}
+}
+
+// isolateFreshInstallDoctorState makes the fresh-install checks observe the
+// empty user-level state their names promise. Doctor reads config, Knowledge
+// Bubbles, caches, and daemon state through the canonical XDG roots; leaving
+// any of them inherited lets a developer's unrelated state affect the result.
+func isolateFreshInstallDoctorState(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("OX_XDG_DISABLE", "")
+	t.Setenv("OX_XDG_ENABLE", "1")
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, "cache"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, "state"))
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(home, "runtime"))
 }
 
 // filterTestEnvironmentIssues removes issues that are expected in a test environment

@@ -128,6 +128,13 @@ var (
 		CapServeMode,
 		CapSkillsInstaller,
 	}
+
+	CursorCapabilities = []string{
+		CapSessionReader,
+		CapHookInstaller,
+		CapIncrementalReader,
+		CapServeMode,
+	}
 )
 
 // BundledAdapterCapabilities maps each bundled adapter's registry.yaml `name`
@@ -151,4 +158,5 @@ var BundledAdapterCapabilities = map[string][]string{
 	"aider":       AiderCapabilities,
 	"droid":       DroidCapabilities,
 	"goose":       GooseCapabilities,
+	"cursor":      CursorCapabilities,
 }

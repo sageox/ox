@@ -1,0 +1,21 @@
+{
+  "conversation_id": "conversation-3",
+  "generation_id": "generation-4",
+  "model": "grok-4.6",
+  "tool_name": "Shell",
+  "tool_input": {
+    "command": "sh -c 'sleep 3; printf FIXTURE_DELAYED_OK'",
+    "cwd": "",
+    "timeout": 10000
+  },
+  "tool_use_id": "tool-use-3",
+  "cwd": "",
+  "session_id": "conversation-3",
+  "hook_event_name": "preToolUse",
+  "cursor_version": "3.20.21",
+  "workspace_roots": [
+    "<WORKSPACE>/.context/cursor-adapter/evidence/fixture-control-project"
+  ],
+  "user_email": "<USER_EMAIL>",
+  "transcript_path": null
+}

@@ -483,6 +483,12 @@ func logCoworkerLoad(projectRoot, agentID, name, model string) {
 	if err != nil || state == nil {
 		return
 	}
+	if state.AdapterName == "cursor" {
+		// Native capture owns both source offsets and saved-entry counts. The
+		// coworker content is still delivered by runCoworkerLoad and captured
+		// if Cursor exports it; this bookkeeping event is not a native row.
+		return
+	}
 
 	// create coworker load entry
 	entry := session.NewCoworkerLoadEntry(name, model)

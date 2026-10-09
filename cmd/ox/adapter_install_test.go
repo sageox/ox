@@ -390,20 +390,15 @@ func TestResolveAdapterSource_ArbitraryRepoWithTag(t *testing.T) {
 	}
 }
 
-// TestResolveAdapterSource_CuratedUnpinned verifies a curated entry that lacks a
-// tag/checksum (the current external entries) resolves to a checksum-less plan,
-// driving fail-closed behavior until a maintainer pins one.
-func TestResolveAdapterSource_CuratedUnpinned(t *testing.T) {
-	// "cursor" is a real external registry entry shipped without a pin.
-	plan, err := resolveAdapterSource("cursor", "darwin_arm64")
-	if err != nil {
-		t.Fatalf("curated lookup should resolve: %v", err)
+// TestResolveAdapterSource_BundledCursorRefusesSeparateInstall verifies Cursor
+// follows the bundled adapter path instead of resolving an external download.
+func TestResolveAdapterSource_BundledCursorRefusesSeparateInstall(t *testing.T) {
+	_, err := resolveAdapterSource("cursor", "darwin_arm64")
+	if err == nil {
+		t.Fatal("bundled Cursor adapter must not resolve a separate download")
 	}
-	if !plan.curated {
-		t.Error("registry short-name must be marked curated")
-	}
-	if plan.checksum != "" {
-		t.Error("unpinned curated entry must have empty checksum (fail-closed)")
+	if !strings.Contains(err.Error(), "bundled with ox") {
+		t.Errorf("error should identify the bundled adapter, got: %v", err)
 	}
 }
 
@@ -425,14 +420,16 @@ func TestRunAdapterInstall_UnverifiableFailsClosed(t *testing.T) {
 	}
 }
 
-// TestRunAdapterInstall_CuratedUnpinnedFailsClosed verifies the documented
-// transition: `ox adapter install cursor` (no pin yet) fails closed without
-// --allow-unverified.
-func TestRunAdapterInstall_CuratedUnpinnedFailsClosed(t *testing.T) {
+// TestRunAdapterInstall_BundledCursorRefusesSeparateInstall verifies the Cobra
+// path also directs users to the Cursor binary bundled with ox.
+func TestRunAdapterInstall_BundledCursorRefusesSeparateInstall(t *testing.T) {
 	cmd := adapterInstallCmd
 	_ = cmd.Flags().Set("allow-unverified", "false")
 	err := cmd.RunE(cmd, []string{"cursor"})
 	if err == nil {
-		t.Fatal("curated entry with no pinned tag must fail closed")
+		t.Fatal("bundled Cursor adapter must not install separately")
+	}
+	if !strings.Contains(err.Error(), "bundled with ox") {
+		t.Errorf("error should identify the bundled adapter, got: %v", err)
 	}
 }

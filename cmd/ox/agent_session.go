@@ -134,8 +134,30 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 	adapterName := ""          // canonical adapter name for GetAdapter() lookup
 	agentTypeName := agentType // original type for metadata
 	sessionFile := ""
+	var startOffset int64
+	var startOffsetKnown bool
+	var sourcePrefixSHA256 string
 
-	if isManualSessionAgent(agentType) {
+	if agentType == string(agentx.AgentTypeCursor) {
+		// Cursor does not expose its native conversation ID through environment
+		// variables. Resolve only the marker belonging to this exact AI coworker;
+		// never infer a chat from Cursor's shared desktop PID.
+		marker := FindUnambiguousSessionMarkerByAgentID(inst.AgentID)
+		if marker == nil || marker.AgentSessionID == "" {
+			return fmt.Errorf("missing-native-identity: Cursor manual recording requires a completed Cursor prime for this AI coworker")
+		}
+		agentSessionID = marker.AgentSessionID
+		if _, adapterErr := adapters.GetAdapter(string(agentx.AgentTypeCursor)); adapterErr != nil {
+			return fmt.Errorf("adapter-missing: Cursor adapter unavailable: %w", adapterErr)
+		}
+		var boundaryErr error
+		sessionFile, startOffset, sourcePrefixSHA256, boundaryErr = cursorManualStartBoundary(projectRoot, agentSessionID)
+		if boundaryErr != nil {
+			return boundaryErr
+		}
+		startOffsetKnown = true
+		adapterName = string(agentx.AgentTypeCursor)
+	} else if isManualSessionAgent(agentType) {
 		// Codex: use the codex adapter to find its session file.
 		// Codex stores plans inline in session files (no separate plan.md).
 		adapterName = string(agentx.AgentTypeCodex)
@@ -217,10 +239,10 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 
 	// capture file size before recording starts — entries before this offset are pre-session
 	// (e.g., buffered messages from before ox agent session start was called)
-	var startOffset int64
-	if sessionFile != "" {
+	if sessionFile != "" && !startOffsetKnown {
 		if fi, err := os.Stat(sessionFile); err == nil {
 			startOffset = fi.Size()
+			startOffsetKnown = true
 		}
 	}
 
@@ -235,22 +257,39 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 	}
 
 	// start recording with agent ID from session
+	if agentType == "cursor" {
+		parentPID = 0
+	}
 	opts := session.StartRecordingOptions{
-		AgentID:        inst.AgentID,
-		AgentSessionID: agentSessionID,
-		AdapterName:    adapterName,
-		AgentType:      agentTypeName,
-		SessionFile:    sessionFile,
-		Title:          title,
-		Username:       identity.AttributionUsername(endpoint.GetForProject(projectRoot), config.GetDisplayName()),
-		WorkspacePath:  projectRoot,
-		Branch:         repotools.GetCurrentBranch(projectRoot),
-		ParentPID:      parentPID,
-		StartOffset:    startOffset,
-		WatchMode:      sessionWatchMode(adapterName),
+		AgentID:            inst.AgentID,
+		AgentSessionID:     agentSessionID,
+		AdapterName:        adapterName,
+		AgentType:          agentTypeName,
+		SessionFile:        sessionFile,
+		Title:              title,
+		Username:           identity.AttributionUsername(endpoint.GetForProject(projectRoot), config.GetDisplayName()),
+		WorkspacePath:      projectRoot,
+		Branch:             repotools.GetCurrentBranch(projectRoot),
+		ParentPID:          parentPID,
+		StartOffset:        startOffset,
+		StartOffsetKnown:   startOffsetKnown,
+		SourcePrefixSHA256: sourcePrefixSHA256,
+		WatchMode:          sessionWatchMode(adapterName),
 	}
 
-	state, err := session.StartRecording(projectRoot, opts)
+	var state *session.RecordingState
+	if adapterName == "cursor" {
+		opts.BeforePublish = func(s *session.RecordingState) error { return writeRawHeader(projectRoot, s) }
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		err = fileutil.WithFileLock(ctx, markerPath(agentSessionID)+".recording-start", func() error {
+			var startErr error
+			state, startErr = session.StartRecording(projectRoot, opts)
+			return startErr
+		})
+	} else {
+		state, err = session.StartRecording(projectRoot, opts)
+	}
 	if err != nil {
 		if errors.Is(err, session.ErrAlreadyRecording) {
 			return fmt.Errorf("a session is already being recorded\nRun 'ox agent %s session stop' first, then start a new session", inst.AgentID)
@@ -261,9 +300,11 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 		return fmt.Errorf("failed to start recording: %w", err)
 	}
 	// write raw.jsonl header immediately so incremental hooks can append entries
-	if writeErr := writeRawHeader(projectRoot, state); writeErr != nil {
-		slog.Warn("failed to write raw.jsonl header at start", "error", writeErr)
-		// non-fatal: processAgentSession will write header at stop time as fallback
+	if adapterName != "cursor" {
+		if writeErr := writeRawHeader(projectRoot, state); writeErr != nil {
+			slog.Warn("failed to write raw.jsonl header at start", "error", writeErr)
+			// non-fatal: processAgentSession will write header at stop time as fallback
+		}
 	}
 
 	// register-at-start so /c/<session_id> resolves from t=0 (fire-and-forget)
@@ -336,7 +377,8 @@ func printSessionStartText(agentID, adapterName, title, notice string, startedAt
 // isManualSessionAgent returns true for agent types that require explicit
 // adapter selection instead of generic/deep autodetection.
 func isManualSessionAgent(agentType string) bool {
-	return canonicalAgentType(agentType) == string(agentx.AgentTypeCodex)
+	canonical := canonicalAgentType(agentType)
+	return canonical == string(agentx.AgentTypeCodex) || canonical == string(agentx.AgentTypeCursor)
 }
 
 // ensurePrimeBeforeSession checks if `ox agent prime` has run for the current
@@ -481,6 +523,17 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 		}
 	}
 	traceAtStop := state.Trace
+	if state.AdapterName == "cursor" {
+		now := time.Now().UTC()
+		if err := session.UpdateRecordingStateForAgent(projectRoot, inst.AgentID, func(current *session.RecordingState) {
+			if current.StoppedAt == nil {
+				current.StoppedAt = &now
+			}
+			current.CursorFinalDrainPending = true
+		}); err != nil {
+			return fmt.Errorf("preserve pending Cursor final drain: %w", err)
+		}
+	}
 	if err := session.MarkExplicitStop(projectRoot, inst.AgentID); err != nil {
 		return fmt.Errorf("mark session stopped: %w", err)
 	}
@@ -498,7 +551,7 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 
 	// re-discover session file if it was empty at start time
 	// (Claude Code session JSONL may not have existed yet when recording started)
-	if state.SessionFile == "" && state.AdapterName != "" && state.AdapterName != "generic" {
+	if state.SessionFile == "" && state.AdapterName != "" && state.AdapterName != "generic" && state.AdapterName != "cursor" {
 		if adapter, adapterErr := adapters.GetAdapter(state.AdapterName); adapterErr == nil {
 			// use state.WorkspacePath (persisted at start) as the single source of truth
 			// for repoRoot -- never derive from ambient cwd/env at stop time
@@ -555,7 +608,7 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 
 	// process session: read, redact secrets, extract events, save
 	var processResult *agentSessionResult
-	if state.SessionFile != "" {
+	if state.SessionFile != "" || state.AdapterName == "cursor" {
 		processStart := time.Now()
 		// Serialize with the raw.jsonl writer's file lock so processAgentSession
 		// (RecoverRawAppend + drain) never runs concurrently with a hook or
@@ -967,6 +1020,12 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	adapter, err := adapters.GetAdapter(state.AdapterName)
 	if err != nil {
 		return nil, fmt.Errorf("adapter not found: %w", err)
+	}
+	if state.AdapterName == "cursor" {
+		// Even a header-only pending session uses its saved byte boundary.
+		// Full Read plus timestamp filtering would replay old JSONL and drop
+		// Cursor's entries, whose timestamps are explicitly unknown.
+		return finalizeIncrementalSession(projectRoot, state, filepath.Join(state.SessionPath, "raw.jsonl"), adapter, result)
 	}
 
 	// read session metadata (agent version, model)
