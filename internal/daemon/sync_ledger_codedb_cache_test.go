@@ -3,6 +3,7 @@ package daemon
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -138,5 +139,80 @@ func TestAdoptCacheOnlyTarget_RestoreAndSymlinkGuard(t *testing.T) {
 		assert.Empty(t, entries, "nothing moved through the symlink")
 		_, err = os.Stat(filepath.Join(target, ".sageox", "cache", "codedb", "index.db"))
 		assert.NoError(t, err, "cache untouched")
+	})
+}
+
+func TestAdoptCacheOnlyTarget_Branches(t *testing.T) {
+	write := func(t *testing.T, path string) {
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+		require.NoError(t, os.WriteFile(path, []byte("x"), 0o644))
+	}
+
+	t.Run("clone already ships a cache: the old derived cache is dropped", func(t *testing.T) {
+		root := t.TempDir()
+		target, tmp := filepath.Join(root, "ledger"), filepath.Join(root, "ledger.tmp-1")
+		write(t, filepath.Join(target, ".sageox", "cache", "codedb", "index.db"))
+		write(t, filepath.Join(tmp, ".sageox", "cache", "shipped.txt"))
+		_, err := adoptCacheOnlyTarget(tmp, target)
+		require.NoError(t, err)
+		_, err = os.Stat(target)
+		assert.True(t, os.IsNotExist(err), "skeleton removed so the swap can land")
+		_, err = os.Stat(filepath.Join(tmp, ".sageox", "cache", "shipped.txt"))
+		assert.NoError(t, err, "the clone's own cache is untouched")
+		_, err = os.Stat(filepath.Join(tmp, ".sageox", "cache", "codedb"))
+		assert.True(t, os.IsNotExist(err))
+	})
+
+	t.Run("empty .sageox skeleton is removed", func(t *testing.T) {
+		root := t.TempDir()
+		target, tmp := filepath.Join(root, "ledger"), filepath.Join(root, "ledger.tmp-1")
+		require.NoError(t, os.MkdirAll(filepath.Join(target, ".sageox"), 0o755))
+		require.NoError(t, os.MkdirAll(tmp, 0o755))
+		_, err := adoptCacheOnlyTarget(tmp, target)
+		require.NoError(t, err)
+		_, err = os.Stat(target)
+		assert.True(t, os.IsNotExist(err))
+	})
+
+	t.Run("missing target or foreign content is a no-op", func(t *testing.T) {
+		root := t.TempDir()
+		tmp := filepath.Join(root, "ledger.tmp-1")
+		require.NoError(t, os.MkdirAll(tmp, 0o755))
+		_, err := adoptCacheOnlyTarget(tmp, filepath.Join(root, "absent"))
+		require.NoError(t, err)
+
+		target := filepath.Join(root, "ledger")
+		write(t, filepath.Join(target, ".sageox", "cache", "codedb", "index.db"))
+		write(t, filepath.Join(target, "notes.txt"))
+		_, err = adoptCacheOnlyTarget(tmp, target)
+		require.NoError(t, err)
+		_, err = os.Stat(filepath.Join(target, ".sageox", "cache", "codedb", "index.db"))
+		assert.NoError(t, err, "foreign content: cache left exactly where it was")
+
+		other := filepath.Join(root, "other")
+		write(t, filepath.Join(other, ".sageox", "config.json"))
+		_, err = adoptCacheOnlyTarget(tmp, other)
+		require.NoError(t, err)
+		_, err = os.Stat(filepath.Join(other, ".sageox", "config.json"))
+		assert.NoError(t, err)
+	})
+
+	t.Run("skeleton removal fails: cache is moved back, nothing lost", func(t *testing.T) {
+		if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+			t.Skip("needs POSIX permission enforcement (chmod is a no-op on Windows, root ignores it)")
+		}
+		root := t.TempDir()
+		target, tmp := filepath.Join(root, "ledger"), filepath.Join(root, "ledger.tmp-1")
+		write(t, filepath.Join(target, ".sageox", "cache", "codedb", "index.db"))
+		require.NoError(t, os.MkdirAll(tmp, 0o755))
+		// target not writable: .sageox cannot be unlinked from it
+		require.NoError(t, os.Chmod(target, 0o500))
+		t.Cleanup(func() { _ = os.Chmod(target, 0o755) })
+
+		_, err := adoptCacheOnlyTarget(tmp, target)
+		require.Error(t, err)
+		require.NoError(t, os.Chmod(target, 0o755))
+		_, statErr := os.Stat(filepath.Join(target, ".sageox", "cache", "codedb", "index.db"))
+		assert.NoError(t, statErr, "the index must survive a failed adoption")
 	})
 }
