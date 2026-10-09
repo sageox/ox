@@ -75,14 +75,15 @@ func handleCheckHooks(p adapterprotocol.HookParams) (*adapterprotocol.CheckHooks
 	if err != nil {
 		return nil, err
 	}
-	path, installed, err := checkCursorHooks(p.RepoRoot, executable)
+	path, installed, owned, err := inspectCursorHooks(p.RepoRoot, executable)
 	if err != nil {
 		return nil, err
 	}
 	return &adapterprotocol.CheckHooksResponse{
-		Installed: installed,
-		Scope:     p.Scope,
-		HookFiles: []string{path},
+		Installed:     installed,
+		HasOwnedHooks: owned,
+		Scope:         p.Scope,
+		HookFiles:     []string{path},
 	}, nil
 }
 
@@ -196,30 +197,37 @@ func installCursorHooks(repoRoot, executable string) (string, bool, error) {
 }
 
 func checkCursorHooks(repoRoot, executable string) (string, bool, error) {
+	path, installed, _, err := inspectCursorHooks(repoRoot, executable)
+	return path, installed, err
+}
+
+// inspectCursorHooks distinguishes a complete install from removable entries.
+func inspectCursorHooks(repoRoot, executable string) (string, bool, bool, error) {
 	if err := validateCursorExecutable(executable); err != nil {
-		return "", false, err
+		return "", false, false, err
 	}
 	path, err := cursorHooksPath(repoRoot)
 	if err != nil {
-		return "", false, err
+		return "", false, false, err
 	}
 	if err := ensureCursorHooksParent(path, false); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return path, false, nil
+			return path, false, false, nil
 		}
-		return path, false, err
+		return path, false, false, err
 	}
 	document, exists, err := readCursorHooksDocument(path)
 	if err != nil {
-		return path, false, err
+		return path, false, false, err
 	}
 	if !exists {
-		return path, false, nil
+		return path, false, false, nil
 	}
+	installed, hasOwnedHooks := true, false
 	for _, event := range cursorHookEvents {
 		entries, err := document.entries(event)
 		if err != nil {
-			return path, false, err
+			return path, false, false, err
 		}
 		owned := 0
 		correct := false
@@ -229,13 +237,14 @@ func checkCursorHooks(repoRoot, executable string) (string, bool, error) {
 				continue
 			}
 			owned++
+			hasOwnedHooks = true
 			correct = entry.command == wantCommand && entry.timeout != nil && *entry.timeout == cursorHookTimeout
 		}
 		if owned != 1 || !correct {
-			return path, false, nil
+			installed = false
 		}
 	}
-	return path, true, nil
+	return path, installed, hasOwnedHooks, nil
 }
 
 func uninstallCursorHooks(repoRoot, executable string) (string, bool, error) {

@@ -859,6 +859,7 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 	// team context sync (lower priority, less frequent)
 	var teamContextTicker *time.Ticker
 	var teamContextChan <-chan time.Time
+	var initialTeamContextChan <-chan time.Time
 	if s.config.TeamContextSyncInterval > 0 && s.config.ProjectRoot != "" {
 		teamContextTicker = time.NewTicker(s.config.TeamContextSyncInterval)
 		teamContextChan = teamContextTicker.C
@@ -870,16 +871,12 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 			"heartbeat_interval", heartbeatInterval,
 		)
 
-		// delayed team context sync for regular pulls (not just cloning).
-		// Gated on global-sync ownership — non-owner daemons leave team
-		// contexts to the owning daemon for this endpoint (ox-6zme).
-		go func() {
-			time.Sleep(5 * time.Second)
-			if !s.IsGlobalSyncOwner() {
-				return
-			}
-			s.pullTeamContexts(ctx)
-		}()
+		// Keep the delayed initial pull in this loop, like recurring pulls:
+		// an untracked sleeper can wake and use scheduler state after Start
+		// returns on cancellation.
+		initialTeamContextTimer := time.NewTimer(5 * time.Second)
+		initialTeamContextChan = initialTeamContextTimer.C
+		defer initialTeamContextTimer.Stop()
 	} else {
 		s.logger.Info("sync scheduler started",
 			"read_interval", s.config.SyncIntervalRead,
@@ -974,6 +971,12 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 			// not traced: high-frequency sync dominates span volume with little diagnostic value
 			s.pullChanges(ctx)
 			readTicker.Reset(jitteredDuration(s.config.SyncIntervalRead, 0.10))
+
+		case <-initialTeamContextChan:
+			initialTeamContextChan = nil // one startup pull, never reset
+			if ctx.Err() == nil && s.IsGlobalSyncOwner() {
+				s.pullTeamContexts(ctx)
+			}
 
 		case <-teamContextChan:
 			// not traced: high-frequency sync dominates span volume with little diagnostic value

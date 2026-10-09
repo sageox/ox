@@ -744,8 +744,8 @@ func uninstallAllIntegrations(force bool) error {
 	}
 
 	// check Cursor Agents Window
-	cursorInstalled := checkExternalAdapterHooks("cursor", false)
-	if cursorInstalled {
+	cursorRemovable := hasExternalAdapterHooksToRemove("cursor", false)
+	if cursorRemovable {
 		installed = append(installed, "Cursor Agents Window (project)")
 	}
 
@@ -828,7 +828,7 @@ func uninstallAllIntegrations(force bool) error {
 			errors = append(errors, fmt.Sprintf("OMP (project): %v", err))
 		}
 	}
-	if cursorInstalled {
+	if cursorRemovable {
 		if err := uninstallExternalAdapterHooks("cursor", false); err != nil {
 			errors = append(errors, fmt.Sprintf("Cursor Agents Window (project): %v", err))
 		}

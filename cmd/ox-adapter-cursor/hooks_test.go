@@ -601,7 +601,7 @@ func TestCursorHookHandlersProjectLifecycle(t *testing.T) {
 		t.Fatalf("install response = %#v", installed)
 	}
 	checked, err := handleCheckHooks(params)
-	if err != nil || !checked.Installed || checked.Scope != "project" || len(checked.HookFiles) != 1 {
+	if err != nil || !checked.Installed || !checked.HasOwnedHooks || checked.Scope != "project" || len(checked.HookFiles) != 1 {
 		t.Fatalf("check response/error = %#v/%v", checked, err)
 	}
 	installedAgain, err := handleInstallHooks(params)
@@ -614,7 +614,7 @@ func TestCursorHookHandlersProjectLifecycle(t *testing.T) {
 		t.Fatalf("uninstall response/error = %#v/%v", uninstalled, err)
 	}
 	checked, err = handleCheckHooks(params)
-	if err != nil || checked.Installed {
+	if err != nil || checked.Installed || checked.HasOwnedHooks {
 		t.Fatalf("post-uninstall check response/error = %#v/%v", checked, err)
 	}
 	uninstalledAgain, err := handleUninstallHooks(params)

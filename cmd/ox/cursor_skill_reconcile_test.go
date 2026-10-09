@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -10,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/sageox/ox/extensions/skills"
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/internal/skillmanager"
 	"github.com/sageox/ox/pkg/adapterprotocol"
@@ -114,6 +116,60 @@ esac
 	require.NoError(t, err)
 	assert.Empty(t, desired.Targets)
 	assert.Empty(t, targets)
+}
+
+func TestCursorUninstallAllCleansPartialHooks(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: builds the Cursor adapter binary")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("adapter wrapper uses a POSIX shell")
+	}
+	realAdapter := buildCursorSkillsAdapter(t)
+	for _, kind := range []string{"partial", "stale", "unrelated only"} {
+		t.Run(kind, func(t *testing.T) {
+			repoRoot := setupUninstallAllTest(t, map[string]string{
+				"amp": ".amp", "codex": ".codex", "cursor": ".cursor",
+				"gemini": ".gemini", "opencode": ".opencode",
+			})
+			wrapper := filepath.Join(os.Getenv("OX_ADAPTER_PATH"), "ox-adapter-cursor")
+			require.NoError(t, os.WriteFile(wrapper, []byte("#!/bin/sh\nexec "+quoteCursorSkillsShell(realAdapter)+" \"$@\"\n"), 0o755))
+			entries := []map[string]any{{"command": "echo keep"}}
+			if kind != "unrelated only" {
+				executable := realAdapter
+				if kind == "stale" {
+					executable = filepath.Join(repoRoot, "old", "ox-adapter-cursor")
+				}
+				entries = append(entries, map[string]any{"command": quoteCursorSkillsShell(executable) + " hook stop", "timeout": 20})
+			}
+			before, err := json.Marshal(map[string]any{"version": 1, "hooks": map[string]any{"stop": entries}})
+			require.NoError(t, err)
+			path := filepath.Join(repoRoot, ".cursor", "hooks.json")
+			require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+			require.NoError(t, os.WriteFile(path, before, 0o644))
+			assert.False(t, checkExternalAdapterHooks("cursor", false), "an incomplete installation remains unhealthy")
+
+			var uninstallErr error
+			output := captureStdoutForPlanCLI(t, func() {
+				withStdin(t, "", func() { uninstallErr = uninstallAllIntegrations(false) })
+			})
+			after, err := os.ReadFile(path)
+			require.NoError(t, err)
+			assert.Equal(t, before, after, "discovery and an unanswered prompt must not mutate hooks")
+			if kind == "unrelated only" {
+				require.NoError(t, uninstallErr)
+				assert.Contains(t, output, "No integrations found")
+				return
+			}
+			require.ErrorIs(t, uninstallErr, cli.ErrConfirmationRequired)
+			assert.Contains(t, output, "Cursor Agents Window (project)")
+			require.NoError(t, uninstallAllIntegrations(true))
+			after, err = os.ReadFile(path)
+			require.NoError(t, err)
+			assert.JSONEq(t, `{"version":1,"hooks":{"stop":[{"command":"echo keep"}]}}`, string(after))
+			assert.False(t, hasExternalAdapterHooksToRemove("cursor", false))
+		})
+	}
 }
 
 func buildCursorSkillsAdapter(t *testing.T) string {

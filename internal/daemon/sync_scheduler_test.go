@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -505,4 +506,39 @@ func TestSyncScheduler_Start_TeamContextTicker(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("scheduler should stop when context canceled")
 	}
+}
+
+// A stopped scheduler must not wake later and sync using another test's state.
+func TestSyncScheduler_Start_CancelsDelayedTeamSync(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: observes the five-second initial team-sync delay")
+	}
+
+	scheduler, _, logs := newTeamBudgetScheduler(t, 0)
+	scheduler.config.SyncIntervalRead = time.Hour
+	scheduler.config.TeamContextSyncInterval = time.Hour
+	scheduler.config.VersionCheckInterval = 0
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		scheduler.Start(ctx)
+	}()
+
+	require.Eventually(t, func() bool {
+		return strings.Contains(logs.String(), "sync scheduler started")
+	}, 5*time.Second, time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("scheduler did not stop after cancellation")
+	}
+
+	// The empty fixture logs this only if a team sync actually runs. Stay
+	// beyond the startup delay so the old detached goroutine is observed.
+	assert.Never(t, func() bool {
+		return strings.Contains(logs.String(), "no team contexts configured")
+	}, 6*time.Second, 10*time.Millisecond, "team sync ran after the scheduler stopped")
 }
