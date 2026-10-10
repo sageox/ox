@@ -1,0 +1,12 @@
+[
+  {
+    "from": "hold",
+    "to": "hnew",
+    "section": "Risks",
+    "label": "The first risk",
+    "method": "label-exact",
+    "score": 1,
+    "at": "2026-10-01T01:30:00Z",
+    "x_reason": "heading reworded"
+  }
+]

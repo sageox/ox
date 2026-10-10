@@ -1,0 +1,16 @@
+{
+  "id": "r-0005-conflict",
+  "slug": "rc-same-id",
+  "reviewer": "Ana",
+  "created_at": "2026-10-01T03:00:00Z",
+  "items": [
+    {
+      "anchor": "h3",
+      "section": "Risks",
+      "label": "The third risk",
+      "status": "flag",
+      "note": "Different words under the same id.",
+      "reviewer": "Ana"
+    }
+  ]
+}

@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -24,8 +25,9 @@ import (
 // plan_review_durability_test.go proves a review POST tells the page the truth
 // about durability: committed and pushed reflect a real Ledger git repo with a
 // real bare remote, a failed push leaves a marker the prime-triggered flush
-// clears, concurrent rounds never collide on .git/index.lock, and a plan
-// commit never sweeps up an unrelated staged Ledger change.
+// clears, concurrent rounds never collide on .git/index.lock, a plan commit
+// never sweeps up an unrelated staged Ledger change, and records published
+// from several clones all survive the push rebase.
 
 // reviewDurabilityResp is the /feedback (and /accept, /reopen, /approve)
 // response decoded strictly, so a renamed or extra field fails the test
@@ -231,6 +233,76 @@ func TestPlanReviewDurability_ConcurrentRoundsAllCommitted(t *testing.T) {
 	}
 	if got := feedbackRoundsOnRemote(t, f.origin); got != n {
 		t.Fatalf("want %d rounds on the remote, got %d", n, got)
+	}
+}
+
+// TestPlanReviewDurability_RacingClonesKeepEveryRecord: three clones of one
+// Ledger each save a round and a resolution, then publish in turn, so every
+// push after the first meets a moved remote head and rebases onto it. All six
+// records reach the remote and assemble into one item per reviewer. Failure
+// prevented: review data kept in a shared file (as v0.20.0 keeps resolutions)
+// loses one side when the push rebase auto-resolves the conflict under data/.
+func TestPlanReviewDurability_RacingClonesKeepEveryRecord(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: three Ledger clones pushing to a bare remote")
+	}
+	origin := initGitLedgerWithOrigin(t, t.TempDir())
+	const rel = "data/plans/2026-10-01-race"
+	clone := func() string {
+		dir := filepath.Join(t.TempDir(), "ledger")
+		runGitInDir(t, filepath.Dir(dir), "clone", "-q", "-b", "main", origin, dir)
+		runGitInDir(t, dir, "config", "user.email", "test@example.com")
+		runGitInDir(t, dir, "config", "user.name", "Test")
+		runGitInDir(t, dir, "config", "commit.gpgsign", "false")
+		return dir
+	}
+	t0 := time.Date(2026, 10, 1, 1, 0, 0, 0, time.UTC)
+	var ledgers []string
+	for i := range 3 {
+		ledger := clone()
+		planDir := filepath.Join(ledger, filepath.FromSlash(rel))
+		who := fmt.Sprintf("reviewer-%d", i)
+		set := plan.FeedbackSet{ID: fmt.Sprintf("race-%04d", i), Reviewer: who,
+			Items: []plan.FeedbackItem{{Anchor: "h1", Status: plan.FeedbackRequestChange}}}
+		if _, err := plan.SaveFeedback(planDir, set, t0.Add(time.Duration(i)*time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		if err := plan.AppendResolution(planDir, plan.Resolution{Anchor: "h1", State: plan.ResolutionAddressed, Note: who}, t0.Add(time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		ledgers = append(ledgers, ledger)
+	}
+	for _, ledger := range ledgers {
+		st, err := commitAndPushPlanDir(context.Background(), ledger, filepath.Join(ledger, filepath.FromSlash(rel)))
+		if err != nil || !st.Pushed {
+			t.Fatalf("publish from %s: %+v (err %v)", ledger, st, err)
+		}
+	}
+
+	if n := feedbackRoundsOnRemote(t, origin); n != 3 {
+		t.Fatalf("remote rounds = %d, want 3", n)
+	}
+	fresh := filepath.Join(clone(), filepath.FromSlash(rel))
+	resolutions, err := plan.LoadResolutions(fresh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var notes []string
+	for _, r := range resolutions {
+		notes = append(notes, r.Note)
+	}
+	slices.Sort(notes)
+	if want := []string{"reviewer-0", "reviewer-1", "reviewer-2"}; !slices.Equal(notes, want) {
+		t.Fatalf("a fresh clone should read every clone's resolution, got notes %v, want %v", notes, want)
+	}
+	items, err := plan.AssembleReview(fresh)
+	if err != nil || len(items) != 3 {
+		t.Fatalf("a fresh clone should assemble one item per reviewer, got %+v (err %v)", items, err)
+	}
+	for _, it := range items {
+		if it.Open || it.Resolution == nil || it.Resolution.State != plan.ResolutionAddressed {
+			t.Fatalf("every reviewer's item should be closed as addressed, got %+v", it)
+		}
 	}
 }
 

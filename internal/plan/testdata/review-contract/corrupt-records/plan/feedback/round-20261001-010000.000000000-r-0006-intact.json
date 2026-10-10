@@ -1,0 +1,24 @@
+{
+  "id": "r-0006-intact",
+  "slug": "rc-corrupt-records",
+  "reviewer": "Ana",
+  "created_at": "2026-10-01T01:00:00Z",
+  "items": [
+    {
+      "anchor": "h1",
+      "section": "Risks",
+      "label": "The first risk",
+      "status": "request-change",
+      "note": "Name the owner.",
+      "reviewer": "Ana"
+    },
+    {
+      "anchor": "h2",
+      "section": "Risks",
+      "label": "The second risk",
+      "status": "flag",
+      "note": "Is this still true?",
+      "reviewer": "Ana"
+    }
+  ]
+}
