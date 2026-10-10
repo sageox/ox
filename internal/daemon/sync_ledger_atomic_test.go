@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -45,6 +46,13 @@ import (
 // binds to.
 func setupBareLedgerHTTP(t *testing.T) string {
 	t.Helper()
+	return setupBareLedgerHTTPWith(t, nil)
+}
+
+// setupBareLedgerHTTPWith is setupBareLedgerHTTP with seed writing extra
+// files into the work tree before the seed commit.
+func setupBareLedgerHTTPWith(t *testing.T, seed func(work string)) string {
+	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -65,6 +73,9 @@ func setupBareLedgerHTTP(t *testing.T) string {
 	run(work, "config", "user.email", "test@example.com")
 	run(work, "config", "user.name", "Test User")
 	require.NoError(t, os.WriteFile(filepath.Join(work, "seed.txt"), []byte("seed\n"), 0o644))
+	if seed != nil {
+		seed(work)
+	}
 	run(work, "add", "-A")
 	run(work, "commit", "-q", "-m", "seed")
 	run(work, "push", "-q", "origin", "main")
@@ -127,6 +138,35 @@ func TestSyncScheduler_Checkout_LedgerCloneIsAtomic(t *testing.T) {
 	require.NoError(t, err, string(out))
 
 	assert.Empty(t, tmpCloneSiblings(t, repoPath), "no temp staging directory should survive a successful clone")
+}
+
+// TestSyncScheduler_Checkout_LedgerSymlinkClonesAsFile: a symlink committed
+// to the Ledger arrives in a fresh daemon clone as a plain file, so the
+// AGENTS.md written right after the clone stays inside it. Failure prevented:
+// AGENTS.md committed as a link to a missing path makes the clone's
+// CreateAgentsMD create that path outside the Ledger.
+func TestSyncScheduler_Checkout_LedgerSymlinkClonesAsFile(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks needs elevated rights on Windows, where git checks them out as files anyway")
+	}
+	outside := filepath.Join(t.TempDir(), "created-through-link")
+	cloneURL := setupBareLedgerHTTPWith(t, func(work string) {
+		require.NoError(t, os.Symlink(outside, filepath.Join(work, "AGENTS.md")))
+	})
+	s := checkoutTestScheduler(t)
+
+	repoPath := filepath.Join(t.TempDir(), "ledger")
+	_, err := s.Checkout(CheckoutPayload{CloneURL: cloneURL, RepoPath: repoPath, RepoType: "ledger"}, nil)
+	require.NoError(t, err)
+
+	info, err := os.Lstat(filepath.Join(repoPath, "AGENTS.md"))
+	require.NoError(t, err)
+	assert.True(t, info.Mode().IsRegular(), "AGENTS.md checked out as %s, want a plain file", info.Mode())
+	_, statErr := os.Stat(outside)
+	assert.True(t, os.IsNotExist(statErr), "nothing may be written outside the Ledger: %v", statErr)
 }
 
 // TestSyncScheduler_Checkout_FailedLedgerCloneLeavesNoHalfClone is the
