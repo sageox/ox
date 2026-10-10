@@ -205,6 +205,10 @@ type SyncScheduler struct {
 	gcSwapWindowTestHook     func()        // called right after runBlueGreenGCOpts writes .gc-swap-lock, before the rename; tests use this to observe the lock file mid-swap
 	retractLockedTestHook    func()        // called on entry to retractOrphanedDrafts' locked closure; tests use it to prove the reaper reached locked revalidation rather than timing out on the lock
 
+	// disableSymlinksTestHook replaces ledger.DisableSymlinks in
+	// pullManagedRepo; tests use it to make the protection fail.
+	disableSymlinksTestHook func(string) error
+
 	// callbacks
 	onActivity   func()                                                           // called on any sync activity
 	onTelemetry  func(syncType, operation, status string, duration time.Duration) // called on sync complete for telemetry
@@ -1411,6 +1415,7 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 		// (data/) which cover all idempotent import paths (github, linear, murmurs).
 		return s.pullManagedRepo(ctx, ManagedRepoPullOpts{
 			ImmutablePaths:     true, // the Ledger: session and plan dirs never move
+			NoSymlinks:         true,
 			RepoPath:           s.config.LedgerPath,
 			RepoName:           "ledger",
 			ProjectRoot:        s.config.ProjectRoot,
@@ -2612,9 +2617,12 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 		if !gitserver.TestAllowFileTransport {
 			cloneArgs = append(cloneArgs, "-c", "protocol.file.allow=never")
 		}
+		// core.symlinks=false: a symlink committed to the Ledger checks out as a
+		// plain file, so the AGENTS.md written below (and every later write)
+		// cannot follow one out of the clone. See ledger.DisableSymlinks.
 		cloneArgs = append(cloneArgs,
 			"-c", "protocol.ext.allow=never",
-			"clone", "--quiet", "--", cloneURL, tempPath,
+			"clone", "--quiet", "--config", "core.symlinks=false", "--", cloneURL, tempPath,
 		)
 		// NewNetworkCmd sets GIT_TERMINAL_PROMPT=0 so a credential gap fails
 		// fast instead of EOFing on a username prompt in the daemon's TTY-less
