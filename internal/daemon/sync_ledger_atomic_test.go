@@ -342,7 +342,7 @@ func TestCloneInBackground_PreCloneLockBusyDoesNotEscalateBackoff(t *testing.T) 
 	// a URL that passes isValidCloneURL (localhost is always allowed) but is
 	// never actually dialed — the lock must block entry before any network
 	// attempt happens.
-	s.cloneInBackground("http://127.0.0.1:1/repo.git", repoPath, "ledger", workspaceID)
+	s.cloneInBackground(context.Background(), "http://127.0.0.1:1/repo.git", repoPath, "ledger", workspaceID)
 
 	attempts, _ := s.workspaceRegistry.GetCloneRetryInfo(workspaceID)
 	assert.Zero(t, attempts, "a busy pre-clone lock must not increment the retry/backoff counter")

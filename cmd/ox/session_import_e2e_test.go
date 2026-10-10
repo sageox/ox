@@ -387,7 +387,7 @@ func (f *importFixture) add(t *testing.T, s pastSession) string {
 }
 
 // readNative is the adapter: it answers only for the exact file it is given.
-func (f *importFixture) readNative(_ nativeimport.Agent, path string) ([]adapters.RawEntry, error) {
+func (f *importFixture) readNative(_ context.Context, _ nativeimport.Agent, path string) ([]adapters.RawEntry, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.reads = append(f.reads, path)
@@ -447,6 +447,9 @@ func (f *importFixture) envFor(ledgerPath string, opts importOptions) (*importEn
 		logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 	env.deps = productionImportDeps(context.Background(), env)
+	// Interactive review has its own E2E proofs; these pipeline tests inject
+	// confirmation directly without starting a real terminal or browser.
+	env.deps.review = nil
 	env.deps.readNative = f.readNative
 	env.deps.runner = func(agent nativeimport.Agent) agentwork.Runner {
 		if f.runners != nil {

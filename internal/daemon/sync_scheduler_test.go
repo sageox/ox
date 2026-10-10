@@ -352,6 +352,9 @@ func TestSyncScheduler_PullTeamContexts_NoTeamContextsConfigured(t *testing.T) {
 	assert.Empty(t, scheduler.TeamContextStatus())
 }
 
+// Two configured local Team Contexts must retain independent successful status.
+// Isolate auth and shared team data: real credentials can discover extra teams
+// and contaminate the registry despite a recent refresh timestamp.
 func TestSyncScheduler_TeamContextMultiple(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test")
@@ -361,6 +364,10 @@ func TestSyncScheduler_TeamContextMultiple(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
+
+	t.Setenv("OX_XDG_DISABLE", "")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
 
 	// isolate from real credentials
 	prevConfigDir := gitserver.TestSetConfigDirOverride(t.TempDir())
@@ -395,6 +402,8 @@ team_name = "Team Beta"
 path = %q
 `, teamDir1, teamDir2)
 	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "config.local.toml"), []byte(configContent), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "config.json"),
+		[]byte(`{"endpoint":"https://fake.test.invalid"}`), 0644))
 
 	cfg := DefaultConfig()
 	cfg.ProjectRoot = projectDir

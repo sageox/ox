@@ -816,7 +816,8 @@ func (s *SyncScheduler) waitClones(timeout time.Duration) {
 	}
 }
 
-// Start starts the sync scheduler.
+// Start runs the scheduler until cancellation, then joins the delayed startup
+// pull before returning. Tracked background clones receive a bounded drain period.
 func (s *SyncScheduler) Start(ctx context.Context) {
 	s.ctx = ctx
 
@@ -877,13 +878,15 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 		// delayed team context sync for regular pulls (not just cloning).
 		// Gated on global-sync ownership — non-owner daemons leave team
 		// contexts to the owning daemon for this endpoint (ox-6zme).
-		go func() {
-			time.Sleep(5 * time.Second)
+		startupTeamSyncDone := startDelayedTeamContextSync(ctx, 5*time.Second, func(ctx context.Context) {
 			if !s.IsGlobalSyncOwner() {
 				return
 			}
 			s.pullTeamContexts(ctx)
-		}()
+		})
+		// The startup pull must stop before the scheduler's caller releases
+		// its resources. Cancellation also interrupts the initial delay.
+		defer func() { <-startupTeamSyncDone }()
 	} else {
 		s.logger.Info("sync scheduler started",
 			"read_interval", s.config.SyncIntervalRead,
@@ -956,7 +959,7 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 	s.writeHeartbeats()
 
 	// immediate anti-entropy check on startup (same logic as periodic ticker)
-	s.triggerMissingClones()
+	s.triggerMissingClones(ctx)
 
 	// immediate initial pull so last_sync gets populated right away
 	// (don't wait 5 minutes for the first readTicker)
@@ -1057,6 +1060,30 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 	}
 }
 
+// startDelayedTeamContextSync schedules the initial team pull and reports when
+// its callback has finished, including when cancellation skips the pull.
+func startDelayedTeamContextSync(ctx context.Context, delay time.Duration, pull func(context.Context)) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if ctx.Err() != nil {
+			return
+		}
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
+		// The timer and cancellation can become ready together.
+		if ctx.Err() == nil {
+			pull(ctx)
+		}
+	}()
+	return done
+}
+
 // TriggerSync triggers an immediate sync (debounced by watcher).
 func (s *SyncScheduler) TriggerSync() {
 	select {
@@ -1070,7 +1097,11 @@ func (s *SyncScheduler) TriggerSync() {
 // This is called by IPC when doctor or other commands want to ensure
 // ledgers and team contexts are cloned.
 func (s *SyncScheduler) TriggerAntiEntropy() {
-	s.triggerMissingClones()
+	ctx := s.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s.triggerMissingClones(ctx)
 }
 
 // LastSync returns the timestamp of the last successful sync.
@@ -1091,7 +1122,7 @@ func (s *SyncScheduler) pullChanges(ctx context.Context) {
 	defer span.End()
 
 	// anti-entropy: ensure missing workspaces get cloned
-	s.triggerMissingClones()
+	s.triggerMissingClones(ctx)
 
 	// bound background sync to 60s so a DNS/network hang doesn't block
 	// the scheduler for minutes (the caller ctx has no deadline)
@@ -1311,6 +1342,8 @@ func escalateSessionConflictSeverity(tracker *IssueTracker, issue *DaemonIssue, 
 	}
 }
 
+// doPull serializes Ledger pulls and applies retry/backoff policy. Discovery and
+// pull work honor ctx; a missing Ledger starts a tracked clone with daemon lifetime.
 func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, forceSync bool, refreshSparse bool) error {
 	ctx, span := perf.Start(ctx, "daemon:do_pull")
 	defer span.End()
@@ -1327,7 +1360,7 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 			if ledger := s.workspaceRegistry.GetLedger(); ledger != nil {
 				// if no clone URL from credentials, try fetching from API
 				if ledger.CloneURL == "" {
-					s.fetchLedgerURLFromAPI()
+					s.fetchLedgerURLFromAPI(ctx)
 					// reload ledger after API fetch
 					ledger = s.workspaceRegistry.GetLedger()
 				}
@@ -1347,7 +1380,7 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 					}
 					// clone in background goroutine - don't block sync loop
 					if s.addClone() {
-						go s.cloneInBackground(ledger.CloneURL, ledger.Path, "ledger", ledger.ID) //nolint:gosec // G118 - intentionally uses background context; goroutine outlives request scope
+						go s.cloneInBackground(s.backgroundCloneContext(), ledger.CloneURL, ledger.Path, "ledger", ledger.ID)
 					}
 				}
 			}
@@ -1468,7 +1501,7 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 
 	// handle errors
 	if result.Err != nil {
-		s.refreshAfterAuthFailure(result.Err)
+		s.refreshAfterAuthFailure(ctx, result.Err)
 		s.recordError("ledger", result.Err.Error())
 		s.metrics.RecordPullFailure()
 		s.workspaceRegistry.RecordSyncFailure("ledger")
@@ -2083,7 +2116,7 @@ func (s *SyncScheduler) syncAll(ctx context.Context) {
 // cache mid-index. The watcher only needs to pull remote changes, not reconfigure
 // the sparse-checkout cone.
 func (s *SyncScheduler) syncFromWatcher(ctx context.Context) {
-	s.triggerMissingClones()
+	s.triggerMissingClones(ctx)
 	pullCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 	_ = s.doPull(pullCtx, nil, false, false)
@@ -2237,7 +2270,7 @@ func (s *SyncScheduler) SyncWithProgress(progress *ProgressWriter) error {
 // Returns an error if the pull fails.
 func (s *SyncScheduler) doSyncAll(ctx context.Context, progress *ProgressWriter) error {
 	// refresh credentials if expired or near expiry
-	s.refreshCredentialsIfNeeded()
+	s.refreshCredentialsIfNeeded(ctx)
 
 	return s.doPull(ctx, progress, true, true)
 }

@@ -227,6 +227,9 @@ func TestSyncScheduler_PullTeamContext_CorruptRepoRenameFailure(t *testing.T) {
 	assert.DirExists(t, tcPath, "the corrupt clone is still there for the next cycle to retry")
 }
 
+// A configured local Team Context must produce successful sync status. Isolate
+// auth and shared team data too: a real bearer can refresh credentials and add
+// unrelated teams even when the test's refresh timestamp is recent.
 func TestSyncScheduler_TeamContextIntegration(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test")
@@ -236,6 +239,10 @@ func TestSyncScheduler_TeamContextIntegration(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
+
+	t.Setenv("OX_XDG_DISABLE", "")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
 
 	// isolate from real credentials
 	prevConfigDir := gitserver.TestSetConfigDirOverride(t.TempDir())
@@ -262,6 +269,8 @@ team_name = "Test Team"
 path = %q
 `, teamDir)
 	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "config.local.toml"), []byte(configContent), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "config.json"),
+		[]byte(`{"endpoint":"https://fake.test.invalid"}`), 0644))
 
 	cfg := DefaultConfig()
 	cfg.ProjectRoot = projectDir

@@ -103,6 +103,9 @@ func TestImportCommandRefusesBeforeReadingSessions(t *testing.T) {
 		{name: "a negative worker count", args: []string{"--parallel", "-1"}, want: importErrBadFlag},
 		{name: "a window that is not one", args: []string{"--since", "yesterday"}, want: importErrBadFlag},
 		{name: "a session prefix too short to be unique", args: []string{"--session", "5b1d"}, want: importErrBadFlag},
+		{name: "browser cannot write a JSON result", args: []string{"--browse"}, want: importErrBadFlag},
+		{name: "content preview needs a session", args: []string{"--preview"}, want: importErrBadFlag},
+		{name: "content preview cannot widen to multiple sessions", args: []string{"--preview", "--session", e2eClaudeA + "," + e2eCodexA}, want: importErrBadFlag},
 		{name: "a directory that is not a SageOx project", setup: func(t *testing.T, _ *importCmdProject) {
 			other := t.TempDir()
 			runGit(t, other, "init", "-q")

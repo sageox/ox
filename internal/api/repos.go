@@ -433,12 +433,18 @@ func (c *RepoClient) GetTeamInfo(teamID string) (*TeamInfoResponse, error) {
 // Returns ErrUnauthorized if authentication fails.
 // Returns nil, nil if the endpoint returns 404 (server hasn't implemented this endpoint yet).
 func (c *RepoClient) GetRepoDetail(repoID string) (*RepoDetailResponse, error) {
+	return c.GetRepoDetailContext(context.Background(), repoID)
+}
+
+// GetRepoDetailContext fetches repo detail with caller cancellation while
+// preserving the client's HTTP timeout and GetRepoDetail's response contract.
+func (c *RepoClient) GetRepoDetailContext(ctx context.Context, repoID string) (*RepoDetailResponse, error) {
 	reqURL := strings.TrimSuffix(c.baseURL, "/") + fmt.Sprintf(repoDetailPath, repoID)
 
 	logger.LogHTTPRequest("GET", reqURL)
 	start := time.Now()
 
-	httpReq, err := useragent.NewRequest(context.Background(), "GET", reqURL, nil)
+	httpReq, err := useragent.NewRequest(ctx, "GET", reqURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
