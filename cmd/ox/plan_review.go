@@ -90,9 +90,14 @@ func reviewSaveDraft(cmd *cobra.Command, file string) (string, error) {
 	if gitRoot == "" || !config.PlanSave(gitRoot) {
 		return "", fmt.Errorf("review --file needs a ledger with plan capture enabled (run `ox init`)")
 	}
+	in, authored := splitAuthoredHTML(in)
 	result := plan.Enrich(context.Background(), in, gitRoot)
-	dir := savePlanWithProvenance(gitRoot, in, result, nil)
+	var report planSaveReport
+	dir := saveEnrichedPlan(gitRoot, in, result, authored, withReport(&report))
 	if dir == "" {
+		if report.Err != nil {
+			return "", fmt.Errorf("could not save draft to the ledger: %w", report.Err)
+		}
 		return "", fmt.Errorf("could not save draft to the ledger")
 	}
 	if companions := gatherCompanions(cmd, in); len(companions) > 0 {
@@ -102,7 +107,9 @@ func reviewSaveDraft(cmd *cobra.Command, file string) (string, error) {
 			cli.PrintHint("could not record companion(s) in plan meta: " + rerr.Error())
 		}
 	}
-	return plan.Slugify(planTopic(in)), nil
+	// Save owns the final slug: an authored page's ox-plan-slug, or the slug
+	// of an earlier save of this same file, can differ from the topic's.
+	return planSavedSlug(dir, "", planTopic(in)), nil
 }
 
 func runPlanReview(cmd *cobra.Command, slug string, noServe bool, idleTimeout time.Duration) error {
