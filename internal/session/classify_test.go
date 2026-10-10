@@ -30,6 +30,23 @@ func TestClassifySession(t *testing.T) {
 			isUploaded: true,
 			want:       StatusUploaded,
 		},
+		// GH #1093: held on this machine, never shown as stranded or uploaded
+		{
+			name: "held → held",
+			info: SessionInfo{Held: true},
+			want: StatusHeld,
+		},
+		{
+			name:       "held with a draft placeholder in the ledger → held, not draft or uploaded",
+			info:       SessionInfo{Held: true, Draft: true},
+			isUploaded: true,
+			want:       StatusHeld,
+		},
+		{
+			name: "held but canceled → canceled",
+			info: SessionInfo{Held: true, StopReason: StopReasonCanceled},
+			want: StatusCanceled,
+		},
 		{
 			name: "recording, live process → recording",
 			info: SessionInfo{

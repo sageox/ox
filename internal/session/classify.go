@@ -61,6 +61,7 @@ const (
 	StatusLocal     SessionStatus = "local"     // exists locally, not uploaded (may have been recovered from orphan)
 	StatusUploaded  SessionStatus = "uploaded"  // committed to ledger
 	StatusCanceled  SessionStatus = "canceled"  // user explicitly discarded session (terminal — data deleted)
+	StatusHeld      SessionStatus = "held"      // kept on this machine (session_publishing: manual) until 'ox session upload'
 
 	// StatusDraft: the ledger holds a meta.json-only placeholder published
 	// early so /c/<session_id> resolves for links already circulating in PR
@@ -155,6 +156,12 @@ func ClassifySession(info SessionInfo, isUploaded bool) SessionStatus {
 		// check stop reason for terminal states
 		if info.StopReason == StopReasonCanceled {
 			return StatusCanceled
+		}
+		// Held on this machine. Checked before draft and uploaded: a draft
+		// placeholder published before the hold makes the session look
+		// uploaded, and it is not (GH #1093).
+		if info.Held {
+			return StatusHeld
 		}
 		// A ledger directory holding only a draft placeholder is NOT an
 		// uploaded session — no turn data has been committed. Checked before

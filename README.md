@@ -224,9 +224,13 @@ happens when a session *stops*, not whether it starts:
 ox config set session_publishing manual   # don't auto-publish when a session stops
 ```
 
-With `session_publishing: manual`, a session is not published when it stops —
-it isn't pushed to the shared ledger until you explicitly run `ox session
-upload`. This is different from `session_recording: disabled` above, which
+With `session_publishing: manual`, a session is *held* on your machine when it
+stops: nothing summarizes it, pushes it to the shared ledger, or deletes it —
+not the background daemon, not `ox doctor`, and not closing your AI coworker.
+`ox session list` shows it as `held`, and `ox doctor` / `ox status` list your
+held sessions. Publish one when you're ready with `ox session upload <name>`;
+its summary is generated after it's published. This is different from
+`session_recording: disabled` above, which
 stops automatic capture entirely; `manual` publishing still records, it just
 doesn't publish automatically. (Don't confuse the two `manual` values:
 `session_recording: manual` changes when capture *starts*; `session_publishing:

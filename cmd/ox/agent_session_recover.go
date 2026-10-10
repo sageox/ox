@@ -305,16 +305,42 @@ func recoverFromCache(inst *agentinstance.Instance, projectRoot string, state *s
 	// minutes and a live hook gives up on the lock after seconds. So this first
 	// pass only sizes the prompt; publishing re-takes the lock and re-reads.
 	var entryCount int
+	var held bool
 	err := withCachedRecordingForRecovery(projectRoot, state, rawPath, func(latest *session.RecordingState) error {
 		stored, readErr := session.ReadSessionFromPath(rawPath)
 		if readErr != nil {
 			return unreadableCachedSessionError(projectRoot, latest, readErr)
 		}
 		entryCount = len(stored.Entries)
+		// Held on this machine (session_publishing: manual, now or at start):
+		// recovered locally, never uploaded. The hold goes on before the
+		// recording is cleared, and both happen under the capture lock, so a
+		// queued hook never sees a finalized recording as live (GH #1093).
+		if !stopHoldsSession(projectRoot, latest) {
+			return nil
+		}
+		if err := session.WriteHoldMarker(latest.SessionPath, session.HoldManualPublishing, "recover"); err != nil {
+			return fmt.Errorf("hold recovered session %s: %w", session.GetSessionName(latest.SessionPath), err)
+		}
+		held = true
+		_ = session.ClearRecordingStateAt(latest.SessionPath, latest.SessionID)
 		return nil
 	})
 	if err != nil {
 		return err
+	}
+
+	if held {
+		name := session.GetSessionName(state.SessionPath)
+		return outputRecoverJSON(&sessionRecoverOutput{
+			Success:     true,
+			Type:        "session_recover",
+			AgentID:     inst.AgentID,
+			RawPath:     rawPath,
+			EntryCount:  entryCount,
+			SessionName: name,
+			Message:     heldSessionWarning(name),
+		})
 	}
 
 	// interactive confirmation: prompt human users before uploading orphaned sessions

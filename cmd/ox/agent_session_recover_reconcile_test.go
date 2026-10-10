@@ -300,22 +300,29 @@ func TestDiscardingACachedRecordingDiscardsOnlyTheOneThatWasOffered(t *testing.T
 // Failure prevented: the tail of a session captured into a finalized recording,
 // never uploaded, with the state that pointed at it deleted a moment later.
 func TestFinalizersClearTheRecordingBeforeReleasingTheCaptureLock(t *testing.T) {
+	recoverCache := func(inst *agentinstance.Instance, projectRoot string, state *session.RecordingState) error {
+		return recoverFromCache(inst, projectRoot, state, filepath.Join(state.SessionPath, "raw.jsonl"))
+	}
 	for _, tc := range []struct {
 		name string
 		// processed names a file the finalizer writes once its read of raw.jsonl
 		// is over, so its appearance means only the clear is left.
 		processed string
-		finalize  func(inst *agentinstance.Instance, projectRoot string, state *session.RecordingState) error
+		// publishing overrides the fixture's manual project config; "" keeps it.
+		publishing string
+		finalize   func(inst *agentinstance.Instance, projectRoot string, state *session.RecordingState) error
 	}{
-		{"recover", "session.md", recoverViaNormalStop},
-		{"stop", "session.md", func(inst *agentinstance.Instance, _ string, _ *session.RecordingState) error {
+		{"recover", "session.md", "", recoverViaNormalStop},
+		{"stop", "session.md", "", func(inst *agentinstance.Instance, _ string, _ *session.RecordingState) error {
 			return runAgentSessionStop(inst)
 		}},
-		{"recover from cache", ".needs-summary", func(inst *agentinstance.Instance, projectRoot string, state *session.RecordingState) error {
-			return recoverFromCache(inst, projectRoot, state, filepath.Join(state.SessionPath, "raw.jsonl"))
-		}},
+		{"recover from cache", ".needs-summary", "auto", recoverCache},
+		{"recover from cache, held", ".held", "", recoverCache},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.publishing != "" {
+				t.Setenv("OX_SESSION_PUBLISHING", tc.publishing)
+			}
 			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 			t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 			t.Setenv("SAGEOX_DAEMON", "false")
@@ -548,4 +555,37 @@ func TestRecoverFixturesLeaveARealJournal(t *testing.T) {
 	var journal map[string]any
 	require.NoError(t, json.Unmarshal(data, &journal))
 	require.NotEmpty(t, journal)
+}
+
+// Failure prevented: `session recover` uploads a crashed manual-mode
+// recording from the cache (GH #1093). It must be recovered locally and held.
+func TestRecoverFromCacheHoldsManualRecording(t *testing.T) {
+	for _, mode := range []string{"manual", "auto"} {
+		t.Run(mode, func(t *testing.T) {
+			projectRoot, agentID, _ := setupHandleAfterToolTest(t)
+			// The fixture's project config says manual; env auto outranks it
+			// (D13), so only the mode recorded at start decides here.
+			t.Setenv("OX_SESSION_PUBLISHING", "auto")
+			stale, rawPath := commitHookBatchLeavingJournal(t, projectRoot, agentID)
+			require.NoError(t, session.UpdateRecordingStateAt(stale.SessionPath, stale.SessionID, func(s *session.RecordingState) {
+				s.PublishingMode = mode
+			}))
+			stale.PublishingMode = mode
+
+			err := recoverFromCache(&agentinstance.Instance{AgentID: agentID}, projectRoot, stale, rawPath)
+
+			if mode == "auto" {
+				require.False(t, session.IsHeld(stale.SessionPath), "control: an auto-mode recovery is not held")
+				return
+			}
+			require.NoError(t, err)
+			require.True(t, session.IsHeld(stale.SessionPath), "a manual-mode recovery must be held")
+			after, readErr := os.ReadFile(rawPath)
+			require.NoError(t, readErr)
+			require.Contains(t, string(after), committedHookEntry, "the recovered transcript stays local and whole")
+			cleared, loadErr := session.LoadRecordingStateForAgent(projectRoot, agentID)
+			require.NoError(t, loadErr)
+			require.Nil(t, cleared, "the stale recording is cleared once the hold is in place")
+		})
+	}
 }

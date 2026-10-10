@@ -467,6 +467,7 @@ func (h *SessionFinalizeHandler) Detect(ledgerPath string) ([]*WorkItem, error) 
 		"ledger", ledgerPath,
 		"items", len(items),
 		"upload_only", uploadOnly,
+		"held", len(skips.held),
 		"skipped_with_content", skips.total(),
 	)
 	// A separate Warn rather than more keys on the line above: `items=0` is
@@ -499,6 +500,7 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 	}
 
 	var items []*WorkItem
+	heldDirs := session.HeldSessionDirs(ledgerPath)
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -656,6 +658,11 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 					if err != nil {
 						return err
 					}
+					// The recording's mode outlives .recording.json only as a hold;
+					// without one, keep the marker and retry on a later pass.
+					if err := holdIfRecordedManual(sessionDir); err != nil {
+						return err
+					}
 					// A queued watcher must observe the cleared marker before it
 					// acquires this lock and tries to resume the old cursor.
 					return os.Remove(recPath)
@@ -681,6 +688,14 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 				"recording_age", recAge.Round(time.Hour),
 				"detection_method", recMethod,
 			)
+		}
+
+		// Held on this machine (session_publishing: manual): never summarize,
+		// upload, or discard it. Checked by name, so an unheld copy in another
+		// cache location cannot be published in its place (GH #1093).
+		if session.HeldAnywhere(name, heldDirs...) {
+			skips.addHeld(name)
+			continue
 		}
 
 		if !hasRaw {
@@ -826,6 +841,17 @@ type detectSkipStats struct {
 	// unreadableMeta: meta.json could not be parsed, so the fail-closed arm
 	// skipped rather than risk recovering onto a git-tracked raw.jsonl.
 	unreadableMeta map[string]bool
+	// held: the coworker keeps these on this machine (session_publishing:
+	// manual). Skipping them is the intended outcome, not an anomaly, so they
+	// are reported as a count and never in the Warn line.
+	held map[string]bool
+}
+
+func (s *detectSkipStats) addHeld(name string) {
+	if s.held == nil {
+		s.held = make(map[string]bool)
+	}
+	s.held[name] = true
 }
 
 func (s *detectSkipStats) addUnprovenDraft(name string) {
@@ -848,6 +874,9 @@ func (s *detectSkipStats) merge(other detectSkipStats) {
 	}
 	for name := range other.unreadableMeta {
 		s.addUnreadableMeta(name)
+	}
+	for name := range other.held {
+		s.addHeld(name)
 	}
 }
 
@@ -1043,6 +1072,11 @@ func (h *SessionFinalizeHandler) DetectOrphanedForAgent(ledgerPath, agentID stri
 					if err != nil {
 						return err
 					}
+					// The recording's mode outlives .recording.json only as a hold;
+					// without one, keep the marker and retry on a later pass.
+					if err := holdIfRecordedManual(sessionDir); err != nil {
+						return err
+					}
 					return os.Remove(recPath)
 				})
 				if recoverErr != nil {
@@ -1065,6 +1099,11 @@ func (h *SessionFinalizeHandler) DetectOrphanedForAgent(ledgerPath, agentID stri
 			h.logger.Info("clearing orphaned recording for agent exit finalization",
 				"session", name, "agent_id", agentID,
 			)
+
+			// held on this machine: recovered locally, never finalized (GH #1093)
+			if session.IsHeldInLedger(ledgerPath, name) {
+				continue
+			}
 
 			if !session.HasSubstantiveEntries(rawPath) {
 				continue
@@ -1111,9 +1150,16 @@ func (h *SessionFinalizeHandler) BuildPrompt(item *WorkItem) (RunRequest, error)
 
 	payload.llmPaused = false
 
-	// Held for ownership review: do not spend an LLM run on it. ProcessResult
+	// Quarantined for ownership review: do not spend an LLM run on it. ProcessResult
 	// drops the item.
-	if sessionHeldForReview(payload.SessionDir) {
+	if sessionQuarantined(payload.SessionDir) {
+		return RunRequest{SkipLLM: true}, nil
+	}
+
+	// Held on this machine (session_publishing: manual): no LLM run, and
+	// ProcessResult drops it. Covers IPC-queued items and holds placed after
+	// the scan, which never pass Detect's check (GH #1093).
+	if sessionHeldLocally(payload) {
 		return RunRequest{SkipLLM: true}, nil
 	}
 
@@ -1269,8 +1315,16 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 	// sweep, a caller's IPC request) ends here, so this is the one place that
 	// keeps a quarantined recording's transcript out of the Ledger. Dropped, not
 	// failed: retrying cannot change the answer, only a coworker's release can.
-	if sessionHeldForReview(payload.SessionDir) {
-		h.logger.Info("session finalize dropped: recording is held for ownership review",
+	if sessionQuarantined(payload.SessionDir) {
+		h.logger.Info("session finalize dropped: recording is quarantined for ownership review",
+			"session", filepath.Base(payload.SessionDir))
+		return nil
+	}
+
+	// Held on this machine: dropped before any LFS upload, commit, or
+	// discard. Only 'ox session upload' publishes it (GH #1093).
+	if sessionHeldLocally(payload) {
+		h.logger.Info("session finalize dropped: session is held on this machine",
 			"session", filepath.Base(payload.SessionDir))
 		return nil
 	}
@@ -2130,11 +2184,14 @@ func (h *SessionFinalizeHandler) stageSessionInLedger(payload *SessionFinalizePa
 	}
 
 	for _, entry := range entries {
-		if entry.IsDir() || pipeline.IsTraceFile(entry.Name()) || strings.HasPrefix(entry.Name(), ".trace-") {
+		if entry.IsDir() || pipeline.IsTraceFile(entry.Name()) {
 			continue
 		}
-		// Machine-local capture state never enters the shared Ledger.
-		if session.IsRawAppendJournal(entry.Name()) {
+		// Machine-local capture state never enters the shared Ledger. Every
+		// dotfile here is local state (.recording.json, .needs-summary, .held,
+		// .upload-retry-pending, .trace-*, .tmp-*); none is session content,
+		// and one committed .held would hold the session on every machine.
+		if strings.HasPrefix(entry.Name(), ".") || session.IsRawAppendJournal(entry.Name()) {
 			continue
 		}
 		src := filepath.Join(payload.SessionDir, entry.Name())
@@ -2952,9 +3009,9 @@ func stampCarrierBeforeReclaim(logger *slog.Logger, sessionDir, rawPath string, 
 	}
 }
 
-// sessionHeldForReview reports whether the recording marker in sessionDir says
+// sessionQuarantined reports whether the recording marker in sessionDir says
 // its native source was quarantined. An unreadable marker is not a quarantine.
-func sessionHeldForReview(sessionDir string) bool {
+func sessionQuarantined(sessionDir string) bool {
 	state, err := session.ReadRecordingStateFile(sessionDir)
 	return err == nil && state != nil && state.SourceRejected
 }
@@ -3545,4 +3602,37 @@ func (h *SessionFinalizeHandler) mergeFileRefs(
 		merged[k] = v
 	}
 	return merged
+}
+
+// writeHoldMarker records a hold. A variable so tests can make it fail.
+var writeHoldMarker = session.WriteHoldMarker
+
+// holdIfRecordedManual holds a recovered session whose recording was started
+// under session_publishing: manual. Call it before .recording.json is removed,
+// and keep the marker if it returns an error, including when the recorded mode
+// cannot be read: after the marker goes, the hold is the only record of the
+// coworker's choice, and the daemon cannot see the CLI's environment to
+// re-derive it.
+func holdIfRecordedManual(sessionDir string) error {
+	state, err := session.ReadRecordingStateFile(sessionDir)
+	if err != nil {
+		return fmt.Errorf("read recorded publishing mode: %w", err)
+	}
+	if state == nil {
+		return fmt.Errorf("read recorded publishing mode: no recording state in %s", filepath.Base(sessionDir))
+	}
+	if !state.RecordedManualPublishing() {
+		return nil
+	}
+	if err := writeHoldMarker(sessionDir, session.HoldManualPublishing, "daemon_recovery"); err != nil {
+		return fmt.Errorf("hold recovered manual-mode session: %w", err)
+	}
+	return nil
+}
+
+// sessionHeldLocally reports whether a work item's session is held on this
+// machine, by name across every cache location: the payload may point at the
+// Ledger copy, which never carries the marker.
+func sessionHeldLocally(p *SessionFinalizePayload) bool {
+	return session.IsHeldInLedger(p.LedgerPath, filepath.Base(p.SessionDir))
 }

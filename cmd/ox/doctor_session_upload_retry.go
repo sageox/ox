@@ -139,6 +139,12 @@ func findOrphanedSessionsInDir(cacheSessionsDir, ledgerPath string) ([]orphanedS
 			continue
 		}
 
+		// Held on this machine: not an orphan, never uploaded by doctor (GH #1093).
+		// By name, so an unheld copy here cannot be published for a held one.
+		if session.IsHeld(sessionDir) || session.IsHeldInLedger(ledgerPath, sessionName) {
+			continue
+		}
+
 		// check if still recording (.recording.json present)
 		recordingPath := filepath.Join(sessionDir, ".recording.json")
 		if _, err := os.Stat(recordingPath); err == nil {
@@ -186,12 +192,21 @@ func findOrphanedSessionsInDir(cacheSessionsDir, ledgerPath string) ([]orphanedS
 				slog.Warn("trace recovery carrier not persisted", "session", sessionName, "error", err)
 				continue
 			}
+			// A manual-mode recording is held before its marker goes: this scan
+			// runs on every `ox doctor` and would otherwise upload it below.
+			if err := session.HoldRecordedManual(&recState, "doctor_upload_retry"); err != nil {
+				continue
+			}
 			_ = os.Remove(recordingPath)
 			// also clean up lock files
 			lockFiles, _ := filepath.Glob(filepath.Join(sessionDir, "*.lock"))
 			for _, lf := range lockFiles {
 				_ = os.Remove(lf)
 			}
+		}
+
+		if session.IsHeld(sessionDir) {
+			continue // just held from its recorded mode
 		}
 
 		// skip if no raw.jsonl (corrupt/empty)

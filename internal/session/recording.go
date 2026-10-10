@@ -15,6 +15,7 @@ import (
 
 	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/auth"
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/lfs"
@@ -34,6 +35,12 @@ var (
 	// the session folder of a quarantined one (session names are minute-granular).
 	// The quarantined recording is left untouched and the start is refused.
 	ErrQuarantinedSessionPath = errors.New("a quarantined recording occupies this session folder")
+
+	// ErrHeldSessionPath is returned when a new recording would land in the
+	// folder of a session held on this machine (session_publishing: manual;
+	// names are minute-granular, so a /clear in the same minute collides).
+	// Starting there would truncate the held transcript and publish the result.
+	ErrHeldSessionPath = errors.New("a held session occupies this session folder")
 
 	// ErrNoLedger is returned when session recording is attempted but no ledger is configured
 	ErrNoLedger = errors.New("no ledger configured for this project")
@@ -139,6 +146,12 @@ type RecordingState struct {
 	StartOffset              int64             `json:"start_offset,omitempty"` // source file byte offset when recording started (entries before this are pre-session)
 	Origin                   string            `json:"origin,omitempty"`       // session origin: "human", "subagent", "agent" (from agentx.DetectOrigin)
 	CacheDir                 string            `json:"cache_dir,omitempty"`    // cache directory when recording was created (diagnostic breadcrumb)
+
+	// PublishingMode is session_publishing as the CLI resolved it at start
+	// (env > user > project > team, contract D13). Crash recovery reads it to
+	// hold a manual-mode session, because the process that recovers it — the
+	// daemon, doctor, or a later recover — cannot see the CLI's environment.
+	PublishingMode string `json:"publishing_mode,omitempty"`
 
 	WatchMode string     `json:"watch_mode,omitempty"` // how entries are captured: "hook" (CLI-driven) or "tail" (daemon-driven)
 	StoppedAt *time.Time `json:"stopped_at,omitempty"` // set by ox session stop to signal daemon to finalize
@@ -532,7 +545,7 @@ func LoadAllRecordingStates(projectRoot string) ([]*RecordingState, error) {
 // Use this instead of LoadRecordingState when you have an agent ID to avoid
 // accidentally operating on another concurrent agent's recording.
 //
-// A quarantined recording (SourceRejected) is held for ownership review and is
+// A quarantined recording (SourceRejected) is quarantined for ownership review and is
 // not the agent's active recording: it neither captures nor blocks a new one,
 // so the agent's next recording can start while it waits. Use
 // LoadQuarantinedRecordingsForAgent to find it.
@@ -972,6 +985,9 @@ func cleanupStaleEmptyRecordings(projectRoot string) {
 		if state.SessionPath == "" {
 			continue
 		}
+		if IsHeld(state.SessionPath) {
+			continue // a held session is the coworker's to remove, by name
+		}
 		// A native log can hold the session even when the watcher never wrote
 		// an entry. Claude hook discovery can fail with an unverifiable cwd,
 		// leaving SessionFile empty despite a real native conversation.
@@ -1174,8 +1190,9 @@ func CleanupOrphanedStubsInDir(cacheSessionsDir string) GhostCleanupResult {
 		}
 		sessionPath := filepath.Join(cacheSessionsDir, entry.Name())
 
-		// a finalized or draft session (meta.json present) is never a phantom.
-		if _, statErr := os.Stat(filepath.Join(sessionPath, "meta.json")); statErr == nil {
+		// a finalized or draft session (meta.json present) is never a phantom,
+		// and a held one is the coworker's to remove, by name.
+		if _, statErr := os.Stat(filepath.Join(sessionPath, "meta.json")); statErr == nil || IsHeld(sessionPath) {
 			continue
 		}
 
@@ -1195,7 +1212,7 @@ func CleanupOrphanedStubsInDir(cacheSessionsDir string) GhostCleanupResult {
 		if data, readErr := os.ReadFile(recordingStatePath(sessionPath)); readErr == nil {
 			state, parseErr := ParseRecordingState(recordingStatePath(sessionPath), data)
 			if parseErr != nil || state.IsAgentAlive() || state.SourceRejected {
-				continue // unreadable-as-JSON, still alive, or held for ownership review → keep
+				continue // unreadable-as-JSON, still alive, or quarantined for ownership review → keep
 			}
 			if state.AdapterName != "" && (state.SessionFile != "" || state.WatchMode == "tail") {
 				continue // native source must be checked by finalization first
@@ -1391,6 +1408,9 @@ func StartRecording(projectRoot string, opts StartRecordingOptions) (*RecordingS
 			return nil, fmt.Errorf("%w: agent_id=%s path=%s", ErrQuarantinedSessionPath, opts.AgentID, sessionPath)
 		}
 	}
+	if IsHeld(sessionPath) {
+		return nil, fmt.Errorf("%w: agent_id=%s path=%s", ErrHeldSessionPath, opts.AgentID, sessionPath)
+	}
 
 	// create the session directory
 	if err := os.MkdirAll(sessionPath, 0755); err != nil {
@@ -1443,6 +1463,7 @@ func StartRecording(projectRoot string, opts StartRecordingOptions) (*RecordingS
 		ParentPID:              opts.ParentPID,
 		Origin:                 origin,
 		CacheDir:               paths.CacheDir(),
+		PublishingMode:         config.GetSessionPublishing(projectRoot),
 		StartOffset:            opts.StartOffset,
 		WatchMode:              opts.WatchMode,
 	}

@@ -236,11 +236,14 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 			// merge local sessions with ledger sessions (local wins on duplicates)
 			sessions = mergeSessionSources(sessions, ledgerSessions)
 
-			// scan ledger cache for in-progress or unuploaded sessions
-			// recordings are initially written to {ledger}/.sageox/cache/sessions/ before upload
-			ledgerCachePath := filepath.Join(ledgerPath, ".sageox", "cache")
-			cacheStore, cacheErr := session.NewStore(ledgerCachePath)
-			if cacheErr == nil {
+			// scan every cache location for in-progress or unuploaded sessions:
+			// recordings are written to {ledger}/.sageox/cache/sessions/ before
+			// upload, and a held session may sit in any XDG cache (GH #1095)
+			for _, cacheSessionsDir := range session.HeldSessionDirs(ledgerPath) {
+				cacheStore, cacheErr := session.NewStore(filepath.Dir(cacheSessionsDir))
+				if cacheErr != nil {
+					continue
+				}
 				var cacheSessions []session.SessionInfo
 				if showAll {
 					cacheSessions, _ = cacheStore.ListAllSessions()
@@ -423,6 +426,11 @@ func printSessionRow(t session.SessionInfo, uploaded bool, localUser string) {
 	case session.StatusCanceled:
 		statusStr = "✗ canceled"
 		statusStyle = "ghost" // dim — discarded
+	case session.StatusHeld:
+		// Kept on this machine by choice (session_publishing: manual), not
+		// stranded: distinct from "local only", which reads as a failure.
+		statusStr = "◆ held · local"
+		statusStyle = "local"
 	default:
 		statusStr = "✗ local only"
 		statusStyle = "local"

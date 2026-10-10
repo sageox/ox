@@ -525,3 +525,27 @@ func TestResolveSessionForAbort_NotFound(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "session not found")
 }
+
+// Failure prevented: a held session cannot be discarded at all, because abort
+// rejects an unknown status (GH #1093). Removing one by name is the escape hatch.
+func TestAbortByName_HeldSession(t *testing.T) {
+	cfg = &config.Config{}
+	projectRoot := setupSessionTestProject(t)
+
+	origDir, _ := os.Getwd()
+	require.NoError(t, os.Chdir(projectRoot))
+	t.Cleanup(func() { os.Chdir(origDir) })
+
+	contextPath := session.GetContextPath(getRepoIDOrDefault(projectRoot))
+	sessionName := "2026-03-15T10-00-testuser-OxHeLd"
+	sessionPath := filepath.Join(contextPath, "sessions", sessionName)
+	require.NoError(t, os.MkdirAll(sessionPath, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(sessionPath, "raw.jsonl"), []byte(`{"type":"header"}`), 0644))
+	require.NoError(t, session.WriteHoldMarker(sessionPath, session.HoldManualPublishing, "test"))
+
+	setForceFlag(t, true)
+	require.NoError(t, runAgentSessionAbort(&agentinstance.Instance{AgentID: "OxTest"}, agentCmd, []string{sessionName}))
+
+	_, err := os.Stat(sessionPath)
+	assert.True(t, os.IsNotExist(err), "a held session is discarded when the coworker names it")
+}

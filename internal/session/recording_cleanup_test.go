@@ -121,6 +121,26 @@ func TestCleanupStaleEmptyRecordings_RemovesOldStubs(t *testing.T) {
 	assert.True(t, os.IsNotExist(err), ".recording.json should be removed for stale empty stub")
 }
 
+// Failure prevented: a held folder that still carries a stale, empty recording
+// marker is deleted, hold and all, before StartRecording's held-folder guard
+// can refuse it, so a new recording reuses the path (GH #1093).
+func TestCleanupStaleEmptyRecordings_KeepsHeldStubs(t *testing.T) {
+	cacheDir := t.TempDir()
+	projectRoot, sessionsBase := setupRecordingTestWithSessionsBase(t, cacheDir)
+	sessionPath := filepath.Join(sessionsBase, "2026-01-01T00-00-user-OxHeLd")
+	require.NoError(t, os.MkdirAll(sessionPath, 0755))
+	state := &RecordingState{AgentID: "OxHeLd", StartedAt: time.Now().Add(-72 * time.Hour), SessionPath: sessionPath}
+	data, err := json.Marshal(state)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(sessionPath, recordingFile), data, 0600))
+	require.NoError(t, WriteHoldMarker(sessionPath, HoldManualPublishing, "session_stop"))
+
+	cleanupStaleEmptyRecordings(projectRoot)
+
+	assert.DirExists(t, sessionPath)
+	assert.True(t, IsHeld(sessionPath), "the hold survives the stale-stub cleanup")
+}
+
 func TestCleanupStaleEmptyRecordings_KeepsRecentStubs(t *testing.T) {
 	cacheDir := t.TempDir()
 	projectRoot, sessionsBase := setupRecordingTestWithSessionsBase(t, cacheDir)
