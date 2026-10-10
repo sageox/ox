@@ -1,6 +1,7 @@
 package ledger
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -224,12 +225,12 @@ func TestConfigureSparseCheckout_SymlinksCheckOutAsFiles(t *testing.T) {
 	}
 }
 
-// TestDisableSymlinks_RetriesAndReadsTheCloneSetting: a failed run returns an
-// error and leaves core.symlinks unsaved, so the next call converts the link
-// and saves it; a global core.symlinks=false does not stand in for the
-// clone's own. Failure prevented: a Ledger reported as protected while a link
-// is still checked out, or left unprotected once a developer drops a global
-// setting.
+// TestDisableSymlinks_RetriesAndReadsTheCloneSetting: a failed run (a locked
+// config, or a link it cannot inspect) returns an error and leaves
+// core.symlinks unsaved, so the next call converts the link and saves it; a
+// global core.symlinks=false does not stand in for the clone's own. Failure
+// prevented: a Ledger reported as protected while a link is still checked
+// out, or left unprotected once a developer drops a global setting.
 func TestDisableSymlinks_RetriesAndReadsTheCloneSetting(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("creating symlinks needs elevated rights on Windows")
@@ -237,15 +238,18 @@ func TestDisableSymlinks_RetriesAndReadsTheCloneSetting(t *testing.T) {
 	if err := DisableSymlinks(t.TempDir()); err == nil || !strings.Contains(err.Error(), "list tracked files") {
 		t.Fatalf("outside a repo: err = %v, want a listing error", err)
 	}
-	// repoWithLink returns a repo whose committed "link" is checked out as a
-	// symlink to target.
-	repoWithLink := func(t *testing.T) (dir, target string) {
+	// repoWithLink returns a repo whose committed link at rel is checked out
+	// as a symlink to target.
+	repoWithLink := func(t *testing.T, rel string) (dir, target string) {
 		t.Helper()
 		dir, target = t.TempDir(), t.TempDir()
 		gitIn(t, dir, "init", "-q", "-b", "main")
 		gitIn(t, dir, "config", "user.email", "test@example.com")
 		gitIn(t, dir, "config", "user.name", "Test")
-		if err := os.Symlink(target, filepath.Join(dir, "link")); err != nil {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, rel)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, filepath.Join(dir, rel)); err != nil {
 			t.Fatal(err)
 		}
 		gitIn(t, dir, "add", "-A")
@@ -258,7 +262,7 @@ func TestDisableSymlinks_RetriesAndReadsTheCloneSetting(t *testing.T) {
 	}
 
 	t.Run("a failed run retries", func(t *testing.T) {
-		dir, target := repoWithLink(t)
+		dir, target := repoWithLink(t, "link")
 		lock := filepath.Join(dir, ".git", "config.lock")
 		if err := os.WriteFile(lock, nil, 0o644); err != nil {
 			t.Fatal(err)
@@ -283,8 +287,32 @@ func TestDisableSymlinks_RetriesAndReadsTheCloneSetting(t *testing.T) {
 		}
 	})
 
+	t.Run("a link it cannot inspect fails the run", func(t *testing.T) {
+		dir, target := repoWithLink(t, "d/link")
+		sub := filepath.Join(dir, "d")
+		if err := os.Chmod(sub, 0); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(sub, 0o755) }) // so TempDir can remove it
+		if _, err := os.Lstat(filepath.Join(sub, "link")); !errors.Is(err, os.ErrPermission) {
+			t.Skipf("directory permissions are not enforced here (running as root?): lstat err = %v", err)
+		}
+		if err := DisableSymlinks(dir); err == nil || saved(dir) {
+			t.Fatalf("with d unreadable: err %v, saved %v; want an error and nothing saved", err, saved(dir))
+		}
+		if err := os.Chmod(sub, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := DisableSymlinks(dir); err != nil || !saved(dir) {
+			t.Fatalf("retry: err %v, saved %v", err, saved(dir))
+		}
+		if got := fileText(t, filepath.Join(sub, "link")); got != target {
+			t.Fatalf("link should hold its link text %q, got %q", target, got)
+		}
+	})
+
 	t.Run("a global setting is not the clone's", func(t *testing.T) {
-		dir, target := repoWithLink(t)
+		dir, target := repoWithLink(t, "link")
 		global := filepath.Join(t.TempDir(), "gitconfig")
 		if err := os.WriteFile(global, []byte("[core]\n\tsymlinks = false\n"), 0o644); err != nil {
 			t.Fatal(err)

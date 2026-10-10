@@ -618,9 +618,16 @@ func DisableSymlinks(path string) error {
 			continue
 		}
 		full := filepath.Join(path, filepath.FromSlash(rel))
+		info, err := os.Lstat(full)
+		if errors.Is(err, os.ErrNotExist) || err == nil && info.Mode()&os.ModeSymlink == 0 {
+			continue // outside the sparse cone, deleted, or already a plain file
+		}
+		// A path Lstat could not inspect still goes to Readlink, which either
+		// converts it or fails the run. Skipping it could save the setting with
+		// a live link that no later call would look at again.
 		target, err := os.Readlink(full)
 		if err != nil {
-			continue // not a link on disk: already a file, or outside the sparse cone
+			return fmt.Errorf("read symlink %s: %w", rel, err)
 		}
 		if err := replaceLinkWithFile(full, target); err != nil {
 			return fmt.Errorf("convert symlink %s: %w", rel, err)
