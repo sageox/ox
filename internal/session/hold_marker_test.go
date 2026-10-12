@@ -262,3 +262,20 @@ func TestStartRecording_RefusesHeldFolder(t *testing.T) {
 	}
 	t.Fatal("could not start twice within one minute")
 }
+
+// Failure prevented: a .held committed into the Ledger's shared sessions/
+// tree, which ox never writes, made a published session read as held for
+// every coworker who pulled it.
+func TestIsHeld_IgnoresMarkersInTheSharedTree(t *testing.T) {
+	ledger := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(ledger, ".git"), 0o755))
+	const name = "2026-10-05T10-00-ryan-OxShRd"
+	shared := filepath.Join(ledger, "sessions", name)
+	cache := filepath.Join(ledger, ".sageox", "cache", "sessions", name)
+	for _, dir := range []string{shared, cache} {
+		require.NoError(t, os.MkdirAll(dir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, HeldMarkerFile), []byte(`{}`), 0o644))
+	}
+	assert.False(t, IsHeld(shared), "a marker in the shared tree is not a hold")
+	assert.True(t, IsHeld(cache), "control: a marker in the cache still holds")
+}

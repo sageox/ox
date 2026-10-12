@@ -167,6 +167,11 @@ func runAgentSessionAbortByName(inst *agentinstance.Instance, cmd *cobra.Command
 	info := buildSessionInfo(sessionName, sessionPath)
 	isUploaded := isSessionInLedger(sessionName)
 	status := session.ClassifySession(info, isUploaded)
+	// A hold never shields a published copy: the Ledger copy is what the team
+	// sees, so removing the session by name removes that copy too.
+	if status == session.StatusHeld && isUploaded {
+		status = session.StatusUploaded
+	}
 
 	switch status {
 	case session.StatusOrphan, session.StatusGhost, session.StatusLocal:

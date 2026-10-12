@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -301,11 +302,11 @@ func firstNonEmpty(values ...string) string {
 // returned, so publishing cannot replay it. A candidate that must not be
 // published from (cachePublishBlocker) is an error, not a fallthrough.
 func findPublishableCacheSession(ledgerPath, arg string) (name, cacheDir string, ok bool, err error) {
+	resolved, err := resolvePublishName(ledgerPath, arg)
+	if err != nil || resolved == "" {
+		return "", "", false, err
+	}
 	for _, dir := range session.HeldSessionDirs(ledgerPath) {
-		resolved, resolveErr := resolveSessionInDir(dir, arg)
-		if resolveErr != nil {
-			continue
-		}
 		candidate := filepath.Join(dir, resolved)
 		if session.ClassifyRawFile(filepath.Join(candidate, ledgerFileRaw)) != session.RawSubstantive {
 			continue
@@ -319,6 +320,38 @@ func findPublishableCacheSession(ledgerPath, arg string) (name, cacheDir string,
 		return resolved, candidate, true, nil
 	}
 	return "", "", false, nil
+}
+
+// resolvePublishName resolves arg to one session name across every cache
+// location and the Ledger's sessions/, or "" when nothing matches. A suffix
+// that matches more than one session is an error, never a guess: a /clear
+// starts a new session under the same agent ID, so the same suffix routinely
+// names several sessions, and guessing publishes one the coworker did not name.
+func resolvePublishName(ledgerPath, arg string) (string, error) {
+	found := map[string]bool{}
+	for _, dir := range append(session.HeldSessionDirs(ledgerPath), filepath.Join(ledgerPath, "sessions")) {
+		resolved, err := resolveSessionInDir(dir, arg)
+		if err != nil {
+			return "", err
+		}
+		if _, statErr := os.Stat(filepath.Join(dir, resolved)); statErr == nil {
+			found[resolved] = true
+		}
+	}
+	names := make([]string, 0, len(found))
+	for name := range found {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	switch len(names) {
+	case 0:
+		return "", nil
+	case 1:
+		return names[0], nil
+	default:
+		return "", fmt.Errorf("ambiguous session name %q matches %d sessions: %s; pass the full name",
+			arg, len(names), strings.Join(names, ", "))
+	}
 }
 
 // cacheSessionUnpublished reports whether the cache copy at candidate is work

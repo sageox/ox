@@ -3634,5 +3634,6 @@ func holdIfRecordedManual(sessionDir string) error {
 // machine, by name across every cache location: the payload may point at the
 // Ledger copy, which never carries the marker.
 func sessionHeldLocally(p *SessionFinalizePayload) bool {
-	return session.IsHeldInLedger(p.LedgerPath, filepath.Base(p.SessionDir))
+	// Clean first: Base of ".../<name>/." is ".", which names no session.
+	return session.IsHeldInLedger(p.LedgerPath, filepath.Base(filepath.Clean(p.SessionDir)))
 }

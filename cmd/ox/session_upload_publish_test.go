@@ -150,3 +150,47 @@ func TestUpload_NeverRepublishesADownloadedCopy(t *testing.T) {
 	require.ErrorContains(t, err, "downloaded")
 	assert.Equal(t, remoteBefore, runGit(t, f.barePath, "rev-parse", "HEAD"), "a teammate's removed session is not republished")
 }
+
+// Failure prevented: a suffix that names several sessions, routine once a
+// /clear reuses the agent ID, silently published one the coworker did not
+// name: an ambiguous match in one cache location was skipped and a unique
+// match in the next location won.
+func TestFindPublishableCacheSession_RefusesAnAmbiguousName(t *testing.T) {
+	held := func(t *testing.T, base, name string) {
+		dir := filepath.Join(base, name)
+		require.NoError(t, os.MkdirAll(dir, 0o755))
+		writeTestRawJSONLWithEntries(t, filepath.Join(dir, ledgerFileRaw), 3)
+		require.NoError(t, session.WriteHoldMarker(dir, session.HoldManualPublishing, "test"))
+	}
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, ledgerPath string)
+	}{
+		{"two held here, one more in the XDG cache", func(t *testing.T, ledgerPath string) {
+			dirs := session.HeldSessionDirs(ledgerPath)
+			held(t, dirs[0], "2026-10-05T10-00-devon-OxAmBg")
+			held(t, dirs[0], "2026-10-05T11-00-devon-OxAmBg")
+			held(t, dirs[1], "2026-09-30T08-00-devon-OxAmBg")
+		}},
+		{"held in the cache, another already published", func(t *testing.T, ledgerPath string) {
+			held(t, session.HeldSessionDirs(ledgerPath)[0], "2026-10-05T10-00-devon-OxAmBg")
+			writeLedgerMeta(t, filepath.Join(ledgerPath, "sessions", "2026-09-30T08-00-devon-OxAmBg"), `{"version":"1.0","title":"done"}`)
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_CACHE_HOME", t.TempDir())
+			ledgerPath := t.TempDir()
+			tc.setup(t, ledgerPath)
+
+			_, _, ok, err := findPublishableCacheSession(ledgerPath, "OxAmBg")
+			require.ErrorContains(t, err, "ambiguous session name")
+			assert.False(t, ok)
+
+			name, _, ok, err := findPublishableCacheSession(ledgerPath, "2026-10-05T10-00-devon-OxAmBg")
+			require.NoError(t, err, "the full name is never ambiguous")
+			assert.True(t, ok)
+			assert.Equal(t, "2026-10-05T10-00-devon-OxAmBg", name)
+		})
+	}
+}

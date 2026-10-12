@@ -235,3 +235,14 @@ func TestStageSessionInLedger_LeavesDotfilesBehind(t *testing.T) {
 		assert.NotEqual(t, '.', rune(e.Name()[0]), "dotfile staged into the Ledger: %s", e.Name())
 	}
 }
+
+// Failure prevented: a finalize request whose session path ends in "/." named
+// "." as the session, so the hold check looked up the wrong name and a held
+// session was summarized.
+func TestSessionHeldLocally_CleansThePath(t *testing.T) {
+	f := newHeldFixture(t)
+	hold(t, f.cacheDir)
+	for _, dir := range []string{f.cacheDir, f.cacheDir + "/.", f.cacheDir + "/"} {
+		assert.True(t, sessionHeldLocally(&SessionFinalizePayload{LedgerPath: f.ledgerPath, SessionDir: dir}), dir)
+	}
+}

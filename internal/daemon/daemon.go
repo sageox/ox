@@ -1875,6 +1875,26 @@ func (s *daemonServiceImpl) runDoctorPass() {
 	logger.Info("doctor pass complete", "duration_ms", time.Since(start).Milliseconds())
 }
 
+// finalizeSessionDir returns the session folder a finalize request names. A
+// CachePath is trusted only when, cleaned, it lies inside the ledger and its
+// last element is the session name: every hold and quarantine check keys on
+// that name, and a path ending in "/." would name "." instead (an untrusted
+// CachePath reports false and the ledger-derived folder is used).
+func finalizeSessionDir(ledgerPath, sessionName, cachePath string) (string, bool) {
+	fallback := filepath.Join(ledgerPath, "sessions", sessionName)
+	if cachePath == "" {
+		return fallback, true
+	}
+	absCache, cacheErr := filepath.Abs(cachePath) // Abs cleans the path
+	absLedger, ledgerErr := filepath.Abs(ledgerPath)
+	if cacheErr != nil || ledgerErr != nil ||
+		!strings.HasPrefix(absCache, absLedger+string(filepath.Separator)) ||
+		filepath.Base(absCache) != sessionName {
+		return fallback, false
+	}
+	return absCache, true
+}
+
 func (s *daemonServiceImpl) SessionFinalize(payload SessionFinalizeIPCPayload) {
 	if s.d.agentWorker == nil {
 		s.d.logger.Warn("session_finalize received but agent worker not initialized")
@@ -1912,17 +1932,10 @@ func (s *daemonServiceImpl) SessionFinalize(payload SessionFinalizeIPCPayload) {
 	)
 	// prefer CachePath from the stop hook (actual session location under .sageox/cache/sessions/)
 	// fall back to ledger-derived path for backwards compatibility
-	sessionDir := filepath.Join(payload.LedgerPath, "sessions", payload.SessionName)
-	if payload.CachePath != "" {
-		// validate CachePath is under the ledger to prevent path traversal from IPC
-		absCache, cacheErr := filepath.Abs(payload.CachePath)
-		absLedger, ledgerErr := filepath.Abs(payload.LedgerPath)
-		if cacheErr == nil && ledgerErr == nil && strings.HasPrefix(absCache, absLedger+string(filepath.Separator)) {
-			sessionDir = payload.CachePath
-		} else {
-			s.d.logger.Warn("ignoring untrusted CachePath from IPC",
-				"cache_path", payload.CachePath, "ledger", payload.LedgerPath)
-		}
+	sessionDir, trusted := finalizeSessionDir(payload.LedgerPath, payload.SessionName, payload.CachePath)
+	if !trusted {
+		s.d.logger.Warn("ignoring untrusted CachePath from IPC",
+			"cache_path", payload.CachePath, "ledger", payload.LedgerPath)
 	}
 
 	// defense in depth: reject header-only sessions before enqueueing.

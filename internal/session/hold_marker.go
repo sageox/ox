@@ -79,8 +79,13 @@ func WriteHoldMarker(dir string, reason HoldReason, source string) error {
 
 // IsHeld reports whether the session in dir is held. It fails closed: a marker
 // that exists but cannot be read, or one that cannot be checked for any reason
-// other than "it does not exist", counts as held.
+// other than "it does not exist", counts as held. A marker inside the Ledger's
+// shared sessions/ tree never counts: ox refuses to write one there, so it was
+// committed by someone else and must not turn a published session local.
 func IsHeld(dir string) bool {
+	if inSharedSessionsTree(dir) {
+		return false
+	}
 	_, err := os.Lstat(filepath.Join(dir, HeldMarkerFile))
 	if err == nil {
 		return true
