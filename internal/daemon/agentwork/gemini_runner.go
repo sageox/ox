@@ -59,12 +59,14 @@ func (r *GeminiRunner) Run(ctx context.Context, req RunRequest) (*RunResult, err
 	defer cancel()
 
 	var args []string
-	workDir := req.WorkDir
+	workDir, env := req.WorkDir, workerEnv("GEMINI_", "GOOGLE_")
 	if req.Isolated || req.IsolateIfSupported {
 		isolation, dir, err := geminiIsolation(ctx, r.binaryPath)
 		switch {
 		case err == nil:
-			args, workDir = isolation, dir
+			// --skip-trust gets Gemini past its headless trust check, but only
+			// this makes it load the worker directory's own settings.
+			args, workDir, env = isolation, dir, append(env, "GEMINI_CLI_TRUST_WORKSPACE=true")
 		case req.Isolated || !errors.As(err, new(isolationUnsupported)):
 			return nil, err
 		default:
@@ -79,7 +81,7 @@ func (r *GeminiRunner) Run(ctx context.Context, req RunRequest) (*RunResult, err
 	// finding #10).
 	cmd := exec.CommandContext(ctx, r.binaryPath, args...)
 	cmd.Stdin = strings.NewReader(req.Prompt)
-	cmd.Env = workerEnv("GEMINI_", "GOOGLE_")
+	cmd.Env = env
 	if workDir != "" {
 		cmd.Dir = workDir
 	}

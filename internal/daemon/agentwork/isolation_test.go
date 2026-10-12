@@ -300,20 +300,26 @@ printf '%s\n' '{"type":"result","result":"ok"}'
 			require.NoError(t, err)
 
 			assert.Equal(t, tt.want, readLines(t, filepath.Join(dir, "args")))
-			if tt.cli == "gemini" && tt.want != nil {
-				policy, err := os.ReadFile(filepath.Join(dir, "policy"))
-				require.NoError(t, err, "an isolated Gemini run carries the deny-all policy")
-				assert.Equal(t, geminiDenyAllTools, string(policy))
-				resolved, err := filepath.EvalSymlinks(workspace)
-				require.NoError(t, err)
-				assert.Equal(t, resolved, readLines(t, filepath.Join(dir, "cwd"))[0], "the trusted workspace is ox's own, never the Ledger")
-			}
-
 			env := map[string]string{}
 			for _, line := range readLines(t, filepath.Join(dir, "env")) {
 				if name, value, ok := strings.Cut(line, "="); ok {
 					env[name] = value
 				}
+			}
+			if tt.cli == "gemini" {
+				isolated := tt.want != nil
+				assert.Equal(t, isolated, env["GEMINI_CLI_TRUST_WORKSPACE"] == "true", "only ox's own worker directory is trusted")
+			}
+			if tt.cli == "gemini" && tt.want != nil {
+				policy, err := os.ReadFile(filepath.Join(dir, "policy"))
+				require.NoError(t, err, "an isolated Gemini run carries the deny-all policy")
+				assert.Equal(t, geminiDenyAllTools, string(policy))
+				settings, err := os.ReadFile(filepath.Join(workspace, ".gemini", "settings.json"))
+				require.NoError(t, err)
+				assert.Equal(t, geminiWorkerSettings, string(settings), "hooks off in the worker directory")
+				resolved, err := filepath.EvalSymlinks(workspace)
+				require.NoError(t, err)
+				assert.Equal(t, resolved, readLines(t, filepath.Join(dir, "cwd"))[0], "the trusted workspace is ox's own, never the Ledger")
 			}
 			// Name the variable rather than print env: a failure would put the
 			// runner's environment in the CI log.

@@ -153,10 +153,15 @@ var geminiIsolationFlags = []string{"--policy", "--extensions", "--skip-trust"}
 // that allows a tool outranks it.
 const geminiDenyAllTools = "[[rule]]\ntoolName = \"*\"\ndecision = \"deny\"\npriority = 999\n"
 
+// geminiWorkerSettings are the worker directory's workspace settings, which
+// outrank the user's: hooks off, because some hooks receive the prompt, and no
+// built-in tools even if the policy file were missing.
+const geminiWorkerSettings = `{"hooksConfig":{"enabled":false},"tools":{"core":[]}}`
+
 // geminiIsolation returns the args for an isolated Gemini run and the directory
 // to run it in. Gemini will not run headless in an untrusted directory and
-// --skip-trust trusts the working one, so it must hold no settings, hooks or
-// MCP servers: never the Ledger. The directory is stable because Gemini keeps
+// --skip-trust trusts the working one, so it must hold only ox's own policy and
+// settings: never the Ledger. The directory is stable because Gemini keeps
 // state under ~/.gemini for every directory it runs in, including each run's
 // chat, which its default retention deletes after 30 days.
 func geminiIsolation(ctx context.Context, binary string) ([]string, string, error) {
@@ -174,13 +179,18 @@ func geminiIsolation(ctx context.Context, binary string) ([]string, string, erro
 	if !filepath.IsAbs(dir) || strings.Contains(dir, ",") {
 		return nil, "", fmt.Errorf("gemini workspace %q must be an absolute path without commas", dir)
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	settings := filepath.Join(dir, ".gemini", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(settings), 0o700); err != nil {
 		return nil, "", fmt.Errorf("gemini workspace: %w", err)
 	}
-	// Rewritten atomically before every run, so it is never missing or partial.
+	// Both rewritten atomically before every run, so neither is ever missing or
+	// partial.
 	policy := filepath.Join(dir, "deny-all-tools.toml")
 	if err := fileutil.AtomicWriteBytes(policy, []byte(geminiDenyAllTools), 0o600); err != nil {
 		return nil, "", fmt.Errorf("gemini policy: %w", err)
+	}
+	if err := fileutil.AtomicWriteBytes(settings, []byte(geminiWorkerSettings), 0o600); err != nil {
+		return nil, "", fmt.Errorf("gemini settings: %w", err)
 	}
 	return []string{"--policy", policy, "--extensions", "none", "--skip-trust"}, dir, nil
 }
