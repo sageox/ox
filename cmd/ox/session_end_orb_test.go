@@ -356,12 +356,17 @@ func TestSessionEndAgentID(t *testing.T) {
 }
 
 func TestSessionStopCommand(t *testing.T) {
+	t.Setenv("AMP_ORB", "1")
+	t.Setenv("CLICOLOR_FORCE", "1")
 	cmd := sessionStopCommand("/usr/local/bin/ox", "/work/repo", "OxAb12")
 	assert.Equal(t, []string{"/usr/local/bin/ox", "agent", "OxAb12", "session", "stop", "--agent-ended"}, cmd.Args)
 	assert.Equal(t, "/work/repo", cmd.Dir)
 	assert.Nil(t, cmd.Stdout, "no pipe: the hook may exit while the upload runs")
 	assert.Nil(t, cmd.Stderr, "no pipe: the hook may exit while the upload runs")
-	assert.Nil(t, cmd.Env, "the child inherits the venue (AMP_ORB, ...) so it also uploads synchronously")
+	assert.Contains(t, cmd.Env, "AMP_ORB=1", "the child inherits the venue, so it also uploads synchronously")
+	// exec keeps the last value of a repeated key, so these win over the inherited ones
+	n := len(cmd.Env)
+	assert.Equal(t, []string{"OX_COLOR_PROFILE=ascii", "NO_COLOR=1"}, cmd.Env[n-2:], "the child's output is parsed: no color")
 }
 
 // fakeOxStop writes a stand-in for the ox binary that records its arguments
@@ -380,6 +385,7 @@ func fakeOxStop(t *testing.T, result, delay string, code int) (exe, calls, done 
 		"echo \"$@\" > '" + calls + "'\n" +
 		"pwd -P >> '" + calls + "'\n" +
 		"cat '" + printed + "'\n" +
+		"[ " + strconv.Itoa(code) + " -ne 0 ] && printf '\\033[31mError: not currently recording\\033[0m\\nRun ox agent prime\\n' >&2\n" +
 		"sleep " + delay + "\n" +
 		"touch '" + done + "'\n" +
 		"exit " + strconv.Itoa(code) + "\n"
@@ -415,6 +421,9 @@ func TestWaitForSessionStop(t *testing.T) {
 	})
 
 	t.Run("outlives the wait and keeps uploading", func(t *testing.T) {
+		if testing.Short() {
+			t.Skip("short: waits about a second for the detached stop")
+		}
 		exe, _, done := fakeOxStop(t, "", "1", 0)
 		start := time.Now()
 		err := waitForSessionStop(sessionStopCommand(exe, projectRoot, "OxAb12"), 50*time.Millisecond)
@@ -448,6 +457,7 @@ func TestSessionStopOutcome(t *testing.T) {
 		{"uploaded", "{\n  \"success\": true,\n  \"type\": \"session_stop\"\n}\n", nil, false},
 		{"whispers first", "<whisper from=\"Avery\">{not json}</whisper>\n{\n  \"success\": true\n}\n", nil, false},
 		{"upload failed", "{\n  \"success\": true,\n  \"upload_warning\": \"Session saved locally but ledger upload failed.\"\n}\n", errSessionUploadFailed, true},
+		{"forced color", "\x1b[1m{\x1b[0m\n  \x1b[34m\"upload_warning\"\x1b[0m: \x1b[32m\"ledger upload failed\"\x1b[0m\n}\n", errSessionUploadFailed, true},
 		{"nothing printed", "", nil, true},
 		{"truncated", "{\n  \"success\": tr", nil, true},
 	} {
@@ -492,11 +502,16 @@ func TestRunSessionStopWith(t *testing.T) {
 		exe, _, _ := fakeOxStop(t, keptLocally, "0", 0)
 		require.ErrorIs(t, runSessionStopWith(exe, projectRoot, "OxAb12", time.Minute), errSessionUploadFailed)
 	})
-	t.Run("non-zero exit", func(t *testing.T) {
+	t.Run("non-zero exit says why", func(t *testing.T) {
 		exe, _, _ := fakeOxStop(t, "", "0", 1)
-		require.ErrorIs(t, runSessionStopWith(exe, projectRoot, "OxAb12", time.Minute), errSessionStopFailed)
+		err := runSessionStopWith(exe, projectRoot, "OxAb12", time.Minute)
+		require.ErrorIs(t, err, errSessionStopFailed)
+		assert.Contains(t, err.Error(), "Error: not currently recording", "the stop's own message must reach the hook log")
 	})
 	t.Run("still uploading", func(t *testing.T) {
+		if testing.Short() {
+			t.Skip("short: waits about a second for the detached stop")
+		}
 		exe, _, done := fakeOxStop(t, uploaded, "1", 0)
 		require.ErrorIs(t, runSessionStopWith(exe, projectRoot, "OxAb12", 50*time.Millisecond), errSessionStopStillRunning)
 		require.Eventually(t, func() bool { _, err := os.Stat(done); return err == nil }, 10*time.Second, 20*time.Millisecond)
@@ -515,4 +530,13 @@ func TestSessionStopCommand_FailedStopKeepsTheSignal(t *testing.T) {
 
 	require.Error(t, err, "nothing is recording for this agent")
 	assert.True(t, session.HasExplicitStop(projectRoot, agentID))
+}
+
+func TestStopDiagnosticsTail(t *testing.T) {
+	assert.Equal(t, "Error: not currently recording Run ox agent prime",
+		stopDiagnosticsTail([]byte("\x1b[31mError: not currently recording\x1b[0m\nRun ox agent prime\n")))
+	assert.Equal(t, "", stopDiagnosticsTail(nil))
+	long := stopDiagnosticsTail([]byte(strings.Repeat("x", 1000) + " the end"))
+	assert.LessOrEqual(t, len(long), stopDiagnosticsMax+len("…"))
+	assert.True(t, strings.HasSuffix(long, "the end"), "keep the end, where the error is")
 }

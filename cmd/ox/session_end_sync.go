@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 
@@ -104,18 +105,30 @@ func runSessionStopProcess(projectRoot, agentID string) error {
 
 // runSessionStopWith runs the stop with the given ox executable.
 func runSessionStopWith(oxPath, projectRoot, agentID string, wait time.Duration) error {
-	// a file, not a pipe: the child may keep writing after this hook exits
+	// files, not pipes: the child may keep writing after this hook exits
 	out, err := os.CreateTemp("", "ox-session-stop-*.json")
 	if err != nil {
 		return fmt.Errorf("%w: %w", errSessionStopNotLaunched, err)
 	}
-	defer func() {
-		_ = out.Close()
-		_ = os.Remove(out.Name())
-	}()
+	defer removeTemp(out)
+	diag, err := os.CreateTemp("", "ox-session-stop-*.log")
+	if err != nil {
+		return fmt.Errorf("%w: %w", errSessionStopNotLaunched, err)
+	}
+	defer removeTemp(diag)
+
 	cmd := sessionStopCommand(oxPath, projectRoot, agentID)
 	cmd.Stdout = out
+	cmd.Stderr = diag
 	if err := waitForSessionStop(cmd, wait); err != nil {
+		// the exit status alone does not say why the stop failed
+		if errors.Is(err, errSessionStopFailed) {
+			if said, readErr := os.ReadFile(diag.Name()); readErr == nil {
+				if tail := stopDiagnosticsTail(said); tail != "" {
+					err = fmt.Errorf("%w: %s", err, tail)
+				}
+			}
+		}
 		return err
 	}
 	printed, err := os.ReadFile(out.Name())
@@ -124,6 +137,26 @@ func runSessionStopWith(oxPath, projectRoot, agentID string, wait time.Duration)
 	}
 	return sessionStopOutcome(printed)
 }
+
+func removeTemp(f *os.File) {
+	_ = f.Close()
+	_ = os.Remove(f.Name())
+}
+
+// stopDiagnosticsMax bounds how much of the stop's stderr a hook log line carries.
+const stopDiagnosticsMax = 400
+
+// stopDiagnosticsTail is the end of what the stop wrote to stderr, on one line.
+func stopDiagnosticsTail(said []byte) string {
+	text := strings.Join(strings.Fields(string(ansiEscape.ReplaceAll(said, nil))), " ")
+	if len(text) > stopDiagnosticsMax {
+		text = "…" + text[len(text)-stopDiagnosticsMax:]
+	}
+	return text
+}
+
+// ansiEscape matches the SGR color sequences a terminal-bound writer emits.
+var ansiEscape = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 
 // waitForSessionStop starts the stop child and waits up to wait for it. On
 // timeout the child keeps running: it is detached, and owns the recording.
@@ -149,6 +182,8 @@ func waitForSessionStop(cmd *exec.Cmd, wait time.Duration) error {
 // and says so in upload_warning. Whispers may be printed ahead of the JSON,
 // which always starts on a line of its own.
 func sessionStopOutcome(printed []byte) error {
+	// the child runs with color off; strip any that a forced profile let through
+	printed = ansiEscape.ReplaceAll(printed, nil)
 	start := bytes.LastIndex(printed, []byte("\n{"))
 	if start < 0 {
 		start = bytes.IndexByte(printed, '{')
@@ -169,10 +204,14 @@ func sessionStopOutcome(printed []byte) error {
 // sessionStopCommand builds the stop child. It runs in its own process
 // session, so an agent that kills this hook at its own timeout (Claude Code,
 // Codex) does not kill the upload with it. It is told the agent ended, so
-// it does not suppress the agent's next recording.
+// it does not suppress the agent's next recording. It inherits the venue
+// (AMP_ORB, ...) with color forced off, because its output is parsed:
+// OX_COLOR_PROFILE outranks CLICOLOR_FORCE and NO_COLOR, and NO_COLOR covers
+// anything that reads only that.
 func sessionStopCommand(oxPath, projectRoot, agentID string) *exec.Cmd {
 	cmd := exec.Command(oxPath, "agent", agentID, "session", "stop", "--agent-ended")
 	cmd.Dir = projectRoot
+	cmd.Env = append(os.Environ(), "OX_COLOR_PROFILE=ascii", "NO_COLOR=1")
 	proc.Detach(cmd)
 	return cmd
 }
