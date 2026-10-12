@@ -1,9 +1,11 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/session"
@@ -35,6 +37,59 @@ func TestDoctor_HoldsUnmarkedManualSessionBeforeRetryingUploads(t *testing.T) {
 
 	assert.Equal(t, remoteBefore, runGit(t, f.barePath, "rev-parse", "HEAD"), "doctor must not publish a manual-mode session")
 	assert.True(t, session.IsHeld(cacheDir), "doctor holds it instead")
+}
+
+// Failure prevented: in manual mode doctor cannot write a hold (a read-only
+// cache folder), drops the error, and its upload retry, which goes by the hold
+// marker, publishes the session in the same run.
+func TestDoctor_SessionItCannotHoldIsReportedAndNeverUploaded(t *testing.T) {
+	f := newDownloadLedgerFixture(t)
+	t.Setenv("OX_SESSION_PUBLISHING", "")
+	repoID := filepath.Base(f.ledgerPath)
+	require.NoError(t, os.WriteFile(filepath.Join(f.projectRoot, ".sageox", "config.json"),
+		[]byte(`{"config_version":"2","repo_id":"`+repoID+`","session_publishing":"manual"}`), 0o644))
+	const name = "2026-10-01T10-00-devon-OxNoHd"
+	cacheDir := filepath.Join(session.GetContextPath(getRepoIDOrDefault(f.projectRoot)), "sessions", name)
+	require.NoError(t, os.MkdirAll(cacheDir, 0o755))
+	writeTestRawJSONLWithEntries(t, filepath.Join(cacheDir, ledgerFileRaw), 4)
+	t.Chdir(f.projectRoot)
+	remoteBefore := runGit(t, f.barePath, "rev-parse", "HEAD")
+	origHold := writeSessionHold
+	writeSessionHold = func(string, session.HoldReason, string) error { return errors.New("read-only cache folder") }
+	t.Cleanup(func() { writeSessionHold = origHold })
+
+	results := checkSessionHealth(doctorOptions{})
+
+	assert.Equal(t, remoteBefore, runGit(t, f.barePath, "rev-parse", "HEAD"), "a session doctor could not hold is never published")
+	assert.NoDirExists(t, filepath.Join(f.ledgerPath, "sessions", name), "nothing was copied into the shared tree")
+	var held *checkResult
+	for i := range results {
+		if results[i].name == "held sessions" {
+			held = &results[i]
+		}
+	}
+	require.NotNil(t, held, "doctor reports the session")
+	assert.True(t, held.warning, "a hold doctor could not write is a warning, not info")
+	require.Len(t, held.children, 1)
+	assert.Contains(t, held.children[0].message, "read-only cache folder")
+}
+
+// Failure prevented: a session that is in the Ledger and also held in a cache
+// copy is listed as uploaded. The Ledger row is merged first, and the held
+// cache row was dropped together with its hold, in either merge order.
+func TestSessionList_HeldCopyOfAPublishedSessionIsListedAsHeld(t *testing.T) {
+	const name = "2026-10-05T10-00-devon-OxHdPb"
+	ledgerRow := session.SessionInfo{SessionName: name, CreatedAt: time.Now()}
+	cacheRow := session.SessionInfo{SessionName: name, Held: true, CreatedAt: time.Now()}
+	for _, order := range [][2][]session.SessionInfo{
+		{{ledgerRow}, {cacheRow}},
+		{{ledgerRow, cacheRow}, nil},
+	} {
+		merged := mergeSessionSources(order[0], order[1])
+		entries := sessionListEntries(merged, map[string]bool{name: true}, "devon")
+		require.Len(t, entries, 1)
+		assert.Equal(t, string(session.StatusHeld), entries[0].Status)
+	}
 }
 
 // Failure prevented: an AI coworker running agent doctor is told nothing about

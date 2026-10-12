@@ -303,7 +303,7 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 	sessionCacheDir := filepath.Dir(result.RawPath)
 	held := stopHoldsSession(projectRoot, state)
 	if held {
-		if err := holdStoppedSession(result, sessionCacheDir, "session_stop"); err != nil {
+		if err := holdStoppedSession(result, state, sessionCacheDir, "session_stop"); err != nil {
 			return nil, err
 		}
 	} else {

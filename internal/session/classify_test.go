@@ -55,6 +55,19 @@ func TestClassifySession(t *testing.T) {
 			},
 			want: StatusRecording,
 		},
+		// A held folder that kept its recording marker (recovery holds before
+		// it clears, and a failed clear leaves both) is held, never the
+		// orphan or ghost that 'prune --all' deletes.
+		{
+			name: "held, dead process, has raw data → held, not orphan",
+			info: SessionInfo{Recording: true, ParentPID: 99999999, HasRawData: true, Held: true},
+			want: StatusHeld,
+		},
+		{
+			name: "held, dead process, no data → held, not ghost",
+			info: SessionInfo{Recording: true, ParentPID: 99999999, Held: true},
+			want: StatusHeld,
+		},
 		{
 			name: "recording, dead process, no data → ghost",
 			info: SessionInfo{

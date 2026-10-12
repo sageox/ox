@@ -676,7 +676,9 @@ func sessionMergeKey(s session.SessionInfo) string {
 }
 
 // mergeSessionSources deduplicates sessions by merge key.
-// Primary sessions take precedence over additional sessions.
+// Primary sessions take precedence over additional sessions, except that a
+// hold on any copy holds the session by name: the kept row carries it, or a
+// published Ledger row would hide a held cache copy as uploaded.
 // Returns merged sessions sorted newest-first by CreatedAt.
 //
 // One exception to primary-wins: a DRAFT placeholder loses to any non-draft
@@ -690,7 +692,8 @@ func mergeSessionSources(primary, additional []session.SessionInfo) []session.Se
 	result := make([]session.SessionInfo, 0, len(primary)+len(additional))
 	for _, s := range primary {
 		k := sessionMergeKey(s)
-		if _, dup := index[k]; dup {
+		if at, dup := index[k]; dup {
+			result[at].Held = result[at].Held || s.Held
 			continue
 		}
 		index[k] = len(result)
@@ -704,9 +707,11 @@ func mergeSessionSources(primary, additional []session.SessionInfo) []session.Se
 			result = append(result, s)
 			continue
 		}
+		held := result[at].Held || s.Held
 		if result[at].Draft && !s.Draft {
 			result[at] = s
 		}
+		result[at].Held = held
 	}
 	sort.Slice(result, func(i, j int) bool {
 		return result[i].CreatedAt.After(result[j].CreatedAt)

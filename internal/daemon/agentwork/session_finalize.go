@@ -501,6 +501,7 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 
 	var items []*WorkItem
 	heldDirs := session.HeldSessionDirs(ledgerPath)
+	manual := h.manualPublishing() // once per pass: it reads config files
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -717,6 +718,16 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 			continue
 		}
 
+		// Publishing is manual and this machine's session is not in the Ledger
+		// yet: held here like a manual stop, never summarized, uploaded, or
+		// discarded. It covers what no stop or recovery held: a cache-only
+		// session from a second recording (GH #1077), or one stopped before
+		// holds existed. After the download check: a download is not ours.
+		if manual && h.holdIfUnpublished(sessionDir, ledgerPath) {
+			skips.addHeld(name)
+			continue
+		}
+
 		missing := missingArtifacts(sessionDir)
 		if len(missing) == 0 {
 			// All artifact files exist on disk. Check whether they are stubs
@@ -927,6 +938,7 @@ func (h *SessionFinalizeHandler) DetectOrphanedForAgent(ledgerPath, agentID stri
 
 	var items []*WorkItem
 	seen := make(map[string]bool)
+	manual := h.manualPublishing() // once per pass: it reads config files
 
 	scanDirs := []string{
 		filepath.Join(ledgerPath, ".sageox", "cache", "sessions"),
@@ -1100,8 +1112,9 @@ func (h *SessionFinalizeHandler) DetectOrphanedForAgent(ledgerPath, agentID stri
 				"session", name, "agent_id", agentID,
 			)
 
-			// held on this machine: recovered locally, never finalized (GH #1093)
-			if session.IsHeldInLedger(ledgerPath, name) {
+			// held on this machine: recovered locally, never finalized, and so
+			// is an unpublished session while publishing is manual (GH #1093)
+			if session.IsHeldInLedger(ledgerPath, name) || (manual && h.holdIfUnpublished(sessionDir, ledgerPath)) {
 				continue
 			}
 
@@ -1156,10 +1169,10 @@ func (h *SessionFinalizeHandler) BuildPrompt(item *WorkItem) (RunRequest, error)
 		return RunRequest{SkipLLM: true}, nil
 	}
 
-	// Held on this machine (session_publishing: manual): no LLM run, and
-	// ProcessResult drops it. Covers IPC-queued items and holds placed after
-	// the scan, which never pass Detect's check (GH #1093).
-	if sessionHeldLocally(payload) {
+	// Held on this machine, or not yet published while publishing is manual:
+	// no LLM run, and ProcessResult drops it. Covers IPC-queued items, holds
+	// placed after the scan, and a switch to manual since then (GH #1093).
+	if h.keepLocal(payload) {
 		return RunRequest{SkipLLM: true}, nil
 	}
 
@@ -1321,9 +1334,10 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 		return nil
 	}
 
-	// Held on this machine: dropped before any LFS upload, commit, or
-	// discard. Only 'ox session upload' publishes it (GH #1093).
-	if sessionHeldLocally(payload) {
+	// Held on this machine, or not yet published while publishing is manual:
+	// dropped before any LFS upload, commit, or discard. Only 'ox session
+	// upload' publishes it (GH #1093).
+	if h.keepLocal(payload) {
 		h.logger.Info("session finalize dropped: session is held on this machine",
 			"session", filepath.Base(payload.SessionDir))
 		return nil
@@ -3636,4 +3650,42 @@ func holdIfRecordedManual(sessionDir string) error {
 func sessionHeldLocally(p *SessionFinalizePayload) bool {
 	// Clean first: Base of ".../<name>/." is ".", which names no session.
 	return session.IsHeldInLedger(p.LedgerPath, filepath.Base(filepath.Clean(p.SessionDir)))
+}
+
+// manualPublishing reports whether this project publishes sessions manually,
+// resolved as the CLI resolves it (env > user > project > team). The daemon
+// sees the saved config and its own environment, never the environment of a
+// CLI that ran with OX_SESSION_PUBLISHING; recorded modes and holds cover
+// those sessions.
+func (h *SessionFinalizeHandler) manualPublishing() bool {
+	return config.GetSessionPublishing(h.projectRoot) == config.SessionPublishingManual
+}
+
+// holdIfUnpublished holds a session that is not in the Ledger yet, for a
+// project that publishes manually, and reports whether the session must stay
+// on this machine. A session already in the Ledger (a coworker published it,
+// and it is waiting for its summary) is not held: summarizing it publishes
+// nothing new. An unreadable Ledger entry counts as not published. The hold is
+// written on the cache folder; if that fails, the session is still kept here,
+// and the next pass tries again (GH #1093).
+func (h *SessionFinalizeHandler) holdIfUnpublished(sessionDir, ledgerPath string) bool {
+	if isGitTrackedLedgerSession(sessionDir, ledgerPath) {
+		return false // the Ledger's shared tree: in the Ledger by definition
+	}
+	name := filepath.Base(filepath.Clean(sessionDir))
+	meta, err := lfs.ReadSessionMeta(filepath.Join(ledgerPath, "sessions", name))
+	if err == nil && !meta.IsDraft() {
+		return false
+	}
+	if err := writeHoldMarker(sessionDir, session.HoldManualPublishing, "daemon"); err != nil {
+		h.logger.Warn("session kept on this machine, but its hold could not be written", "session", name, "err", err)
+	}
+	return true
+}
+
+// keepLocal reports whether a work item's session stays on this machine: it
+// is held, or the project publishes manually and the session is not in the
+// Ledger yet. Every entry point (scan, IPC, prompt, result) asks it.
+func (h *SessionFinalizeHandler) keepLocal(p *SessionFinalizePayload) bool {
+	return sessionHeldLocally(p) || (h.manualPublishing() && h.holdIfUnpublished(p.SessionDir, p.LedgerPath))
 }

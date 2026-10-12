@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -209,6 +210,120 @@ func TestFinalizeEntryPoints_DropHeldItem(t *testing.T) {
 			assert.NoDirExists(t, filepath.Join(f.ledgerPath, "sessions", f.name), "nothing is staged into the Ledger")
 		})
 	}
+}
+
+// projectWithPublishing returns a project root whose saved config sets
+// session_publishing, as 'ox config set session_publishing' leaves it.
+func projectWithPublishing(t *testing.T, mode string) string {
+	t.Helper()
+	root := t.TempDir()
+	setProjectPublishing(t, root, mode)
+	return root
+}
+
+func setProjectPublishing(t *testing.T, root, mode string) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(filepath.Join(root, ".sageox"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, ".sageox", "config.json"),
+		[]byte(`{"config_version":"2","session_publishing":"`+mode+`"}`), 0o644))
+}
+
+// Failure prevented: with session_publishing: manual saved, a session that no
+// stop or recovery held (a cache-only second recording, GH #1077, or one
+// stopped before holds existed) is summarized and published by the daemon,
+// which went only by holds and recorded modes, unless 'ox doctor' happened to
+// hold it first.
+func TestDetect_ManualPublishingHoldsUnpublishedSessions(t *testing.T) {
+	cases := []struct {
+		name     string
+		mode     string
+		setup    func(t *testing.T, f cacheFixture)
+		wantItem bool
+		wantHeld bool
+	}{
+		{"cache only", "manual", func(t *testing.T, f cacheFixture) { f.transcript(t) }, false, true},
+		{"only a draft placeholder in the Ledger", "manual", func(t *testing.T, f cacheFixture) {
+			f.transcript(t)
+			f.ledgerMeta(t, `{"version":"1.0","draft":true}`)
+		}, false, true},
+		{"published with 'ox session upload', waiting for its summary", "manual", func(t *testing.T, f cacheFixture) {
+			f.transcript(t)
+			f.ledgerMeta(t, `{"version":"1.0"}`)
+			require.NoError(t, session.WriteNeedsSummaryMarker(f.cacheDir, filepath.Join(f.cacheDir, artifactRaw), filepath.Join(f.ledgerPath, "sessions", f.name)))
+		}, true, false},
+		{"a teammate's download, since removed from the Ledger", "manual", func(t *testing.T, f cacheFixture) {
+			f.downloaded(t)
+			f.write(t, lfs.DownloadedMarkerFile, "")
+		}, false, false},
+		{"control: auto", "auto", func(t *testing.T, f cacheFixture) { f.transcript(t) }, true, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newHeldFixture(t)
+			tc.setup(t, f)
+			h := NewSessionFinalizeHandlerForTest(slog.New(slog.DiscardHandler))
+			h.SetProjectRoot(projectWithPublishing(t, tc.mode))
+
+			items, skips, err := h.detectInDir(filepath.Join(f.ledgerPath, ".sageox", "cache", "sessions"), f.ledgerPath)
+
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantItem, len(items) == 1, "queued for the LLM and the Ledger")
+			assert.Equal(t, tc.wantHeld, session.IsHeld(f.cacheDir), "held on this machine")
+			assert.Equal(t, tc.wantHeld, skips.held[f.name], "counted as held")
+		})
+	}
+}
+
+// Failure prevented: an exited AI coworker's recording that says auto (it
+// started before the coworker switched to manual) is finalized and published
+// by the agent-exit sweep, which went only by the recorded mode.
+func TestDetectOrphanedForAgent_ManualPublishingHoldsAnUnpublishedRecording(t *testing.T) {
+	stale := time.Now().Add(-25 * time.Hour)
+	for _, mode := range []string{"manual", "auto"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newHeldFixture(t)
+			f.transcript(t)
+			rec, err := json.Marshal(map[string]any{"agent_id": "OxHeLd", "started_at": stale.Format(time.RFC3339),
+				"stopped_at": stale.Add(time.Hour).Format(time.RFC3339), "publishing_mode": "auto"})
+			require.NoError(t, err)
+			require.NoError(t, os.WriteFile(filepath.Join(f.cacheDir, recordingMarker), rec, 0o644))
+			h := NewSessionFinalizeHandlerForTest(slog.New(slog.DiscardHandler))
+			h.SetProjectRoot(projectWithPublishing(t, mode))
+
+			items := h.DetectOrphanedForAgent(f.ledgerPath, "OxHeLd", 0)
+
+			assert.FileExists(t, filepath.Join(f.cacheDir, artifactRaw), "the transcript stays local")
+			if mode == "manual" {
+				assert.Empty(t, items, "not finalized while publishing is manual")
+				assert.True(t, session.IsHeld(f.cacheDir))
+				return
+			}
+			assert.Len(t, items, 1, "control: finalized while publishing is auto")
+			assert.False(t, session.IsHeld(f.cacheDir))
+		})
+	}
+}
+
+// Failure prevented: an item queued while publishing was auto (or sent over
+// IPC) is summarized and published after the coworker switched to manual.
+func TestFinalizeEntryPoints_ManualPublishingDropsUnpublishedItem(t *testing.T) {
+	f := newHeldFixture(t)
+	f.transcript(t)
+	projectRoot := projectWithPublishing(t, "auto")
+	h := NewSessionFinalizeHandlerForTest(slog.New(slog.DiscardHandler))
+	h.SetProjectRoot(projectRoot)
+	items := detectCacheOnly(t, h, f.ledgerPath)
+	require.Len(t, items, 1, "precondition: queued while publishing is auto")
+
+	setProjectPublishing(t, projectRoot, "manual")
+
+	req, err := h.BuildPrompt(items[0])
+	require.NoError(t, err)
+	assert.True(t, req.SkipLLM, "no LLM run once publishing is manual")
+	require.NoError(t, h.ProcessResult(items[0], &RunResult{}))
+	assert.NoDirExists(t, filepath.Join(f.ledgerPath, "sessions", f.name), "nothing is staged into the Ledger")
+	assert.FileExists(t, filepath.Join(f.cacheDir, artifactRaw), "never discarded")
+	assert.True(t, session.IsHeld(f.cacheDir), "held, so 'ox session upload' publishes it")
 }
 
 // Failure prevented: machine-local state (.upload-retry-pending, found

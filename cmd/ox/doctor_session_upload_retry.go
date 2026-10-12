@@ -110,7 +110,31 @@ func findOrphanedSessions(projectRoot, ledgerPath string) ([]orphanedSession, er
 	}
 
 	cacheSessionsDir := filepath.Join(contextPath, "sessions")
-	return findOrphanedSessionsInDir(cacheSessionsDir, ledgerPath)
+	orphans, err := findOrphanedSessionsInDir(cacheSessionsDir, ledgerPath)
+	if err != nil || config.GetSessionPublishing(projectRoot) != config.SessionPublishingManual {
+		return orphans, err
+	}
+	return keepPublishedOrphans(ledgerPath, orphans), nil
+}
+
+// keepPublishedOrphans is the manual-mode filter on doctor's upload retry: it
+// finishes publications already in the Ledger and never publishes a session
+// that is only in the cache. That is 'ox session upload <name>', even when the
+// hold that should keep the session here could not be written (GH #1093).
+func keepPublishedOrphans(ledgerPath string, orphans []orphanedSession) []orphanedSession {
+	var kept []orphanedSession
+	for _, o := range orphans {
+		meta, err := lfs.ReadSessionMeta(filepath.Join(ledgerPath, "sessions", o.SessionName))
+		if err == nil && !meta.IsDraft() {
+			kept = append(kept, o)
+			continue
+		}
+		if holdErr := writeSessionHold(o.CachePath, session.HoldManualPublishing, "doctor_upload_retry"); holdErr != nil {
+			slog.Warn("session upload retry: could not hold a cache-only session", "session", o.SessionName, "error", holdErr)
+		}
+		slog.Info("session upload retry: left for 'ox session upload' (session_publishing: manual)", "session", o.SessionName)
+	}
+	return kept
 }
 
 // findOrphanedSessionsInDir contains the filesystem scan after project path
@@ -290,7 +314,7 @@ func readCacheSessionMeta(rawPath string) (*session.StoreMeta, int, error) {
 	if err := json.Unmarshal(scanner.Bytes(), &header); err != nil {
 		return nil, 0, fmt.Errorf("parse header: %w", err)
 	}
-	metaMap, ok := header["metadata"].(map[string]any)
+	metaMap, ok := rawHeaderMetadata(header)
 	if !ok {
 		return nil, 0, fmt.Errorf("no metadata in header")
 	}
@@ -661,11 +685,22 @@ func validateRawJSONLHeader(rawPath string) error {
 		return fmt.Errorf("invalid JSON on first line: %w", err)
 	}
 
-	if _, ok := header["metadata"]; !ok {
+	if _, ok := rawHeaderMetadata(header); !ok {
 		return fmt.Errorf("first line missing 'metadata' key (not a valid session header)")
 	}
 
 	return nil
+}
+
+// rawHeaderMetadata returns a raw.jsonl header's metadata in either format the
+// session reader accepts: {"type":"header","metadata":{...}} from recording,
+// or {"_meta":{...}}, which daemon recovery writes when it rebuilds a header.
+func rawHeaderMetadata(header map[string]any) (map[string]any, bool) {
+	if m, ok := header["metadata"].(map[string]any); ok {
+		return m, true
+	}
+	m, ok := header["_meta"].(map[string]any)
+	return m, ok
 }
 
 func newRawJSONLScanner(r io.Reader) *bufio.Scanner {

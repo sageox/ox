@@ -258,6 +258,7 @@ func TestHookStop_HoldFailureKeepsTheRecording(t *testing.T) {
 			createActiveRecording(t, projectRoot, repoID, agentID)
 			state, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
 			require.NoError(t, err)
+			require.False(t, state.RecordedManualPublishing(), "precondition: recording started in auto mode")
 
 			sent := 0
 			origIPC := sendHookFinalizeIPC
@@ -283,6 +284,38 @@ func TestHookStop_HoldFailureKeepsTheRecording(t *testing.T) {
 			assert.NotNil(t, kept.StoppedAt, "capture has ended")
 			assert.False(t, session.IsHeld(state.SessionPath))
 			assert.Zero(t, sent, "a session meant to be held is never handed to the daemon")
+			// Daemon recovery reads only the recorded mode: a kept recording that
+			// still said auto would be reclaimed and published.
+			assert.True(t, kept.RecordedManualPublishing(), "the kept recording must carry the manual choice")
 		})
 	}
+}
+
+// Failure prevented: 'session stop' holds a recording started in auto mode
+// (the coworker switched to manual mid-session), the hold write fails, and the
+// kept recording still says auto. Once its AI coworker exits, daemon recovery
+// reads that and publishes the session.
+func TestHoldStoppedSession_FailedHoldStillRecordsManual(t *testing.T) {
+	projectRoot, repoID := setupTestProject(t)
+	agentID := "OxStpAu"
+	createActiveRecording(t, projectRoot, repoID, agentID)
+	state, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+	require.NoError(t, err)
+	require.False(t, state.RecordedManualPublishing(), "precondition: recording started in auto mode")
+
+	origHold := writeSessionHold
+	writeSessionHold = func(string, session.HoldReason, string) error { return errors.New("disk full") }
+	t.Cleanup(func() { writeSessionHold = origHold })
+
+	require.ErrorContains(t, holdStoppedSession(&agentSessionResult{}, state, state.SessionPath, "session_stop"), "disk full")
+
+	kept, err := session.ReadRecordingStateFile(state.SessionPath)
+	require.NoError(t, err)
+	require.NotNil(t, kept, "the recording is kept for recovery")
+	assert.True(t, kept.RecordedManualPublishing(), "the kept recording must carry the manual choice")
+
+	// what daemon recovery does with it: hold, not publish
+	writeSessionHold = origHold
+	require.NoError(t, session.HoldRecordedManual(kept, "daemon_recovery"))
+	assert.True(t, session.IsHeld(state.SessionPath))
 }

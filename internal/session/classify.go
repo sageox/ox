@@ -182,6 +182,12 @@ func ClassifySession(info SessionInfo, isUploaded bool) SessionStatus {
 
 	// recording is active — check if the parent process is still alive
 	if isAbandoned(info.ParentPID, info.CreatedAt) {
+		// A held folder can keep its recording marker: recovery writes the
+		// hold first, and a failed clear leaves both. Orphan and ghost are
+		// what prune deletes, and a hold is removed only by name.
+		if info.Held {
+			return StatusHeld
+		}
 		if info.HasRawData || info.EntryCount > 0 {
 			return StatusOrphan
 		}

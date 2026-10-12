@@ -31,14 +31,36 @@ func stopHoldsSession(projectRoot string, state *session.RecordingState) bool {
 // writeSessionHold records a hold. A variable so tests can make it fail.
 var writeSessionHold = session.WriteHoldMarker
 
+// recordManualPublishing saves the manual choice on the recording itself, for
+// a stop that holds a recording started in auto mode. If the hold cannot be
+// written, the kept recording must still say manual: daemon recovery reads only
+// the recorded mode, and would publish a recording that says auto.
+func recordManualPublishing(state *session.RecordingState) error {
+	if state == nil || state.SessionPath == "" || state.RecordedManualPublishing() {
+		return nil
+	}
+	err := session.UpdateRecordingStateAt(state.SessionPath, state.SessionID, func(s *session.RecordingState) {
+		s.PublishingMode = config.SessionPublishingManual
+	})
+	if errors.Is(err, os.ErrNotExist) {
+		return nil // no recording left to keep
+	}
+	if err != nil {
+		return fmt.Errorf("record manual publishing on the recording: %w", err)
+	}
+	state.PublishingMode = config.SessionPublishingManual
+	return nil
+}
+
 // holdStoppedSession records the hold on the session's cache folder. Call it
 // before anything the daemon reacts to (.needs-summary) is written and before
 // .recording.json is cleared, so no window exists where the folder looks like
 // unfinished work with no hold. On error the caller must keep .recording.json:
 // without it or the hold, the folder looks like an orphan the daemon publishes.
-func holdStoppedSession(result *agentSessionResult, cacheDir, source string) error {
+func holdStoppedSession(result *agentSessionResult, state *session.RecordingState, cacheDir, source string) error {
+	recordErr := recordManualPublishing(state)
 	if err := writeSessionHold(cacheDir, session.HoldManualPublishing, source); err != nil {
-		return fmt.Errorf("hold session on this machine: %w", err)
+		return fmt.Errorf("hold session on this machine: %w", errors.Join(err, recordErr))
 	}
 	result.Held = true
 	return nil
@@ -60,8 +82,9 @@ func finalizeOrHoldOnHookStop(ctx *HookContext, state *session.RecordingState, p
 		return nil
 	}
 	if stopHoldsSession(ctx.ProjectRoot, state) {
+		recordErr := recordManualPublishing(state)
 		if err := writeSessionHold(state.SessionPath, session.HoldManualPublishing, "hook_"+phase); err != nil {
-			return fmt.Errorf("hold session on this machine: %w", err)
+			return fmt.Errorf("hold session on this machine: %w", errors.Join(err, recordErr))
 		}
 		return nil
 	}
@@ -157,15 +180,16 @@ func listUnpublishedCacheSessions(ledgerPath string) unpublishedCacheSessions {
 // checkHeldSessions is the doctor's view of unpublished cache sessions. It is
 // information only and never publishes. In manual mode a cache-only session
 // with no hold (stopped before holds existed) is held first: the coworker's
-// standing choice is to publish explicitly.
+// standing choice is to publish explicitly. A hold that cannot be written is
+// reported as a warning; doctor's own upload retry leaves that session alone
+// (findOrphanedSessions).
 func checkHeldSessions(projectRoot, ledgerPath string) (checkResult, bool) {
 	sessions := listUnpublishedCacheSessions(ledgerPath)
+	holdErrs := map[string]error{}
 	if config.GetSessionPublishing(projectRoot) == config.SessionPublishingManual && len(sessions.Waiting) > 0 {
 		for _, name := range sessions.Waiting {
-			for _, dir := range session.HeldSessionDirs(ledgerPath) {
-				if _, err := os.Stat(filepath.Join(dir, name, ledgerFileRaw)); err == nil {
-					_ = session.WriteHoldMarker(filepath.Join(dir, name), session.HoldManualPublishing, "doctor")
-				}
+			if err := holdCacheCopies(ledgerPath, name, "doctor"); err != nil {
+				holdErrs[name] = err
 			}
 		}
 		sessions = listUnpublishedCacheSessions(ledgerPath)
@@ -184,7 +208,32 @@ func checkHeldSessions(projectRoot, ledgerPath string) (checkResult, bool) {
 		result.children = append(result.children, checkResult{name: name, passed: true, priority: "info", message: "held (session_publishing: manual)"})
 	}
 	for _, name := range sessions.Waiting {
+		if err, failed := holdErrs[name]; failed {
+			// doctor's retry leaves it alone, but the daemon reclaims an
+			// unheld cache session like any other
+			result.warning, result.priority = true, ""
+			result.detail = "fix the error, then run 'ox doctor' again to hold it; publish one with 'ox session upload <name>'"
+			result.children = append(result.children, checkResult{name: name, passed: true, warning: true, message: "could not be held, so the daemon may still publish it: " + err.Error()})
+			continue
+		}
 		result.children = append(result.children, checkResult{name: name, passed: true, priority: "info", message: "cache only; recovered when its AI coworker exits"})
 	}
 	return result, true
+}
+
+// holdCacheCopies holds every cache copy of the session named name that has a
+// transcript. The errors of the copies that could not be held are joined.
+func holdCacheCopies(ledgerPath, name, source string) error {
+	var errs []error
+	for _, dir := range session.HeldSessionDirs(ledgerPath) {
+		sessionDir := filepath.Join(dir, name)
+		if _, err := os.Stat(filepath.Join(sessionDir, ledgerFileRaw)); err != nil {
+			continue
+		}
+		if err := writeSessionHold(sessionDir, session.HoldManualPublishing, source); err != nil {
+			slog.Warn("could not hold session", "session", name, "dir", dir, "source", source, "error", err)
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }

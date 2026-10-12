@@ -339,11 +339,17 @@ func stopSessionForClear(ctx *HookContext, agentID string) {
 	// done before we mutate state so SessionPath is still accurate.
 	ctx.ClearNotice = buildClearNoticeFromState(state)
 
-	// set StoppedAt to signal this session is complete
+	// set StoppedAt to signal this session is complete. A held stop saves
+	// the manual choice in the same write: StoppedAt is what daemon recovery
+	// reclaims, and it must never find a stopped recording that says auto.
+	held := stopHoldsSession(ctx.ProjectRoot, state)
 	now := time.Now()
 	if updateErr := session.UpdateRecordingStateForAgent(ctx.ProjectRoot, agentID, func(s *session.RecordingState) {
 		s.RecordTraceBoundary("stop", now)
 		s.StoppedAt = &now
+		if held {
+			s.PublishingMode = config.SessionPublishingManual
+		}
 		state = s
 	}); updateErr != nil {
 		slog.Debug("hook: clear could not set StoppedAt", "agent_id", agentID, "error", updateErr)
@@ -413,10 +419,15 @@ func handleEnd(ctx *HookContext) error {
 		return nil
 	}
 
+	// a held stop saves the manual choice with StoppedAt (see stopSessionForClear)
+	held := stopHoldsSession(ctx.ProjectRoot, state)
 	now := time.Now()
 	if updateErr := session.UpdateRecordingStateForAgent(ctx.ProjectRoot, agentID, func(s *session.RecordingState) {
 		s.RecordTraceBoundary("stop", now)
 		s.StoppedAt = &now
+		if held {
+			s.PublishingMode = config.SessionPublishingManual
+		}
 		state = s
 	}); updateErr != nil {
 		slog.Debug("hook: end could not set StoppedAt", "agent_id", agentID, "error", updateErr)

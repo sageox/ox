@@ -1221,7 +1221,7 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	// be recorded, the stop fails and the recording state is kept.
 	held := stopHoldsSession(projectRoot, state)
 	if held {
-		if err := holdStoppedSession(result, filepath.Dir(result.RawPath), "session_stop"); err != nil {
+		if err := holdStoppedSession(result, state, filepath.Dir(result.RawPath), "session_stop"); err != nil {
 			return nil, err
 		}
 	}

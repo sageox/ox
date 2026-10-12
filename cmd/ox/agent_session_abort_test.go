@@ -549,3 +549,28 @@ func TestAbortByName_HeldSession(t *testing.T) {
 	_, err := os.Stat(sessionPath)
 	assert.True(t, os.IsNotExist(err), "a held session is discarded when the coworker names it")
 }
+
+// Failure prevented: a held session kept in a cache abort did not search (the
+// cache keyed by the Ledger folder name rather than the repo ID, or one a
+// process with a different cache directory wrote) shows in 'ox session list'
+// and every cleanup leaves it alone, but abort by name said "session not
+// found", so the coworker had no way to discard it.
+func TestAbortByName_HeldSessionInAnotherCache(t *testing.T) {
+	f := newDownloadLedgerFixture(t)
+	const name = "2026-10-05T10-00-devon-OxAlTc"
+	dirs := session.HeldSessionDirs(f.ledgerPath)
+	require.GreaterOrEqual(t, len(dirs), 2)
+	other := dirs[1]
+	require.NotEqual(t, filepath.Join(session.GetContextPath(getRepoIDOrDefault(f.projectRoot)), "sessions"), other,
+		"precondition: a cache other than the one abort always searched")
+	sessionPath := filepath.Join(other, name)
+	require.NoError(t, os.MkdirAll(sessionPath, 0o755))
+	writeTestRawJSONLWithEntries(t, filepath.Join(sessionPath, ledgerFileRaw), 2)
+	require.NoError(t, session.WriteHoldMarker(sessionPath, session.HoldManualPublishing, "test"))
+	require.True(t, session.IsHeldInLedger(f.ledgerPath, name), "precondition: listed as held")
+
+	setForceFlag(t, true)
+	require.NoError(t, runAgentSessionAbort(&agentinstance.Instance{AgentID: "OxTest"}, agentCmd, []string{name}))
+
+	assert.NoDirExists(t, sessionPath, "a held session is discarded wherever it is kept")
+}

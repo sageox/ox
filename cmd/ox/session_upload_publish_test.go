@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
 	"github.com/stretchr/testify/assert"
@@ -149,6 +150,90 @@ func TestUpload_NeverRepublishesADownloadedCopy(t *testing.T) {
 
 	require.ErrorContains(t, err, "downloaded")
 	assert.Equal(t, remoteBefore, runGit(t, f.barePath, "rev-parse", "HEAD"), "a teammate's removed session is not republished")
+}
+
+// Failure prevented: names have minute precision, so a held session can share
+// its name with a different session already published. 'ox session upload'
+// replaced that session's transcript under its session ID, and every link to
+// it showed this one instead.
+func TestUpload_NeverPublishesOverADifferentSession(t *testing.T) {
+	f := newDownloadLedgerFixture(t)
+	const name = "2026-09-24T23-03-riley-OxRiLy"
+	f.publishFinishedSession(t, name, "Riley's title", "ok")
+	ledgerDir := filepath.Join(f.ledgerPath, "sessions", name)
+	rawBefore, err := os.ReadFile(filepath.Join(ledgerDir, ledgerFileRaw))
+	require.NoError(t, err)
+	cacheDir := filepath.Join(f.ledgerPath, ".sageox", "cache", "sessions", name)
+	require.NoError(t, os.MkdirAll(cacheDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, ledgerFileRaw), []byte(`{"type":"header","metadata":{"schema_version":"1","agent_type":"claude-code","username":"riley","agent_id":"OxRiLy","session_id":"ses_01890000-0000-7000-8000-0000000c0de1"}}
+{"type":"user","content":"A different conversation recorded in the same minute.","seq":1}
+{"entry_count":1}
+`), 0o644))
+	require.NoError(t, session.WriteHoldMarker(cacheDir, session.HoldManualPublishing, "session_stop"))
+	remoteBefore := runGit(t, f.barePath, "rev-parse", "HEAD")
+
+	err = sessionUploadCmd.RunE(sessionUploadCmd, []string{name})
+
+	require.ErrorIs(t, err, errRecoveryRefused)
+	assert.Equal(t, remoteBefore, runGit(t, f.barePath, "rev-parse", "HEAD"), "the published session is untouched on the remote")
+	rawAfter, err := os.ReadFile(filepath.Join(ledgerDir, ledgerFileRaw))
+	require.NoError(t, err)
+	assert.Equal(t, string(rawBefore), string(rawAfter), "the published transcript is untouched")
+	assert.True(t, session.IsHeld(cacheDir), "the held session stays held")
+}
+
+// Failure prevented: with agent.summarizer=off, a session held by an exit hook
+// (transcript only, no summary files) is published and left in the cache. The
+// daemon, which never reads agent.summarizer, finds a session with no summary
+// and runs the LLM on it.
+func TestUpload_SummarizerOffLeavesNothingForTheDaemon(t *testing.T) {
+	f := newDownloadLedgerFixture(t)
+	userConfig := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(userConfig, []byte("agent_summarizer: \"off\"\n"), 0o600))
+	t.Setenv("OX_USER_CONFIG", userConfig)
+	require.Equal(t, config.AgentSummarizerOff, config.GetAgentSummarizer(f.projectRoot))
+	const name = "2026-10-05T10-00-devon-OxNoSm"
+	cacheDir := filepath.Join(f.ledgerPath, ".sageox", "cache", "sessions", name)
+	require.NoError(t, os.MkdirAll(cacheDir, 0o755))
+	// a conversation worth summarizing, so the daemon would run the LLM on it
+	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, ledgerFileRaw), []byte(`{"metadata":{"schema_version":"1","agent_type":"claude-code","username":"devon","agent_id":"OxNoSm"},"type":"header"}
+{"type":"user","content":"Refactor the ledger sync retry loop so failed pushes back off exponentially, and log each attempt with its delay.","seq":1}
+{"type":"assistant","content":"Done: pushes now back off exponentially with jitter, and every attempt logs its delay and error.","seq":2}
+{"entry_count":2}
+`), 0o644))
+	require.NoError(t, session.WriteHoldMarker(cacheDir, session.HoldManualPublishing, "hook_end"))
+	remoteBefore := runGit(t, f.barePath, "rev-parse", "HEAD")
+
+	require.NoError(t, sessionUploadCmd.RunE(sessionUploadCmd, []string{"OxNoSm"}))
+
+	assert.NotEqual(t, remoteBefore, runGit(t, f.barePath, "rev-parse", "HEAD"), "the publish reached the remote")
+	queued, llmRuns := runFinalizePass(t, f.projectRoot, f.ledgerPath)
+	assert.Zero(t, queued, "agent.summarizer=off: the daemon has nothing left to do")
+	assert.Zero(t, llmRuns, "agent.summarizer=off: the published session is never summarized")
+}
+
+// Failure prevented: daemon recovery rebuilds a lost raw.jsonl header in the
+// {"_meta":...} form, then holds the manual recording. 'ox session upload'
+// accepted only {"metadata":...} and refused it with "no metadata in header",
+// so the coworker could never publish it.
+func TestUpload_PublishesARecoveredHeader(t *testing.T) {
+	f := newDownloadLedgerFixture(t)
+	const name = "2026-10-05T10-00-devon-OxReCv"
+	cacheDir := filepath.Join(f.ledgerPath, ".sageox", "cache", "sessions", name)
+	require.NoError(t, os.MkdirAll(cacheDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, ledgerFileRaw), []byte(`{"_meta":{"schema_version":"1","agent_id":"OxReCv","agent_type":"claude-code","recovered":true}}
+{"type":"user","content":"Recovered after the original header was lost.","seq":1}
+{"type":"assistant","content":"The recovered conversation is intact.","seq":2}
+`), 0o644))
+	require.NoError(t, session.WriteHoldMarker(cacheDir, session.HoldManualPublishing, "daemon_recovery"))
+	remoteBefore := runGit(t, f.barePath, "rev-parse", "HEAD")
+
+	require.NoError(t, sessionUploadCmd.RunE(sessionUploadCmd, []string{"OxReCv"}))
+
+	assert.NotEqual(t, remoteBefore, runGit(t, f.barePath, "rev-parse", "HEAD"), "the recovered session reached the remote")
+	meta, err := lfs.ReadSessionMeta(filepath.Join(f.ledgerPath, "sessions", name))
+	require.NoError(t, err)
+	assert.Equal(t, 2, meta.EntryCount)
 }
 
 // Failure prevented: a suffix that names several sessions, routine once a

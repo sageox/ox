@@ -285,6 +285,10 @@ func withCachedRecordingForRecovery(projectRoot string, state *session.Recording
 	})
 }
 
+// clearRecoveredRecording clears a held recovery's recording state. A variable
+// so tests can make it fail.
+var clearRecoveredRecording = session.ClearRecordingStateAt
+
 // recoverFromCache uploads raw.jsonl from cache when the adapter file is gone.
 // raw.jsonl is the source of truth -- all other artifacts (events, summary)
 // can be regenerated from it. This ensures no session data is lost even when
@@ -319,11 +323,24 @@ func recoverFromCache(inst *agentinstance.Instance, projectRoot string, state *s
 		if !stopHoldsSession(projectRoot, latest) {
 			return nil
 		}
+		name := session.GetSessionName(latest.SessionPath)
+		// 'ox session upload' later publishes from raw.jsonl alone, so the
+		// native session IDs and trace boundaries the recording collected
+		// after start go onto it before the recording state is cleared.
+		if err := session.StampRawCarrier(rawPath, session.CarrierStamp{
+			NativeSessions: latest.NativeSessions,
+			StoppedAt:      session.ResolveStoppedAt(latest.StoppedAt, rawPath, time.Now()),
+			TraceCapture:   latest.Trace,
+		}); err != nil {
+			return fmt.Errorf("record recovered session %s details before holding it: %w", name, err)
+		}
 		if err := session.WriteHoldMarker(latest.SessionPath, session.HoldManualPublishing, "recover"); err != nil {
-			return fmt.Errorf("hold recovered session %s: %w", session.GetSessionName(latest.SessionPath), err)
+			return fmt.Errorf("hold recovered session %s: %w", name, err)
 		}
 		held = true
-		_ = session.ClearRecordingStateAt(latest.SessionPath, latest.SessionID)
+		if err := clearRecoveredRecording(latest.SessionPath, latest.SessionID); err != nil {
+			return fmt.Errorf("held recovered session %s, but could not clear its recording state: %w", name, err)
+		}
 		return nil
 	})
 	if err != nil {

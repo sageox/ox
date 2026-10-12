@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -567,8 +568,11 @@ func TestRecoverFromCacheHoldsManualRecording(t *testing.T) {
 			// (D13), so only the mode recorded at start decides here.
 			t.Setenv("OX_SESSION_PUBLISHING", "auto")
 			stale, rawPath := commitHookBatchLeavingJournal(t, projectRoot, agentID)
+			// a native session ID seen after start lives only in the recording
+			// state until something writes it onto raw.jsonl
 			require.NoError(t, session.UpdateRecordingStateAt(stale.SessionPath, stale.SessionID, func(s *session.RecordingState) {
 				s.PublishingMode = mode
+				s.RecordNativeSession("native-after-start", "clear", time.Now())
 			}))
 			stale.PublishingMode = mode
 
@@ -586,6 +590,32 @@ func TestRecoverFromCacheHoldsManualRecording(t *testing.T) {
 			cleared, loadErr := session.LoadRecordingStateForAgent(projectRoot, agentID)
 			require.NoError(t, loadErr)
 			require.Nil(t, cleared, "the stale recording is cleared once the hold is in place")
+			// 'ox session upload' later publishes from raw.jsonl alone
+			stored, readErr := session.ReadSessionFromPath(rawPath)
+			require.NoError(t, readErr)
+			require.NotNil(t, stored.Meta)
+			var native []string
+			for _, n := range stored.Meta.NativeSessions {
+				native = append(native, n.ID)
+			}
+			require.Contains(t, native, "native-after-start", "the held transcript keeps what the recording collected after start")
 		})
 	}
+}
+
+// Failure prevented: a held recovery that cannot clear the recording state
+// reports success. The recording state stays, and 'ox session upload' then
+// refuses the session as still recording with nothing telling the coworker why.
+func TestRecoverFromCache_HeldRecoveryReportsAStateItCouldNotClear(t *testing.T) {
+	projectRoot, agentID, _ := setupHandleAfterToolTest(t)
+	t.Setenv("OX_SESSION_PUBLISHING", "manual")
+	stale, rawPath := commitHookBatchLeavingJournal(t, projectRoot, agentID)
+	orig := clearRecoveredRecording
+	clearRecoveredRecording = func(string, string) error { return errors.New("state file locked") }
+	t.Cleanup(func() { clearRecoveredRecording = orig })
+
+	err := recoverFromCache(&agentinstance.Instance{AgentID: agentID}, projectRoot, stale, rawPath)
+
+	require.ErrorContains(t, err, "state file locked")
+	require.True(t, session.IsHeld(stale.SessionPath), "the hold stays: the session is still kept here")
 }

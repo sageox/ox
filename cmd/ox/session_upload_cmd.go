@@ -66,6 +66,10 @@ Example:
 				}
 				return fmt.Errorf("publish %s: %w", name, err)
 			}
+			if config.GetAgentSummarizer(projectRoot) == config.AgentSummarizerOff {
+				fmt.Printf("Session %s published to the ledger; no summary is generated (agent.summarizer: off)\n", name)
+				return nil
+			}
 			fmt.Printf("Session %s published to the ledger; its summary is generated in the background\n", name)
 			return nil
 		}
@@ -393,9 +397,10 @@ func cachePublishBlocker(dir string) error {
 
 // publishCachedSession publishes a session from its cache copy through the
 // same upload path doctor's retry uses, synchronously. The hold is released
-// only after the commit lands, and .needs-summary is written first so the
-// daemon summarizes the published session instead of mistaking the cache copy
-// for a read-only download.
+// only after the commit lands. With a summarizer, .needs-summary is written
+// first so the daemon summarizes the published session instead of mistaking
+// the cache copy for a read-only download; with agent.summarizer=off the cache
+// copy is removed once the commit lands, so the daemon never sees it.
 func publishCachedSession(projectRoot, ledgerPath, sessionName, cacheDir string) error {
 	// re-checked here: the folder can change between lookup and publish
 	if err := cachePublishBlocker(cacheDir); err != nil {
@@ -409,7 +414,14 @@ func publishCachedSession(projectRoot, ledgerPath, sessionName, cacheDir string)
 	if entryCount == 0 {
 		return fmt.Errorf("session %s holds no conversation entries — nothing to publish", sessionName)
 	}
-	if config.GetAgentSummarizer(projectRoot) != config.AgentSummarizerOff {
+	// Names have minute precision, so a different session can already be in
+	// the Ledger under this one. Publishing would replace its transcript under
+	// its session ID, and its links would show this session instead.
+	if err := checkRecoveryDestination(filepath.Join(ledgerPath, "sessions", sessionName), sessionName, meta.SessionID); err != nil {
+		return err
+	}
+	summarize := config.GetAgentSummarizer(projectRoot) != config.AgentSummarizerOff
+	if summarize {
 		if err := session.WriteNeedsSummaryMarker(cacheDir, rawPath, filepath.Join(ledgerPath, "sessions", sessionName)); err != nil {
 			return fmt.Errorf("request summary: %w", err)
 		}
@@ -422,6 +434,14 @@ func publishCachedSession(projectRoot, ledgerPath, sessionName, cacheDir string)
 		return err
 	}
 
+	if !summarize {
+		// The commit landed and nothing reads this copy now. Left in place,
+		// the daemon would find a session with no summary and summarize it,
+		// since it never reads agent.summarizer.
+		if err := os.RemoveAll(cacheDir); err != nil {
+			slog.Warn("published session cache copy not removed", "session", sessionName, "dir", cacheDir, "error", err)
+		}
+	}
 	for _, dir := range session.HeldSessionDirs(ledgerPath) {
 		if err := session.ClearHoldMarker(filepath.Join(dir, sessionName)); err != nil {
 			slog.Warn("published session still marked held", "session", sessionName, "dir", dir, "error", err)

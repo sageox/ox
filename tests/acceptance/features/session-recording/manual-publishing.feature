@@ -50,6 +50,13 @@ Feature: Holding Sessions on This Machine Until Publishing Them
       Then the recovered session is held on Devon's machine
       And it is not shared with the team
 
+    Scenario: ox finds an unpublished session that nothing held
+      Given Devon publishes sessions manually
+      And a session recorded on Devon's machine was never held or published
+      When ox runs its background housekeeping
+      Then the session is held on Devon's machine
+      And it is not summarized or shared with the team
+
   Rule: Publishing a held session takes one explicit command
 
     Scenario: Devon publishes a held session
@@ -58,6 +65,13 @@ Feature: Holding Sessions on This Machine Until Publishing Them
       Then the session appears in the "Acme Engineering" Ledger
       And it is no longer held
       And ox generates its summary in the background
+
+    Scenario: Devon publishes a held session with summaries turned off
+      Given Devon has turned session summaries off
+      And Devon has a held session
+      When Devon publishes it by name
+      Then the session appears in the "Acme Engineering" Ledger
+      And no summary is generated for it
 
   Rule: ox shows held sessions without ever publishing them
 
