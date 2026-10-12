@@ -1,0 +1,17 @@
+{
+  "created_at": "2026-10-01T01:00:00Z",
+  "id": "r-v2-0003",
+  "items": [
+    {
+      "anchor": "hold",
+      "label": "The third risk",
+      "note": "Worth a diagram.",
+      "reviewer": "Ana",
+      "section": "Risks",
+      "status": "comment"
+    }
+  ],
+  "request_sha256": "721b18276b3120ce64e52bab65e0100c127fd59461393c012f77ffbbd8b190f3",
+  "reviewer": "Ana",
+  "slug": "rc-v2-records"
+}

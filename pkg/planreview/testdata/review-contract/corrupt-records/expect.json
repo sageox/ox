@@ -1,0 +1,12 @@
+{
+  "summary": "A torn round, a damaged per-entry resolution and a damaged remaps.json. Each is a failure, so the review is incomplete; the intact round still assembles. The CLI's v1 reader reports only the torn round: the damaged resolution silently leaves h2 open and remaps.json is ignored with a log line.",
+  "items": [
+    {"anchor": "h1", "reviewer": "Ana", "status": "request-change", "label": "The first risk", "note": "Name the owner.", "open": true},
+    {"anchor": "h2", "reviewer": "Ana", "status": "flag", "label": "The second risk", "note": "Is this still true?", "open": true}
+  ],
+  "failures": [
+    {"path": "feedback/remaps.json", "reason": "undecodable"},
+    {"path": "feedback/resolutions/20261001-030000.000000000-6d5c4b3a.json", "reason": "undecodable"},
+    {"path": "feedback/round-20261001-020000.000000000-r-0006-torn.json", "reason": "undecodable"}
+  ]
+}

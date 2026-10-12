@@ -1,0 +1,16 @@
+{
+  "created_at": "2026-10-01T02:00:00Z",
+  "id": "r-big-0002",
+  "items": [
+    {
+      "anchor": "h2",
+      "label": "Item 2",
+      "note": "A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. A long note. ",
+      "reviewer": "Ben",
+      "section": "Plan",
+      "status": "flag"
+    }
+  ],
+  "reviewer": "Ben",
+  "slug": "rc-oversized"
+}

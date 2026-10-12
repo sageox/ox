@@ -1,23 +1,33 @@
 # Plan review: Ledger concurrency and compatibility contract
 
-**Status:** candidate, not frozen (#1287). It freezes in #1288 once the module
-implements and tests the mechanisms in 3.5 and 3.6 *and* a consuming host has
-proven the same I/O assumptions on its own storage. Follow-up owners: #1288
-(shared module), #1289 (CLI adoption), #1291 (browser outbox), #1294
-(certification).
+**Status:** frozen (#1288). `pkg/planreview` implements and tests 3.5 and 3.6,
+and a consuming host passed the §5 probes on its own storage. The three points
+that host raised are settled in 3.2 (identity on retries), 3.6 (per-host
+bounds) and §5 (what a host proves). Follow-up owners: #1289 (CLI adoption),
+#1291 (browser outbox), #1294 (certification).
 
 **Goal:** supported concurrent reviewers never lose feedback and never repair
 Git conflicts by hand. This spec records what the CLI does today, names the
 mechanisms found that lose, hide, block or broaden review data, and fixes the
 contract choices the shared module implements.
 
-**Executable half:**
+**Executable half:** the Go module `github.com/sageox/ox/pkg/planreview`
+(`pkg/planreview/`, its own `go.mod`; standard library plus
+`golang.org/x/net/html`).
 
 | Where | What it pins |
 |---|---|
-| `internal/plan/testdata/review-contract/<fixture>/` | Shared fixtures: a plan dir (`plan/`) and the merged review `ox plan feedback show --json` returns for it, projected to the fields every host must agree on, the reviewer's label and note included (`expect.json`) |
-| `TestReviewContractFixtures` (`internal/plan/feedback_test.go`) | The v1 reader against every fixture |
+| `pkg/planreview/testdata/review-contract/<fixture>/` | Shared fixtures: a plan dir (`plan/`) and what assembling it yields (`expect.json`): the merged items, projected to the fields every host must agree on (the reviewer's label and note included), every failure by path and reason, and every conflicting operation; `limits` when the fixture needs its own |
+| `pkg/planreview/testdata/anchors.json` | The review page's anchor, label and markable-element vectors; the anchors are goldens from a JS engine running review.js |
+| `TestContractFixtures` (`pkg/planreview/review_test.go`) | Every fixture through two transports (`Capture` and a plain read of every file) and the shared assembler |
+| `TestPublish_*`, `TestCapture_*` (`pkg/planreview/local_test.go`) | 3.5 and 3.6 |
+| `TestReviewContractFixtures` (`internal/plan/feedback_test.go`) | The CLI's v1 reader against the five fixtures it can read, `many-rounds` (120 rounds, every layout) included, until #1289 replaces it |
 | `TestPlanReviewDurability_RacingClonesKeepEveryRecord` (`cmd/ox/plan_review_durability_test.go`) | Rounds and resolutions from three clones survive the push rebase |
+
+The CLI does not import the module yet: `go install
+github.com/sageox/ox/cmd/ox@<version>` refuses a `go.mod` with a `replace`
+directive, so the CLI can only require a published module version. #1289 adopts the released `pkg/planreview` and removes the CLI's own
+reader and writers; until then §1 describes the CLI as it is.
 
 ---
 
@@ -155,9 +165,17 @@ to repair (`TestPlanReviewDurability_RacingClonesKeepEveryRecord`).
   `ContentRoundID` canonicalization (reviewer + items; unknown fields ignored),
   taken after each item's empty reviewer is filled from the round's reviewer
   as `SaveFeedback` stores it, so a request and its stored copy compare equal.
+  Two v2 rounds must match on both, so a request digest copied onto edited
+  marks is a conflict, not a duplicate.
 - Host materialization (`created_at`, slug, per-item reviewer stamp,
   authenticated identity) is outside the digest, so an acceptance timestamp
   never creates another logical submission.
+- **Identity:** an operation belongs to the reviewer stamped on it. The
+  caller's authenticated identity stays outside the request digest, and a copy
+  is the same operation only with the same payload *and* the same stamped
+  reviewer. A writer answers `already_published` only when the stored copy's
+  stamped reviewer is the caller; a retry under another account is a
+  `conflict`, never told that someone else's record is its saved review.
 - **Equivalent:** every physical copy is kept; it assembles once, as the
   earliest acceptance (v1 rule).
 - **Conflicting:** every copy is kept and never rewritten; assembly still uses
@@ -184,9 +202,23 @@ except `resolutions.json`.
 - `.` cannot occur in an id, so `<id>.<digest>` splits unambiguously. A v1
   writer will not recognize a v2 copy by name and may write a second copy;
   read-time dedup by id still assembles it once.
-- Remaps move to the same per-entry shape (`feedback/remaps/…`), read beside
-  the legacy file. v1 readers do not see them, so a moved mark shows at its
-  original anchor, the documented degraded state.
+- Remaps move to the same per-entry shape,
+  `feedback/remaps/<ts>-<id>.<digest>.json`, read after the legacy file. The
+  id is `m` plus 16 hex characters of SHA-256 over `from`, NUL, `to`, so one
+  move computed by two clones shares an id. v1 readers do not see them, so a
+  moved mark shows at its original anchor, the documented degraded state.
+- **Record fields.** A record keeps the v1 shape so v1 readers read it: the
+  frozen request's fields, unknown ones included, with the host's materialized
+  fields over them. A round sets `id`, `slug`, `created_at` (the acceptance
+  time), `reviewer` (stamped on the round and on every item, replacing any the
+  request named) and `request_sha256`, and normalizes each item's `status`. A
+  resolution sets `id`, `at`, `reviewer` and `request_sha256`. Records are
+  indented JSON with sorted keys; a writer refuses one over 8 MiB.
+- **Requests a writer refuses:** an item without an anchor, and a key that
+  differs from a known field only in case (`Items`, `ſtatus`). Go's
+  `encoding/json` matches field names case-insensitively, so such a key would
+  be validated as the field and then stored beside it, where a reader decodes
+  whichever sorts last.
 
 ### 3.4 Frozen-byte checks
 
@@ -203,36 +235,44 @@ except `resolutions.json`.
 ### 3.5 Confined create-only publication
 
 1. Walk from the plan dir to the record's directory one component at a time,
-   each opened relative to its parent's handle without following a symlink
-   (`openat` with `O_NOFOLLOW|O_DIRECTORY`), creating the missing ones. A
-   symlink or non-directory fails the publication, including one swapped in
-   after an earlier check. `os.Root` alone is not enough: it follows a symlink
-   that stays inside the root.
+   each opened relative to its parent's handle without following a symlink,
+   creating the missing ones. A symlink or non-directory fails the
+   publication, including one swapped in after an earlier check. `os.Root`
+   alone is not enough: it follows a symlink that stays inside the root. So
+   each component is checked with `Lstat`, opened, and kept only when both the
+   opened directory and a second `Lstat` are that same directory
+   (`os.SameFile`).
 2. Write a dot-prefixed temporary relative to that directory handle with
-   `O_CREATE|O_EXCL|O_NOFOLLOW`, fsync, close.
+   `O_CREATE|O_EXCL` (which also refuses a symlink at the name), fsync, close.
 3. `linkat(2)` it to the record name on the same handle. It fails rather than
-   replace any existing name, live or dangling symlinks included. Fsync the
-   directory, remove the temporary.
+   replace any existing name, live or dangling symlinks included. Remove the
+   temporary, fsync the directory.
 4. On `EEXIST`, apply the write check in 3.4.
 
-Readers skip dot-prefixed names, so a temporary is never a record. A spike
-during #1287 (macOS, Go 1.27) confirmed the outcomes with an `os.Root` plus a
-check of each component: no overwrite, no write through a symlinked name or
-directory inside or outside the plan, no traversal, nothing written outside
-the plan, and one record left by 16 concurrent publishers. That version
-leaves a window between check and use, which the handle-relative walk above
-closes. #1288 implements it, with those cases as its tests.
+Readers skip dot-prefixed names, so a temporary is never a record. `Publish`
+implements this, in the standard library (`os.Root.Link`; Windows skips the
+directory fsync it cannot do). Its tests are the #1287 spike's cases: no
+overwrite, no write through a symlinked name or directory inside or outside
+the plan, no traversal, nothing written outside the plan, and one record left
+by 16 concurrent publishers.
 
 ### 3.6 Bounded capture
 
 - Reads the worktree with the same no-follow walk as 3.5, so unsynced records
   are included and a component swapped for a symlink between listing and read
   is a failed read, not followed.
-- Every entry under `feedback/` and `feedback/resolutions/` is either a known
-  record or a reported failure: unrecognized, not a regular file, over a limit,
-  undecodable, gone after listing, or replaced between listing and read.
-- **Limits:** 10,000 records, 8 MiB per record, 64 MiB per capture; new
-  writers refuse to store a record over 8 MiB. v1 writers have no cap: `ox plan
+- Every entry under `feedback/`, `feedback/resolutions/` and `feedback/remaps/`
+  is either a known record or a reported failure: unrecognized (another
+  directory included), not a regular file, over a limit, undecodable, altered,
+  gone after listing, or replaced between listing and read.
+- **Limits:** each host passes its own; the semantics do not change. Records
+  count in path order, and exceeding a bound makes the capture incomplete,
+  never silently shorter. The defaults are 10,000 records, 8 MiB per record
+  and 64 MiB per capture; new writers refuse to store a record over 8 MiB. A
+  host that pays one request per record may lower the record and capture
+  bounds to fit its request timeout, keeping 8 MiB per record so it reads
+  anything a writer stores. `Assemble` applies the bounds to any inventory, so
+  parsing stays bounded whatever the transport did. v1 writers have no cap: `ox plan
   feedback apply --from` reads any size, and a stored round outgrows its
   request (indented JSON, the round's reviewer copied into every item). One
   1 MiB request of minimal items, the review server's cap
@@ -248,9 +288,10 @@ closes. #1288 implements it, with those cases as its tests.
   "no open feedback", show an item resolved, or approve on one; it shows the
   failures.
 
-The #1287 spike confirmed sustained churn yields incomplete, a single change
-is absorbed by the next attempt, and a capture taken at H7's `break` is
-incomplete where the v1 reader answers. #1288 implements it, with those cases as its tests.
+`Capture` implements this; its tests are the #1287 spike's cases: sustained
+churn yields incomplete, a single change is absorbed by the next attempt, and
+a capture taken while a rebase is in progress (H7) is incomplete where the v1
+reader answers.
 
 ### 3.7 Exact-set commit and recovery (#1289)
 
@@ -267,12 +308,25 @@ incomplete where the v1 reader answers. #1288 implements it, with those cases as
 
 ### 3.8 Retained v1 assembly
 
-Unchanged, and pinned by `TestReviewContractFixtures`:
+Unchanged, and pinned by `TestReviewContractFixtures` and `TestContractFixtures`;
+on `many-rounds` the CLI's v1 reader and the module assemble the same items:
 
 - latest mark per (canonical anchor, reviewer), in file order;
 - latest resolution per canonical anchor, by its `at`;
 - open when raised after that resolution;
 - the remap chain is applied at read time; records on disk are never rewritten.
+
+`Assemble` folds the remaps once for all anchors; folding each anchor on its
+own costs anchors × remaps, minutes for a 1 MiB round against a 1 MiB
+`remaps.json`.
+
+**What the Ledger bytes cannot prove.** Anyone who can push to the Ledger can
+write any review file. A forged copy of another reviewer's operation is
+reported as a conflict, but when it sorts first it is the copy assembled, and
+nothing in the bytes says who wrote a record. A resolution's `at` is its
+writer's clock, so one dated far in the future keeps its item closed until
+then. Closing either needs an authority outside the Ledger (push rules, or
+receipts signed by the host); this contract does not provide one.
 
 ---
 
@@ -280,7 +334,7 @@ Unchanged, and pinned by `TestReviewContractFixtures`:
 
 Measured on the official `ox_0.20.0_darwin_arm64` release asset (checksum
 verified, commit `5428a78a`) and on a build of main at `651ac29a` (unreleased;
-it also reports 0.20.0). Each fixture was installed as a plan in a scratch
+it also reports 0.20.0). Each of the four #1287 fixtures was installed as a plan in a scratch
 Ledger and read with `ox plan feedback show <slug> --json` and
 `ox plan render <slug> -o page.html`, with `HOME` and every XDG dir in a scratch
 dir, `SAGEOX_DAEMON=false` and `DO_NOT_TRACK=1`. Both commands agreed on every
@@ -319,9 +373,12 @@ repeating the measurement above against its binary.
 
 A host that reads or writes the same records proves, on its own storage:
 
-1. **Reads:** for every fixture, the items and `corrupt_rounds` in
-   `expect.json`, and it reports the gaps v1 leaves silent (H4, H6) as
-   conflicts and failures (3.2, 3.6).
+1. **Reads:** a host proves its transport: for every fixture, its inventory
+   holds every file under `plan/feedback/` byte for byte, and it reports its
+   own failure classes. The items, failures and conflicts in `expect.json`
+   then come from running `Assemble` over that inventory, which reports the
+   gaps v1 leaves silent (H4, H6) as conflicts and failures (3.2, 3.6); no
+   host re-implements assembly.
 2. **Create-only publication:** its write path fails instead of replacing an
    existing path, and refuses a symlink entry (Git mode `120000`) anywhere on
    the record path.
@@ -330,6 +387,7 @@ A host that reads or writes the same records proves, on its own storage:
 4. **Bounded capture:** a truncated listing, a lagging replica or a concurrent
    change yields incomplete, never an empty or resolved result.
 
-The contract freezes in #1288 when the module's tests cover 3.5 and 3.6, the
-consuming host's probes pass on its storage, and both sides agree on every
-`expect.json`. Consuming-host qualification is private-owner follow-up.
+The contract froze in #1288: the module's tests cover 3.5 and 3.6, and the
+consuming host's probes passed on its storage. That host then agrees on every
+`expect.json` by running the released module over its own inventories.
+Consuming-host qualification is private-owner follow-up.

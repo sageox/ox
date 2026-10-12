@@ -324,14 +324,13 @@ func find(items []MergedItem, anchor string) *MergedItem {
 }
 
 // TestReviewContractFixtures pins what `ox plan feedback show --json`
-// (AssembleReview + CorruptFeedbackRounds) returns for each shared fixture in
-// testdata/review-contract, the fixtures
-// docs/specs/plan-review-ledger-contract.md publishes for other hosts and
-// release measurements. expect.json holds a projection of each merged item,
-// not the literal CLI JSON: the fields every host must agree on, including
-// the reviewer's label and note. Failure prevented: a reader change silently
-// reinterprets, or drops the words of, review data that released CLIs and
-// other hosts read too.
+// (AssembleReview + CorruptFeedbackRounds) returns for the shared fixtures in
+// pkg/planreview/testdata/review-contract that this v1 reader can read: the
+// items its expect.json records, and as corrupt rounds the round files it
+// lists as failures. The other fixtures hold what only the module reads
+// (immutable-record retries and conflicts, per-entry remaps, record bounds).
+// Failure prevented: a reader change silently reinterprets, or drops the
+// words of, review data that released CLIs and other hosts read too.
 func TestReviewContractFixtures(t *testing.T) {
 	t.Parallel()
 	type item struct {
@@ -344,30 +343,36 @@ func TestReviewContractFixtures(t *testing.T) {
 		Resolution   string `json:"resolution,omitempty"`
 		RemappedFrom string `json:"remapped_from,omitempty"`
 	}
-	const root = "testdata/review-contract"
-	fixtures, err := os.ReadDir(root)
-	if err != nil || len(fixtures) == 0 {
-		t.Fatalf("read fixtures: %v (%d found)", err, len(fixtures))
-	}
-	for _, f := range fixtures {
-		t.Run(f.Name(), func(t *testing.T) {
+	const root = "../../pkg/planreview/testdata/review-contract"
+	for _, name := range []string{"corrupt-records", "many-rounds", "resolution-layouts", "same-id", "unknown-fields"} {
+		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			raw, err := os.ReadFile(filepath.Join(root, f.Name(), "expect.json"))
+			raw, err := os.ReadFile(filepath.Join(root, name, "expect.json"))
 			if err != nil {
 				t.Fatal(err)
 			}
 			var want struct {
-				Summary       string   `json:"summary"`
-				Items         []item   `json:"items"`
-				CorruptRounds []string `json:"corrupt_rounds"`
+				Summary  string `json:"summary"`
+				Items    []item `json:"items"`
+				Failures []struct {
+					Path   string `json:"path"`
+					Reason string `json:"reason"`
+				} `json:"failures"`
+				Conflicts json.RawMessage `json:"conflicts"`
 			}
 			dec := json.NewDecoder(bytes.NewReader(raw))
 			dec.DisallowUnknownFields()
 			if err := dec.Decode(&want); err != nil {
 				t.Fatalf("decode expect.json: %v", err)
 			}
+			var wantCorrupt []string
+			for _, f := range want.Failures {
+				if strings.HasPrefix(f.Path, feedbackSubdir+"/"+roundPrefix) {
+					wantCorrupt = append(wantCorrupt, f.Path)
+				}
+			}
 
-			dir := filepath.Join(root, f.Name(), "plan")
+			dir := filepath.Join(root, name, "plan")
 			merged, err := AssembleReview(dir)
 			if err != nil {
 				t.Fatal(err)
@@ -392,8 +397,8 @@ func TestReviewContractFixtures(t *testing.T) {
 			for _, p := range corrupt {
 				gotCorrupt = append(gotCorrupt, feedbackSubdir+"/"+filepath.Base(p))
 			}
-			if !slices.Equal(gotCorrupt, want.CorruptRounds) {
-				t.Errorf("corrupt_rounds = %v, want %v", gotCorrupt, want.CorruptRounds)
+			if !slices.Equal(gotCorrupt, wantCorrupt) {
+				t.Errorf("corrupt_rounds = %v, want %v", gotCorrupt, wantCorrupt)
 			}
 		})
 	}

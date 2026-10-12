@@ -1,0 +1,9 @@
+{
+  "anchor": "h1",
+  "at": "2026-10-01T02:00:00Z",
+  "id": "accept-0001",
+  "note": "accepted by reviewer",
+  "request_sha256": "cd9207a7d82a1c0fe6469542df19af70a384b28a5d4ab1e5af2c862bfcea677f",
+  "reviewer": "Ana",
+  "state": "verified"
+}

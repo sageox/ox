@@ -275,17 +275,22 @@ check-test-tiers: ## Validate the machine-readable test-tier contract
 test-tiers: check-test-tiers ## Print the executable test-tier contract
 	@for tier in fast full slow acceptance digital_twin integration release; do $(TEST_TIER_TOOL) describe $$tier; echo; done
 
-# Root ./... deliberately excludes nested public modules, so the contract's
-# coverage is collected here and appended into coverage.out by each coverage
-# tier below before the ratchet reads it. Otherwise every change to the
-# contract fails the changed-line gate as "no coverage data".
-SESSIONPROVENANCE_COVER := tmp/sessionprovenance-coverage.out
-.PHONY: test-sessionprovenance
-test-sessionprovenance: ## Validate the public native-session contract
+# Root ./... deliberately excludes nested public modules, so their coverage is
+# collected here and appended into coverage.out by each coverage tier below
+# before the ratchet reads it. Otherwise every change to a public module fails
+# the changed-line gate as "no coverage data".
+PUBLIC_MODULES := pkg/sessionprovenance pkg/planreview
+PUBLIC_MODULES_COVER := tmp/public-modules-coverage.out
+.PHONY: test-public-modules
+test-public-modules: ## Validate the public contract modules under pkg/
 	@mkdir -p tmp
-	@$(GO) -C pkg/sessionprovenance test -race -coverprofile=$(CURDIR)/$(SESSIONPROVENANCE_COVER) -covermode=atomic ./...
+	@echo "mode: atomic" > $(PUBLIC_MODULES_COVER)
+	@for m in $(PUBLIC_MODULES); do \
+	  $(GO) -C $$m test -race -coverprofile=$(CURDIR)/tmp/public-module-coverage.out -covermode=atomic ./... || exit 1; \
+	  tail -n +2 tmp/public-module-coverage.out >> $(PUBLIC_MODULES_COVER); \
+	done
 
-test: check-test-tiers test-sessionprovenance ## Run fast tests — unit tests <500ms, race detection, no coverage (every commit)
+test: check-test-tiers test-public-modules ## Run fast tests — unit tests <500ms, race detection, no coverage (every commit)
 	$(call say,"Running fast tests (skipping >500ms, no coverage)...")
 	@timings='$(TEST_TIMINGS)'; \
 	if [ -z "$$timings" ]; then mkdir -p tmp; timings=$$(mktemp -p tmp test-timings.XXXXXX); else mkdir -p "$$(dirname "$$timings")"; fi; \
@@ -297,10 +302,10 @@ test: check-test-tiers test-sessionprovenance ## Run fast tests — unit tests <
 	if [ "$$test_status" -ne 0 ]; then exit "$$test_status"; fi; \
 	exit "$$metrics_status"
 
-test-cover: check-test-tiers test-sessionprovenance ## Run fast tests with coverage collection (~15-20% slower than `make test`)
+test-cover: check-test-tiers test-public-modules ## Run fast tests with coverage collection (~15-20% slower than `make test`)
 	$(call say,"Running fast tests with coverage...")
 	@$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) $(GOTESTSUM_JUNIT) $(GOTESTSUM_TIMINGS) -- $(FAST_TEST_FLAGS) -coverprofile=coverage.out -covermode=atomic ./...
-	@tail -n +2 $(SESSIONPROVENANCE_COVER) >> coverage.out
+	@tail -n +2 $(PUBLIC_MODULES_COVER) >> coverage.out
 	@python3 scripts/coverage_ratchet.py coverage.out --write-provenance coverage.out.provenance.json
 
 test-timings: ## Reprint metrics from the latest fast-test timing artifact
@@ -308,10 +313,10 @@ test-timings: ## Reprint metrics from the latest fast-test timing artifact
 	@test -f $(TEST_TIMINGS) || (echo "No fast-test timing artifact at $(TEST_TIMINGS)." && exit 1)
 	@python3 $(TEST_METRICS) $(TEST_TIMINGS)
 
-test-all: check-test-tiers test-sessionprovenance ## Run all unit tests including expensive ones (git clone, SQLite, LFS) with coverage
+test-all: check-test-tiers test-public-modules ## Run all unit tests including expensive ones (git clone, SQLite, LFS) with coverage
 	$(call say,"Running all tests including expensive tests...")
 	@$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) $(GOTESTSUM_JUNIT) $(GOTESTSUM_TIMINGS) -- $(FULL_TEST_FLAGS) -coverprofile=coverage.out -covermode=atomic ./...
-	@tail -n +2 $(SESSIONPROVENANCE_COVER) >> coverage.out
+	@tail -n +2 $(PUBLIC_MODULES_COVER) >> coverage.out
 	@python3 scripts/coverage_ratchet.py coverage.out --write-provenance coverage.out.provenance.json
 
 # Same tests, flags, and coverage as test-all, cut into slots
@@ -334,11 +339,11 @@ TEST_SPLIT_RUN = python3 scripts/test_split.py run $(TEST_SPLIT_LAYOUT) \
 		$(if $(strip $(TEST_JUNIT)),--junit "$(TEST_JUNIT)",) \
 		$(if $(strip $(TEST_TIMINGS)),--timings "$(TEST_TIMINGS)",)
 
-test-all-split: check-test-tiers test-sessionprovenance ## Full tier (same as test-all) with every split slot running at once
+test-all-split: check-test-tiers test-public-modules ## Full tier (same as test-all) with every split slot running at once
 	$(call say,"Running all tests split into slots...")
 	@$(TEST_GIT_ISOLATION) $(TIME_CMD) $(TEST_SPLIT_RUN) --work-dir tmp/test-split --coverprofile coverage.out \
 		-- $(FULL_TEST_FLAGS) -covermode=atomic
-	@tail -n +2 $(SESSIONPROVENANCE_COVER) >> coverage.out
+	@tail -n +2 $(PUBLIC_MODULES_COVER) >> coverage.out
 	@python3 scripts/coverage_ratchet.py coverage.out --write-provenance coverage.out.provenance.json
 
 test-split-slots: ## Print the full tier's slots as a JSON array (the CI unit matrix)
@@ -349,10 +354,10 @@ test-split-slot: check-test-tiers ## Run one slot of the full tier: make test-sp
 	@$(TEST_GIT_ISOLATION) $(TIME_CMD) $(TEST_SPLIT_RUN) --only "$(TEST_SPLIT_ONLY)" --work-dir tmp/test-split \
 		--coverprofile $(TEST_SPLIT_PARTS)/coverage-$(TEST_SPLIT_ONLY).out \
 		-- $(FULL_TEST_FLAGS) -covermode=atomic
-	@# The nested public-contract module rides with `rest`, as it does in test-all.
+	@# The nested public modules ride with `rest`, as they do in test-all.
 	@if [ "$(TEST_SPLIT_ONLY)" = rest ]; then \
-	  $(MAKE) --no-print-directory test-sessionprovenance && \
-	  tail -n +2 $(SESSIONPROVENANCE_COVER) >> $(TEST_SPLIT_PARTS)/coverage-rest.out; \
+	  $(MAKE) --no-print-directory test-public-modules && \
+	  tail -n +2 $(PUBLIC_MODULES_COVER) >> $(TEST_SPLIT_PARTS)/coverage-rest.out; \
 	 fi
 
 coverage-merge-unit: ## Merge one coverage part per slot ($(TEST_SPLIT_PARTS)) into coverage.out; fails if a slot is missing
@@ -370,7 +375,7 @@ warm-test-cache: build-cover ## Compile the full, acceptance, and twin test bina
 	@$(GO) test -tags=ledger_twin -run '^$$' ./tests/ledger_twin/... >/dev/null
 	@$(GO) test -tags=kb_twin -run '^$$' ./tests/kb_twin/... >/dev/null
 
-test-calm: check-test-tiers test-sessionprovenance ## Run the full test tier at reduced concurrency (shared or already-loaded machine)
+test-calm: check-test-tiers test-public-modules ## Run the full test tier at reduced concurrency (shared or already-loaded machine)
 	@# The tier contract's -p 8 -parallel 32 assumes the runner owns the machine.
 	@# Locally it runs once per agent session per worktree: two concurrent
 	@# `make test-all` runs on an 18-core workstation measured load average 37
@@ -379,7 +384,7 @@ test-calm: check-test-tiers test-sessionprovenance ## Run the full test tier at 
 	$(call say,"Running full tests at reduced concurrency (-p $(CALM_P) -parallel $(CALM_PARALLEL))...")
 	@calm_flags="$$(OX_TEST_P=$(CALM_P) OX_TEST_PARALLEL=$(CALM_PARALLEL) $(TEST_TIER_TOOL) flags full)" || exit $$?; \
 		$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) $(GOTESTSUM_JUNIT) $(GOTESTSUM_TIMINGS) -- $$calm_flags -coverprofile=coverage.out -covermode=atomic ./...
-	@tail -n +2 $(SESSIONPROVENANCE_COVER) >> coverage.out
+	@tail -n +2 $(PUBLIC_MODULES_COVER) >> coverage.out
 	@python3 scripts/coverage_ratchet.py coverage.out --write-provenance coverage.out.provenance.json
 
 test-slow: check-test-tiers ## Run slow tests (build tag: slow) — requires real ox binary, no Claude needed
@@ -799,7 +804,7 @@ smoke-test: build ## Run smoke tests against SageOx cloud (requires SAGEOX_CI_PA
 
 # Code quality
 # Targets below are agent-friendly by default (quiet). V=1 for verbose.
-lint: lint-test-env lint-sessionprovenance ## Run golangci-lint
+lint: lint-test-env lint-public-modules ## Run golangci-lint
 	@which golangci-lint > /dev/null || (echo "golangci-lint not found. Install from https://golangci-lint.run/docs/welcome/install/" && exit 1)
 	@# --allow-parallel-runners: multiple AI coding agent sessions routinely run
 	@# `make lint` at the same time in this repo. golangci-lint's default file
@@ -809,11 +814,11 @@ lint: lint-test-env lint-sessionprovenance ## Run golangci-lint
 	@golangci-lint run -c .config/golangci.yml --allow-parallel-runners ./...
 
 # Root ./... cannot reach a nested module: golangci-lint resolves packages
-# against the main module, so pkg/sessionprovenance would ship unlinted.
-.PHONY: lint-sessionprovenance
-lint-sessionprovenance: ## Lint the public native-session contract
+# against the main module, so a public module would ship unlinted.
+.PHONY: lint-public-modules
+lint-public-modules: ## Lint the public contract modules under pkg/
 	@which golangci-lint > /dev/null || (echo "golangci-lint not found. Install from https://golangci-lint.run/docs/welcome/install/" && exit 1)
-	@cd pkg/sessionprovenance && golangci-lint run -c $(CURDIR)/.config/golangci.yml --allow-parallel-runners ./...
+	@for m in $(PUBLIC_MODULES); do (cd $$m && golangci-lint run -c $(CURDIR)/.config/golangci.yml --allow-parallel-runners ./...) || exit 1; done
 
 lint-test-env: ## Check that test files use testguard instead of os.Environ()
 	$(call say,"Checking for os.Environ() in test files...")

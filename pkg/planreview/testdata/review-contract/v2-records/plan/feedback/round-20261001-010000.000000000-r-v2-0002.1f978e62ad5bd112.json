@@ -1,0 +1,17 @@
+{
+  "created_at": "2026-10-01T01:00:00Z",
+  "id": "r-v2-0002",
+  "items": [
+    {
+      "anchor": "h2",
+      "label": "The second risk",
+      "note": "Is this still true?",
+      "reviewer": "Ana",
+      "section": "Risks",
+      "status": "flag"
+    }
+  ],
+  "request_sha256": "1e788274efecdf1c61adbebf5318df1d7e9f1707fc759f75328dbd8811c040ef",
+  "reviewer": "Ana",
+  "slug": "rc-v2-records"
+}
