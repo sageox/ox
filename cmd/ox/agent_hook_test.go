@@ -63,6 +63,11 @@ func TestResolvePhase(t *testing.T) {
 		{"codex Stop", "codex", "Stop", phaseStop},
 		{"codex SessionEnd finalizes", "codex", "SessionEnd", phaseEnd},
 		{"codex unknown event", "codex", "FooBar", ""},
+		// agentx maps only Amp's tool events; the ox-bridge plugin's
+		// SessionEnd comes from the local supplement (sageox/ox#1314)
+		{"amp SessionEnd finalizes", "amp", "SessionEnd", phaseEnd},
+		{"amp tool event still from agentx", "amp", "tool:post-execute", phaseAfterTool},
+		{"amp unmapped event stays unmapped", "amp", "SessionStart", ""},
 		{"unregistered agent falls back", "some-new-agent", "SessionStart", phaseStart},
 		{"unregistered agent unknown event", "some-new-agent", "FooBar", ""},
 	}

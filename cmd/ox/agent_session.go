@@ -31,6 +31,7 @@ import (
 	"github.com/sageox/ox/internal/plan"
 	"github.com/sageox/ox/internal/proc"
 	"github.com/sageox/ox/internal/repotools"
+	"github.com/sageox/ox/internal/runtime"
 	"github.com/sageox/ox/internal/selfexec"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
@@ -1307,7 +1308,8 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	// `agent.summarizer` user-config key, and finally the inline default.
 	// Route sync-vs-async through the capability-aware dispatcher in
 	// internal/session. When the daemon isn't viable (sandbox / ephemeral
-	// / OX_NO_DAEMON), the dispatcher forces sync even if the user opted
+	// / OX_NO_DAEMON) or won't outlive the agent (an Amp orb, which pauses
+	// once the agent is idle), the dispatcher forces sync even if the user opted
 	// into `delegated` — otherwise the daemon RPC silently no-ops and
 	// the session sits in the cache until `ox doctor` sweeps it. Prior
 	// to this dispatcher, `delegated` + no daemon = lost upload
@@ -1399,7 +1401,17 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 // runtime capability probe catches sandboxes / OX_NO_DAEMON, while the
 // historical SAGEOX_DAEMON=false off-switch is enforced in daemon.IsDaemonDisabled.
 func finalizeModeForSessionStop(userPrefersAsync bool) session.FinalizeDispatchMode {
-	return session.ChooseFinalizeMode(!daemon.IsDaemonDisabled(), userPrefersAsync)
+	return session.ChooseFinalizeMode(daemonOutlivesSession(), userPrefersAsync)
+}
+
+// daemonOutlivesSession reports whether work handed to the daemon at session
+// end gets to run: the daemon must be enabled, and the machine must keep
+// running after the coding agent finishes. An Amp orb passes the first test
+// and fails the second — its daemon is frozen when the orb pauses, minutes
+// after the agent goes idle — so session end there uploads before returning
+// (sageox/ox#1314).
+func daemonOutlivesSession() bool {
+	return !daemon.IsDaemonDisabled() && !runtime.Caps().HostEndsWithAgent
 }
 
 // uploadSessionToLedger uploads cached blobs to LFS, then commits and pushes
