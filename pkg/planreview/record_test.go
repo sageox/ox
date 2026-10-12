@@ -79,6 +79,8 @@ func TestParseRequests_RefuseMalformedInput(t *testing.T) {
 		// is a long s): validation and the record would see different fields
 		`{"id":"r-0001-abcd","items":[{"anchor":"h1"},{"anchor":"h2"}],"Items":[{"anchor":"h3"}]}`,
 		`{"id":"r-0001-abcd","items":[{"anchor":"h1","status":"flag","\u017ftatus":"approve"}]}`,
+		// a duplicate key: the last value is the one stored, so it is the one validated
+		`{"id":"r-0001-abcd","items":[{"anchor":"h1","anchor":null,"status":"flag"}]}`,
 	} {
 		if _, err := ParseRoundRequest([]byte(c)); err == nil {
 			t.Errorf("ParseRoundRequest(%s) accepted", c)
@@ -90,6 +92,7 @@ func TestParseRequests_RefuseMalformedInput(t *testing.T) {
 		`{"anchor":"h1","state":"done"}`,
 		`{"id":"bad/id-0001","anchor":"h1","state":"addressed"}`,
 		`{"id":"accept-0001","anchor":"h1","state":"addressed","State":"wontfix"}`,
+		`{"id":"accept-0001","anchor":"h1","anchor":null,"state":"verified"}`,
 	} {
 		if _, err := ParseResolutionRequest([]byte(c)); err == nil {
 			t.Errorf("ParseResolutionRequest(%s) accepted", c)
@@ -204,5 +207,8 @@ func TestRemapRecord(t *testing.T) {
 	}
 	if _, err := RemapRecord(Remap{From: "hold", To: "hnew"}); err == nil {
 		t.Error("a remap without a time became a record")
+	}
+	if _, err := RemapRecord(Remap{From: "hold", To: "hnew", At: at(1), Label: strings.Repeat("x", MaxRecordBytes)}); err == nil {
+		t.Error("a remap over MaxRecordBytes became a record that readers refuse")
 	}
 }

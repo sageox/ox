@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"syscall"
 )
 
 var (
@@ -135,11 +136,14 @@ func holds(dir *os.Root, name string, data []byte) (bool, error) {
 	if !fi.Mode().IsRegular() || fi.Size() != int64(len(data)) {
 		return false, nil
 	}
-	f, err := dir.Open(name)
+	f, err := openListed(dir, name)
 	if err != nil {
 		return false, err
 	}
 	defer func() { _ = f.Close() }()
+	if opened, err := f.Stat(); err != nil || !os.SameFile(fi, opened) {
+		return false, nil
+	}
 	got, err := io.ReadAll(io.LimitReader(f, int64(len(data))+1))
 	if err != nil {
 		return false, err
@@ -200,14 +204,20 @@ type entry struct {
 
 func captureOnce(planDir, gitDir string, l Limits) (Inventory, bool) {
 	var inv Inventory
-	replay := replaying(gitDir)
+	replay, rerr := replaying(gitDir)
+	if rerr != nil {
+		inv.Failures = append(inv.Failures, Failure{Reason: ReasonUnreadable, Detail: "check for a rebase or merge: " + rerr.Error()})
+	}
 	root, err := os.OpenRoot(planDir)
 	if err != nil {
-		return Inventory{Failures: []Failure{{Reason: ReasonUnreadable, Detail: err.Error()}}}, !replay
+		inv.Failures = append(inv.Failures, Failure{Reason: ReasonUnreadable, Detail: err.Error()})
+		return inv, false
 	}
 	defer func() { _ = root.Close() }()
 
-	before, dirs := list(root, &inv.Failures)
+	var listed []Failure
+	before, dirs := list(root, l, &listed)
+	inv.Failures = append(inv.Failures, listed...)
 	defer func() {
 		for _, d := range dirs {
 			_ = d.Close()
@@ -236,26 +246,43 @@ func captureOnce(planDir, gitDir string, l Limits) (Inventory, bool) {
 	}
 	afterRead()
 
-	var ignored []Failure
-	after, afterDirs := list(root, &ignored)
+	var relisted []Failure
+	after, afterDirs := list(root, l, &relisted)
 	for _, d := range afterDirs {
 		_ = d.Close()
 	}
+	replayAfter, rerrAfter := replaying(gitDir)
+	if rerrAfter != nil && rerr == nil {
+		inv.Failures = append(inv.Failures, Failure{Reason: ReasonUnreadable, Detail: "check for a rebase or merge: " + rerrAfter.Error()})
+	}
 	switch {
-	case replay || replaying(gitDir):
+	case replay || replayAfter:
 		inv.Failures = append(inv.Failures, Failure{Reason: ReasonReplay, Detail: "a rebase or merge is in progress in " + gitDir})
 		return inv, false
-	case !sameListing(before, after):
+	case !sameListing(before, after) || !slices.EqualFunc(listed, relisted, func(a, b Failure) bool { return a.Path == b.Path && a.Reason == b.Reason }):
 		inv.Failures = append(inv.Failures, Failure{Reason: ReasonChanged, Detail: "the review files changed while they were read"})
 		return inv, false
 	}
-	return inv, !slices.ContainsFunc(inv.Failures, func(f Failure) bool { return f.Reason == ReasonChanged })
+	return inv, !slices.ContainsFunc(inv.Failures, func(f Failure) bool { return !settled(f) })
+}
+
+// settled reports whether a failure describes the subtree as it is, so another
+// attempt would read the same; any other failure may pass, and is retried.
+func settled(f Failure) bool {
+	switch f.Reason {
+	case ReasonUnrecognized, ReasonNotRegular, ReasonTooLarge, ReasonTooManyRecords, ReasonCaptureTooLarge:
+		return true
+	}
+	return false
 }
 
 // list walks feedback/ and the record directories under it without following
 // a symlink, returning every entry but dot-prefixed temporaries, in path
-// order, and the open record directories by path.
-func list(root *os.Root, fails *[]Failure) ([]entry, map[string]*os.Root) {
+// order, and the open record directories by path. Every entry is a record or
+// a failure, but for remaps/ and resolutions/, so a directory holding more than
+// Records+2 entries cannot be read completely: its listing stops there.
+func list(root *os.Root, l Limits, fails *[]Failure) ([]entry, map[string]*os.Root) {
+	most := l.Records + 2
 	dirs := map[string]*os.Root{}
 	var out []entry
 	var walk func(r *os.Root, rel string)
@@ -266,11 +293,15 @@ func list(root *os.Root, fails *[]Failure) ([]entry, map[string]*os.Root) {
 			*fails = append(*fails, Failure{Path: rel, Reason: ReasonUnreadable, Detail: err.Error()})
 			return
 		}
-		names, err := d.Readdirnames(-1)
+		names, err := d.Readdirnames(most + 1)
 		_ = d.Close()
-		if err != nil {
+		if err != nil && !errors.Is(err, io.EOF) {
 			*fails = append(*fails, Failure{Path: rel, Reason: ReasonUnreadable, Detail: err.Error()})
 			return
+		}
+		if len(names) > most {
+			*fails = append(*fails, Failure{Path: rel, Reason: ReasonTooManyRecords, Detail: fmt.Sprintf("more than %d entries", most)})
+			names = names[:most]
 		}
 		for _, n := range names {
 			if strings.HasPrefix(n, ".") {
@@ -309,7 +340,7 @@ func list(root *os.Root, fails *[]Failure) ([]entry, map[string]*os.Root) {
 // the one listed or its size changed since the listing (the size the budget
 // admitted).
 func readEntry(dir *os.Root, e entry) ([]byte, *Failure) {
-	f, err := dir.Open(path.Base(e.path))
+	f, err := openListed(dir, path.Base(e.path))
 	if err != nil {
 		return nil, &Failure{Path: e.path, Reason: ReasonChanged, Detail: err.Error()}
 	}
@@ -327,6 +358,18 @@ func readEntry(dir *os.Root, e entry) ([]byte, *Failure) {
 	return data, nil
 }
 
+// openListed opens a file its listing said was regular. A FIFO swapped in
+// since then would block a plain open until a writer appears; O_NONBLOCK
+// returns at once, and the caller refuses the file because it is not the one
+// listed. Windows has no FIFOs in the filesystem.
+func openListed(dir *os.Root, name string) (*os.File, error) {
+	flag := os.O_RDONLY
+	if runtime.GOOS != "windows" {
+		flag |= syscall.O_NONBLOCK
+	}
+	return dir.OpenFile(name, flag, 0)
+}
+
 func sameListing(a, b []entry) bool {
 	return slices.EqualFunc(a, b, func(x, y entry) bool {
 		return x.path == y.path && x.info.Size() == y.info.Size() &&
@@ -334,15 +377,22 @@ func sameListing(a, b []entry) bool {
 	})
 }
 
-// replaying reports whether a rebase or merge is in progress in gitDir.
-func replaying(gitDir string) bool {
+// replaying reports whether a rebase or merge is in progress in gitDir. An
+// error means it could not tell.
+func replaying(gitDir string) (bool, error) {
 	if gitDir == "" {
-		return false
+		return false, nil
+	}
+	if _, err := os.Stat(gitDir); err != nil {
+		return false, err
 	}
 	for _, n := range []string{"rebase-merge", "rebase-apply", "MERGE_HEAD"} {
-		if _, err := os.Lstat(filepath.Join(gitDir, n)); err == nil {
-			return true
+		switch _, err := os.Lstat(filepath.Join(gitDir, n)); {
+		case err == nil:
+			return true, nil
+		case !errors.Is(err, fs.ErrNotExist):
+			return false, err
 		}
 	}
-	return false
+	return false, nil
 }

@@ -218,7 +218,8 @@ except `resolutions.json`.
   differs from a known field only in case (`Items`, `ſtatus`). Go's
   `encoding/json` matches field names case-insensitively, so such a key would
   be validated as the field and then stored beside it, where a reader decodes
-  whichever sorts last.
+  whichever sorts last. A duplicate key counts once, as its last value, for
+  validation and the record alike.
 
 ### 3.4 Frozen-byte checks
 

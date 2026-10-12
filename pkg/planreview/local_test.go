@@ -2,11 +2,13 @@ package planreview
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func roundRecord(t *testing.T, id, note string) File {
@@ -196,26 +198,32 @@ func TestCapture_ReportsWhatItCannotReadAndNeverFollowsALink(t *testing.T) {
 	t.Parallel()
 	rec := roundRecord(t, "r-0001-abcd", "Why?")
 	for _, c := range []struct {
-		name  string
-		setup func(t *testing.T, plan, outside string)
-		want  []string
-		files int
+		name   string
+		setup  func(t *testing.T, plan, outside string)
+		want   []string
+		files  int
+		limits Limits
 	}{
-		{"no feedback yet", func(*testing.T, string, string) {}, []string{}, 0},
+		{"no feedback yet", func(*testing.T, string, string) {}, []string{}, 0, Limits{}},
 		{"feedback/ is a symlink", func(t *testing.T, plan, outside string) {
 			write(t, filepath.Join(outside, rec.Path), string(rec.Data))
 			symlink(t, filepath.Join(outside, "feedback"), filepath.Join(plan, "feedback"))
-		}, []string{"feedback not_regular"}, 0},
+		}, []string{"feedback not_regular"}, 0, Limits{}},
 		{"a record is a symlink", func(t *testing.T, plan, outside string) {
 			write(t, filepath.Join(outside, "round.json"), string(rec.Data))
 			symlink(t, filepath.Join(outside, "round.json"), filepath.Join(plan, rec.Path))
-		}, []string{rec.Path + " not_regular"}, 0},
+		}, []string{rec.Path + " not_regular"}, 0, Limits{}},
 		{"an unknown file and directory", func(t *testing.T, plan, _ string) {
 			write(t, filepath.Join(plan, rec.Path), string(rec.Data))
 			write(t, filepath.Join(plan, "feedback", "notes.txt"), "x")
 			write(t, filepath.Join(plan, "feedback", "attachments", "a.png"), "x")
 			write(t, filepath.Join(plan, "feedback", ".round.json.1a2b.tmp"), "half")
-		}, []string{"feedback/attachments unrecognized", "feedback/notes.txt unrecognized"}, 1},
+		}, []string{"feedback/attachments unrecognized", "feedback/notes.txt unrecognized"}, 1, Limits{}},
+		{"more entries than records allowed", func(t *testing.T, plan, _ string) {
+			for _, n := range []string{"round-1.json", "round-2.json", "round-3.json", "round-4.json"} {
+				write(t, filepath.Join(plan, "feedback", n), `{}`)
+			}
+		}, []string{" too_many_records", "feedback too_many_records"}, 1, Limits{Records: 1}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
@@ -225,7 +233,7 @@ func TestCapture_ReportsWhatItCannotReadAndNeverFollowsALink(t *testing.T) {
 				t.Fatal(err)
 			}
 			c.setup(t, plan, outside)
-			inv := Capture(plan, "", Limits{})
+			inv := Capture(plan, "", c.limits)
 			if got := pathsAndReasons(inv.Failures); !slices.Equal(got, c.want) || len(inv.Files) != c.files {
 				t.Errorf("failures %v and %d files, want %v and %d", got, len(inv.Files), c.want, c.files)
 			}
@@ -272,5 +280,58 @@ func TestCapture_IsCompleteOnlyOnAStableListing(t *testing.T) { // not parallel:
 	}
 	if inv := Capture(plan, gitDir, Limits{}); !slices.Contains(pathsAndReasons(inv.Failures), " replay_in_progress") {
 		t.Errorf("mid-rebase: failures %v, want replay_in_progress", inv.Failures)
+	}
+	if inv := Capture(plan, filepath.Join(plan, "feedback", "round-1.json"), Limits{}); !slices.Contains(pathsAndReasons(inv.Failures), " unreadable") {
+		t.Errorf("a git dir that cannot be checked: failures %v, want unreadable", inv.Failures)
+	}
+
+	// feedback/ appears as a symlink after a read of a plan without one: the
+	// second listing fails, and the capture must not settle as empty
+	bare, outside := t.TempDir(), t.TempDir()
+	afterRead = func() {
+		afterRead = func() {}
+		symlink(t, outside, filepath.Join(bare, "feedback"))
+	}
+	if inv := Capture(bare, "", Limits{}); !slices.Contains(pathsAndReasons(inv.Failures), "feedback not_regular") {
+		t.Errorf("a failed second listing: failures %v, want feedback not_regular", inv.Failures)
+	}
+	afterRead = func() {}
+}
+
+// TestReadEntry_NeverWaitsOnAFIFO: a FIFO swapped in for a listed record is
+// refused at once. Failure prevented: a capture blocks until something writes
+// to the pipe.
+func TestReadEntry_NeverWaitsOnAFIFO(t *testing.T) {
+	t.Parallel()
+	plan := t.TempDir()
+	rec := filepath.Join(plan, "feedback", "round-1.json")
+	write(t, rec, `{}`)
+	root, err := os.OpenRoot(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	var fails []Failure
+	listed, dirs := list(root, DefaultLimits, &fails)
+	defer func() {
+		for _, d := range dirs {
+			_ = d.Close()
+		}
+	}()
+	if err := os.Remove(rec); err != nil {
+		t.Fatal(err)
+	}
+	if err := exec.Command("mkfifo", rec).Run(); err != nil {
+		t.Skipf("cannot make a FIFO here: %v", err)
+	}
+	done := make(chan *Failure, 1)
+	go func() { _, f := readEntry(dirs["feedback"], listed[0]); done <- f }()
+	select {
+	case f := <-done:
+		if f == nil || f.Reason != ReasonChanged {
+			t.Errorf("readEntry = %+v, want changed", f)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("reading a FIFO swapped in for a record blocked")
 	}
 }

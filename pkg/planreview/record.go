@@ -54,11 +54,12 @@ type RoundRequest struct {
 // round: at least one item, each with an anchor and a known status, and a
 // well-formed id and slug when present. Unknown fields are kept for the record.
 func ParseRoundRequest(frozen []byte) (*RoundRequest, error) {
-	if _, _, err := roundObjects(frozen); err != nil {
+	top, _, err := roundObjects(frozen)
+	if err != nil {
 		return nil, err
 	}
 	var r Round
-	if err := json.Unmarshal(frozen, &r); err != nil {
+	if err := json.Unmarshal(rawJSON(top), &r); err != nil {
 		return nil, fmt.Errorf("parse round request: %w", err)
 	}
 	if r.Slug != "" {
@@ -130,11 +131,12 @@ type ResolutionRequest struct {
 // for a resolution: an anchor, a known state, and a well-formed id when
 // present. Unknown fields are kept for the record.
 func ParseResolutionRequest(frozen []byte) (*ResolutionRequest, error) {
-	if _, err := object(frozen, resolutionFields); err != nil {
+	top, err := object(frozen, resolutionFields)
+	if err != nil {
 		return nil, fmt.Errorf("parse resolution request: %w", err)
 	}
 	var r Resolution
-	if err := json.Unmarshal(frozen, &r); err != nil {
+	if err := json.Unmarshal(rawJSON(top), &r); err != nil {
 		return nil, fmt.Errorf("parse resolution request: %w", err)
 	}
 	if a := strings.TrimSpace(r.Anchor); a == "" || strings.ContainsAny(a, `/\`) || strings.Contains(a, "..") {
@@ -174,12 +176,8 @@ func RemapRecord(m Remap) (File, error) {
 	if m.From == "" || m.To == "" || m.At.IsZero() {
 		return File{}, fmt.Errorf("remap needs from, to and at: %+v", m)
 	}
-	data, err := json.MarshalIndent(m, "", "  ")
-	if err != nil {
-		return File{}, fmt.Errorf("encode remap: %w", err)
-	}
 	id := "m" + sha256Hex([]byte(m.From + "\x00" + m.To))[:16]
-	return File{Path: recordName("feedback/remaps/", m.At, id, data), Data: data}, nil
+	return record("feedback/remaps/", m.At, id, m)
 }
 
 // Prior looks rec's operation up in a capture before rec is written, so a
@@ -240,11 +238,12 @@ func Prior(inv Inventory, rec File) (r Receipt, ok bool) {
 	return Receipt{}, false
 }
 
-// The known fields of each request object. A request is decoded twice: into
-// the typed fields that are validated, and into raw objects that carry its
-// unknown fields into the record. encoding/json matches a field name
-// case-insensitively, so a key differing from a known field only in case
-// would be read by the first and not the second; object refuses one.
+// The known fields of each request object. A request is decoded into raw
+// objects, which carry its unknown fields into the record, and the typed
+// fields that are validated are decoded from those same objects, so a
+// duplicate key cannot be validated one way and stored another. encoding/json
+// matches a field name case-insensitively, so object refuses a key that
+// differs from a known field only in case.
 var (
 	roundFields      = []string{"id", "slug", "reviewer", "created_at", "items", "request_sha256"}
 	itemFields       = []string{"anchor", "section", "label", "quote", "status", "note", "reviewer"}
@@ -289,11 +288,12 @@ func roundObjects(frozen []byte) (map[string]json.RawMessage, []map[string]json.
 			return nil, nil, fmt.Errorf("parse round request item %d: %w", i, err)
 		}
 	}
+	top["items"] = rawJSON(items)
 	return top, items, nil
 }
 
-func record(prefix string, at time.Time, id string, fields map[string]json.RawMessage) (File, error) {
-	data, err := json.MarshalIndent(fields, "", "  ")
+func record(prefix string, at time.Time, id string, v any) (File, error) {
+	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return File{}, fmt.Errorf("encode record: %w", err)
 	}
