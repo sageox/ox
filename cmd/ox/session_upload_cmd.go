@@ -2,8 +2,12 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -395,24 +399,60 @@ func cachePublishBlocker(dir string) error {
 	return fmt.Errorf("session %s is still recording; stop it first with 'ox agent %s session stop'", name, state.AgentID)
 }
 
-// filesNotPublished lists what in the cache folder has no copy in the Ledger
-// session folder: any entry but a dotfile (local state, never content), a
-// directory included. An unreadable cache folder reports itself.
+// filesNotPublished lists what in the cache folder the Ledger holds no
+// identical copy of. A file counts as published when the manifest entry for it
+// has the same hash and size (LFS), or the Ledger file has the same bytes
+// (git-stored, like summary.json); a copy the retry broke off partway matches
+// neither. Dotfiles are local state, never content. A directory, an unreadable
+// file, and every file when the manifest cannot be read count as unpublished.
 func filesNotPublished(cacheDir, ledgerSessionDir string) []string {
 	entries, err := os.ReadDir(cacheDir)
 	if err != nil {
 		return []string{cacheDir}
 	}
+	meta, metaErr := lfs.ReadSessionMeta(ledgerSessionDir)
 	var missing []string
 	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), ".") {
+		name := e.Name()
+		if strings.HasPrefix(name, ".") {
 			continue
 		}
-		if info, statErr := os.Lstat(filepath.Join(ledgerSessionDir, e.Name())); e.IsDir() || statErr != nil || !info.Mode().IsRegular() {
-			missing = append(missing, e.Name())
+		if e.IsDir() || metaErr != nil || !sameAsPublished(filepath.Join(cacheDir, name), filepath.Join(ledgerSessionDir, name), meta.Files[name]) {
+			missing = append(missing, name)
 		}
 	}
 	return missing
+}
+
+// sameAsPublished reports whether the content at cachePath is what the Ledger
+// published under that name: ref's hash and size for an LFS file, otherwise
+// the same bytes in the Ledger folder.
+func sameAsPublished(cachePath, ledgerPath string, ref lfs.FileRef) bool {
+	if ref.IsLFS() && ref.OID != "" {
+		sum, size, err := sha256OfFile(cachePath)
+		return err == nil && size == ref.Size && sum == ref.BareOID()
+	}
+	cached, err := os.ReadFile(cachePath)
+	if err != nil {
+		return false
+	}
+	published, err := os.ReadFile(ledgerPath)
+	return err == nil && bytes.Equal(cached, published)
+}
+
+// sha256OfFile streams a file's sha256, as a bare hex digest, and its size.
+func sha256OfFile(path string) (string, int64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", 0, err
+	}
+	defer f.Close()
+	h := sha256.New()
+	size, err := io.Copy(h, f)
+	if err != nil {
+		return "", 0, err
+	}
+	return hex.EncodeToString(h.Sum(nil)), size, nil
 }
 
 // publishCachedSession publishes a session from its cache copy through the

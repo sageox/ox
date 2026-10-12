@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/lfs"
@@ -223,6 +224,54 @@ func TestUpload_SummarizerOffLeavesNothingForTheDaemon(t *testing.T) {
 	queued, llmRuns := runFinalizePass(t, f.projectRoot, f.ledgerPath)
 	assert.Zero(t, queued, "agent.summarizer=off: the daemon has nothing left to do")
 	assert.Zero(t, llmRuns, "agent.summarizer=off: the published session is never summarized")
+}
+
+// Failure prevented: with agent.summarizer=off, a file the publish copied only
+// partway (it exists in the Ledger, truncated, and was published that way)
+// passes the check, and the complete cache copy is deleted with it.
+func TestFilesNotPublished_ComparesContentNotPresence(t *testing.T) {
+	trace := []byte(`{"type":"provided","source":"team-context","doc":"conventions.md"}` + "\n" +
+		`{"type":"provided","source":"team-context","doc":"adr-012.md"}` + "\n")
+	summary := []byte(`{"title":"Retry pushes with backoff","summary":"Exponential backoff for ledger pushes."}`)
+	cases := []struct {
+		name          string
+		ledgerTrace   []byte // what the Ledger published as context-trace.jsonl (LFS)
+		ledgerSummary []byte // what the Ledger holds as summary.json (git)
+		want          []string
+	}{
+		{"published intact", trace, summary, nil},
+		{"LFS file published truncated", trace[:30], summary, []string{"context-trace.jsonl"}},
+		{"git file published truncated", trace, summary[:12], []string{"summary.json"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cacheDir, ledgerDir := t.TempDir(), t.TempDir()
+			require.NoError(t, os.WriteFile(filepath.Join(cacheDir, "context-trace.jsonl"), trace, 0o644))
+			require.NoError(t, os.WriteFile(filepath.Join(cacheDir, "summary.json"), summary, 0o644))
+			require.NoError(t, os.WriteFile(filepath.Join(cacheDir, ".held"), []byte("{}"), 0o644)) // local state, never content
+
+			ref := lfs.NewFileRef(tc.ledgerTrace)
+			require.NoError(t, lfs.WritePointerFile(filepath.Join(ledgerDir, "context-trace.jsonl"), lfs.AssertUploaded(ref)))
+			require.NoError(t, os.WriteFile(filepath.Join(ledgerDir, "summary.json"), tc.ledgerSummary, 0o644))
+			require.NoError(t, lfs.WriteSessionMetaOnly(ledgerDir, &lfs.SessionMeta{
+				Version: "1.0", SessionName: "2026-10-05T10-00-devon-OxPaRt", SessionID: sessionScopedID("2026-10-05T10-00-devon-OxPaRt"),
+				Username: "devon", AgentID: "OxPaRt", AgentType: "claude-code", CreatedAt: time.Date(2026, 10, 5, 10, 0, 0, 0, time.UTC),
+				Files: map[string]lfs.FileRef{
+					"context-trace.jsonl": ref,
+					"summary.json":        lfs.NewGitFileRef(int64(len(tc.ledgerSummary))),
+				},
+			}))
+
+			assert.Equal(t, tc.want, filesNotPublished(cacheDir, ledgerDir))
+		})
+	}
+
+	t.Run("manifest unreadable", func(t *testing.T) {
+		cacheDir, ledgerDir := t.TempDir(), t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(cacheDir, "context-trace.jsonl"), trace, 0o644))
+		require.NoError(t, os.WriteFile(filepath.Join(ledgerDir, "meta.json"), []byte("{not json"), 0o644))
+		assert.Equal(t, []string{"context-trace.jsonl"}, filesNotPublished(cacheDir, ledgerDir))
+	})
 }
 
 // Failure prevented: with agent.summarizer=off, the published cache copy is
