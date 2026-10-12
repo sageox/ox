@@ -876,15 +876,23 @@ func ReadSessionMeta(sessionPath string) (*SessionMeta, error) {
 		}
 		return nil, fmt.Errorf("read session meta file=%s: %w", metaPath, err)
 	}
+	meta, err := ParseSessionMeta(data)
+	if err != nil {
+		return nil, fmt.Errorf("parse session meta file=%s: %w", metaPath, err)
+	}
+	return meta, nil
+}
 
+// ParseSessionMeta is ReadSessionMeta's contract applied to bytes, for content that is not on disk
+// yet, such as a candidate resolution of a conflicted meta.json.
+func ParseSessionMeta(data []byte) (*SessionMeta, error) {
 	var meta SessionMeta
 	if err := json.Unmarshal(data, &meta); err != nil {
 		if gitutil.HasConflictMarkersBytes(data) {
-			return nil, fmt.Errorf("parse session meta file=%s: unresolved Git conflict markers: %w", metaPath, err)
+			return nil, fmt.Errorf("unresolved Git conflict markers: %w", err)
 		}
-		return nil, fmt.Errorf("parse session meta file=%s: %w", metaPath, err)
+		return nil, err
 	}
-
 	for filename := range meta.Files {
 		if err := ValidateRelativePath(filename); err != nil {
 			return nil, fmt.Errorf("unsafe filename in meta.json: %w", err)

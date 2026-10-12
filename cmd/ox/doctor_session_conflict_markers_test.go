@@ -155,9 +155,9 @@ func TestRunSessionConflictMarkers(t *testing.T) {
 		{"fully repairable ledger passes", func(t *testing.T) string { return newMarkedLedger(t, false) },
 			true, true, false, "resolved conflict markers in 2", nil},
 		{"pushed markers are reported as team-wide", func(t *testing.T) string { _, l := newPushedMarkedLedger(t); return l },
-			false, false, false, "3 already pushed, unreadable on every teammate's clone", []string{fixCmd}},
+			false, false, false, "4 already pushed, unreadable on every teammate's clone", []string{fixCmd}},
 		{"pushed markers are resolved", func(t *testing.T) string { _, l := newPushedMarkedLedger(t); return l },
-			true, true, false, "resolved conflict markers in 3", nil},
+			true, true, false, "resolved conflict markers in 4", nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

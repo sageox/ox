@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -14,6 +13,7 @@ import (
 
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/lfs"
+	"github.com/sageox/ox/pkg/sessionsummary"
 )
 
 // CheckSlugSessionConflictMarkers repairs session files committed with git conflict markers, e.g.
@@ -258,8 +258,10 @@ func resolveMarkedFile(ctx context.Context, ledgerPath, upstream, path string, c
 	if gitutil.HasConflictMarkersBytes(clean) {
 		return "still holds a conflict marker after resolving (an unlabeled or crossed marker line)"
 	}
-	if isMeta && !json.Valid(clean) {
-		return "meta.json is not valid JSON after resolving the conflict"
+	if isMeta {
+		if _, err := lfs.ParseSessionMeta(clean); err != nil {
+			return fmt.Sprintf("meta.json is not readable session metadata after resolving the conflict: %v", err)
+		}
 	}
 	if err := os.WriteFile(abs, clean, 0o644); err != nil {
 		return fmt.Sprintf("cannot write resolved file: %v", err)
@@ -267,34 +269,58 @@ func resolveMarkedFile(ctx context.Context, ledgerPath, upstream, path string, c
 	return ""
 }
 
-// pickMetaSide chooses between the two readings of a marked meta.json. Only a side the commit
-// validator accepts qualifies. Between two, the higher summary_attempts wins: the counter only
-// grows, so it marks the later write. A tie goes to the stash side, the local write the Ledger's
-// rebase policy also keeps. The choice depends only on the bytes, so every clone that repairs the
-// same file writes the same result and concurrent repairs merge cleanly.
+// pickMetaSide chooses between the two readings of a marked meta.json. A side qualifies only when
+// both the commit validator and the daemon's reader accept it, so a repaired session is readable.
+// Between two, the side whose summary state is worth keeping wins (summaryRank). Within one state
+// the higher summary_attempts wins: the counter only grows until a repair or re-arm resets it, and
+// those also change the state. A tie goes to the stash side, the local write the Ledger's rebase
+// policy also keeps. The choice depends only on the bytes, so every clone that repairs the same
+// file writes the same result and concurrent repairs merge cleanly.
 func pickMetaSide(path string, upstreamSide, stashSide []byte) ([]byte, bool) {
-	upAttempts, upOK := metaSummaryAttempts(path, upstreamSide)
-	stashAttempts, stashOK := metaSummaryAttempts(path, stashSide)
+	up, stash := readableMeta(path, upstreamSide), readableMeta(path, stashSide)
 	switch {
-	case upOK && (!stashOK || upAttempts > stashAttempts):
+	case up != nil && (stash == nil || outranks(up, stash)):
 		return upstreamSide, true
-	case stashOK:
+	case stash != nil:
 		return stashSide, true
 	}
 	return nil, false
 }
 
-// metaSummaryAttempts reports a meta.json's summary_attempts, and whether the commit validator
-// accepts the bytes at all. A missing or non-numeric counter reads as 0.
-func metaSummaryAttempts(path string, data []byte) (int, bool) {
+// readableMeta parses one candidate, or returns nil when the commit validator or the daemon's
+// reader would refuse it.
+func readableMeta(path string, data []byte) *lfs.SessionMeta {
 	if gitutil.ValidateLedgerBlob(path, data) != nil {
-		return 0, false
+		return nil
 	}
-	var meta struct {
-		SummaryAttempts int `json:"summary_attempts"`
+	meta, err := lfs.ParseSessionMeta(data)
+	if err != nil {
+		return nil
 	}
-	_ = json.Unmarshal(data, &meta)
-	return meta.SummaryAttempts, true
+	return meta
+}
+
+func outranks(a, b *lfs.SessionMeta) bool {
+	if rankA, rankB := summaryRank(a), summaryRank(b); rankA != rankB {
+		return rankA > rankB
+	}
+	return a.SummaryAttempts > b.SummaryAttempts
+}
+
+// summaryRank orders summary states by what keeping them preserves: a finished summary, then a
+// session still eligible for summarization (including one re-armed by a repair), then a failed
+// attempt, then the terminal state that stops retries. An empty status is pre-status metadata,
+// finished when it carries a summary.
+func summaryRank(meta *lfs.SessionMeta) int {
+	switch status := meta.SummaryStatus; {
+	case status == sessionsummary.SummaryStatusOK, status == "" && strings.TrimSpace(meta.Summary) != "":
+		return 3
+	case status == "", status == sessionsummary.SummaryStatusPending:
+		return 2
+	case status == sessionsummary.SummaryStatusUnrecoverable:
+		return 0
+	}
+	return 1 // failed_validation, or a status this build does not know
 }
 
 // upstreamCleanContent returns the marker-free version the upstream branch holds at path.

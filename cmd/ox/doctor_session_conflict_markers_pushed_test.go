@@ -19,33 +19,41 @@ import (
 // every scan. Every conflict is in summary bookkeeping fields, as on the real Ledgers.
 
 const (
-	pushedTie      = "sessions/2026-06-24T09-00-avery-OxAAAA/meta.json" // equal attempts: the stash side wins
-	pushedAttempts = "sessions/2026-08-02T14-00-sam-OxSSSS/meta.json"   // the upstream side has more attempts
-	pushedNested   = "sessions/2026-09-29T16-00-quinn-OxQQQQ/meta.json" // a second stash pop over markers
-	pushedClean    = "sessions/2026-09-30T08-00-riley-OxLLLL/meta.json" // never conflicted
+	pushedTie       = "sessions/2026-06-24T09-00-avery-OxAAAA/meta.json" // same state and attempts: the stash side wins
+	pushedAttempts  = "sessions/2026-08-02T14-00-sam-OxSSSS/meta.json"   // same state: the upstream side has more attempts
+	pushedRecovered = "sessions/2026-09-05T11-00-devon-OxDDDD/meta.json" // a finished summary beats more failed attempts
+	pushedNested    = "sessions/2026-09-29T16-00-quinn-OxQQQQ/meta.json" // a second stash pop over markers
+	pushedClean     = "sessions/2026-09-30T08-00-riley-OxLLLL/meta.json" // never conflicted
 )
 
-var allPushed = []string{pushedTie, pushedAttempts, pushedNested} // sorted, as the report lists them
+var allPushed = []string{pushedTie, pushedAttempts, pushedRecovered, pushedNested} // sorted, as the report lists them
 
 const (
-	tieConflict = "{\n  \"session_id\": \"ses_tie\",\n" +
-		"<<<<<<< Updated upstream\n  \"summary_status\": \"failed\",\n  \"validation_error\": \"empty title\"\n" +
-		"=======\n  \"summary_status\": \"pending\"\n>>>>>>> Stashed changes\n}\n"
-	tieResolved = "{\n  \"session_id\": \"ses_tie\",\n  \"summary_status\": \"pending\"\n}\n"
+	tieConflict = "{\n  \"session_id\": \"ses_tie\",\n  \"summary_attempts\": 2,\n" +
+		"<<<<<<< Updated upstream\n  \"summary_status\": \"failed_validation\",\n  \"validation_error\": \"empty title\"\n" +
+		"=======\n  \"summary_status\": \"failed_validation\",\n  \"validation_error\": \"title too short\"\n>>>>>>> Stashed changes\n}\n"
+	tieResolved = "{\n  \"session_id\": \"ses_tie\",\n  \"summary_attempts\": 2,\n" +
+		"  \"summary_status\": \"failed_validation\",\n  \"validation_error\": \"title too short\"\n}\n"
 
 	attemptsConflict = "{\n  \"session_id\": \"ses_attempts\",\n" +
-		"<<<<<<< Updated upstream\n  \"summary_attempts\": 3,\n  \"summary_status\": \"failed\"\n" +
-		"=======\n  \"summary_attempts\": 1,\n  \"summary_status\": \"pending\"\n>>>>>>> Stashed changes\n}\n"
-	attemptsResolved = "{\n  \"session_id\": \"ses_attempts\",\n  \"summary_attempts\": 3,\n  \"summary_status\": \"failed\"\n}\n"
+		"<<<<<<< Updated upstream\n  \"summary_attempts\": 3,\n=======\n  \"summary_attempts\": 1,\n>>>>>>> Stashed changes\n" +
+		"  \"summary_status\": \"failed_validation\"\n}\n"
+	attemptsResolved = "{\n  \"session_id\": \"ses_attempts\",\n  \"summary_attempts\": 3,\n  \"summary_status\": \"failed_validation\"\n}\n"
+
+	// a repair reset summary_attempts to 0 when it recovered the title; the older failure has 3
+	recoveredConflict = "{\n  \"session_id\": \"ses_recovered\",\n" +
+		"<<<<<<< Updated upstream\n  \"title\": \"Ledger repair\",\n  \"summary_status\": \"ok\"\n" +
+		"=======\n  \"summary_attempts\": 3,\n  \"summary_status\": \"unrecoverable\"\n>>>>>>> Stashed changes\n}\n"
+	recoveredResolved = "{\n  \"session_id\": \"ses_recovered\",\n  \"title\": \"Ledger repair\",\n  \"summary_status\": \"ok\"\n}\n"
 
 	nestedConflict = "{\n  \"session_id\": \"ses_nested\",\n" +
 		"<<<<<<< Updated upstream\n" +
 		"<<<<<<< Updated upstream\n  \"summary_attempts\": 2,\n=======\n  \"summary_attempts\": 1,\n>>>>>>> Stashed changes\n" +
-		"  \"summary_status\": \"failed\"\n" +
-		"=======\n  \"summary_attempts\": 3,\n  \"summary_status\": \"pending\"\n>>>>>>> Stashed changes\n}\n"
-	nestedResolved = "{\n  \"session_id\": \"ses_nested\",\n  \"summary_attempts\": 3,\n  \"summary_status\": \"pending\"\n}\n"
+		"  \"summary_status\": \"failed_validation\"\n" +
+		"=======\n  \"summary_attempts\": 3,\n  \"summary_status\": \"failed_validation\"\n>>>>>>> Stashed changes\n}\n"
+	nestedResolved = "{\n  \"session_id\": \"ses_nested\",\n  \"summary_attempts\": 3,\n  \"summary_status\": \"failed_validation\"\n}\n"
 
-	cleanPushedMeta = "{\n  \"session_id\": \"ses_clean\",\n  \"summary_status\": \"complete\"\n}\n"
+	cleanPushedMeta = "{\n  \"session_id\": \"ses_clean\",\n  \"summary_status\": \"ok\"\n}\n"
 )
 
 // newPushedMarkedLedger builds a bare remote that already holds marker-bearing meta.json files, the
@@ -63,6 +71,7 @@ func newPushedMarkedLedger(t *testing.T) (remote, ledger string) {
 	mustRunGit(t, seed, "config", "commit.gpgsign", "false")
 	writeLedgerFile(t, seed, pushedTie, tieConflict)
 	writeLedgerFile(t, seed, pushedAttempts, attemptsConflict)
+	writeLedgerFile(t, seed, pushedRecovered, recoveredConflict)
 	writeLedgerFile(t, seed, pushedNested, nestedConflict)
 	writeLedgerFile(t, seed, pushedClean, cleanPushedMeta)
 	mustRunGit(t, seed, "add", "-A")
@@ -108,7 +117,8 @@ func TestResolveCommittedConflictMarkers_AlreadyPushed(t *testing.T) {
 	assert.NoError(t, report.Remaining)
 
 	assert.Equal(t, tieResolved, ledgerFile(t, ledger, "HEAD:"+pushedTie), "a tie keeps the local (stash) side")
-	assert.Equal(t, attemptsResolved, ledgerFile(t, ledger, "HEAD:"+pushedAttempts), "more summary_attempts marks the later write")
+	assert.Equal(t, attemptsResolved, ledgerFile(t, ledger, "HEAD:"+pushedAttempts), "within one state, more summary_attempts marks the later write")
+	assert.Equal(t, recoveredResolved, ledgerFile(t, ledger, "HEAD:"+pushedRecovered), "a recovered summary must not lose to an older failure")
 	assert.Equal(t, nestedResolved, ledgerFile(t, ledger, "HEAD:"+pushedNested))
 	assert.Equal(t, cleanPushedMeta, ledgerFile(t, ledger, "HEAD:"+pushedClean))
 
@@ -195,13 +205,25 @@ func TestPickMetaSide(t *testing.T) {
 		want            string
 		ok              bool
 	}{
-		{"tie keeps the stash side", `{"summary_status":"failed"}`, `{"summary_status":"pending"}`, `{"summary_status":"pending"}`, true},
-		{"more upstream attempts wins", `{"summary_attempts":3}`, `{"summary_attempts":1}`, `{"summary_attempts":3}`, true},
-		{"more stash attempts wins", `{"summary_attempts":1}`, `{"summary_attempts":2}`, `{"summary_attempts":2}`, true},
+		{"tie keeps the stash side", `{"summary_status":"failed_validation"}`, `{"summary_status":"failed_validation","validation_error":"x"}`,
+			`{"summary_status":"failed_validation","validation_error":"x"}`, true},
+		{"same state, more upstream attempts wins", `{"summary_attempts":3}`, `{"summary_attempts":1}`, `{"summary_attempts":3}`, true},
+		{"same state, more stash attempts wins", `{"summary_attempts":1}`, `{"summary_attempts":2}`, `{"summary_attempts":2}`, true},
+		// a title repair resets summary_attempts to 0; the older failure must not win on its count
+		{"a finished summary beats more failed attempts", `{"summary_status":"ok","title":"t"}`, `{"summary_status":"unrecoverable","summary_attempts":3}`,
+			`{"summary_status":"ok","title":"t"}`, true},
+		{"a pre-status summary counts as finished", `{"summary":"done"}`, `{"summary_status":"failed_validation","summary_attempts":2}`,
+			`{"summary":"done"}`, true},
+		// a re-arm clears status and attempts so the daemon retries; unrecoverable would stop it
+		{"a re-armed session beats unrecoverable", `{"summary_status":"unrecoverable","summary_attempts":3}`, `{}`, `{}`, true},
+		{"a failed attempt beats unrecoverable", `{"summary_status":"failed_validation","summary_attempts":1}`, `{"summary_status":"unrecoverable","summary_attempts":3}`,
+			`{"summary_status":"failed_validation","summary_attempts":1}`, true},
 		{"only upstream parses", `{"a":1}`, `{"a":`, `{"a":1}`, true},
 		{"only stash parses", `{"a":`, `{"a":2}`, `{"a":2}`, true},
 		{"a non-object is not a meta.json", `[1]`, `null`, "", false},
-		{"non-numeric attempts reads as zero", `{"summary_attempts":"9"}`, `{"summary_attempts":0}`, `{"summary_attempts":0}`, true},
+		// the stash side would win the tie, but the daemon cannot read a string counter
+		{"the daemon must be able to read the winner", `{"summary_attempts":0}`, `{"summary_attempts":"9"}`, `{"summary_attempts":0}`, true},
+		{"an unsafe files entry is refused", `{"a":1}`, `{"files":{"../escape":{}}}`, `{"a":1}`, true},
 		{"neither parses", `{`, `}`, "", false},
 	}
 	for _, tt := range tests {
@@ -227,7 +249,7 @@ func TestConflictSides(t *testing.T) {
 			"{\n<<<<<<< Updated upstream\n\"a\":1\n||||||| base\n\"a\":0\n=======\n\"a\":2\n>>>>>>> Stashed changes\n}\n",
 			"{\n\"a\":1\n}\n", "{\n\"a\":2\n}\n", true},
 		{"nested block resolves with its parent", nestedConflict,
-			"{\n  \"session_id\": \"ses_nested\",\n  \"summary_attempts\": 2,\n  \"summary_status\": \"failed\"\n}\n",
+			"{\n  \"session_id\": \"ses_nested\",\n  \"summary_attempts\": 2,\n  \"summary_status\": \"failed_validation\"\n}\n",
 			nestedResolved, true},
 		{"nested block inside the stash half",
 			"<<<<<<< Updated upstream\nA\n=======\n<<<<<<< Updated upstream\nB\n=======\nC\n>>>>>>> Stashed changes\n>>>>>>> Stashed changes\n",
