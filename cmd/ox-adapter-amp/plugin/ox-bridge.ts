@@ -134,9 +134,14 @@ export async function endSession(amp: PluginAPI, threadID: string): Promise<void
         hook_event_name: 'SessionEnd',
       }),
     });
-    if (code !== 0) amp.logger.log(`ox-bridge: ox agent hook SessionEnd ended with ${code}`);
+    if (code !== 0)
+      amp.logger.log(
+        `ox-bridge event=session_end_exit thread_id=${threadID} exit_code=${code ?? 'still_running'}`
+      );
   } catch (err) {
-    amp.logger.log('ox-bridge: could not end the ox session:', String(err));
+    amp.logger.log(
+      `ox-bridge event=session_end_error thread_id=${threadID} error=${JSON.stringify(String(err))}`
+    );
   } finally {
     lease?.unsubscribe();
   }

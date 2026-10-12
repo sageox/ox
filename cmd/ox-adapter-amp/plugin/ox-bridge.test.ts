@@ -229,7 +229,7 @@ describe('endSession', () => {
       const { amp, leases, logs } = fakeAmp(workspace);
       await endSession(amp, 'T-noox');
       expect(leases.released).toBe(1);
-      expect(logs.join('\n')).toContain('could not end the ox session');
+      expect(logs.join('\n')).toMatch(/^ox-bridge event=session_end_error thread_id=T-noox error=".*"$/m);
     } finally {
       process.env.PATH = priorPath;
     }

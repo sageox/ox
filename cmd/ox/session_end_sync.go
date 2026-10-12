@@ -11,15 +11,21 @@ package main
 // uploads before it returns, and needs neither the daemon nor an LLM CLI.
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
 
+	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/proc"
 	"github.com/sageox/ox/internal/selfexec"
 	"github.com/sageox/ox/internal/session"
+	"github.com/sageox/ox/internal/session/pipeline"
+	"github.com/spf13/cobra"
 )
 
 var (
@@ -27,10 +33,18 @@ var (
 	// handleEnd found it and the daemon handoff can still take it.
 	errSessionStopNotLaunched = errors.New("session stop could not be launched")
 
+	// errSessionStopFailed: the stop ran and exited non-zero. If it failed
+	// before marking the recording stopped, the recording is untouched.
+	errSessionStopFailed = errors.New("session stop failed")
+
 	// errSessionStopStillRunning: the stop outlived sessionEndStopWait. It
 	// keeps uploading in its own process session; handleEnd must not touch
 	// the recording underneath it.
 	errSessionStopStillRunning = errors.New("session stop still running")
+
+	// errSessionUploadFailed: the stop finished but the upload did not. The
+	// stop keeps the session in its cache and flags it for `ox doctor`.
+	errSessionUploadFailed = errors.New("session upload failed")
 )
 
 // sessionEndStopWait bounds how long SessionEnd waits for the upload. The
@@ -44,25 +58,76 @@ var runSessionStopAtEnd = runSessionStopProcess
 
 // finishRecordingAtEnd uploads the agent's recording before returning.
 func finishRecordingAtEnd(projectRoot, agentID string) error {
-	if err := runSessionStopAtEnd(projectRoot, agentID); err != nil {
+	return runSessionStopAtEnd(projectRoot, agentID)
+}
+
+// stopLeftRecordingUntouched reports whether a failed SessionEnd stop never
+// got as far as claiming the recording, so the daemon handoff may still take
+// it. A stop that marked the recording owns it: still uploading, or keeping
+// it for `ox doctor` after a failed upload. Handing that one over would
+// stamp a second stop onto a session already written.
+func stopLeftRecordingUntouched(err error, projectRoot, agentID string) bool {
+	if errors.Is(err, errSessionStopNotLaunched) {
+		return true
+	}
+	return errors.Is(err, errSessionStopFailed) && !session.HasExplicitStop(projectRoot, agentID)
+}
+
+// runAgentSessionStopCommand is `ox agent <id> session stop`. With
+// --agent-ended (sessionStopCommand sets it), a completed stop also clears
+// its explicit-stop signal: the agent ended and the coworker did not ask to
+// stop recording, so a later prime for this agent records again. The stop
+// clears it itself because it may outlive the hook that started it.
+func runAgentSessionStopCommand(cmd *cobra.Command, inst *agentinstance.Instance) error {
+	if err := runAgentSessionStop(inst); err != nil {
 		return err
 	}
-	// The agent ended; the coworker did not ask to stop recording. Drop the
-	// explicit-stop signal `session stop` leaves behind, so a later prime for
-	// this agent records again, as it does after the daemon handoff.
-	session.ConsumeExplicitStop(projectRoot, agentID)
+	if agentEnded, _ := cmd.Flags().GetBool("agent-ended"); agentEnded {
+		if projectRoot, err := findProjectRoot(); err == nil {
+			session.ConsumeExplicitStop(projectRoot, inst.AgentID)
+		}
+	}
 	return nil
 }
 
-// runSessionStopProcess runs `ox agent <id> session stop` and waits up to
-// sessionEndStopWait. The child inherits the environment, so it sees the
-// same venue (AMP_ORB, ...) and also refuses to defer to the daemon.
+// runSessionStopProcess runs `ox agent <id> session stop --agent-ended`,
+// waits up to sessionEndStopWait, and reads whether the upload landed. The
+// child inherits the environment, so it sees the same venue (AMP_ORB, ...)
+// and also refuses to defer to the daemon.
 func runSessionStopProcess(projectRoot, agentID string) error {
 	oxPath, err := selfexec.Path()
 	if err != nil {
 		return fmt.Errorf("%w: %w", errSessionStopNotLaunched, err)
 	}
+	return runSessionStopWith(oxPath, projectRoot, agentID, sessionEndStopWait)
+}
+
+// runSessionStopWith runs the stop with the given ox executable.
+func runSessionStopWith(oxPath, projectRoot, agentID string, wait time.Duration) error {
+	// a file, not a pipe: the child may keep writing after this hook exits
+	out, err := os.CreateTemp("", "ox-session-stop-*.json")
+	if err != nil {
+		return fmt.Errorf("%w: %w", errSessionStopNotLaunched, err)
+	}
+	defer func() {
+		_ = out.Close()
+		_ = os.Remove(out.Name())
+	}()
 	cmd := sessionStopCommand(oxPath, projectRoot, agentID)
+	cmd.Stdout = out
+	if err := waitForSessionStop(cmd, wait); err != nil {
+		return err
+	}
+	printed, err := os.ReadFile(out.Name())
+	if err != nil {
+		return fmt.Errorf("read session stop output: %w", err)
+	}
+	return sessionStopOutcome(printed)
+}
+
+// waitForSessionStop starts the stop child and waits up to wait for it. On
+// timeout the child keeps running: it is detached, and owns the recording.
+func waitForSessionStop(cmd *exec.Cmd, wait time.Duration) error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("%w: %w", errSessionStopNotLaunched, err)
 	}
@@ -71,21 +136,42 @@ func runSessionStopProcess(projectRoot, agentID string) error {
 	select {
 	case err := <-done:
 		if err != nil {
-			return fmt.Errorf("session stop: %w", err)
+			return fmt.Errorf("%w: %w", errSessionStopFailed, err)
 		}
 		return nil
-	case <-time.After(sessionEndStopWait):
+	case <-time.After(wait):
 		return errSessionStopStillRunning
 	}
 }
 
+// sessionStopOutcome reads the JSON `session stop` printed. Stop exits 0
+// when the upload fails (it keeps the session and flags it for `ox doctor`)
+// and says so in upload_warning. Whispers may be printed ahead of the JSON,
+// which always starts on a line of its own.
+func sessionStopOutcome(printed []byte) error {
+	start := bytes.LastIndex(printed, []byte("\n{"))
+	if start < 0 {
+		start = bytes.IndexByte(printed, '{')
+	}
+	if start < 0 {
+		return fmt.Errorf("session stop printed no result")
+	}
+	var result pipeline.StopOutput
+	if err := json.NewDecoder(bytes.NewReader(printed[start:])).Decode(&result); err != nil {
+		return fmt.Errorf("parse session stop result: %w", err)
+	}
+	if result.UploadWarning != "" {
+		return fmt.Errorf("%w: %s", errSessionUploadFailed, result.UploadWarning)
+	}
+	return nil
+}
+
 // sessionStopCommand builds the stop child. It runs in its own process
 // session, so an agent that kills this hook at its own timeout (Claude Code,
-// Codex) does not kill the upload with it. Output goes nowhere: SessionEnd
-// output reaches no model, and a pipe to a hook that has exited would stop
-// the child on its next write.
+// Codex) does not kill the upload with it. It is told the agent ended, so
+// it does not suppress the agent's next recording.
 func sessionStopCommand(oxPath, projectRoot, agentID string) *exec.Cmd {
-	cmd := exec.Command(oxPath, "agent", agentID, "session", "stop")
+	cmd := exec.Command(oxPath, "agent", agentID, "session", "stop", "--agent-ended")
 	cmd.Dir = projectRoot
 	proc.Detach(cmd)
 	return cmd

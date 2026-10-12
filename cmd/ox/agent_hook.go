@@ -425,14 +425,15 @@ func handleEnd(ctx *HookContext) error {
 
 	if !daemonOutlivesSession() {
 		err := finishRecordingAtEnd(ctx.ProjectRoot, agentID)
-		if err == nil {
+		switch {
+		case err == nil:
 			slog.Info("hook: uploaded session at agent end", "agent_id", agentID)
 			return nil
-		}
-		// A stop that got as far as marking the recording owns it from here:
-		// still uploading, or kept for `ox doctor` to retry. Only a stop that
-		// never touched it falls through to the daemon handoff.
-		if errors.Is(err, errSessionStopStillRunning) || session.HasExplicitStop(ctx.ProjectRoot, agentID) {
+		case errors.Is(err, errSessionUploadFailed):
+			// the stop kept the session and flagged it for `ox doctor`
+			slog.Warn("hook: session upload at agent end failed, kept for ox doctor", "agent_id", agentID, "error", err)
+			return nil
+		case !stopLeftRecordingUntouched(err, ctx.ProjectRoot, agentID):
 			slog.Warn("hook: session stop at agent end did not finish", "agent_id", agentID, "error", err)
 			return nil
 		}

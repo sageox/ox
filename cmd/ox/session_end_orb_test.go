@@ -5,8 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,6 +22,7 @@ import (
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -151,16 +156,30 @@ func newOrbSessionFixture(t *testing.T) *orbSessionFixture {
 	}
 	require.NoError(t, os.WriteFile(sidecar, lines, 0o600))
 
-	// the stop child runs in-process: selfexec refuses to re-exec a test binary
+	// The stop child runs in-process (selfexec refuses to re-exec a test
+	// binary): the same command the child runs, and the same read of what it
+	// printed.
 	prior := runSessionStopAtEnd
 	runSessionStopAtEnd = func(_, id string) error {
 		var err error
-		captureRealStdout(t, func() { err = runAgentSessionStop(&agentinstance.Instance{AgentID: id}) })
-		return err
+		printed := captureRealStdout(t, func() {
+			err = runAgentSessionStopCommand(stopCommandFlags(true), &agentinstance.Instance{AgentID: id})
+		})
+		if err != nil {
+			return fmt.Errorf("%w: %w", errSessionStopFailed, err)
+		}
+		return sessionStopOutcome(printed)
 	}
 	t.Cleanup(func() { runSessionStopAtEnd = prior })
 
 	return &orbSessionFixture{draftLedgerFixture: base, store: store, agentID: agentID}
+}
+
+// stopCommandFlags stands in for the cobra command `session stop` runs under.
+func stopCommandFlags(agentEnded bool) *cobra.Command {
+	cmd := &cobra.Command{}
+	cmd.Flags().Bool("agent-ended", agentEnded, "")
+	return cmd
 }
 
 // sendSessionEnd runs `ox agent hook SessionEnd` the way ox-bridge.ts does:
@@ -216,24 +235,35 @@ func TestSessionEnd_LaptopStillHandsOffToTheDaemon(t *testing.T) {
 	assert.Nil(t, state, "the handoff still clears the live recording")
 }
 
-// TestHandleEnd_StopThatNeverRanFallsBackToTheDaemon: when the stop cannot
-// even start (no ox executable), the recording is as SessionEnd found it, so
-// the daemon handoff takes it — never worse than before the orb path existed.
+// TestHandleEnd_StopThatNeverRanFallsBackToTheDaemon: when the stop never
+// claimed the recording (no ox executable, or it refused before marking the
+// recording stopped), the recording is as SessionEnd found it, so the daemon
+// handoff takes it. Never worse than before the orb path existed.
 func TestHandleEnd_StopThatNeverRanFallsBackToTheDaemon(t *testing.T) {
-	projectRoot, repoID := setupTestProject(t)
-	clearFinalizeEnv(t)
-	t.Setenv("AMP_ORB", "1")
-	const agentID = "OxOrbFallback"
-	createActiveRecording(t, projectRoot, repoID, agentID)
-	prior := runSessionStopAtEnd
-	runSessionStopAtEnd = func(string, string) error { return errSessionStopNotLaunched }
-	t.Cleanup(func() { runSessionStopAtEnd = prior })
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"could not launch", errSessionStopNotLaunched},
+		{"refused before marking", fmt.Errorf("%w: exit status 1", errSessionStopFailed)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			projectRoot, repoID := setupTestProject(t)
+			clearFinalizeEnv(t)
+			t.Setenv("AMP_ORB", "1")
+			const agentID = "OxOrbFallback"
+			createActiveRecording(t, projectRoot, repoID, agentID)
+			prior := runSessionStopAtEnd
+			runSessionStopAtEnd = func(string, string) error { return tc.err }
+			t.Cleanup(func() { runSessionStopAtEnd = prior })
 
-	require.NoError(t, handleEnd(&HookContext{Phase: phaseEnd, AgentType: "amp", ProjectRoot: projectRoot, Marker: &SessionMarker{AgentID: agentID}}))
+			require.NoError(t, handleEnd(&HookContext{Phase: phaseEnd, AgentType: "amp", ProjectRoot: projectRoot, Marker: &SessionMarker{AgentID: agentID}}))
 
-	state, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
-	require.NoError(t, err)
-	assert.Nil(t, state, "the daemon handoff must still run")
+			state, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+			require.NoError(t, err)
+			assert.Nil(t, state, "the daemon handoff must still run")
+		})
+	}
 }
 
 // TestHandleEnd_StopThatStartedOwnsTheRecording: a stop that failed after
@@ -246,9 +276,15 @@ func TestHandleEnd_StopThatStartedOwnsTheRecording(t *testing.T) {
 	}{
 		{"failed after marking", func(projectRoot, agentID string) error {
 			require.NoError(t, session.MarkExplicitStop(projectRoot, agentID))
-			return errors.New("session stop: exit status 1")
+			return fmt.Errorf("%w: exit status 1", errSessionStopFailed)
 		}},
 		{"still uploading", func(string, string) error { return errSessionStopStillRunning }},
+		// the finished stop already cleared its marker; the outcome alone must
+		// keep the handoff from stamping a second stop onto the written session
+		{"upload failed", func(string, string) error {
+			return fmt.Errorf("%w: ledger upload failed", errSessionUploadFailed)
+		}},
+		{"outcome unreadable", func(string, string) error { return errors.New("session stop printed no result") }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			projectRoot, repoID := setupTestProject(t)
@@ -276,6 +312,23 @@ func TestSessionEndAgentID(t *testing.T) {
 		AgentID: "OxThread", AdapterName: "amp", Username: "amp", AgentSessionID: orbThreadURL,
 	})
 	require.NoError(t, err)
+	// a recording already stopped for its thread is not the one to end
+	_, err = session.StartRecording(projectRoot, session.StartRecordingOptions{
+		AgentID: "OxStopped", AdapterName: "amp", Username: "amp", AgentSessionID: "https://ampcode.com/threads/T-stopped",
+	})
+	require.NoError(t, err)
+	require.NoError(t, session.UpdateRecordingStateForAgent(projectRoot, "OxStopped", func(s *session.RecordingState) {
+		now := time.Now()
+		s.StoppedAt = &now
+	}))
+	// a recording that has since moved on to another native session still owns the earlier one
+	_, err = session.StartRecording(projectRoot, session.StartRecordingOptions{
+		AgentID: "OxMoved", AdapterName: "amp", Username: "amp", AgentSessionID: "https://ampcode.com/threads/T-earlier",
+	})
+	require.NoError(t, err)
+	require.NoError(t, session.UpdateRecordingStateForAgent(projectRoot, "OxMoved", func(s *session.RecordingState) {
+		s.RecordNativeSession("https://ampcode.com/threads/T-current", "resume", time.Now())
+	}))
 
 	for _, tc := range []struct {
 		name   string
@@ -288,6 +341,8 @@ func TestSessionEndAgentID(t *testing.T) {
 		{"trailing slash and other host still match", nil, "https://amp.example.com/threads/T-5f0c2a71-3b9e-4d1a-8c6f-2e7d9b4a1c03/", "OxThread"},
 		{"bare thread id matches", nil, "T-5f0c2a71-3b9e-4d1a-8c6f-2e7d9b4a1c03", "OxThread"},
 		{"another thread matches nothing", nil, "https://ampcode.com/threads/T-other", ""},
+		{"a stopped recording is skipped", nil, "https://ampcode.com/threads/T-stopped", ""},
+		{"an earlier native session still matches", nil, "https://ampcode.com/threads/T-earlier", "OxMoved"},
 		{"no session id", nil, "", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -302,9 +357,162 @@ func TestSessionEndAgentID(t *testing.T) {
 
 func TestSessionStopCommand(t *testing.T) {
 	cmd := sessionStopCommand("/usr/local/bin/ox", "/work/repo", "OxAb12")
-	assert.Equal(t, []string{"/usr/local/bin/ox", "agent", "OxAb12", "session", "stop"}, cmd.Args)
+	assert.Equal(t, []string{"/usr/local/bin/ox", "agent", "OxAb12", "session", "stop", "--agent-ended"}, cmd.Args)
 	assert.Equal(t, "/work/repo", cmd.Dir)
 	assert.Nil(t, cmd.Stdout, "no pipe: the hook may exit while the upload runs")
 	assert.Nil(t, cmd.Stderr, "no pipe: the hook may exit while the upload runs")
 	assert.Nil(t, cmd.Env, "the child inherits the venue (AMP_ORB, ...) so it also uploads synchronously")
+}
+
+// fakeOxStop writes a stand-in for the ox binary that records its arguments
+// and working directory, prints result, waits delay, marks itself done, and
+// exits with code.
+func fakeOxStop(t *testing.T, result, delay string, code int) (exe, calls, done string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("a shell script stands in for ox")
+	}
+	dir := t.TempDir()
+	exe, calls, done = filepath.Join(dir, "ox"), filepath.Join(dir, "calls"), filepath.Join(dir, "done")
+	printed := filepath.Join(dir, "printed")
+	require.NoError(t, os.WriteFile(printed, []byte(result), 0o600))
+	script := "#!/bin/sh\n" +
+		"echo \"$@\" > '" + calls + "'\n" +
+		"pwd -P >> '" + calls + "'\n" +
+		"cat '" + printed + "'\n" +
+		"sleep " + delay + "\n" +
+		"touch '" + done + "'\n" +
+		"exit " + strconv.Itoa(code) + "\n"
+	require.NoError(t, os.WriteFile(exe, []byte(script), 0o755))
+	return exe, calls, done
+}
+
+// TestWaitForSessionStop covers the process boundary SessionEnd crosses: the
+// stop child gets the agent and the project, its failure is reported as a
+// failure (so the handoff does not rewrite the recording under it), and a
+// stop that outlives the hook's wait keeps uploading after the hook returns.
+func TestWaitForSessionStop(t *testing.T) {
+	projectRoot, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+
+	t.Run("finished", func(t *testing.T) {
+		exe, calls, _ := fakeOxStop(t, "", "0", 0)
+		require.NoError(t, waitForSessionStop(sessionStopCommand(exe, projectRoot, "OxAb12"), time.Minute))
+		got, err := os.ReadFile(calls)
+		require.NoError(t, err)
+		lines := strings.Split(strings.TrimSpace(string(got)), "\n")
+		require.Len(t, lines, 2)
+		assert.Equal(t, "agent OxAb12 session stop --agent-ended", lines[0])
+		assert.Equal(t, projectRoot, lines[1], "the stop runs in the project, where it finds the recording")
+	})
+
+	t.Run("failed", func(t *testing.T) {
+		exe, _, _ := fakeOxStop(t, "", "0", 3)
+		err := waitForSessionStop(sessionStopCommand(exe, projectRoot, "OxAb12"), time.Minute)
+		require.ErrorIs(t, err, errSessionStopFailed)
+		assert.NotErrorIs(t, err, errSessionStopNotLaunched, "it ran, so it may have marked the recording")
+		assert.NotErrorIs(t, err, errSessionStopStillRunning)
+	})
+
+	t.Run("outlives the wait and keeps uploading", func(t *testing.T) {
+		exe, _, done := fakeOxStop(t, "", "1", 0)
+		start := time.Now()
+		err := waitForSessionStop(sessionStopCommand(exe, projectRoot, "OxAb12"), 50*time.Millisecond)
+		require.ErrorIs(t, err, errSessionStopStillRunning)
+		assert.Less(t, time.Since(start), time.Second, "the hook stops waiting at its bound")
+		require.Eventually(t, func() bool { _, err := os.Stat(done); return err == nil }, 10*time.Second, 20*time.Millisecond,
+			"the detached stop must finish after the hook has returned")
+	})
+
+	t.Run("cannot start", func(t *testing.T) {
+		err := waitForSessionStop(sessionStopCommand(filepath.Join(t.TempDir(), "missing-ox"), projectRoot, "OxAb12"), time.Minute)
+		require.ErrorIs(t, err, errSessionStopNotLaunched)
+	})
+}
+
+// TestRunSessionStopProcess_NeverRunsTheTestBinary: under go test the stop is
+// reported as never launched, which is what sends handleEnd to the handoff.
+func TestRunSessionStopProcess_NeverRunsTheTestBinary(t *testing.T) {
+	require.ErrorIs(t, runSessionStopProcess(t.TempDir(), "OxAb12"), errSessionStopNotLaunched)
+}
+
+// TestSessionStopOutcome: `session stop` exits 0 when the upload fails, so the
+// hook reads the result it printed. Whispers can come first.
+func TestSessionStopOutcome(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		printed string
+		want    error
+		wantErr bool
+	}{
+		{"uploaded", "{\n  \"success\": true,\n  \"type\": \"session_stop\"\n}\n", nil, false},
+		{"whispers first", "<whisper from=\"Avery\">{not json}</whisper>\n{\n  \"success\": true\n}\n", nil, false},
+		{"upload failed", "{\n  \"success\": true,\n  \"upload_warning\": \"Session saved locally but ledger upload failed.\"\n}\n", errSessionUploadFailed, true},
+		{"nothing printed", "", nil, true},
+		{"truncated", "{\n  \"success\": tr", nil, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := sessionStopOutcome([]byte(tc.printed))
+			if !tc.wantErr {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			if tc.want != nil {
+				assert.ErrorIs(t, err, tc.want)
+			}
+		})
+	}
+}
+
+// TestSessionStop_CoworkerStopStillSuppressesTheNextAutoStart: only the
+// SessionEnd hook's stop (--agent-ended) clears the explicit-stop signal. A
+// coworker who runs `session stop` themselves still opted out of the next
+// automatic recording.
+func TestSessionStop_CoworkerStopStillSuppressesTheNextAutoStart(t *testing.T) {
+	f := newOrbSessionFixture(t)
+	captureRealStdout(t, func() {
+		require.NoError(t, runAgentSessionStopCommand(stopCommandFlags(false), &agentinstance.Instance{AgentID: f.agentID}))
+	})
+	assert.True(t, session.HasExplicitStop(f.projectRoot, f.agentID))
+}
+
+// TestRunSessionStopWith drives the whole process boundary SessionEnd uses:
+// the child's printed result, read back from a file after it exits.
+func TestRunSessionStopWith(t *testing.T) {
+	projectRoot := t.TempDir()
+	uploaded := "<whisper from=\"Avery\">rebasing the billing branch</whisper>\n{\n  \"success\": true,\n  \"type\": \"session_stop\"\n}\n"
+	keptLocally := "{\n  \"success\": true,\n  \"upload_warning\": \"Session saved locally but ledger upload failed. Run 'ox doctor' to retry.\"\n}\n"
+
+	t.Run("uploaded", func(t *testing.T) {
+		exe, _, _ := fakeOxStop(t, uploaded, "0", 0)
+		require.NoError(t, runSessionStopWith(exe, projectRoot, "OxAb12", time.Minute))
+	})
+	t.Run("exit 0 with a failed upload is a failure", func(t *testing.T) {
+		exe, _, _ := fakeOxStop(t, keptLocally, "0", 0)
+		require.ErrorIs(t, runSessionStopWith(exe, projectRoot, "OxAb12", time.Minute), errSessionUploadFailed)
+	})
+	t.Run("non-zero exit", func(t *testing.T) {
+		exe, _, _ := fakeOxStop(t, "", "0", 1)
+		require.ErrorIs(t, runSessionStopWith(exe, projectRoot, "OxAb12", time.Minute), errSessionStopFailed)
+	})
+	t.Run("still uploading", func(t *testing.T) {
+		exe, _, done := fakeOxStop(t, uploaded, "1", 0)
+		require.ErrorIs(t, runSessionStopWith(exe, projectRoot, "OxAb12", 50*time.Millisecond), errSessionStopStillRunning)
+		require.Eventually(t, func() bool { _, err := os.Stat(done); return err == nil }, 10*time.Second, 20*time.Millisecond)
+	})
+}
+
+// TestSessionStopCommand_FailedStopKeepsTheSignal: a stop that fails leaves
+// the explicit-stop signal alone; it still owns the recording.
+func TestSessionStopCommand_FailedStopKeepsTheSignal(t *testing.T) {
+	projectRoot, _ := setupTestProject(t)
+	t.Chdir(projectRoot)
+	const agentID = "OxNotRecording"
+	require.NoError(t, session.MarkExplicitStop(projectRoot, agentID))
+
+	err := runAgentSessionStopCommand(stopCommandFlags(true), &agentinstance.Instance{AgentID: agentID})
+
+	require.Error(t, err, "nothing is recording for this agent")
+	assert.True(t, session.HasExplicitStop(projectRoot, agentID))
 }
