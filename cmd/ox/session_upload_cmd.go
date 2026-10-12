@@ -51,7 +51,11 @@ Example:
 
 		// A held or cache-only session is published from its cache copy
 		// (GH #1019, #1077); anything else keeps the Ledger-folder path below.
-		if name, cacheDir, ok := findPublishableCacheSession(ledgerPath, args[0]); ok {
+		name, cacheDir, ok, findErr := findPublishableCacheSession(ledgerPath, args[0])
+		if findErr != nil {
+			return findErr
+		}
+		if ok {
 			fmt.Printf("Publishing session %s...\n", name)
 			if err := publishCachedSession(projectRoot, ledgerPath, name, cacheDir); err != nil {
 				if errors.Is(err, api.ErrReadOnly) {
@@ -294,29 +298,64 @@ func firstNonEmpty(values ...string) string {
 // and returns a session whose content is there and is not yet published: it is
 // held, the Ledger has no entry or only a draft placeholder for it, or an
 // earlier publish left a pending retry. An already-published session is never
-// returned, so publishing cannot replay it.
-func findPublishableCacheSession(ledgerPath, arg string) (name, cacheDir string, ok bool) {
+// returned, so publishing cannot replay it. A candidate that must not be
+// published from (cachePublishBlocker) is an error, not a fallthrough.
+func findPublishableCacheSession(ledgerPath, arg string) (name, cacheDir string, ok bool, err error) {
 	for _, dir := range session.HeldSessionDirs(ledgerPath) {
-		resolved, err := resolveSessionInDir(dir, arg)
-		if err != nil {
+		resolved, resolveErr := resolveSessionInDir(dir, arg)
+		if resolveErr != nil {
 			continue
 		}
 		candidate := filepath.Join(dir, resolved)
 		if session.ClassifyRawFile(filepath.Join(candidate, ledgerFileRaw)) != session.RawSubstantive {
 			continue
 		}
-		if session.IsHeld(candidate) {
-			return resolved, candidate, true
+		if !cacheSessionUnpublished(ledgerPath, resolved, candidate) {
+			continue
 		}
-		if _, err := os.Stat(filepath.Join(candidate, sessionUploadRetryPendingFile)); err == nil {
-			return resolved, candidate, true
+		if blockErr := cachePublishBlocker(candidate); blockErr != nil {
+			return "", "", false, blockErr
 		}
-		ledgerMeta, err := lfs.ReadSessionMeta(filepath.Join(ledgerPath, "sessions", resolved))
-		if errors.Is(err, os.ErrNotExist) || (err == nil && ledgerMeta.IsDraft()) {
-			return resolved, candidate, true
-		}
+		return resolved, candidate, true, nil
 	}
-	return "", "", false
+	return "", "", false, nil
+}
+
+// cacheSessionUnpublished reports whether the cache copy at candidate is work
+// still waiting to be published: held, left with a pending retry, or with no
+// Ledger entry beyond a draft placeholder.
+func cacheSessionUnpublished(ledgerPath, name, candidate string) bool {
+	if session.IsHeld(candidate) {
+		return true
+	}
+	if _, err := os.Stat(filepath.Join(candidate, sessionUploadRetryPendingFile)); err == nil {
+		return true
+	}
+	ledgerMeta, err := lfs.ReadSessionMeta(filepath.Join(ledgerPath, "sessions", name))
+	return errors.Is(err, os.ErrNotExist) || (err == nil && ledgerMeta.IsDraft())
+}
+
+// cachePublishBlocker reports why the cache folder at dir must not be
+// published from. It reads the folder the transcript is copied from, never
+// the Ledger copy, which has no .recording.json: a recording still owns the
+// folder (live, or quarantined for an ownership review, #1065), or it is a
+// read-only copy downloaded from the Ledger, which may be a teammate's.
+func cachePublishBlocker(dir string) error {
+	name := filepath.Base(dir)
+	if lfs.HasDownloadedMarker(dir) {
+		return fmt.Errorf("session %s is a copy downloaded from the ledger, not a session recorded on this machine; there is nothing to publish", name)
+	}
+	state, err := session.ReadRecordingStateFile(dir)
+	if err != nil {
+		return fmt.Errorf("session %s has a recording state that cannot be read; run 'ox doctor' before publishing: %w", name, err)
+	}
+	if state == nil {
+		return nil
+	}
+	if state.SourceRejected {
+		return fmt.Errorf("session %s is held back for ownership review and was not uploaded; run 'ox agent %s session recover --release-quarantine' to re-check it", name, state.AgentID)
+	}
+	return fmt.Errorf("session %s is still recording; stop it first with 'ox agent %s session stop'", name, state.AgentID)
 }
 
 // publishCachedSession publishes a session from its cache copy through the
@@ -325,6 +364,10 @@ func findPublishableCacheSession(ledgerPath, arg string) (name, cacheDir string,
 // daemon summarizes the published session instead of mistaking the cache copy
 // for a read-only download.
 func publishCachedSession(projectRoot, ledgerPath, sessionName, cacheDir string) error {
+	// re-checked here: the folder can change between lookup and publish
+	if err := cachePublishBlocker(cacheDir); err != nil {
+		return err
+	}
 	rawPath := filepath.Join(cacheDir, ledgerFileRaw)
 	meta, entryCount, err := readCacheSessionMeta(rawPath)
 	if err != nil {

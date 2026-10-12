@@ -128,6 +128,9 @@ func listUnpublishedCacheSessions(ledgerPath string) unpublishedCacheSessions {
 				continue
 			}
 			sessionDir := filepath.Join(dir, name)
+			if lfs.HasDownloadedMarker(sessionDir) {
+				continue // a copy downloaded from the Ledger is not this machine's work
+			}
 			if session.IsHeldInLedger(ledgerPath, name) {
 				seen[name] = true
 				out.Held = append(out.Held, name)
