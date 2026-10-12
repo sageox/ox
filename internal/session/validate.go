@@ -46,12 +46,13 @@ func ValidateAndRedact(reader io.Reader) (*CapturedHistory, int, error) {
 }
 
 // ValidateCapturePriorInput validates input specifically for capture-prior command.
-// This adds additional validation beyond the schema:
+// It differs from the schema in these ways:
+//   - The _meta header may omit agent_id and source; CapturePrior fills them before storing
 //   - At least one entry required
 //   - Updates time_range in metadata if not set
 //   - Sets message_count in metadata
 func ValidateCapturePriorInput(reader io.Reader) (*CapturedHistory, error) {
-	history, err := ValidateHistoryJSONLReader(reader)
+	history, err := readHistoryJSONL(reader, validateCapturePriorMeta)
 	if err != nil {
 		return nil, err
 	}
@@ -71,4 +72,14 @@ func ValidateCapturePriorInput(reader io.Reader) (*CapturedHistory, error) {
 	}
 
 	return history, nil
+}
+
+// validateCapturePriorMeta checks a capture-prior header. Only schema_version is required:
+// CapturePrior takes a missing agent_id from its command line and defaults source, so an AI
+// coworker following an older or shorter example is not refused.
+func validateCapturePriorMeta(meta *HistoryMeta) (*HistoryMeta, error) {
+	if meta.SchemaVersion == "" {
+		return nil, fmt.Errorf("%w: schema_version", ErrHistoryInvalidMeta)
+	}
+	return meta, nil
 }

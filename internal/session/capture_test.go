@@ -40,7 +40,7 @@ func TestCapturePrior_NilReader(t *testing.T) {
 }
 
 func TestCapturePrior_MissingAgentID(t *testing.T) {
-	// no agent_id in meta means validation will fail with missing required field
+	// no agent_id in the header and none on the command line: nothing to store it under
 	jsonl := `{"_meta":{"schema_version":"1","source":"test","agent_id":""}}
 {"seq":1,"type":"user","content":"Hello"}`
 
@@ -49,7 +49,66 @@ func TestCapturePrior_MissingAgentID(t *testing.T) {
 	_, err := CapturePrior(strings.NewReader(jsonl), opts)
 
 	require.Error(t, err)
-	// validation catches missing agent_id in meta
+	assert.Contains(t, err.Error(), "agent_id required")
+}
+
+// isolateCaptureStorage keeps a CapturePrior test's stored history out of real directories: no
+// project under the working directory, and HOME and the XDG cache inside the test's own dir.
+func isolateCaptureStorage(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(dir, "cache"))
+	t.Chdir(t.TempDir())
+}
+
+// Failure prevented: capture-prior refuses a header without agent_id or source (an older prime's
+// example, or a shorter one an AI coworker writes) although its command line carries the agent ID,
+// or stores a history that every later strict reader rejects (ox-dfk7).
+func TestCapturePrior_HeaderWithoutAgentIDUsesCommandLine(t *testing.T) {
+	tests := []struct {
+		name, meta, wantSource string
+	}{
+		{"older prime example", `{"_meta":{"schema_version":"1","agent_type":"claude-code","session_id":"manual","started_at":"2026-10-12T00:00:00Z"}}`,
+			HistorySourceAgentReconstruction},
+		{"schema_version only", `{"_meta":{"schema_version":"1"}}`, HistorySourceAgentReconstruction},
+		{"a given source is kept", `{"_meta":{"schema_version":"1","source":"planning_history"}}`, HistorySourcePlanningHistory},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			isolateCaptureStorage(t)
+			jsonl := tt.meta + "\n" + `{"seq":1,"type":"user","content":"Hello"}` + "\n" + `{"seq":2,"type":"assistant","content":"Hi"}`
+
+			result, err := CapturePrior(strings.NewReader(jsonl), CaptureOptions{AgentID: "Oxa7b3", SkipRedaction: true})
+
+			require.NoError(t, err)
+			assert.Equal(t, "Oxa7b3", result.AgentID, "session_id must never stand in for the agent ID")
+			stored, err := ParseHistoryFile(result.Path) // the strict reader every later consumer uses
+			require.NoError(t, err)
+			assert.Equal(t, "Oxa7b3", stored.Meta.AgentID)
+			assert.Equal(t, tt.wantSource, stored.Meta.Source)
+			assert.Len(t, stored.Entries, 2)
+		})
+	}
+}
+
+// Failure prevented: relaxing the capture-prior header check so far that a line with no
+// schema_version, which may not be a header at all, is accepted.
+func TestCapturePrior_HeaderStillNeedsSchemaVersion(t *testing.T) {
+	jsonl := `{"_meta":{"agent_id":"Oxa7b3"}}` + "\n" + `{"seq":1,"type":"user","content":"Hello"}`
+
+	_, err := CapturePrior(strings.NewReader(jsonl), CaptureOptions{AgentID: "Oxa7b3"})
+
+	require.ErrorIs(t, err, ErrHistoryInvalidMeta)
+	assert.Contains(t, err.Error(), "schema_version")
+}
+
+// Failure prevented: the capture-prior relaxation leaking into the general validator, whose
+// readers (stored prior-history.jsonl) must keep rejecting a header without agent_id.
+func TestValidateJSONL_StillRequiresAgentID(t *testing.T) {
+	_, err := ValidateJSONL(strings.NewReader(`{"_meta":{"schema_version":"1","source":"agent_reconstruction"}}` + "\n" + `{"seq":1,"type":"user","content":"Hello"}`))
+
+	require.ErrorIs(t, err, ErrHistoryInvalidMeta)
 	assert.Contains(t, err.Error(), "agent_id")
 }
 
