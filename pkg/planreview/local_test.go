@@ -1,6 +1,7 @@
 package planreview
 
 import (
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -230,6 +231,9 @@ func TestCapture_ReportsWhatItCannotReadAndNeverFollowsALink(t *testing.T) {
 				write(t, filepath.Join(plan, "feedback", n), "half")
 			}
 		}, []string{}, 1, Limits{Records: 1}},
+		{"no practical bound", func(t *testing.T, plan, _ string) {
+			write(t, filepath.Join(plan, rec.Path), string(rec.Data))
+		}, []string{}, 1, Limits{Records: math.MaxInt}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()

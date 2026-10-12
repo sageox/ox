@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"os"
 	"path"
 	"path/filepath"
@@ -283,7 +284,7 @@ func settled(f Failure) bool {
 // directory holding more than Records+2 other entries cannot be read
 // completely: its listing stops there.
 func list(root *os.Root, l Limits, fails *[]Failure) ([]entry, map[string]*os.Root) {
-	most := l.Records + 2
+	most := min(l.Records, math.MaxInt-3) + 2 // most+1 is read below; neither may overflow
 	dirs := map[string]*os.Root{}
 	var out []entry
 	var walk func(r *os.Root, rel string)
