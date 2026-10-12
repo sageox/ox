@@ -224,6 +224,12 @@ func TestCapture_ReportsWhatItCannotReadAndNeverFollowsALink(t *testing.T) {
 				write(t, filepath.Join(plan, "feedback", n), `{}`)
 			}
 		}, []string{" too_many_records", "feedback too_many_records"}, 1, Limits{Records: 1}},
+		{"leftover temporaries", func(t *testing.T, plan, _ string) {
+			write(t, filepath.Join(plan, rec.Path), string(rec.Data))
+			for _, n := range []string{".a.tmp", ".b.tmp", ".c.tmp", ".d.tmp"} {
+				write(t, filepath.Join(plan, "feedback", n), "half")
+			}
+		}, []string{}, 1, Limits{Records: 1}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()

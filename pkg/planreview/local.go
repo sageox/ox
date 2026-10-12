@@ -278,9 +278,10 @@ func settled(f Failure) bool {
 
 // list walks feedback/ and the record directories under it without following
 // a symlink, returning every entry but dot-prefixed temporaries, in path
-// order, and the open record directories by path. Every entry is a record or
-// a failure, but for remaps/ and resolutions/, so a directory holding more than
-// Records+2 entries cannot be read completely: its listing stops there.
+// order, and the open record directories by path. Every entry but a
+// temporary is a record or a failure, remaps/ and resolutions/ aside, so a
+// directory holding more than Records+2 other entries cannot be read
+// completely: its listing stops there.
 func list(root *os.Root, l Limits, fails *[]Failure) ([]entry, map[string]*os.Root) {
 	most := l.Records + 2
 	dirs := map[string]*os.Root{}
@@ -293,20 +294,29 @@ func list(root *os.Root, l Limits, fails *[]Failure) ([]entry, map[string]*os.Ro
 			*fails = append(*fails, Failure{Path: rel, Reason: ReasonUnreadable, Detail: err.Error()})
 			return
 		}
-		names, err := d.Readdirnames(most + 1)
-		_ = d.Close()
-		if err != nil && !errors.Is(err, io.EOF) {
-			*fails = append(*fails, Failure{Path: rel, Reason: ReasonUnreadable, Detail: err.Error()})
-			return
+		var names []string
+		for len(names) <= most {
+			chunk, err := d.Readdirnames(most + 1)
+			for _, n := range chunk {
+				if !strings.HasPrefix(n, ".") {
+					names = append(names, n)
+				}
+			}
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if err != nil {
+				_ = d.Close()
+				*fails = append(*fails, Failure{Path: rel, Reason: ReasonUnreadable, Detail: err.Error()})
+				return
+			}
 		}
+		_ = d.Close()
 		if len(names) > most {
 			*fails = append(*fails, Failure{Path: rel, Reason: ReasonTooManyRecords, Detail: fmt.Sprintf("more than %d entries", most)})
 			names = names[:most]
 		}
 		for _, n := range names {
-			if strings.HasPrefix(n, ".") {
-				continue
-			}
 			p := rel + "/" + n
 			fi, err := r.Lstat(n)
 			if err != nil {
