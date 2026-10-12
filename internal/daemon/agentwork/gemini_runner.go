@@ -58,15 +58,30 @@ func (r *GeminiRunner) Run(ctx context.Context, req RunRequest) (*RunResult, err
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	var args []string
+	workDir := req.WorkDir
+	if req.Isolated || req.IsolateIfSupported {
+		isolation, dir, err := geminiIsolation(ctx, r.binaryPath)
+		switch {
+		case err == nil:
+			args, workDir = isolation, dir
+		case req.Isolated || !errors.As(err, new(isolationUnsupported)):
+			return nil, err
+		default:
+			r.logger.Warn("running gemini without isolation; update Gemini CLI", "error", err)
+		}
+	}
+
 	// Gemini runs non-interactively (headless) when its stdin is not a TTY and
 	// reads the prompt from stdin. The prompt is fed via stdin rather than the
 	// `-p` argv value so the (potentially sensitive) session transcript does not
 	// appear in ps / /proc/<pid>/cmdline / sysctl kern.procargs2 (security
 	// finding #10).
-	cmd := exec.CommandContext(ctx, r.binaryPath)
+	cmd := exec.CommandContext(ctx, r.binaryPath, args...)
 	cmd.Stdin = strings.NewReader(req.Prompt)
-	if req.WorkDir != "" {
-		cmd.Dir = req.WorkDir
+	cmd.Env = workerEnv("GEMINI_", "GOOGLE_")
+	if workDir != "" {
+		cmd.Dir = workDir
 	}
 	setProcAttr(cmd)
 

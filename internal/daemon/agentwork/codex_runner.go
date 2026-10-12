@@ -87,9 +87,7 @@ func (r *CodexRunner) Run(ctx context.Context, req RunRequest) (*RunResult, erro
 
 	cmd := exec.CommandContext(ctx, r.binaryPath, args...)
 	cmd.Stdin = strings.NewReader(req.Prompt)
-	// Hooks are disabled above; recording is disabled independently because
-	// repository instructions may still ask the worker to run ox agent prime.
-	cmd.Env = append(os.Environ(), "OX_SESSION_RECORDING=disabled", "SAGEOX_DAEMON=false")
+	cmd.Env = workerEnv("OPENAI_", "CODEX_")
 	if req.WorkDir != "" {
 		cmd.Dir = req.WorkDir
 	}

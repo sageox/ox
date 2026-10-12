@@ -172,10 +172,12 @@ func (r *ClaudeRunner) Run(ctx context.Context, req RunRequest) (*RunResult, err
 	args = append(args, "-p")
 
 	cmd := exec.CommandContext(ctx, r.binaryPath, args...)
-	cmd.Stdin = strings.NewReader(req.Prompt)
-	if isolated {
-		cmd.Env = append(os.Environ(), isolatedEnv...)
-	}
+	// Claude Code reads any file an @-mention in a -p prompt names and gives it
+	// to the model, whatever --tools says. A worker prompt carries untrusted
+	// text and needs no file, so each @ goes in as its XML entity, which the
+	// model reads as @.
+	cmd.Stdin = strings.NewReader(strings.ReplaceAll(req.Prompt, "@", "&#64;"))
+	cmd.Env = workerEnv(claudeEnvPrefixes()...)
 	if req.WorkDir != "" {
 		cmd.Dir = req.WorkDir
 	}
