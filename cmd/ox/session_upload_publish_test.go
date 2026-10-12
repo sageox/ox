@@ -182,19 +182,29 @@ func TestUpload_NeverPublishesOverADifferentSession(t *testing.T) {
 	assert.True(t, session.IsHeld(cacheDir), "the held session stays held")
 }
 
-// Failure prevented: with agent.summarizer=off, a session held by an exit hook
-// (transcript only, no summary files) is published and left in the cache. The
-// daemon, which never reads agent.summarizer, finds a session with no summary
-// and runs the LLM on it.
-func TestUpload_SummarizerOffLeavesNothingForTheDaemon(t *testing.T) {
-	f := newDownloadLedgerFixture(t)
+// summarizerOff points the user config at agent.summarizer: off.
+func summarizerOff(t *testing.T, projectRoot string) {
+	t.Helper()
 	userConfig := filepath.Join(t.TempDir(), "config.yaml")
 	require.NoError(t, os.WriteFile(userConfig, []byte("agent_summarizer: \"off\"\n"), 0o600))
 	t.Setenv("OX_USER_CONFIG", userConfig)
-	require.Equal(t, config.AgentSummarizerOff, config.GetAgentSummarizer(f.projectRoot))
+	require.Equal(t, config.AgentSummarizerOff, config.GetAgentSummarizer(projectRoot))
+}
+
+// Failure prevented: with agent.summarizer=off, a session held by an exit hook
+// (transcript only, no summary files) is published and left in the cache. The
+// daemon, which never reads agent.summarizer, finds a session with no summary
+// and runs the LLM on it. And the opposite failure: removing that copy deletes
+// the context trace prime saved beside the transcript, which the publish never
+// copied.
+func TestUpload_SummarizerOffLeavesNothingForTheDaemon(t *testing.T) {
+	f := newDownloadLedgerFixture(t)
+	summarizerOff(t, f.projectRoot)
 	const name = "2026-10-05T10-00-devon-OxNoSm"
 	cacheDir := filepath.Join(f.ledgerPath, ".sageox", "cache", "sessions", name)
 	require.NoError(t, os.MkdirAll(cacheDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, "context-trace.jsonl"),
+		[]byte(`{"type":"provided","source":"team-context","doc":"conventions.md"}`+"\n"), 0o644))
 	// a conversation worth summarizing, so the daemon would run the LLM on it
 	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, ledgerFileRaw), []byte(`{"metadata":{"schema_version":"1","agent_type":"claude-code","username":"devon","agent_id":"OxNoSm"},"type":"header"}
 {"type":"user","content":"Refactor the ledger sync retry loop so failed pushes back off exponentially, and log each attempt with its delay.","seq":1}
@@ -207,9 +217,31 @@ func TestUpload_SummarizerOffLeavesNothingForTheDaemon(t *testing.T) {
 	require.NoError(t, sessionUploadCmd.RunE(sessionUploadCmd, []string{"OxNoSm"}))
 
 	assert.NotEqual(t, remoteBefore, runGit(t, f.barePath, "rev-parse", "HEAD"), "the publish reached the remote")
+	meta, err := lfs.ReadSessionMeta(filepath.Join(f.ledgerPath, "sessions", name))
+	require.NoError(t, err)
+	assert.Contains(t, meta.Files, "context-trace.jsonl", "the context trace is published with the transcript")
 	queued, llmRuns := runFinalizePass(t, f.projectRoot, f.ledgerPath)
 	assert.Zero(t, queued, "agent.summarizer=off: the daemon has nothing left to do")
 	assert.Zero(t, llmRuns, "agent.summarizer=off: the published session is never summarized")
+}
+
+// Failure prevented: with agent.summarizer=off, the published cache copy is
+// removed although it held a file the publish did not carry to the Ledger,
+// and that file is gone for good.
+func TestUpload_SummarizerOffKeepsACopyItDidNotFullyPublish(t *testing.T) {
+	f := newDownloadLedgerFixture(t)
+	summarizerOff(t, f.projectRoot)
+	const name = "2026-10-05T10-00-devon-OxKeEp"
+	cacheDir := filepath.Join(f.ledgerPath, ".sageox", "cache", "sessions", name)
+	require.NoError(t, os.MkdirAll(cacheDir, 0o755))
+	writeTestRawJSONLWithEntries(t, filepath.Join(cacheDir, ledgerFileRaw), 3)
+	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, "notes.txt"), []byte("not a session artifact"), 0o644))
+	require.NoError(t, session.WriteHoldMarker(cacheDir, session.HoldManualPublishing, "hook_end"))
+
+	require.NoError(t, sessionUploadCmd.RunE(sessionUploadCmd, []string{"OxKeEp"}))
+
+	assert.FileExists(t, filepath.Join(cacheDir, "notes.txt"), "a file the publish did not carry stays on this machine")
+	assert.FileExists(t, filepath.Join(cacheDir, ledgerFileRaw))
 }
 
 // Failure prevented: daemon recovery rebuilds a lost raw.jsonl header in the

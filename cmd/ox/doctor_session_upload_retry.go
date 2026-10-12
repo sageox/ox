@@ -16,6 +16,7 @@ import (
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
+	"github.com/sageox/ox/internal/session/pipeline"
 )
 
 func init() {
@@ -459,9 +460,12 @@ func retrySessionUploadWithEffects(projectRoot, ledgerPath string, orphan orphan
 		return fmt.Errorf("copy %s (critical): %w", ledgerFileRaw, err)
 	}
 
-	// copy secondary artifacts (best-effort — skip missing files, don't abort on failure)
-	secondaryFiles := []string{ledgerFileSummaryMD, ledgerFileSessionMD, ledgerFilePlan, "summary.json"}
-	for _, name := range secondaryFiles {
+	// copy secondary artifacts (best-effort — skip missing files, don't abort on failure).
+	// Every content file the upload knows, not a hand-kept subset: the cache is
+	// pruned after a successful retry, and a file left out of this copy (as
+	// context-trace.jsonl once was) is lost with it. Traces go through
+	// prepareRetryTraces.
+	for _, name := range retrySecondaryFiles() {
 		src := filepath.Join(orphan.CachePath, name)
 		dst := filepath.Join(sessionDir, name)
 		if err := copyFile(src, dst); err != nil {
@@ -568,6 +572,19 @@ func retrySessionUploadWithEffects(projectRoot, ledgerPath string, orphan orphan
 	}
 
 	return nil
+}
+
+// retrySecondaryFiles lists the artifacts a retry copies from the cache after
+// raw.jsonl: every committed content file except raw.jsonl and the traces,
+// plus summary.json, which is git-stored.
+func retrySecondaryFiles() []string {
+	names := []string{"summary.json"}
+	for _, name := range pipeline.LedgerContentFiles {
+		if name != ledgerFileRaw && !pipeline.IsTraceFile(name) {
+			names = append(names, name)
+		}
+	}
+	return names
 }
 
 // writeRetryUploadMeta records a retry-upload's results into meta.json,

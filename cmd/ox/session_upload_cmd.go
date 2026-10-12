@@ -395,6 +395,26 @@ func cachePublishBlocker(dir string) error {
 	return fmt.Errorf("session %s is still recording; stop it first with 'ox agent %s session stop'", name, state.AgentID)
 }
 
+// filesNotPublished lists what in the cache folder has no copy in the Ledger
+// session folder: any entry but a dotfile (local state, never content), a
+// directory included. An unreadable cache folder reports itself.
+func filesNotPublished(cacheDir, ledgerSessionDir string) []string {
+	entries, err := os.ReadDir(cacheDir)
+	if err != nil {
+		return []string{cacheDir}
+	}
+	var missing []string
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		if info, statErr := os.Lstat(filepath.Join(ledgerSessionDir, e.Name())); e.IsDir() || statErr != nil || !info.Mode().IsRegular() {
+			missing = append(missing, e.Name())
+		}
+	}
+	return missing
+}
+
 // publishCachedSession publishes a session from its cache copy through the
 // same upload path doctor's retry uses, synchronously. The hold is released
 // only after the commit lands. With a summarizer, .needs-summary is written
@@ -435,10 +455,14 @@ func publishCachedSession(projectRoot, ledgerPath, sessionName, cacheDir string)
 	}
 
 	if !summarize {
-		// The commit landed and nothing reads this copy now. Left in place,
-		// the daemon would find a session with no summary and summarize it,
-		// since it never reads agent.summarizer.
-		if err := os.RemoveAll(cacheDir); err != nil {
+		// The commit landed. Left in place, this copy would be summarized by
+		// the daemon, which never reads agent.summarizer. It is removed only
+		// when every file in it reached the Ledger: anything else would be
+		// lost with it, and a copy kept is worth more than a summary skipped.
+		ledgerSessionDir := filepath.Join(ledgerPath, "sessions", sessionName)
+		if missing := filesNotPublished(cacheDir, ledgerSessionDir); len(missing) > 0 {
+			slog.Warn("published session cache copy kept: some files did not reach the ledger", "session", sessionName, "files", missing)
+		} else if err := os.RemoveAll(cacheDir); err != nil {
 			slog.Warn("published session cache copy not removed", "session", sessionName, "dir", cacheDir, "error", err)
 		}
 	}
