@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -238,7 +239,16 @@ func conflictRepairMessage(ctx context.Context, ledgerPath string, paths []strin
 // pickMetaSide chooses, and any other file keeps its "Updated upstream" side.
 func resolveMarkedFile(ctx context.Context, ledgerPath, upstream, path string, committed []byte) string {
 	abs := filepath.Join(ledgerPath, filepath.FromSlash(path))
-	if working, err := os.ReadFile(abs); err != nil || !bytes.Equal(working, committed) {
+	working, err := os.ReadFile(abs)
+	switch {
+	case err == nil && bytes.Equal(working, committed):
+	case errors.Is(err, fs.ErrNotExist) && sparseExcluded(ctx, ledgerPath, path):
+		// nothing on disk to protect: the committed blob is the baseline, and `git add --sparse`
+		// stages the file written below
+		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+			return fmt.Sprintf("cannot create session directory: %v", err)
+		}
+	default:
 		return "working copy differs from the committed content (uncommitted local edit); commit or discard it first"
 	}
 	isMeta := strings.HasSuffix(path, "/meta.json")
@@ -321,6 +331,13 @@ func summaryRank(meta *lfs.SessionMeta) int {
 		return 0
 	}
 	return 1 // failed_validation, or a status this build does not know
+}
+
+// sparseExcluded reports whether sparse checkout leaves path out of the working tree (the index
+// entry carries skip-worktree), as on a clone whose manifest-driven checkout never reached it.
+func sparseExcluded(ctx context.Context, ledgerPath, path string) bool {
+	out, err := exec.CommandContext(ctx, "git", "-C", ledgerPath, "ls-files", "-t", "-z", "--", ":(literal)"+path).Output()
+	return err == nil && strings.HasPrefix(string(out), "S ")
 }
 
 // upstreamCleanContent returns the marker-free version the upstream branch holds at path.

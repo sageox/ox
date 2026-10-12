@@ -145,6 +145,45 @@ func TestResolveCommittedConflictMarkers_AlreadyPushed(t *testing.T) {
 	}
 }
 
+// Failure prevented: a clone whose sparse checkout left sessions/ out (a manifest-driven checkout
+// that stopped at .sageox/) reports every pushed file as an "uncommitted local edit" and repairs
+// nothing. A file deleted by hand, which is not sparse-excluded, must still be refused.
+func TestResolveCommittedConflictMarkers_SparseExcludedSessions(t *testing.T) {
+	ctx := context.Background()
+	remote, ledger := newPushedMarkedLedger(t)
+	mustRunGit(t, ledger, "sparse-checkout", "set", "--no-cone", "/.sageox/")
+	_, err := os.Stat(filepath.Join(ledger, filepath.FromSlash(pushedTie)))
+	require.ErrorIs(t, err, os.ErrNotExist, "the fixture must leave sessions/ out of the working tree")
+
+	report, err := resolveCommittedConflictMarkers(ctx, ledger, true)
+
+	require.NoError(t, err)
+	assert.Equal(t, allPushed, report.Resolved)
+	assert.Empty(t, report.Unrepairable)
+	assert.True(t, report.Committed)
+	assert.NoError(t, report.Remaining)
+	assert.Equal(t, recoveredResolved, ledgerFile(t, ledger, "HEAD:"+pushedRecovered))
+	assert.Equal(t, cleanPushedMeta, ledgerFile(t, ledger, "HEAD:"+pushedClean), "an unmarked sparse file stays as committed")
+
+	mustRunGit(t, ledger, "push", "origin", "main")
+	fresh := cloneLedger(t, remote, filepath.Join(filepath.Dir(ledger), "fresh"))
+	for _, path := range allPushed {
+		assert.NoError(t, sessionReadable(fresh, path), path)
+	}
+
+	t.Run("a file deleted by hand is still refused", func(t *testing.T) {
+		_, deleted := newPushedMarkedLedger(t)
+		require.NoError(t, os.Remove(filepath.Join(deleted, filepath.FromSlash(pushedTie))))
+
+		report, err := resolveCommittedConflictMarkers(ctx, deleted, true)
+
+		require.NoError(t, err)
+		require.Len(t, report.Unrepairable, 1)
+		assert.Equal(t, pushedTie, report.Unrepairable[0].Path)
+		assert.Contains(t, report.Unrepairable[0].Reason, "uncommitted local edit")
+	})
+}
+
 // Failure prevented: two teammates repair the same pushed markers before either sees the other's
 // commit, and the second push conflicts or the clones settle on different content.
 func TestResolveCommittedConflictMarkers_ConcurrentRepairsConverge(t *testing.T) {
