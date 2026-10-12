@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -101,6 +102,121 @@ func mustRunGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	out, err := runIsolatedGit(t, dir, args...)
 	require.NoErrorf(t, err, "git %s: %s", strings.Join(args, " "), out)
+}
+
+// noBackgroundGitMaintenance stops git from forking a detached
+// `git maintenance run --auto` (or `gc --auto`) into a fixture repository.
+// The *.auto keys keep it from triggering; the autoDetach keys make anything
+// that still triggers finish before the git command that started it returns.
+const noBackgroundGitMaintenance = `[gc]
+	auto = 0
+	autoDetach = false
+[maintenance]
+	auto = false
+	autoDetach = false
+[receive]
+	autogc = false
+`
+
+// disableBackgroundGitMaintenance appends noBackgroundGitMaintenance to the
+// repository's own config. gitDir is a bare repository, or a clone's .git.
+//
+// Repository config is the only place these settings reliably reach a bare
+// origin. A push to a local path starts receive-pack with GIT_CONFIG_COUNT and
+// GIT_CONFIG_PARAMETERS removed from its environment, so the Makefile's
+// TEST_GIT_ISOLATION never arrives there. receive-pack then runs
+// `git maintenance run --auto --detach` with git's defaults, the push returns
+// while that process is still writing into the origin, and t.TempDir()
+// cleanup fails with "unlinkat <origin>: directory not empty".
+func disableBackgroundGitMaintenance(t *testing.T, gitDir string) {
+	t.Helper()
+	f, err := os.OpenFile(filepath.Join(gitDir, "config"), os.O_APPEND|os.O_WRONLY, 0)
+	require.NoError(t, err, "open git config in %s", gitDir)
+	_, writeErr := f.WriteString(noBackgroundGitMaintenance)
+	require.NoError(t, f.Close())
+	require.NoError(t, writeErr)
+}
+
+// initBareRemote creates a bare repository at path to stand in for a hosted
+// origin, with background maintenance disabled. initArgs go to `git init`,
+// e.g. "--initial-branch=main". Every bare origin in this package's tests is
+// created here or by cloneBareRemote (TestBareRemoteFixturesGoThroughHelpers).
+func initBareRemote(t *testing.T, path string, initArgs ...string) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(path, 0o755))
+	mustRunGit(t, path, append([]string{"init", "-q", "--bare"}, initArgs...)...)
+	disableBackgroundGitMaintenance(t, path)
+}
+
+// cloneBareRemote is initBareRemote for an origin seeded from source.
+func cloneBareRemote(t *testing.T, source, path string) {
+	t.Helper()
+	mustRunGit(t, filepath.Dir(path), "clone", "-q", "--bare", source, path)
+	disableBackgroundGitMaintenance(t, path)
+}
+
+// A push into a fixture origin must not leave a git process running there.
+// Failure prevented: receive-pack forks a detached maintenance run into the
+// origin, the test returns, and t.TempDir() cleanup fails with "directory not
+// empty" — the CI-only flake in
+// TestRunPlanBackfillTitlesOnLedger_IncompleteCorpusAbortsInDryRun.
+func TestInitBareRemote_PushStartsNoBackgroundMaintenance(t *testing.T) {
+	root := t.TempDir()
+	origin := filepath.Join(root, "origin.git")
+	initBareRemote(t, origin)
+	work := filepath.Join(root, "work")
+	require.NoError(t, os.MkdirAll(work, 0o755))
+	initGitRepo(t, work)
+	mustRunGit(t, work, "remote", "add", "origin", origin)
+
+	trace := filepath.Join(root, "trace2.jsonl")
+	cmd := exec.Command("git", "push", "-q", "origin", "HEAD:refs/heads/main")
+	cmd.Dir = work
+	cmd.Env = append(isolatedGitEnv(work), "GIT_TRACE2_EVENT="+trace)
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "git push: %s", out)
+
+	raw, err := os.ReadFile(trace)
+	require.NoError(t, err)
+	sawReceivePack := false
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		var event struct {
+			Event string   `json:"event"`
+			Argv  []string `json:"argv"`
+		}
+		require.NoError(t, json.Unmarshal([]byte(line), &event), line)
+		if event.Event == "start" && strings.Contains(strings.Join(event.Argv, " "), "receive-pack") {
+			sawReceivePack = true
+		}
+		if event.Event == "child_start" && len(event.Argv) > 1 && (event.Argv[1] == "maintenance" || event.Argv[1] == "gc") {
+			t.Errorf("push started background maintenance in the fixture origin: %s", strings.Join(event.Argv, " "))
+		}
+	}
+	// Without receive-pack's own events, the absence of a maintenance child
+	// above would prove nothing.
+	require.True(t, sawReceivePack, "trace2 never reached the receiving side of the push")
+}
+
+// Failure prevented: a new fixture runs `git init --bare` directly, keeps
+// git's default receive.autogc, and brings back the background-maintenance
+// cleanup flake, which appears only on a loaded CI runner.
+func TestBareRemoteFixturesGoThroughHelpers(t *testing.T) {
+	files, err := filepath.Glob(repoPath("*_test.go"))
+	require.NoError(t, err)
+	require.NotEmpty(t, files, "no test sources under %s", packageDir)
+	for _, file := range files {
+		if filepath.Base(file) == "test_helpers_test.go" {
+			continue
+		}
+		data, err := os.ReadFile(file)
+		require.NoError(t, err)
+		for i, line := range strings.Split(string(data), "\n") {
+			if strings.Contains(line, `"--bare"`) {
+				t.Errorf("%s:%d creates a bare repository directly; use initBareRemote or cloneBareRemote: %s",
+					filepath.Base(file), i+1, strings.TrimSpace(line))
+			}
+		}
+	}
 }
 
 // initGitRepo creates a minimal git repo in the given directory. Keep this

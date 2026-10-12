@@ -330,7 +330,7 @@ func TestCheckLedgerBranchStatus_UnbornHead(t *testing.T) {
 		root := t.TempDir()
 		bare := filepath.Join(root, "bare.git")
 		repo := filepath.Join(root, "ledger")
-		gitRun(t, root, "init", "--bare", "--initial-branch=main", bare)
+		initBareRemote(t, bare, "--initial-branch=main")
 		gitRun(t, root, "clone", bare, repo)
 		// content on disk, zero commits — exactly the production shape
 		require.NoError(t, os.MkdirAll(filepath.Join(repo, "sessions", "s1"), 0o755))
@@ -352,7 +352,7 @@ func TestCheckLedgerBranchStatus_UnbornHead(t *testing.T) {
 		bare := filepath.Join(root, "bare.git")
 		seed := filepath.Join(root, "seed")
 		repo := filepath.Join(root, "ledger")
-		gitRun(t, root, "init", "--bare", "--initial-branch=main", bare)
+		initBareRemote(t, bare, "--initial-branch=main")
 		gitRun(t, root, "clone", bare, seed)
 		require.NoError(t, os.WriteFile(filepath.Join(seed, "AGENTS.md"), []byte("# Ledger\n"), 0o644))
 		gitRun(t, seed, "add", "-A")
@@ -419,7 +419,7 @@ func TestUnbornLedger_UnreachableRemoteNeverSuggestsSeeding(t *testing.T) {
 		root := t.TempDir()
 		bare := filepath.Join(root, "bare.git")
 		repo := filepath.Join(root, "ledger")
-		gitInit(t, root, "init", "--bare", "--initial-branch=main", bare)
+		initBareRemote(t, bare, "--initial-branch=main")
 		gitInit(t, root, "clone", bare, repo)
 		require.NoError(t, os.WriteFile(filepath.Join(repo, "note.txt"), []byte("x"), 0o644))
 
@@ -457,7 +457,7 @@ func TestUnbornLedger_FailedRepairStaysCritical(t *testing.T) {
 		// let the test run against a repo in an unintended state and "pass".
 		require.NoError(t, err, "fixture git %v failed: %s", args, out)
 	}
-	run(root, "init", "--bare", "--initial-branch=main", bare)
+	initBareRemote(t, bare, "--initial-branch=main")
 	run(root, "clone", bare, repo)
 	run(root, "clone", bare, seed)
 	require.NoError(t, os.WriteFile(filepath.Join(seed, "a.txt"), []byte("a"), 0o644))

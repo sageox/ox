@@ -117,7 +117,7 @@ func TestSaveGitCredentialsFromRepos_BindsBearer(t *testing.T) {
 		t.Run(outcome, func(t *testing.T) {
 			gitRoot := t.TempDir()
 			ledger := filepath.Join(gitRoot, "ledger.git")
-			hostedTestGit(t, gitRoot, "init", "--bare", ledger)
+			initBareRemote(t, ledger)
 			backend := &cgi.Handler{Path: filepath.Join(hostedTestGit(t, gitRoot, "--exec-path"), "git-http-backend"), Env: []string{"GIT_PROJECT_ROOT=" + gitRoot, "GIT_HTTP_EXPORT_ALL=1"}}
 			var calls, oldProbes, freshProbes atomic.Int32
 			var rejectPAT atomic.Bool

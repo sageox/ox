@@ -247,6 +247,13 @@ GOTESTSUM_TIMINGS = $(if $(strip $(TEST_TIMINGS)),--jsonfile-timing-events "$(TE
 # all four — collapsing this back to just gc.auto=0 quietly reopens the
 # fork-and-return race for any path that doesn't honor gc.auto.
 #
+# None of these reach a bare origin's receive-pack. For a push to a local
+# path, git starts receive-pack with GIT_CONFIG_COUNT and
+# GIT_CONFIG_PARAMETERS removed from its environment, so receive-pack runs
+# with git's defaults and forks a detached `git maintenance run --auto` into
+# the origin. A test origin must carry these settings in its own config — in
+# cmd/ox, create it with initBareRemote (cmd/ox/test_helpers_test.go).
+#
 # Known, acceptable interaction: a handful of tests build their own
 # GIT_CONFIG_COUNT env for a specific git invocation (e.g.
 # cmd/ox/doctor_ledger_git_test.go, internal/kb/multiwriter_test.go,

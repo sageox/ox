@@ -17,10 +17,7 @@ import (
 func setupBareRemote(t *testing.T) string {
 	t.Helper()
 	bareDir := filepath.Join(t.TempDir(), "remote.git")
-
-	cmd := exec.Command("git", "init", "--bare", bareDir)
-	require.NoError(t, cmd.Run(), "failed to create bare remote")
-
+	initBareRemote(t, bareDir)
 	return bareDir
 }
 

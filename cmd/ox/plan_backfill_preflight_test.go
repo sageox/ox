@@ -3,7 +3,6 @@ package main
 import (
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -21,16 +20,15 @@ import (
 // that an abort here actually stops the command before it does anything —
 // including in dry-run mode, which is the whole point of Guard 1.
 
-// runGitInDir runs a git command in dir, failing the test on error.
+// runGitInDir runs a git command in dir with the host's git config scrubbed
+// (isolatedGitEnv), failing the test on error.
 func runGitInDir(t *testing.T, dir string, args ...string) string {
 	t.Helper()
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
+	out, err := runIsolatedGit(t, dir, args...)
 	if err != nil {
 		t.Fatalf("git %v (in %s): %v\n%s", args, dir, err, out)
 	}
-	return string(out)
+	return out
 }
 
 // initGitLedgerWithOrigin builds a local git repo AND a bare "origin" remote
@@ -58,7 +56,7 @@ func initGitLedgerWithOrigin(t *testing.T, ledgerPath string) (originPath string
 	runGitInDir(t, ledgerPath, "commit", "-q", "-m", "init")
 
 	originPath = t.TempDir()
-	runGitInDir(t, originPath, "init", "-q", "--bare")
+	initBareRemote(t, originPath)
 	runGitInDir(t, ledgerPath, "remote", "add", "origin", originPath)
 	runGitInDir(t, ledgerPath, "push", "-q", "-u", "origin", "main")
 	return originPath
