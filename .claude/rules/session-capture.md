@@ -27,4 +27,4 @@ ox agent <id> session import --file planning.jsonl --title "Plan"
 
 ## Capturing Prior Planning (Before `ox session start`)
 
-Reconstruct conversation as JSONL with `seq`, `type`, `content`, `ts` (ISO8601), `source: "planning_history"`. First line must be `_meta` header. Pipe to `ox agent <id> session capture-prior`.
+Reconstruct conversation as JSONL with `seq`, `type`, `content`, `ts` (ISO8601), `source: "planning_history"`. First line must be a `_meta` header with `schema_version`, `source` (`agent_reconstruction`) and `agent_id`; capture-prior rejects a header without them. Pipe to `ox agent <id> session capture-prior`.

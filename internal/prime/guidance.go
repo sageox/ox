@@ -301,14 +301,15 @@ func BuildCapturePriorGuidance(agentID string) *CapturePriorGuidance {
 		Instructions: []string{
 			"Reconstruct your conversation history as JSONL",
 			"Include: seq (number), type (user|assistant), content, ts (ISO8601 if known)",
-			"First line must be _meta with schema_version and agent_type",
+			// keep in step with session.ValidateCapturePriorInput; the example test enforces it
+			"First line must be _meta with schema_version, source (agent_reconstruction) and agent_id",
 			"Mark entries with source: planning_history",
 			fmt.Sprintf("Pipe to: ox agent %s session capture-prior", agentID),
 		},
 		Example: fmt.Sprintf(`ox agent %s session capture-prior << 'EOF'
-{"_meta":{"schema_version":"1","agent_type":"claude-code","session_id":"manual","started_at":"%s"}}
+{"_meta":{"schema_version":"1","source":"agent_reconstruction","agent_id":"%s","agent_type":"claude-code","started_at":"%s"}}
 {"seq":1,"type":"user","content":"<user prompt>","ts":"%s","source":"planning_history"}
 {"seq":2,"type":"assistant","content":"<assistant response>","ts":"%s","source":"planning_history"}
-EOF`, agentID, now, now, now),
+EOF`, agentID, agentID, now, now, now),
 	}
 }
