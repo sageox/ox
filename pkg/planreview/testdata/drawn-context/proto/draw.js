@@ -15,9 +15,9 @@
   var SVGNS = 'http://www.w3.org/2000/svg';
   // review.js SELECTOR for generated pages plus chrome.js's for authored ones.
   var MARKABLE = 'section[id],[data-ox-section],h1,h2,h3,h4,p,li,tr,pre,blockquote,figure,.ox-chip,.stat,.bar-row';
-  // Bounds on one capture. bytes is the serialized context; see the spec for
-  // the measurements behind it.
-  var LIMIT = { points: 512, targets: 16, items: 48, labels: 32, text: 280, label: 80, bytes: 16384, keys: 128 };
+  // Bounds on one capture. bytes is the serialized context in UTF-8; see the
+  // spec for the measurements behind it.
+  var LIMIT = { points: 512, targets: 16, items: 48, labels: 32, text: 600, targetText: 2000, label: 80, bytes: 16384, keys: 128 };
   var TOL = 1; // css px: geometry within this of the capture is unchanged
 
   function r1(n) { return Math.round(n * 10) / 10; }
@@ -108,6 +108,10 @@
           out.appendChild(mk('rect', { x: l.box[0], y: l.box[1], width: l.box[2], height: l.box[3], fill: 'none', stroke: '#97aebd', 'stroke-width': 0.5 }));
           out.appendChild(mk('text', { x: l.box[0] + 2, y: l.box[1] + Math.min(l.box[3], 14) - 3, 'font-size': 11, fill: '#97aebd' }, l.text));
         });
+        // whatever text the labels do not account for (a figure's caption)
+        // goes along the bottom of the item's box
+        var rest = it.labels.reduce(function (t, l) { return t.replace(l.text, ' '); }, it.text).replace(/\s+/g, ' ').trim();
+        if (rest) out.appendChild(mk('text', { x: x + 2, y: y + h - 4, 'font-size': 11, fill: '#b7b6a3' }, rest));
         return;
       }
       // wrap the item's text at ~7px a character, as many lines as its box holds
@@ -119,6 +123,9 @@
       out.appendChild(text);
     });
     inkInto(out, mk, inkLine(rec), [0, 0], '#d9b654', 0.95);
+    if (rec.context && rec.context.truncated) {
+      out.appendChild(mk('text', { x: vb[0] + 4, y: vb[1] + vb[3] - 6, 'font-size': 11, fill: '#c6a23c' }, 'context truncated: some of what lay here was not kept'));
+    }
     return out;
   }
 
@@ -208,11 +215,14 @@
   function leafMost(list) { return list.filter(function (c) { return !list.some(function (d) { return d !== c && c.el.contains(d.el); }); }); }
   function outerMost(list) { return list.filter(function (c) { return !list.some(function (d) { return d !== c && d.el.contains(c.el); }); }); }
   function clip(s, n) { return s.length > n ? s.slice(0, n - 1) + '…' : s; }
+  // utf8Bytes is the size of v as stored: UTF-8 JSON, not JavaScript string units
+  function utf8Bytes(v) { return new TextEncoder().encode(JSON.stringify(v)).length; }
 
   // --- layout context: the conditions the geometry was captured under ---
   function detailsKey(d) { var s = d.querySelector('summary'); return 'd' + fnv1a(norm(s ? s.textContent : '')); }
   function inputKey(i) { return i.id ? '#' + i.id : i.name + '=' + i.value; }
   function layoutContext() {
+    fitLayer(); // so document below is the page's size, not a stale layer's
     var open = [], checked = [];
     document.querySelectorAll('details[open]').forEach(function (d) { if (!d.closest('.oxd')) open.push(detailsKey(d)); });
     document.querySelectorAll('input[type=radio]:checked, input[type=checkbox]:checked').forEach(function (i) { checked.push(inputKey(i)); });
@@ -305,7 +315,7 @@
         if (same.length > 1) { t.nth = same.indexOf(c); t.of = same.length; }
         return t;
       }),
-      context: contextOf(shown, bb)
+      context: contextOf(shown, bb, targets)
     };
   }
   // thin drops points closer than 2px to the last kept one, then strides the
@@ -323,22 +333,27 @@
   // the text the reader saw (innerText: rendered text only, cells and lines
   // kept apart) and any diagram labels — so the drawing can be shown again
   // after the page has changed. Bounded by LIMIT; truncated says so.
-  function contextOf(shown, bb) {
+  function contextOf(shown, bb, targets) {
     var m = 16, zone = [bb[0] - m, bb[1] - m, bb[2] + 2 * m, bb[3] + 2 * m];
     var cx = bb[0] + bb[2] / 2, cy = bb[1] + bb[3] / 2;
     var near = leafMost(shown.filter(function (c) { return overlaps(c.box, zone); }));
     near.sort(function (a, b) { return dist(a.box) - dist(b.box); });
     function dist(b) { return Math.abs(b[0] + b[2] / 2 - cx) + Math.abs(b[1] + b[3] / 2 - cy); }
     var ctx = { items: [], truncated: near.length > LIMIT.items };
+    // cut clips s to n characters, and marks the context truncated when it does
+    function cut(s, n) { if (s.length > n) ctx.truncated = true; return clip(s, n); }
     near.slice(0, LIMIT.items).forEach(function (c) {
-      var it = { anchor: c.anchor, tag: c.el.tagName.toLowerCase(), box: c.box, text: clip(collapse(c.el.innerText === undefined ? stableText(c.el) : c.el.innerText), LIMIT.text) };
-      if (!it.text) { var img = c.el.querySelector('img[alt]'); if (img) it.text = clip('[image: ' + collapse(img.alt) + ']', LIMIT.text); }
+      var text = collapse(c.el.innerText === undefined ? stableText(c.el) : c.el.innerText);
+      if (!text) { var img = c.el.querySelector('img[alt]'); if (img) text = '[image: ' + collapse(img.alt) + ']'; }
+      // an enclosed element keeps its words whole; a neighbour is only context
+      var it = { anchor: c.anchor, tag: c.el.tagName.toLowerCase(), box: c.box, text: cut(text, targets.indexOf(c) >= 0 ? LIMIT.targetText : LIMIT.text) };
       var labels = labelsIn(c.el, zone);
       if (labels.length > LIMIT.labels) { ctx.truncated = true; labels = labels.slice(0, LIMIT.labels); }
+      labels.forEach(function (l) { l.text = cut(l.text, LIMIT.label); });
       if (labels.length) it.labels = labels;
       ctx.items.push(it);
     });
-    while (JSON.stringify(ctx).length > LIMIT.bytes && ctx.items.length > 1) { ctx.items.pop(); ctx.truncated = true; }
+    while (utf8Bytes(ctx) > LIMIT.bytes && ctx.items.length > 1) { ctx.items.pop(); ctx.truncated = true; }
     return ctx;
   }
   // labelsIn: the text a diagram draws inside el — Mermaid node, edge and
@@ -348,7 +363,7 @@
     el.querySelectorAll('svg g.node, svg g.edgeLabel, svg g.cluster, svg text').forEach(function (n) {
       if (n.tagName.toLowerCase() === 'text' && n.closest('g.node, g.edgeLabel, g.cluster')) return;
       var t = collapse(n.textContent), b = t && shownBox(n);
-      if (b && overlaps(b, zone)) out.push({ text: clip(t, LIMIT.label), box: b });
+      if (b && overlaps(b, zone)) out.push({ text: t, box: b });
     });
     return out;
   }
@@ -407,8 +422,14 @@
   function svg(tag, attrs) { var n = document.createElementNS(SVGNS, tag); for (var k in attrs) n.setAttribute(k, attrs[k]); return n; }
   // the design register's gold: #d9b654 on dark pages, #836726 on light ones
   function inkColor() { return document.documentElement.getAttribute('data-theme') === 'light' ? '#836726' : '#d9b654'; }
+  // fitLayer sizes the layer to the page. It zeroes the layer first: an
+  // absolutely positioned child of <html> counts toward the root's scroll size,
+  // so measuring with the old size in place would never let the page shrink.
   function fitLayer() {
-    var root = document.documentElement, o = layer.getBoundingClientRect();
+    var root = document.documentElement;
+    layer.setAttribute('width', 0);
+    layer.setAttribute('height', 0);
+    var o = layer.getBoundingClientRect();
     layer.setAttribute('width', root.scrollWidth);
     layer.setAttribute('height', root.scrollHeight);
     ink.setAttribute('transform', 'translate(' + r1(-(o.left + scrollX)) + ' ' + r1(-(o.top + scrollY)) + ')');
@@ -476,6 +497,10 @@
   // Scrolling mid-stroke moves the page under a still pointer: record where
   // the pointer now is in the document, so the stroke follows the content.
   window.addEventListener('scroll', function () { if (stroke && lastClient) addPoint(lastClient[0], lastClient[1]); });
+  // Scrolling an element (an overflowing table or panel) moves its content
+  // within the page, so placement is derived again: the drawing follows its
+  // target, or is hidden once the target scrolls out of view.
+  document.addEventListener('scroll', function (e) { if (e.target !== document) schedulePaint(); }, true);
   // A resize mid-stroke reflows the content the stroke was drawn over, so the
   // stroke is abandoned rather than captured against a layout that is gone.
   window.addEventListener('resize', function () { if (stroke) abort('layout-changed'); schedulePaint(); });

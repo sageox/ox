@@ -121,6 +121,7 @@ and fonts as `expect.json`'s `environment`.
 | Pinch zoom (visual viewport) | No effect: client coordinates and boxes stay in layout-viewport px | `r10`: drawn at scale 2, `exact` at scale 1 |
 | Resize during a stroke | The stroke is abandoned, `layout-changed` | Refused in the evidence run |
 | Resize, toggle or tab change after capture | Placement is derived again; nothing stored changes | A live 1280→1024 resize moved every drawing −128 px without a reload |
+| Scroll inside an element (an overflowing table or panel) | Placement is derived again: the drawing follows its target, or is `hidden` once the target scrolls out of view | On a probe page, a 40 px scroll moved a drawing 0,−40, and scrolling its target out of view hid it |
 | `<details>` closed, or a CSS tab unchecked, since capture | The drawing is `hidden`, never placed elsewhere. Show reopens what capture recorded and any `<details>` around a target | `r5`, `r6`: `hidden` on every revision, placed after Show |
 
 Current Chrome hides a closed `<details>`'s content with
@@ -168,32 +169,42 @@ and leaves the drawing off the page.
 
 ## 4. View original
 
-The host redraws a drawing from the record alone: each context item as a box
-with its text, diagram labels at their own boxes, then the inked ellipse, in
-the record's frame. It names the revision and layout, says when that revision is
-not the one on screen, and inserts text as text nodes, never markup. It needs
-neither the framed document nor the revision's bytes. On revision c the
-harness shows the original sentence and the "Retry budget" node inside their
-ellipses.
+The host redraws a drawing from the record alone, in the record's frame:
+
+- each context item as a box with its text;
+- diagram labels at their own boxes, with any text the labels don't account
+  for (a figure's caption) along the bottom of the item;
+- then the inked ellipse;
+- and, when the context was cut, a "context truncated" note.
+
+It names the revision and layout, says when that revision is not the one on
+screen, and inserts text as text nodes, never markup. It needs neither the
+framed document nor the revision's bytes. On revision c the harness shows the
+original sentence and the "Retry budget" node inside their ellipses.
 
 ## 5. Inline context, not an attachment
 
 **Decision:** the original context travels inline in the record, bounded. No
 attachment.
 
-Synthetic strokes over 42 authored plans from one team Ledger plus revision a,
-at 1280×800. The raster column is a Chrome screenshot of the same box: what an
-image attachment would weigh.
+Synthetic strokes over 42 authored plans from one team Ledger, at 1280×800.
+Sizes are UTF-8 bytes. The raster column is a Chrome screenshot of the same box:
+what an image attachment would weigh.
 
-| Stroke around | Records | Record p50 / p95 / max | 2× PNG p50 / p95 / max |
-|---|---|---|---|
-| one element | 1,399 | 1.0 / 1.5 / 3.2 KB | 22 / 69 / 156 KB |
-| a section | 168 | 3.1 / 7.6 / 12.6 KB | 253 KB / 1.42 MB / 2.1 MB |
-| a viewport | 266 | 3.3 / 5.5 / 6.8 KB | 316 / 503 / 559 KB |
-| the whole page | 43 | 5.9 / 11.9 / 12.1 KB | — |
+| Stroke around | Records | Record p50 / p95 / max | 2× PNG p50 / p95 / max | Context truncated |
+|---|---|---|---|---|
+| one element | 1,379 | 1.1 / 1.7 / 3.2 KB | 22 / 69 / 156 KB | 1.9% |
+| a section | 157 | 3.3 / 8.2 / 13.4 KB | 253 KB / 1.42 MB / 2.1 MB | 8.9% |
+| a viewport | 240 | 3.7 / 5.7 / 6.9 KB | 317 / 503 / 559 KB | 7.9% |
+| the whole page | 32 | 6.3 / 12.8 / 13.0 KB | — | 37.5% |
 
-Capture, including the ellipse fit, took at most 5.0 ms. Context was truncated
-only for 11 whole-page strokes and 3 section strokes.
+Capture, including the ellipse fit, took at most 5.1 ms.
+
+The text caps come from the same plans. Of their 1,982 visible leaf elements,
+the median holds 105 characters of text and p99 holds 603; 3 exceed 2,000. An
+element the drawing encloses therefore keeps up to 2,000 characters, and a
+neighbour up to 600. An earlier cap of 280 for every item cut the text of 24% of
+single-element drawings.
 
 Refused: 9 viewport and 10 whole-page strokes covered more than 16 separate
 elements (`too-large`); 8 section and 15 viewport strokes enclosed nothing
@@ -221,9 +232,12 @@ Why inline:
 |---|---|
 | path | 512 points, thinned beyond that |
 | targets | 16 |
-| context items | 48, each with text ≤ 280 chars and ≤ 32 labels of ≤ 80 chars |
-| serialized context | 16 KiB; observed max 11,479 bytes, truncation flagged |
-| whole record (host refuses larger) | 64 KiB; observed max 12,601 bytes |
+| context items | 48; an enclosed element's text ≤ 2,000 characters, a neighbour's ≤ 600; ≤ 32 labels of ≤ 80 characters |
+| serialized context | 16 KiB of UTF-8; observed max 12,249 bytes |
+| whole record (host refuses larger) | 64 KiB of UTF-8; observed max 13,379 bytes |
+
+Every cut (an item, a label, a clipped text) sets `context.truncated`, and View
+original says so.
 
 These sit inside the 1 MiB review request cap (`reviewBodyLimit`) and the
 Ledger contract's 8 MiB record limit (§3.6).
@@ -267,9 +281,11 @@ style was needed.
 
 **Host rules:**
 
-- Accept a message only from the frame's window, with origin `"null"`, the
-  current instance id (passed in the frame URL's fragment), a valid shape and
-  at most 64 KiB.
+- Accept a message only from the frame's window, with origin `"null"` and the
+  current instance id (passed in the frame URL's fragment).
+- Accept a capture only if every field the host later reads is well-formed:
+  path, ellipse, targets, layout, and each context item and label. It must
+  also be at most 64 KiB of UTF-8.
 - Mint `id`, stamp `plan_revision` and `created_at`.
 - The document accepts messages only from its parent.
 - A forged capture posted from another window was ignored.
