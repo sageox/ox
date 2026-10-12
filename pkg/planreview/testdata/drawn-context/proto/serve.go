@@ -81,7 +81,7 @@ func main() {
 			http.NotFound(w, r)
 			return
 		}
-		cfg, _ := json.Marshal(map[string]string{"name": name, "plan_revision": rev, "doc": "/doc/" + name + "?embed=1"})
+		cfg, _ := json.Marshal(map[string]string{"name": name, "plan_revision": rev})
 		page := strings.Replace(string(mustRead(filepath.Join(protoDir, "host.html"))),
 			"</head>", `<script type="application/json" id="ox-host-config">`+string(cfg)+"</script></head>", 1)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")

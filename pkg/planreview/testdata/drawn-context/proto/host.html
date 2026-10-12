@@ -38,7 +38,9 @@ code{font-size:11px;color:#b7b6a3}
   var frame = document.getElementById('doc');
   var state = window.OxHost = { records: [], outcomes: {}, rejected: [], ready: null, checks: null };
   var instance = newId(), drawing = false;
-  frame.src = cfg.doc + '#i=' + instance;
+  // the frame's URL is built here from the revision's name, never taken
+  // whole from page text, so no config can point the frame at a script URL
+  frame.src = '/doc/' + encodeURIComponent(cfg.name) + '?embed=1#i=' + instance;
 
   function newId() { return crypto.randomUUID(); }
   function post(msg) { msg.ox = 'draw'; frame.contentWindow.postMessage(msg, '*'); }
