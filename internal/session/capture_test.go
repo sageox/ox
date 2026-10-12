@@ -92,6 +92,38 @@ func TestCapturePrior_HeaderWithoutAgentIDUsesCommandLine(t *testing.T) {
 	}
 }
 
+// Failure prevented: the adapter path (a native transcript read by capture-prior with no piped
+// input) storing a history under no agent ID, losing its adapter source, or storing a header the
+// strict readers reject.
+func TestCapturePriorFromHistory_ResolvesAgentID(t *testing.T) {
+	newHistory := func(meta *HistoryMeta) *CapturedHistory {
+		return &CapturedHistory{
+			Meta:    meta,
+			Entries: []HistoryEntry{{Seq: 1, Type: "user", Content: "Hello"}, {Seq: 2, Type: "assistant", Content: "Hi"}},
+		}
+	}
+
+	t.Run("command-line agent ID fills the header, adapter source kept", func(t *testing.T) {
+		isolateCaptureStorage(t)
+		meta := &HistoryMeta{SchemaVersion: HistorySchemaVersion, Source: HistorySourceAdapterImport}
+
+		result, err := CapturePriorFromHistory(newHistory(meta), CaptureOptions{AgentID: "Oxa7b3", SkipRedaction: true})
+
+		require.NoError(t, err)
+		stored, err := ParseHistoryFile(result.Path)
+		require.NoError(t, err)
+		assert.Equal(t, "Oxa7b3", stored.Meta.AgentID)
+		assert.Equal(t, HistorySourceAdapterImport, stored.Meta.Source)
+	})
+
+	t.Run("no agent ID anywhere is refused", func(t *testing.T) {
+		_, err := CapturePriorFromHistory(newHistory(&HistoryMeta{SchemaVersion: HistorySchemaVersion}), CaptureOptions{})
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "agent_id required")
+	})
+}
+
 // Failure prevented: relaxing the capture-prior header check so far that a line with no
 // schema_version, which may not be a header at all, is accepted.
 func TestCapturePrior_HeaderStillNeedsSchemaVersion(t *testing.T) {
