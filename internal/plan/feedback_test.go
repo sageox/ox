@@ -344,7 +344,7 @@ func TestReviewContractFixtures(t *testing.T) {
 		RemappedFrom string `json:"remapped_from,omitempty"`
 	}
 	const root = "../../pkg/planreview/testdata/review-contract"
-	for _, name := range []string{"corrupt-records", "many-rounds", "resolution-layouts", "same-id", "unknown-fields"} {
+	for _, name := range []string{"corrupt-records", "many-rounds", "region-items", "resolution-layouts", "same-id", "unknown-fields"} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			raw, err := os.ReadFile(filepath.Join(root, name, "expect.json"))

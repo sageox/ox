@@ -31,6 +31,10 @@ computes them with `Rebind` and records each with `RemapRecord`.
 what assembling it yields (`expect.json`); `testdata/anchors.json` holds the
 review page's anchor, label and markable-element vectors. Record files in the
 fixtures never change: hosts compare against them byte for byte.
+`testdata/drawn-context/` holds the drawn-region prototype a host qualifies
+its viewer with (a document tool, an opaque-origin harness and a local server)
+and its plan revisions, captures and expected placements; no module code reads
+it (`docs/specs/plan-review-drawn-context.md`).
 
 Run `go test -race ./...` in this directory or `make test-public-modules` at the
 repository root. Root `go test ./...` does not reach this nested module.

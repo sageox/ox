@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drawn-region harness (opaque-origin host)</title>
+<!-- Host half of the ox#1292 prototype. It frames the plan document under
+     sandbox="allow-scripts" — an opaque origin with no storage, cookies,
+     parent access or (with serve.go's CSP) network — and is the only trusted
+     party: it mints each drawing's id and stamps the revision it framed,
+     ignoring any such claim from the document. serve.go adds the config. -->
+<style>
+body{margin:0;font:13px/1.5 system-ui,sans-serif;background:#0b0d0b;color:#f4f2ef;display:grid;grid-template-columns:auto 360px;height:100vh}
+iframe{width:920px;height:100vh;border:0;background:#fff}
+aside{overflow:auto;padding:12px;border-left:1px solid #212620}
+button{font:inherit;margin:0 4px 4px 0}
+.on{outline:2px solid #d9b654}
+li{margin-bottom:8px}
+code{font-size:11px;color:#b7b6a3}
+.fail{color:#d77e6c}.pass{color:#99c693}
+#original svg{background:#111411;max-width:100%;height:auto}
+</style>
+<script src="/proto/draw.js" data-role="host"></script>
+</head>
+<body>
+<iframe id="doc" sandbox="allow-scripts" title="Plan"></iframe>
+<aside>
+<button id="draw" title="Draw around part of the plan">Draw</button>
+<div id="probe"></div>
+<ol id="list"></ol>
+<div id="checks"></div>
+<div id="original"></div>
+</aside>
+<script>
+(function () {
+  'use strict';
+  var cfg = JSON.parse(document.getElementById('ox-host-config').textContent);
+  var params = new URLSearchParams(location.search);
+  var frame = document.getElementById('doc');
+  var state = window.OxHost = { records: [], outcomes: {}, rejected: [], ready: null, checks: null };
+  var instance = newId(), drawing = false;
+  frame.src = cfg.doc + '#i=' + instance;
+
+  function newId() { return crypto.randomUUID(); }
+  function post(msg) { msg.ox = 'draw'; frame.contentWindow.postMessage(msg, '*'); }
+  function num(n) { return typeof n === 'number' && isFinite(n); }
+  function box(b) { return Array.isArray(b) && b.length === 4 && b.every(num); }
+  // invalid returns why a capture is refused, or '' — the document is
+  // untrusted, so its message is data to check, never authority.
+  function invalid(c) {
+    if (!c || c.v !== 1 || c.kind !== 'region' || c.frame !== 'document') return 'shape';
+    if (!Array.isArray(c.path) || c.path.length < 3 || c.path.length > 512 || !c.path.every(function (p) { return Array.isArray(p) && p.length === 2 && num(p[0]) && num(p[1]); })) return 'path';
+    if (!box(c.bbox)) return 'bbox';
+    var e = c.ellipse;
+    if (!e || !Array.isArray(e.center) || e.center.length !== 2 || !e.center.every(num) || !Array.isArray(e.radii) || e.radii.length !== 2 ||
+      !e.radii.every(function (r) { return num(r) && r > 0; }) || !num(e.rotation) || !num(e.start) || (e.dir !== 1 && e.dir !== -1)) return 'ellipse';
+    if (!Array.isArray(c.targets) || !c.targets.length || c.targets.length > 16) return 'targets';
+    if (!c.targets.every(function (t) { return t && /^h[0-9a-f]{8}$/.test(t.anchor) && box(t.box); })) return 'targets';
+    if (!c.context || !Array.isArray(c.context.items)) return 'context';
+    if (JSON.stringify(c).length > 64 * 1024) return 'size';
+    return '';
+  }
+
+  window.addEventListener('message', function (e) {
+    var d = e.data;
+    if (e.source !== frame.contentWindow || e.origin !== 'null' || !d || d.ox !== 'draw') return;
+    if (d.instance !== instance) { state.rejected.push('stale-instance'); return; }
+    if (d.type === 'ready') { state.ready = d.probe; renderProbe(); post({ type: 'place', records: state.records }); }
+    else if (d.type === 'placed') { state.outcomes = d.outcomes || {}; renderList(); check(); }
+    else if (d.type === 'refused') { state.rejected.push(String(d.reason)); }
+    else if (d.type === 'mode') { drawing = !!d.draw; document.getElementById('draw').classList.toggle('on', drawing); }
+    else if (d.type === 'capture') {
+      var why = invalid(d.capture);
+      if (why) { state.rejected.push(why); return; }
+      var rec = JSON.parse(JSON.stringify(d.capture));
+      rec.id = newId();
+      rec.plan_revision = cfg.plan_revision;
+      rec.created_at = new Date().toISOString();
+      state.records.push(rec);
+      post({ type: 'place', records: state.records });
+    }
+  });
+
+  document.getElementById('draw').onclick = function () {
+    drawing = !drawing;
+    this.classList.toggle('on', drawing);
+    post({ type: 'mode', draw: drawing });
+  };
+
+  function text(tag, s, cls) { var n = document.createElement(tag); n.textContent = s; if (cls) n.className = cls; return n; }
+  function renderProbe() {
+    var p = state.ready, el = document.getElementById('probe');
+    el.textContent = '';
+    el.appendChild(text('code', 'origin ' + p.origin + ' · storage ' + p.storage + ' · cookie ' + p.cookie + ' · parent ' + p.parent_dom + ' · network ' + p.network + ' · ' + p.mermaid));
+  }
+  function renderList() {
+    var ol = document.getElementById('list');
+    ol.textContent = '';
+    state.records.forEach(function (rec) {
+      var o = state.outcomes[rec.id] || {}, li = document.createElement('li');
+      li.appendChild(text('div', o.outcome || '…'));
+      li.appendChild(text('code', rec.targets.map(function (t) { return t.section + ' · ' + t.tag; }).join(', ')));
+      var view = text('button', 'View original');
+      view.onclick = function () { showOriginal(rec); };
+      li.appendChild(document.createElement('br'));
+      li.appendChild(view);
+      if (o.outcome === 'hidden') {
+        var show = text('button', 'Show');
+        show.onclick = function () { post({ type: 'reveal', id: rec.id }); };
+        li.appendChild(show);
+      }
+      ol.appendChild(li);
+    });
+  }
+  // View original is drawn here, in the trusted host, from the record alone:
+  // it needs neither the framed document nor the revision's bytes.
+  function showOriginal(rec) {
+    var el = document.getElementById('original');
+    el.textContent = '';
+    var l = rec.layout || {};
+    el.appendChild(text('div', 'Drawn on ' + rec.plan_revision.slice(0, 19) + '… at ' + (l.viewport || []).join('×') + ', ' + l.theme +
+      (rec.plan_revision === cfg.plan_revision ? ' (this revision)' : ' (not the revision shown)')));
+    el.appendChild(window.OxDrawOriginal(rec, document));
+  }
+
+  // fixture self-check: ?records=<url>&expect=<url>[&layout=<name>] places the
+  // published captures on this revision and compares each outcome with
+  // expect.json's for the same revision and layout.
+  if (params.get('records')) {
+    Promise.all([fetch(params.get('records')).then(function (r) { return r.json(); }),
+      params.get('expect') ? fetch(params.get('expect')).then(function (r) { return r.json(); }) : null]).then(function (got) {
+      state.records = got[0].records;
+      state.expect = got[1];
+      // the frame takes the layout's size, so placements compare like for like
+      var l = state.expect && state.expect.layouts[params.get('layout') || 'base'];
+      if (l) { frame.style.width = l.width + 'px'; frame.style.height = l.height + 'px'; }
+      if (state.ready) post({ type: 'place', records: state.records });
+    });
+  }
+  function check() {
+    var want = state.expect && state.expect.outcomes[cfg.name] && state.expect.outcomes[cfg.name][params.get('layout') || 'base'];
+    if (!want) return;
+    state.checks = Object.keys(want).map(function (id) {
+      var o = state.outcomes[id] || {}, got = o.outcome === 'moved' ? 'moved ' + o.offset.join(',') : (o.outcome || 'none');
+      return { record: id, want: want[id], got: got, pass: got === want[id] };
+    });
+    var el = document.getElementById('checks');
+    el.textContent = '';
+    state.checks.forEach(function (c) { el.appendChild(text('div', (c.pass ? 'PASS ' : 'FAIL ') + c.record + ': want ' + c.want + ', got ' + c.got, c.pass ? 'pass' : 'fail')); });
+  }
+})();
+</script>
+</body>
+</html>

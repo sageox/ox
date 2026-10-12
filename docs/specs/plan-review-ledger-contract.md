@@ -21,7 +21,7 @@ contract choices the shared module implements.
 | `pkg/planreview/testdata/anchors.json` | The review page's anchor, label and markable-element vectors; the anchors are goldens from a JS engine running review.js |
 | `TestContractFixtures` (`pkg/planreview/review_test.go`) | Every fixture through two transports (`Capture` and a plain read of every file) and the shared assembler |
 | `TestPublish_*`, `TestCapture_*` (`pkg/planreview/local_test.go`) | 3.5 and 3.6 |
-| `TestReviewContractFixtures` (`internal/plan/feedback_test.go`) | The CLI's v1 reader against the five fixtures it can read, `many-rounds` (120 rounds, every layout) included, until #1289 replaces it |
+| `TestReviewContractFixtures` (`internal/plan/feedback_test.go`) | The CLI's v1 reader against the six fixtures it can read, `many-rounds` (120 rounds, every layout) and `region-items` (drawn regions, #1292) included, until #1289 replaces it |
 | `TestPlanReviewDurability_RacingClonesKeepEveryRecord` (`cmd/ox/plan_review_durability_test.go`) | Rounds and resolutions from three clones survive the push rebase |
 
 The CLI does not import the module yet: `go install
