@@ -14,9 +14,7 @@ package plan
 // acquire on the same lock path, even from the same goroutine, blocks
 // forever waiting for a release that can never happen. Instead
 // AppendPlanEvent takes the lock once and inlines the same
-// read-marshal-append-atomic-write sequence AppendEvent uses — the same
-// pattern feedback.go's AppendResolution already follows, for the identical
-// reason (see its comment).
+// read-marshal-append-atomic-write sequence AppendEvent uses.
 
 import (
 	"context"

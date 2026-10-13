@@ -247,16 +247,23 @@
   }
 
   var orphanBar;
+  // failures: how much of this plan's review the server could not read. The
+  // committed state below is then partial, and the bar says so first.
+  var failures = +body.getAttribute('data-review-failures') || 0;
   function renderOrphans(orphans) {
     if (orphanBar) { orphanBar.remove(); orphanBar = null; }
     var open = orphans.filter(function (o) { return o.state === 'open'; });
-    if (!open.length) return;
+    if (!open.length && !failures) return;
     orphanBar = document.createElement('div');
     orphanBar.className = 'rev-orphans';
-    var items = open.map(function (o) {
-      return '<li><strong>' + esc(o.status) + '</strong> ' + esc(o.label || o.anchor) + (o.note ? ' — ' + esc(o.note) : '') + '</li>';
-    }).join('');
-    orphanBar.innerHTML = '<div class="rev-orphans-h">⚠ ' + open.length + ' review note(s) no longer anchored (the text changed) — still open:</div><ul>' + items + '</ul><button class="rev-orphans-x">dismiss</button>';
+    var html = failures ? '<div class="rev-orphans-h">⚠ This review could not be fully read (' + failures + ' problem(s)): notes may be missing or shown resolved. <code>ox plan feedback show ' + esc(slug) + '</code> lists them.</div>' : '';
+    if (open.length) {
+      var items = open.map(function (o) {
+        return '<li><strong>' + esc(o.status) + '</strong> ' + esc(o.label || o.anchor) + (o.note ? ' — ' + esc(o.note) : '') + '</li>';
+      }).join('');
+      html += '<div class="rev-orphans-h">⚠ ' + open.length + ' review note(s) no longer anchored (the text changed) — still open:</div><ul>' + items + '</ul>';
+    }
+    orphanBar.innerHTML = html + '<button class="rev-orphans-x">dismiss</button>';
     document.body.appendChild(orphanBar);
     orphanBar.querySelector('.rev-orphans-x').onclick = function () { orphanBar.remove(); orphanBar = null; };
   }

@@ -54,6 +54,9 @@ type RenderOptions struct {
 	// the render can show each item's open/addressed state inline and in a
 	// summary. Empty for a plan with no review yet.
 	Review []MergedItem
+	// ReviewFailures counts what reading the review could not use; when it is
+	// not 0 the page warns that Review is incomplete.
+	ReviewFailures int
 	// ReviewEndpoint + ReviewToken are set ONLY when the page is served by the
 	// ephemeral `ox plan review` server: the page POSTs marks to the endpoint
 	// with the token. Empty for a static file:// render (clipboard fallback).
@@ -186,6 +189,7 @@ type renderData struct {
 	ReviewJSON     template.JS // JSON island: merged review state for the page
 	ReviewEndpoint string      // set only when served by `ox plan review`
 	ReviewToken    string
+	ReviewFailures int
 	Review         reviewSummary
 	TOC            []tocEntry
 	TLDR           template.HTML
@@ -265,6 +269,7 @@ func RenderHTMLOpts(in Input, res Result, opts RenderOptions) ([]byte, error) {
 		ReviewJS:       template.JS(reviewJS),
 		ReviewEndpoint: opts.ReviewEndpoint,
 		ReviewToken:    opts.ReviewToken,
+		ReviewFailures: opts.ReviewFailures,
 		FooterCredit:   len(res.Annotations) > 0 || len(res.Context) > 0,
 		SessionURL:     opts.SessionURL,
 		Artifact:       opts.Artifact,

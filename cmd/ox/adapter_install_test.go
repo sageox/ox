@@ -1,8 +1,6 @@
 package main
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -71,11 +69,6 @@ func newFakeReleaseServer(t *testing.T, tagName string, assetBody []byte) *fakeR
 	f.srv = httptest.NewTLSServer(mux)
 	t.Cleanup(f.srv.Close)
 	return f
-}
-
-func sha256Hex(b []byte) string {
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:])
 }
 
 // allowAllHosts returns nil so ValidateHTTPSHost skips the allowlist check, which

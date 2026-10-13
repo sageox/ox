@@ -34,6 +34,7 @@ import (
 	"github.com/chromedp/chromedp"
 	"github.com/chromedp/chromedp/kb"
 	"github.com/sageox/ox/internal/plan"
+	"github.com/sageox/ox/pkg/planreview"
 )
 
 // mustLoopbackListener binds an ephemeral loopback port, closed on test cleanup.
@@ -219,11 +220,7 @@ func TestBrowser_ReviewRoundTripInRealChrome(t *testing.T) {
 	}
 
 	// The agent addresses it, exactly as `ox plan feedback resolve` does.
-	if err := plan.AppendResolution(planDir, plan.Resolution{
-		Anchor: anchor, State: plan.ResolutionAddressed, Commit: "abc1234", Note: "guarded the retry",
-	}, time.Now()); err != nil {
-		t.Fatalf("agent resolve: %v", err)
-	}
+	resolveForTest(t, planDir, anchor, planreview.StateAddressed, "guarded the retry")
 
 	// The reviewer's still-open page live-reloads (SSE) and repaints the item as
 	// addressed — no reader action. review.js sets data-revstate="addressed" on
@@ -289,11 +286,7 @@ func TestBrowser_UnsentMarkSurvivesReconnect(t *testing.T) {
 		t.Fatalf("a saved mark must show as exactly one unsent draft, counter=%q", unsentBefore)
 	}
 	// nothing has reached the ledger — it is only a local draft
-	sets, err := plan.LoadAllFeedback(planDir)
-	if err != nil {
-		t.Fatalf("read feedback: %v", err)
-	}
-	if len(sets) != 0 {
+	if sets := plan.ReadReview(planDir).Rounds; len(sets) != 0 {
 		t.Fatalf("an unsent draft must not reach the ledger, got %d round(s)", len(sets))
 	}
 
@@ -982,10 +975,10 @@ func TestBrowser_HighlightCommentsOnExactWords(t *testing.T) {
 	}
 
 	// Both marks reach the authoring coworker; the highlight carries its words.
-	var quoted, whole plan.FeedbackItem
+	var quoted, whole planreview.Item
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) && quoted.Anchor == "" {
-		if sets, err := plan.LoadAllFeedback(planDir); err == nil && len(sets) == 1 && len(sets[0].Items) == 2 {
+		if sets := plan.ReadReview(planDir).Rounds; len(sets) == 1 && len(sets[0].Items) == 2 {
 			for _, it := range sets[0].Items {
 				if it.Quote != "" {
 					quoted = it
@@ -1003,21 +996,13 @@ func TestBrowser_HighlightCommentsOnExactWords(t *testing.T) {
 	if whole.Anchor == "" || whole.Section != "Risks" || whole.Note != sectionNote {
 		t.Fatalf("the whole-section mark must reach the agent beside the highlight: %+v", whole)
 	}
-	items, err := plan.AssembleReview(planDir)
-	if err != nil {
-		t.Fatalf("assemble review: %v", err)
-	}
-	if d := plan.FeedbackDigest(items); !strings.Contains(d, "“"+phrase+"”") {
+	if d := plan.FeedbackDigest(plan.ReadReview(planDir).Items); !strings.Contains(d, "“"+phrase+"”") {
 		t.Fatalf("the agent's digest must quote the highlighted words:\n%s", d)
 	}
 
 	// The agent addresses the highlight; the open page live-reloads and
 	// repaints those words as addressed.
-	if err := plan.AppendResolution(planDir, plan.Resolution{
-		Anchor: quoted.Anchor, State: plan.ResolutionAddressed, Commit: "abc1234", Note: "switched to idempotency keys",
-	}, time.Now()); err != nil {
-		t.Fatalf("agent resolve: %v", err)
-	}
+	resolveForTest(t, planDir, quoted.Anchor, planreview.StateAddressed, "switched to idempotency keys")
 	if err := chromedp.Run(ctx,
 		chromedp.WaitVisible(".rev-rail-tag.addressed", chromedp.ByQuery),
 		chromedp.Evaluate(fmt.Sprintf(tinted, "rev-q-sage"), &paintedAddressed),
@@ -1074,9 +1059,8 @@ func TestBrowser_HighlightCommentsOnExactWords(t *testing.T) {
 	}
 	verified := false
 	for deadline := time.Now().Add(10 * time.Second); !verified && time.Now().Before(deadline); time.Sleep(100 * time.Millisecond) {
-		resns, _ := plan.LoadResolutions(planDir)
-		for _, r := range resns {
-			verified = verified || (r.Anchor == quoted.Anchor && r.State == plan.ResolutionVerified)
+		for _, it := range plan.ReadReview(planDir).Items {
+			verified = verified || (it.Anchor == quoted.Anchor && it.Resolution != nil && it.Resolution.State == planreview.StateVerified)
 		}
 	}
 	if !verified {
@@ -1439,19 +1423,16 @@ func waitForNewPage(ctx context.Context, cond string, within time.Duration) bool
 // waitForOneRound polls the plan dir until exactly one review round with one item
 // has landed, then returns that item. Fails if nothing arrives — a submit that
 // never reached the ledger is the failure this guards.
-func waitForOneRound(t *testing.T, planDir string, within time.Duration) plan.FeedbackItem {
+func waitForOneRound(t *testing.T, planDir string, within time.Duration) planreview.Item {
 	t.Helper()
 	deadline := time.Now().Add(within)
-	var lastErr error
+	var last plan.Review
 	for time.Now().Before(deadline) {
-		sets, err := plan.LoadAllFeedback(planDir)
-		if err != nil {
-			lastErr = err
-		} else if len(sets) == 1 && len(sets[0].Items) == 1 {
-			return sets[0].Items[0]
+		if last = plan.ReadReview(planDir); len(last.Rounds) == 1 && len(last.Rounds[0].Items) == 1 {
+			return last.Rounds[0].Items[0]
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	t.Fatalf("browser Submit never reached the ledger (last read error: %v)", lastErr)
-	return plan.FeedbackItem{}
+	t.Fatalf("browser Submit never reached the ledger (last read failures: %+v)", last.Failures)
+	return planreview.Item{}
 }

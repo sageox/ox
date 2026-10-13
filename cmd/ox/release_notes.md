@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Plan review feedback reaches your team without taking anything else along** — each round, Accept, Reopen, or `ox plan feedback resolve` is committed on its own, so a plan someone is still editing never ships with it. A failed push is retried for exactly that feedback until the team's Ledger holds it, and "synced" now means the team's copy was checked. Sending the same feedback twice stores it once; reusing its id for different marks is refused instead of reported as saved.
+- **A review that cannot be fully read says so** — `ox plan feedback show`, `ox plan review await`, `ox plan list`, `ox agent prime`, and the review page report damaged or unreadable review files, a review read mid-sync, and feedback stored twice with different content, instead of showing a partial review as complete. `--json` adds `complete`, `failures`, and `conflicts`.
+
 ## [0.23.0] - 2026-10-12
 
 Bring past AI coworker sessions into your Ledger, find recorded conversations, and give your AI coworker a screen walkthrough it can read.

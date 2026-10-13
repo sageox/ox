@@ -10,7 +10,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Hedvig+Letters+Serif:opsz@12..24&family=Inter:wght@400;500;600&family=Spline+Sans+Mono:wght@400;500;600&display=swap" rel="stylesheet"/>
 {{end}}<style>{{.CSS}}</style>
 </head>
-<body data-slug="{{.Slug}}" data-review-endpoint="{{.ReviewEndpoint}}" data-review-token="{{.ReviewToken}}">
+<body data-slug="{{.Slug}}" data-review-endpoint="{{.ReviewEndpoint}}" data-review-token="{{.ReviewToken}}"{{if .ReviewFailures}} data-review-failures="{{.ReviewFailures}}"{{end}}>
 <!-- SageOx OX icon, two-tone outlined. Defined once; markers <use> it
      so the page stays lean and self-contained. Dark/light variants toggle via CSS. -->
 <svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>

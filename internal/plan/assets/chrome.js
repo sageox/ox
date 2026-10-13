@@ -23,6 +23,7 @@
     if (data.slug) body.setAttribute('data-slug', data.slug);
     if (data.endpoint) body.setAttribute('data-review-endpoint', data.endpoint);
     if (data.token) body.setAttribute('data-review-token', data.token);
+    if (data.review_failures) body.setAttribute('data-review-failures', String(data.review_failures));
   } catch (e) {}
 
   // an authored page has no [section id]/.ox-chip/.stat/.bar-row convention of
