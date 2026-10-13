@@ -127,15 +127,15 @@ func Open(dbPath string) (*Store, error) {
 
 	// The first statement opens a connection, which converts a new DB to WAL
 	// under a lock busy_timeout does not cover.
-	deadline := time.Now().Add(openBusyBudget)
+	deadline := time.Now().Add(openRetryBudget)
 	err = prepare(db)
-	for err != nil && sqliteerr.IsBusy(err) && time.Now().Before(deadline) {
-		time.Sleep(openBusyBackoff)
+	for err != nil && !isCorrupt(err) && time.Now().Before(deadline) {
+		time.Sleep(openRetryBackoff)
 		err = prepare(db)
 	}
 	if err != nil {
 		db.Close()
-		if !errors.Is(err, errCorrupt) && !sqliteerr.IsDamage(err) {
+		if !isCorrupt(err) {
 			return nil, fmt.Errorf("open whisper db: %w", err)
 		}
 		slog.Warn("whisper db corrupt, recreating", "path", dbPath, "err", err)
@@ -167,17 +167,24 @@ func openSQLite(dbPath string) (*sql.DB, error) {
 	return sql.Open("sqlite", dsn)
 }
 
-// openBusyBudget bounds Open's SQLITE_BUSY retry: openers racing to create
-// the DB contend for the WAL-conversion lock, whose BUSY returns at once, and
-// retries 20ms apart outlast the race. A BUSY that already waited out
+// openRetryBudget bounds Open's retry of a failed first statement: openers
+// racing to create the DB contend for the WAL-conversion lock, whose
+// SQLITE_BUSY returns at once, and retries 20ms apart outlast the race; other
+// unsettled failures may clear the same way. A failure that already waited out
 // busy_timeout has spent the budget, so it is returned.
 const (
-	openBusyBudget  = time.Second
-	openBusyBackoff = 20 * time.Millisecond
+	openRetryBudget  = time.Second
+	openRetryBackoff = 20 * time.Millisecond
 )
 
 // errCorrupt marks an integrity_check that ran and found damage.
 var errCorrupt = errors.New("whisper db corrupt")
+
+// isCorrupt reports whether a failed open is settled as damage. Every other
+// failure is retried, and never deletes the files.
+func isCorrupt(err error) bool {
+	return errors.Is(err, errCorrupt) || sqliteerr.IsDamage(err)
+}
 
 // prepare checks an opened DB's integrity and creates its schema.
 func prepare(db *sql.DB) error {

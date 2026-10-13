@@ -112,10 +112,12 @@ func holdWriteLock(t *testing.T, root string) func() {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = holder.Close() })
 	conn, err := holder.Conn(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = conn.Close() })
 	for _, q := range []string{"PRAGMA journal_mode=DELETE", "BEGIN IMMEDIATE"} {
 		if _, err := conn.ExecContext(t.Context(), q); err != nil {
 			t.Fatalf("%s: %v", q, err)

@@ -76,10 +76,12 @@ func TestOpen_BusyDatabaseIsKeptNotRebuilt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = holder.Close() })
 	conn, err := holder.Conn(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = conn.Close() })
 	// A write lock on a rollback-journal DB: switching it to WAL needs a lock
 	// SQLite refuses at once, the BUSY racing creators get.
 	for _, q := range []string{"PRAGMA journal_mode=DELETE", "BEGIN IMMEDIATE"} {

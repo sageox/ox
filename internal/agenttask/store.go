@@ -93,17 +93,17 @@ func NewStore(projectRoot string) (*Store, error) {
 	}
 	dbPath := filepath.Join(storePath, fileName)
 
-	deadline := time.Now().Add(openBusyBudget)
+	deadline := time.Now().Add(openRetryBudget)
 	db, err := openDB(dbPath)
-	for err != nil && sqliteerr.IsBusy(err) && time.Now().Before(deadline) {
-		time.Sleep(openBusyBackoff)
+	for err != nil && !mustRebuild(err) && time.Now().Before(deadline) {
+		time.Sleep(openRetryBackoff)
 		db, err = openDB(dbPath)
 	}
 	if err != nil {
 		// Only a damaged DB, or one from another schema generation, is
 		// rebuilt: the queue is ephemeral. Any other failure leaves the files
 		// alone, since another connection may be using them (#1339).
-		if !errors.Is(err, errRebuild) && !sqliteerr.IsDamage(err) {
+		if !mustRebuild(err) {
 			return nil, fmt.Errorf("failed to open task db: %w", err)
 		}
 		removeDBFiles(dbPath)
@@ -121,19 +121,26 @@ func NewStore(projectRoot string) (*Store, error) {
 	return &Store{db: db, host: host}, nil
 }
 
-// openBusyBudget bounds NewStore's SQLITE_BUSY retry. Openers racing to
+// openRetryBudget bounds NewStore's retry of a failed open. Openers racing to
 // create the queue contend for the lock that converts it to WAL, which
-// busy_timeout does not cover: that BUSY returns at once, and retries 20ms
-// apart outlast the race. A BUSY that already waited out busy_timeout has
-// spent the budget, so it is returned rather than waited for again.
+// busy_timeout does not cover: that SQLITE_BUSY returns at once, and retries
+// 20ms apart outlast the race. Other unsettled failures (I/O, an exhausted fd
+// table) may clear the same way. A failure that already waited out
+// busy_timeout has spent the budget, so it is returned.
 const (
-	openBusyBudget  = time.Second
-	openBusyBackoff = 20 * time.Millisecond
+	openRetryBudget  = time.Second
+	openRetryBackoff = 20 * time.Millisecond
 )
 
 // errRebuild marks a DB that opened but must be rebuilt: it fails
 // integrity_check, or it was stamped by another schema generation.
 var errRebuild = errors.New("task db must be rebuilt")
+
+// mustRebuild reports whether a failed open is settled as damage. Every other
+// failure is retried, and never deletes the files.
+func mustRebuild(err error) bool {
+	return errors.Is(err, errRebuild) || sqliteerr.IsDamage(err)
+}
 
 func openDB(dbPath string) (*sql.DB, error) {
 	dsn := dbPath + "?" + strings.Join([]string{
