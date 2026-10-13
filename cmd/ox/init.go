@@ -308,6 +308,8 @@ func checkRemoteSageoxExists(gitRoot string) (found bool, stale bool, err error)
 	return false, false, nil
 }
 
+// runInit configures AI coworker integrations and registers the authenticated
+// repository, then prints setup guidance when human-readable output is enabled.
 func runInit() error {
 	// warn if using non-default endpoint (subtle, informational)
 	if endpoint.Get() != endpoint.Default {

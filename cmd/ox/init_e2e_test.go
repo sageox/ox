@@ -419,6 +419,8 @@ func TestRunInit_DashboardHandoffIsNotAnInit(t *testing.T) {
 	assert.NoDirExists(t, filepath.Join(env.Root, ".sageox"), "nothing was initialized")
 }
 
+// TestRunInit_SessionImportDiscovery prevents deferred sync or disabled tips from
+// hiding import help, while suppressing it for machine output and unbound setup.
 func TestRunInit_SessionImportDiscovery(t *testing.T) {
 	for _, tc := range []struct {
 		name                                               string
@@ -477,6 +479,8 @@ func TestRunInit_SessionImportDiscovery(t *testing.T) {
 	}
 }
 
+// TestRunInit_SkippedRegistrationHidesSessionImport prevents stale repo/team IDs
+// from advertising import after skipped registration or endpoint rebinding.
 func TestRunInit_SkippedRegistrationHidesSessionImport(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
