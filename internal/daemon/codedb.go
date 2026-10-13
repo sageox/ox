@@ -14,7 +14,6 @@ import (
 
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/storage/filesystem/dotgit"
-	"github.com/go-git/go-git/v6/storage/filesystem/mmap"
 
 	"github.com/sageox/ox/internal/codedb"
 	"github.com/sageox/ox/internal/codedb/index"
@@ -430,7 +429,9 @@ func isLedgerRepoChanged(err error) bool {
 		return false
 	}
 	text := err.Error()
-	for _, sentinel := range []error{plumbing.ErrObjectNotFound, mmap.ErrObjectNotFound, dotgit.ErrPackfileNotFound} {
+	// The mmap sentinel has the same message as plumbing.ErrObjectNotFound,
+	// but is only defined on Darwin and Linux. The shared message covers both.
+	for _, sentinel := range []error{plumbing.ErrObjectNotFound, dotgit.ErrPackfileNotFound} {
 		if strings.Contains(text, sentinel.Error()) {
 			return true
 		}
