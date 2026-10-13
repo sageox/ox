@@ -100,13 +100,3 @@ When `/security-review` flags an issue and you patch it, the patch is only as go
 Findings in any of these classes — `secrets-redaction`, `daemon-ipc`, `supply-chain` (the `hard_classes` in `security/config.yml`) — should not be closed on a single contributor's say-so. Tag the PR for review by a maintainer with security context, attach the regression test, and link to the original finding ID.
 
 If you're not sure whether a class qualifies, it probably does. Ask.
-
-## Re-running scoped
-
-The pipeline supports re-running on a single finding ID:
-
-```bash
-make sec ARGS="--rerun-on=<finding-id>"
-```
-
-This skips clean tiers and only re-runs the validators that produced the named finding. Useful for tight iteration when you're patching one thing and don't want a full 5-minute run between attempts.

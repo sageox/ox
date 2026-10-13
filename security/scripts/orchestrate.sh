@@ -12,13 +12,13 @@
 #   bash security/scripts/orchestrate.sh --full                # full-repo scan
 #   bash security/scripts/orchestrate.sh --scope=cmd/ox/       # narrow to a path
 #   bash security/scripts/orchestrate.sh --hunter=cli-input    # run only one hunter (debug)
-#   bash security/scripts/orchestrate.sh --rerun               # re-run, dedupe vs previous run
 #   bash security/scripts/orchestrate.sh --cap=10              # raise per-run cost cap (USD)
 #   bash security/scripts/orchestrate.sh --since=<ref>         # diff against alternate base
 #
 # Exit codes:
 #   0  every stage that ran completed (a scanner skipped as not installed still lands here)
-#   1  a stage failed (scanner, cartographer, hunter or dedup error): partial coverage
+#   1  a stage failed (scanner, cartographer, hunter or dedup error), or a Claude rate or
+#      usage limit stopped the AI phases: partial coverage
 #   2  the cost cap stopped the AI phases: partial coverage; re-run with --cap=<higher>
 #   3  NO COVERAGE: a required stage did not run, so zero findings means nothing
 #
@@ -54,7 +54,6 @@ cd "$ROOT"
 # --- Args -------------------------------------------------------------------
 SCOPE_ARG=""
 HUNTER_ARG=""
-RERUN=0
 CAP_USD=""
 SCAN_FULL=0
 SINCE="origin/main"
@@ -63,7 +62,6 @@ while [[ $# -gt 0 ]]; do
     --full)             SCAN_FULL=1; shift ;;
     --scope=*)          SCOPE_ARG="${1#--scope=}"; shift ;;
     --hunter=*)         HUNTER_ARG="${1#--hunter=}"; shift ;;
-    --rerun)            RERUN=1; shift ;;
     --cap=*)            CAP_USD="${1#--cap=}"; shift ;;
     --since=*)          SINCE="${1#--since=}"; shift ;;
     --help|-h)
@@ -101,7 +99,7 @@ rm -rf "$OUT/review"
 rm -f "$OUT"/FINDINGS.md "$OUT"/findings.sarif "$OUT"/coverage.json "$OUT"/scope.md \
   "$OUT"/surface.md "$OUT"/surface.json "$OUT"/cartographer-*.json "$OUT"/hunter-*.jsonl \
   "$OUT"/hunter-status.tsv "$OUT"/findings-*.jsonl "$OUT"/dedup-status "$OUT"/.validate-* \
-  "$OUT"/.cost "$OUT"/.cost-ledger "$OUT"/.cap-hit "$OUT"/.malformed.jsonl "$OUT"/.claude-raw.* \
+  "$OUT"/.cost "$OUT"/.cost-ledger "$OUT"/.cap-hit "$OUT"/.rate-limited "$OUT"/.malformed.jsonl "$OUT"/.claude-raw.* \
   "$OUT"/.sanitize.*
 
 # If anything kills the run before the aggregate step writes a report, leave a
@@ -187,6 +185,12 @@ remaining_budget() {
 }
 # The first call to hit the cap names the phase; later calls see the file and stop.
 mark_cap_hit() { [[ -f "$CAP_FILE" ]] || echo "$1" > "$CAP_FILE"; }
+# The first call to end on a rate or usage limit names the phase; later calls see
+# the file and skip the CLI. The CLI already retried that call with backoff, so a
+# second retry layer here would only multiply the requests (team rule: retry at one
+# layer). A run used to keep calling and leave every remaining finding at "error".
+RATE_FILE="$OUT/.rate-limited"
+mark_rate_limited() { [[ -f "$RATE_FILE" ]] || echo "$1" > "$RATE_FILE"; }
 # budget_or_cap <label> — print the remaining budget, or record the cap hit and
 # return 1 when less than a cent is left.
 budget_or_cap() {
@@ -228,6 +232,12 @@ invoke_claude() {
     echo "WARNING: claude CLI not installed; skipping $label (see claude.ai/code)" | tee -a "$OUT/run-log.md"
     echo '{"verdict":"skipped","reason":"claude CLI missing"}' > "$output"
     return 0
+  fi
+
+  if [[ -f "$RATE_FILE" ]]; then
+    echo "rate or usage limit already hit ($(cat "$RATE_FILE")); skipped $label" >> "$OUT/run-log.md"
+    echo '{"verdict":"rate-limited","reason":"skipped after an earlier call hit a rate or usage limit"}' > "$output"
+    return 1
   fi
 
   local budget=""
@@ -280,7 +290,7 @@ invoke_claude() {
 
   # mktemp + $BASHPID so parallel hunters don't clobber each other's raw output —
   # $$ is the parent shell's PID, shared across the subshells of one hunt wave.
-  local raw rc=0 parsed cost subtype is_error denials
+  local raw rc=0 parsed cost subtype is_error denials limited
   raw="$(mktemp "$OUT/.claude-raw.${BASHPID:-$$}.$(basename "$prompt").XXXXXX")"
   # The reviewed branch is untrusted, and so is its git metadata. Claude Code puts a
   # git status snapshot (branch name, recent commit messages) in the system prompt,
@@ -294,9 +304,9 @@ invoke_claude() {
   # Parse the envelope whatever the exit code: a budget stop exits 1 but still
   # reports what it spent.
   parsed="$(python3 "$LIB" envelope --raw "$raw" --output "$output" ${schema:+--structured})" \
-    || parsed=$'0\tenvelope-parse-crash\ttrue\t0'
+    || parsed=$'0\tenvelope-parse-crash\ttrue\t0\tfalse'
   rm -f "$raw"
-  IFS=$'\t' read -r cost subtype is_error denials <<< "$parsed"
+  IFS=$'\t' read -r cost subtype is_error denials limited <<< "$parsed"
   printf '%s\t%s\t%s\n' "${cost:-0}" "$label" "$model" >> "$COST_LEDGER"
   if [[ "${denials:-0}" != "0" ]]; then
     echo "$label: $denials tool call(s) denied" >> "$OUT/run-log.md"
@@ -305,6 +315,12 @@ invoke_claude() {
     mark_cap_hit "$label"
     echo "WARNING: $label stopped at the cost cap (\$$CAP_USD)" | tee -a "$OUT/run-log.md"
     echo '{"verdict":"cap","reason":"stopped at --max-budget-usd"}' > "$output"
+    return 1
+  fi
+  if [[ "$limited" == "true" ]]; then
+    mark_rate_limited "$label"
+    echo "WARNING: $label hit a Claude rate or usage limit; skipping the remaining AI calls (re-run once it resets)" \
+      | tee -a "$OUT/run-log.md"
     return 1
   fi
   if (( rc != 0 )) || [[ "$is_error" == "true" ]]; then
