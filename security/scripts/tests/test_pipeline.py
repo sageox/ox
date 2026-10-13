@@ -125,6 +125,10 @@ class EnvelopeTest(unittest.TestCase):
                          "result": "You've hit your session limit", "total_cost_usd": 0}),
             ("result text", {"type": "result", "subtype": "error_during_execution", "is_error": True,
                              "result": "API Error: Request rejected (429) · rate limit exceeded", "total_cost_usd": 0}),
+            ("no subtype", {"type": "result", "is_error": True,
+                            "result": "API Error: Request rejected (429)", "total_cost_usd": 0}),
+            ("overloaded", {"type": "result", "subtype": "error_during_execution", "is_error": True,
+                            "result": "API Error: 529 Overloaded", "total_cost_usd": 0}),
             ("no envelope", "Claude AI usage limit reached|1760000000\n"),
         ]
         for name, envelope in cases:
@@ -132,6 +136,26 @@ class EnvelopeTest(unittest.TestCase):
                 fields, payload = self.run_envelope(envelope)
                 self.assertEqual((fields[2], fields[4]), ("true", "true"))
                 self.assertEqual(json.loads(payload)["verdict"], "rate-limited")
+
+    def test_a_missing_subtype_prints_a_placeholder_so_no_field_is_empty(self):
+        """bash's read with IFS=tab merges adjacent tabs: an empty field would shift the rest."""
+        fields, _ = self.run_envelope(
+            {"type": "result", "is_error": True, "result": "API Error: Request rejected (429)", "total_cost_usd": 0}
+        )
+        self.assertEqual(fields, ["0.000000", "-", "true", "0", "true"])
+
+    def test_text_that_only_resembles_a_limit_is_not_one(self):
+        cases = [
+            ("bare 429", "panic: index 429 out of range\n"),
+            ("overloaded outside an envelope", "warning: server overloaded, see log\n"),
+            ("cut-off envelope quoting a finding",
+             '{"type": "result", "subtype": "success", "structured_output": {"findings": [{"title": "no rate limit on'),
+        ]
+        for name, raw in cases:
+            with self.subTest(name):
+                fields, payload = self.run_envelope(raw)
+                self.assertEqual(fields[4], "false")
+                self.assertEqual(json.loads(payload)["verdict"], "error")
 
     def test_an_error_that_is_not_a_limit_stays_an_error(self):
         fields, payload = self.run_envelope(

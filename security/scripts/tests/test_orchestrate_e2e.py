@@ -348,9 +348,16 @@ class OrchestrateE2ETest(unittest.TestCase):
 
     def test_rate_limit_stops_later_calls_and_keeps_the_findings(self):
         """Quinn's subscription hits its rate limit mid-validation; the run stops calling, keeps both findings."""
+        self.assert_rate_limit_stops_the_run()
+
+    def test_rate_limit_with_no_subtype_still_stops_the_run(self):
+        """The same limit, reported without a subtype: the stop must survive the shell's field parsing."""
+        self.assert_rate_limit_stops_the_run(FAKE_RATE_LIMIT_NO_SUBTYPE="1")
+
+    def assert_rate_limit_stops_the_run(self, **env):
         self.repo.plant_feature()
         self.repo.install("claude", "golangci-lint")
-        result = self.repo.run("orchestrate.sh", FAKE_DAEMON_FINDING="1", FAKE_RATE_LIMIT_ROLE="validator")
+        result = self.repo.run("orchestrate.sh", FAKE_DAEMON_FINDING="1", FAKE_RATE_LIMIT_ROLE="validator", **env)
 
         # Two findings reach validation. The CLI already retried the first call with
         # backoff, so the run must not send the second one into the same limit.
