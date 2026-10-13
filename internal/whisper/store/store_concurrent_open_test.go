@@ -12,10 +12,11 @@ import (
 // TestOpen_ConcurrentFirstOpensKeepEveryWhisper: writers racing to create the
 // store all keep their whispers. Failure prevented: an opener that lost the
 // race to convert the new database to WAL took its SQLITE_BUSY for corruption
-// and deleted the files the others were writing (#1339).
+// and deleted the files the others were writing (#1339). Without Open's retry,
+// that opener returns the BUSY instead.
 func TestOpen_ConcurrentFirstOpensKeepEveryWhisper(t *testing.T) {
 	if testing.Short() {
-		t.Skip("short: races dozens of SQLite opens")
+		t.Skip("short: 20 rounds of racing opens")
 	}
 	const writers, rounds = 8, 20
 	for r := range rounds {
@@ -93,9 +94,9 @@ func TestOpen_BusyDatabaseIsKeptNotRebuilt(t *testing.T) {
 		_ = s.Close()
 		t.Fatal("Open succeeded against a held write lock")
 	}
-	_, _ = conn.ExecContext(t.Context(), "ROLLBACK")
-	_ = conn.Close()
-	_ = holder.Close()
+	if _, err := conn.ExecContext(t.Context(), "ROLLBACK"); err != nil {
+		t.Fatal(err)
+	}
 
 	s, err = Open(dbPath)
 	if err != nil {

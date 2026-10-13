@@ -1,10 +1,10 @@
 package agenttask
 
 import (
+	"bytes"
 	"database/sql"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sync"
 	"testing"
 )
@@ -14,21 +14,19 @@ import (
 // race to convert the new database to WAL took its SQLITE_BUSY for corruption
 // and deleted the files the others were writing, losing their tasks or
 // crashing the process on a WAL index whose file was replaced (#1339).
+// Without NewStore's retry, that opener fails its Enqueue with the BUSY instead.
 func TestEnqueue_ConcurrentFirstOpensKeepEveryTask(t *testing.T) {
 	if testing.Short() {
-		t.Skip("short: races dozens of SQLite opens")
+		t.Skip("short: 20 rounds of racing opens")
 	}
 	const producers, rounds = 8, 20
 	for r := range rounds {
 		root := t.TempDir()
-		if err := os.MkdirAll(filepath.Join(root, sageoxDir), 0o755); err != nil {
-			t.Fatal(err)
-		}
 		var wg sync.WaitGroup
 		errs := make(chan error, producers)
 		for i := range producers {
 			wg.Go(func() {
-				if _, err := Enqueue(root, &Task{Title: fmt.Sprintf("task %d", i), DedupKey: fmt.Sprintf("k%d", i)}); err != nil {
+				if _, err := Enqueue(root, &Task{Title: fmt.Sprintf("task %d", i)}); err != nil {
 					errs <- err
 				}
 			})
@@ -53,61 +51,18 @@ func TestEnqueue_ConcurrentFirstOpensKeepEveryTask(t *testing.T) {
 	}
 }
 
-// TestNewStore_RebuildsOnlyDamage: the queue is ephemeral, so a damaged one is
-// rebuilt, but a queue another connection has locked is reported and kept.
-// Failure prevented: NewStore took the lock's SQLITE_BUSY for corruption and
-// wiped a live queue (#1339), or no longer recovered from real damage.
-func TestNewStore_RebuildsOnlyDamage(t *testing.T) {
+// TestNewStore_BusyQueueIsKeptNotRebuilt: a queue another connection holds
+// locked past the retry budget is reported, never deleted. Failure prevented:
+// NewStore took the lock's SQLITE_BUSY for corruption and wiped a live queue
+// (#1339).
+func TestNewStore_BusyQueueIsKeptNotRebuilt(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: waits out the busy retry budget")
 	}
-	tests := []struct {
-		name string
-		// break leaves the queue unusable and returns how to undo that, if it can be undone
-		breakQueue func(t *testing.T, root string) (undo func())
-		wantErr    bool
-		wantTasks  int // after undo, or after the rebuild
-	}{
-		{"held write lock is reported and kept", holdWriteLock, true, 1},
-		{"damaged table is rebuilt", damageTasksTable, false, 0},
+	root := t.TempDir()
+	if _, err := Enqueue(root, &Task{Title: "queued before"}); err != nil {
+		t.Fatal(err)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			root := t.TempDir()
-			if err := os.MkdirAll(filepath.Join(root, sageoxDir), 0o755); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := Enqueue(root, &Task{Title: "queued before"}); err != nil {
-				t.Fatal(err)
-			}
-			undo := tt.breakQueue(t, root)
-			store, err := NewStore(root)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("NewStore err = %v, want error %v", err, tt.wantErr)
-			}
-			if err != nil {
-				undo()
-				if store, err = NewStore(root); err != nil {
-					t.Fatalf("NewStore after the lock: %v", err)
-				}
-			}
-			defer store.Close()
-			tasks, err := store.List(true)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(tasks) != tt.wantTasks {
-				t.Fatalf("%d tasks, want %d", len(tasks), tt.wantTasks)
-			}
-		})
-	}
-}
-
-// holdWriteLock holds a write lock on the queue in rollback-journal mode:
-// switching it to WAL then needs a lock SQLite refuses at once, the BUSY
-// racing creators get.
-func holdWriteLock(t *testing.T, root string) func() {
-	t.Helper()
 	holder, err := sql.Open("sqlite", QueuePath(root))
 	if err != nil {
 		t.Fatal(err)
@@ -118,22 +73,46 @@ func holdWriteLock(t *testing.T, root string) func() {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
+	// A write lock on a rollback-journal DB: switching it to WAL needs a lock
+	// SQLite refuses at once, the BUSY racing creators get.
 	for _, q := range []string{"PRAGMA journal_mode=DELETE", "BEGIN IMMEDIATE"} {
 		if _, err := conn.ExecContext(t.Context(), q); err != nil {
 			t.Fatalf("%s: %v", q, err)
 		}
 	}
-	return func() {
-		_, _ = conn.ExecContext(t.Context(), "ROLLBACK")
-		_ = conn.Close()
-		_ = holder.Close()
+	if store, err := NewStore(root); err == nil {
+		_ = store.Close()
+		t.Fatal("NewStore succeeded against a held write lock")
+	}
+	if _, err := conn.ExecContext(t.Context(), "ROLLBACK"); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := NewStore(root)
+	if err != nil {
+		t.Fatalf("NewStore after the lock: %v", err)
+	}
+	defer store.Close()
+	tasks, err := store.List(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("the locked queue was rebuilt: %d tasks, want 1", len(tasks))
 	}
 }
 
-// damageTasksTable overwrites the b-tree header of the tasks table's root
-// page: the file still opens, and integrity_check reports the damage.
-func damageTasksTable(t *testing.T, root string) func() {
-	t.Helper()
+// TestNewStore_DamagedQueueIsRebuilt: the queue is ephemeral, so one that
+// integrity_check reports damaged is rebuilt empty. Failure prevented: a
+// damaged queue is returned as an error instead, failing every task command
+// until someone deletes the file.
+func TestNewStore_DamagedQueueIsRebuilt(t *testing.T) {
+	root := t.TempDir()
+	if _, err := Enqueue(root, &Task{Title: "queued before"}); err != nil {
+		t.Fatal(err)
+	}
+	// Overwrite the b-tree header of the tasks table's root page: the file
+	// still opens, and integrity_check reports the damage.
 	db, err := sql.Open("sqlite", QueuePath(root))
 	if err != nil {
 		t.Fatal(err)
@@ -150,9 +129,22 @@ func damageTasksTable(t *testing.T, root string) func() {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
-	if _, err := f.WriteAt([]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}, (page-1)*size); err != nil {
+	_, err = f.WriteAt(bytes.Repeat([]byte{0xff}, 8), (page-1)*size)
+	_ = f.Close()
+	if err != nil {
 		t.Fatal(err)
 	}
-	return func() {}
+
+	store, err := NewStore(root)
+	if err != nil {
+		t.Fatalf("NewStore on a damaged queue: %v", err)
+	}
+	defer store.Close()
+	tasks, err := store.List(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 0 {
+		t.Fatalf("%d tasks, want the rebuilt queue empty", len(tasks))
+	}
 }

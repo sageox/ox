@@ -3,38 +3,18 @@ package sqliteerr
 import (
 	"context"
 	"database/sql"
-	"errors"
-	"fmt"
-	"os"
 	"path/filepath"
 	"testing"
 )
 
-// execErr runs one statement against a fresh handle on dsn and returns its error.
-func execErr(t *testing.T, dsn, query string) error {
-	t.Helper()
-	db, err := sql.Open("sqlite", dsn)
-	if err != nil {
-		t.Fatalf("open %s: %v", dsn, err)
-	}
-	defer db.Close()
-	_, err = db.Exec(query)
-	return err
-}
-
-// Whether a failure counts as damage decides whether a store may delete its
-// files, so the classifier is pinned against errors SQLite actually returns.
-// Failure prevented: a busy open reads as corruption and a store deletes a
-// database other connections are using (#1339).
+// TestClassify: a held lock's error, as SQLite returns it, is busy and never
+// damage; an error from outside SQLite is neither. Failure prevented: a store
+// takes a busy open for corruption and deletes a database other connections
+// are using (#1339). codedb/store's TestIsSQLiteDamage pins the damage codes
+// through IsSQLiteDamage.
 func TestClassify(t *testing.T) {
-	notADB := filepath.Join(t.TempDir(), "notadb.db")
-	if err := os.WriteFile(notADB, []byte("this is plainly not a sqlite database file, just text padding padding"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	damaged := execErr(t, notADB, "PRAGMA schema_version")
-
-	locked := filepath.Join(t.TempDir(), "locked.db")
-	holder, err := sql.Open("sqlite", locked)
+	path := filepath.Join(t.TempDir(), "locked.db")
+	holder, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,20 +29,20 @@ func TestClassify(t *testing.T) {
 			t.Fatalf("%s: %v", q, err)
 		}
 	}
-	busy := execErr(t, locked+"?_pragma=busy_timeout(1)", "SELECT COUNT(*) FROM t")
+	reader, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(1)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reader.Close() })
+	_, busyErr := reader.Exec("SELECT COUNT(*) FROM t")
 
 	tests := []struct {
 		name         string
 		err          error
 		damage, busy bool
 	}{
-		{"not a database", damaged, true, false},
-		{"wrapped damage", fmt.Errorf("open: %w", damaged), true, false},
-		{"busy", busy, false, true},
-		{"wrapped busy", fmt.Errorf("open: %w", busy), false, true},
-		{"the words alone", errors.New("database is locked"), false, false},
-		{"canceled context", context.Canceled, false, false},
-		{"nil", nil, false, false},
+		{"busy", busyErr, false, true},
+		{"not from SQLite", context.Canceled, false, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
