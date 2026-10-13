@@ -11,6 +11,22 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestCursorHostSessionEndWithoutActiveRecording(t *testing.T) {
+	f := newCursorHostFixture(t)
+	t.Setenv("SAGEOX_DAEMON", "false")
+	t.Setenv(config.EnvSessionPublishing, config.SessionPublishingAuto)
+	state := f.record(t)
+	require.NoError(t, session.ClearRecordingStateForAgent(f.root, state.AgentID))
+
+	// The conversation identity survives recording stop. SessionEnd therefore
+	// reaches the hold lookup with nil state, including its nil-safe receiver.
+	require.NoError(t, runCursorAgentHook("sessionEnd", f.input(t, "sessionEnd", "g1"), f.root))
+	current, err := session.LoadRecordingStateForAgent(f.root, state.AgentID)
+	require.NoError(t, err)
+	assert.Nil(t, current, "ending a stopped chat must not start another recording")
+	assert.Zero(t, f.reader.calls.Load())
+}
+
 // Cursor's sessionEnd keeps its recording for the daemon's final JSONL drain.
 // The daemon cannot see a manual-publishing override supplied only to this
 // hook, so that choice must survive in the same marker as the stop signal.

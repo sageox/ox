@@ -170,12 +170,16 @@ func recoverRecording(inst *agentinstance.Instance, projectRoot string, state *s
 		// The PIDless watcher can still own raw.jsonl. Stop this exact recording
 		// before waiting for ownership; its poll observes the durable marker
 		// even when daemon IPC is unavailable. Pending sources stay recoverable.
+		held := stopHoldsSession(projectRoot, state)
 		now := time.Now().UTC()
 		if err := session.UpdateRecordingStateAt(state.SessionPath, state.SessionID, func(current *session.RecordingState) {
 			if current.StoppedAt == nil {
 				current.StoppedAt = &now
 			}
 			current.CursorFinalDrainPending = true
+			if held {
+				current.PublishingMode = config.SessionPublishingManual
+			}
 		}); err != nil {
 			return fmt.Errorf("preserve pending Cursor recovery: %w", err)
 		}

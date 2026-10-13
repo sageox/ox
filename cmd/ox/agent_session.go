@@ -542,12 +542,16 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 	}
 	traceAtStop := state.Trace
 	if state.AdapterName == "cursor" {
+		held := stopHoldsSession(projectRoot, state)
 		now := time.Now().UTC()
 		if err := session.UpdateRecordingStateForAgent(projectRoot, inst.AgentID, func(current *session.RecordingState) {
 			if current.StoppedAt == nil {
 				current.StoppedAt = &now
 			}
 			current.CursorFinalDrainPending = true
+			if held {
+				current.PublishingMode = config.SessionPublishingManual
+			}
 		}); err != nil {
 			return fmt.Errorf("preserve pending Cursor final drain: %w", err)
 		}
