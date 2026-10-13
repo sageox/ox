@@ -7,22 +7,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-10-12
+
+Bring past AI coworker sessions into your Ledger, find recorded conversations, and give your AI coworker a screen walkthrough it can read.
+
 ### New
 
-- **AI coworkers can read a screen walkthrough without watching it** — `ox conversation walkthrough <id>` turns a walkthrough recorded with SageOx Desktop into a short timeline of what was clicked, what the pointer rested on, which page was showing, and the keyframe stills, each tied to the moment in the narration. "What was on screen when they said this?" becomes one command. A new `ox-cli-walkthrough` skill teaches coworkers to use it, and when part of a recording's screen data is missing, ox says what is missing instead of guessing.
+- **Import past Claude Code and Codex sessions** — `ox session import` lets you preview sessions in the terminal or a local browser, choose what to share, and upload them to your team's Ledger. Sessions already imported or recorded by ox are skipped.
+- **Find recorded conversations by keyword, person, and date** — `ox conversation search` returns matching passages you can open in context.
+- **Give your AI coworker a screen walkthrough it can read** — `ox conversation walkthrough` shows what was clicked, what was on screen, and the narration at each moment. Missing screen data is called out explicitly.
+- **Import audio and video recordings** — `ox import` sends media files through SageOx's recording upload flow.
 
-### Changed
+### Improved
 
-- **`ox plan feedback show --json` returns `{"items": [...], "corrupt_rounds": [...]}`** instead of a bare array, so a damaged review round is reported rather than silently skipped.
+- **Imported sessions are summarized faster** — up to three sessions are summarized at once, with `--parallel` to control the pace.
+- **ox uses less CPU and disk space** — background indexing is smaller and avoids repeated rebuilds.
+- **`ox sync` and plan saves report what reached your team** — local saves and successful sharing are clearly distinguished.
 
 ### Fixed
 
-- **Failed document imports can be retried** — `ox import` resumes after a failed commit or push, synchronizing with teammates' changes when needed. Recovery checks every push to keep unrelated local history private, preserves the saved document and staged work, and explains what to do when publication cannot be confirmed. Failed document writes no longer leave an empty folder blocking a retry.
-- **Claude Code and Pi sessions no longer disappear when their native files move** — ox can find resumed Claude sessions by exact native ID across project buckets and recognizes Pi's current session-file layout. It checks repository and session ownership before capture or recovery, keeping uncertain and mixed-repository sources local instead of uploading them to the wrong Ledger. `ox doctor` lists any recording held back this way and how to release it.
-- **ox no longer hangs on Windows when its input is redirected** — choosing the light or dark markdown theme asks the terminal for its background color, and on Windows that query opens the console directly whenever stdin isn't already a console: a pipe, a file, `NUL`, or Git Bash. The reply could never be interrupted, so the query's own two-second timeout never fired and the command waited forever instead of falling back to dark — `ox guide` and `ox doctor` from Git Bash, any AI coworker capturing ox's output, and two packages of the Windows test suite, which died at the Go test timeout with the read still parked in `ReadConsole`. The query is now only made when stdin really is the console, which is the only case where it can be interrupted and time out.
-- **Plan review answers reach your team, and you can see when they have** — the review page now says "synced to your team" or "saved on the author's machine, not yet synced" instead of assuming success. A review that couldn't be pushed is retried automatically the next time an AI coworker session starts.
-- **Review answers are no longer lost or doubled** — resubmitting after a reload or a double-click sends the same round once. Two open tabs keep each other's unsent marks. Applying the same exported review twice is a no-op.
-- **Resolved review items stay resolved across machines** — each resolution is saved as its own file, so syncing two machines can no longer drop one.
+- **Manually held sessions stay on your machine** — ox waits for `ox session upload` before sharing them with your team.
+- **Ledger sync recovers more reliably** — interrupted updates, large backlogs, and expired credentials no longer leave sharing stuck as often. `ox doctor` can repair more damaged session files while preserving your work.
+- **Plan review answers survive reloads and sync** — repeated submissions no longer duplicate answers, open tabs preserve unsent marks, and resolved items stay resolved across machines. The page shows whether your answers have reached the team.
+- **Failed document imports can be retried** — saved documents are preserved and failed uploads no longer leave an empty folder blocking the next attempt.
+- **Session capture finds resumed Claude Code and current Pi sessions** — recordings whose repository ownership cannot be verified stay local, and `ox doctor` explains how to release them.
+- **Gemini session summaries work with current Gemini CLI** — summaries no longer fail because the working folder is untrusted.
+- **Commands no longer hang on Windows with redirected input** — ox falls back to a default theme when terminal colors cannot be detected.
+- **Setup and command errors are clearer** — `ox init` fails when you are not signed in, and invalid subcommands return concise guidance.
+
+### Changed
+
+- **Plan feedback JSON now reports damaged review rounds** — `ox plan feedback show --json` returns an object with `items` and `corrupt_rounds` instead of a bare array. Scripts that read this output should use `items`.
+
+### Security
+
+- **Session summarizers receive fewer credentials** — only the settings and credentials needed by your chosen AI provider are passed through.
+- **Updated dependencies address known security vulnerabilities.**
+
+## [0.21.0] - 2026-10-12
+
+Bring past AI coworker sessions into your Ledger, find recorded conversations, and give your AI coworker a screen walkthrough it can read.
+
+### New
+
+- **Import past Claude Code and Codex sessions** — `ox session import` lets you preview sessions in the terminal or a local browser, choose what to share, and upload them to your team's Ledger. Sessions already imported or recorded by ox are skipped.
+- **Find recorded conversations by keyword, person, and date** — `ox conversation search` returns matching passages you can open in context.
+- **Give your AI coworker a screen walkthrough it can read** — `ox conversation walkthrough` shows what was clicked, what was on screen, and the narration at each moment. Missing screen data is called out explicitly.
+- **Import audio and video recordings** — `ox import` sends media files through SageOx's recording upload flow.
+
+### Improved
+
+- **Imported sessions are summarized faster** — up to three sessions are summarized at once, with `--parallel` to control the pace.
+- **ox uses less CPU and disk space** — background indexing is smaller and avoids repeated rebuilds.
+- **`ox sync` and plan saves report what reached your team** — local saves and successful sharing are clearly distinguished.
+
+### Fixed
+
+- **Ledger sync recovers more reliably** — interrupted updates, large backlogs, and expired credentials no longer leave sharing stuck as often. `ox doctor` can repair more damaged session files while preserving your work.
+- **Plan review answers survive reloads and sync** — repeated submissions no longer duplicate answers, open tabs preserve unsent marks, and resolved items stay resolved across machines. The page shows whether your answers have reached the team.
+- **Failed document imports can be retried** — saved documents are preserved and failed uploads no longer leave an empty folder blocking the next attempt.
+- **Session capture finds resumed Claude Code and current Pi sessions** — recordings whose repository ownership cannot be verified stay local, and `ox doctor` explains how to release them.
+- **Gemini session summaries work with current Gemini CLI** — summaries no longer fail because the working folder is untrusted.
+- **Commands no longer hang on Windows with redirected input** — ox falls back to a default theme when terminal colors cannot be detected.
+- **Setup and command errors are clearer** — `ox init` fails when you are not signed in, and invalid subcommands return concise guidance.
+
+### Changed
+
+- **Plan feedback JSON now reports damaged review rounds** — `ox plan feedback show --json` returns an object with `items` and `corrupt_rounds` instead of a bare array. Scripts that read this output should use `items`.
+
+### Security
+
+- **Session summarizers receive fewer credentials** — only the settings and credentials needed by your chosen AI provider are passed through.
+- **Updated dependencies address known security vulnerabilities.**
 
 ## [0.20.0] - 2026-09-30
 

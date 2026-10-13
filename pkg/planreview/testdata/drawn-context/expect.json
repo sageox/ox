@@ -1,0 +1,331 @@
+{
+  "environment": {
+    "browser": "HeadlessChrome/155",
+    "fonts": "none loaded: the fixture names Inter and Hedvig Letters Serif, which are not installed, so system-ui and Georgia render",
+    "os": "macOS 27.0.1"
+  },
+  "layouts": {
+    "base": {
+      "width": 1280,
+      "height": 800,
+      "dpr": 1,
+      "what": "the capture layout"
+    },
+    "dpr2": {
+      "width": 1280,
+      "height": 800,
+      "dpr": 2,
+      "what": "2x device pixels, same CSS layout"
+    },
+    "tall": {
+      "width": 1280,
+      "height": 1100,
+      "dpr": 1,
+      "what": "taller window, same width"
+    },
+    "w1024": {
+      "width": 1024,
+      "height": 800,
+      "dpr": 1,
+      "what": "narrower window; the 760px column moves left"
+    },
+    "w600": {
+      "width": 600,
+      "height": 800,
+      "dpr": 1,
+      "what": "narrow window; the column reflows"
+    },
+    "w920": {
+      "width": 920,
+      "height": 800,
+      "dpr": 1,
+      "what": "the harness's framed document width"
+    },
+    "zoom125": {
+      "width": 1024,
+      "height": 640,
+      "dpr": 1.25,
+      "what": "browser zoom 125% of 1280x800"
+    }
+  },
+  "outcomes": {
+    "a": {
+      "base": {
+        "r1-double-fire": "exact",
+        "r10-pinch-zoom": "exact",
+        "r2-double-fire-again": "exact",
+        "r3-mermaid-nodes": "exact",
+        "r4-abort-item": "exact",
+        "r5-notes-item": "hidden",
+        "r6-full-tab": "hidden",
+        "r7-figure": "exact",
+        "r8-table-scrolled": "exact",
+        "r9-mermaid-renamed-node": "exact"
+      },
+      "dpr2": {
+        "r1-double-fire": "exact",
+        "r10-pinch-zoom": "exact",
+        "r2-double-fire-again": "exact",
+        "r3-mermaid-nodes": "exact",
+        "r4-abort-item": "exact",
+        "r5-notes-item": "hidden",
+        "r6-full-tab": "hidden",
+        "r7-figure": "exact",
+        "r8-table-scrolled": "exact",
+        "r9-mermaid-renamed-node": "exact"
+      },
+      "tall": {
+        "r1-double-fire": "exact",
+        "r10-pinch-zoom": "exact",
+        "r2-double-fire-again": "exact",
+        "r3-mermaid-nodes": "exact",
+        "r4-abort-item": "exact",
+        "r5-notes-item": "hidden",
+        "r6-full-tab": "hidden",
+        "r7-figure": "exact",
+        "r8-table-scrolled": "exact",
+        "r9-mermaid-renamed-node": "exact"
+      },
+      "w1024": {
+        "r1-double-fire": "moved -128,0",
+        "r10-pinch-zoom": "moved -128,0",
+        "r2-double-fire-again": "moved -128,0",
+        "r3-mermaid-nodes": "moved -128,0",
+        "r4-abort-item": "moved -128,0",
+        "r5-notes-item": "hidden",
+        "r6-full-tab": "hidden",
+        "r7-figure": "moved -128,0",
+        "r8-table-scrolled": "moved -128,0",
+        "r9-mermaid-renamed-node": "moved -128,0"
+      },
+      "w600": {
+        "r1-double-fire": "reflowed",
+        "r10-pinch-zoom": "reflowed",
+        "r2-double-fire-again": "reflowed",
+        "r3-mermaid-nodes": "reflowed",
+        "r4-abort-item": "reflowed",
+        "r5-notes-item": "hidden",
+        "r6-full-tab": "hidden",
+        "r7-figure": "reflowed",
+        "r8-table-scrolled": "reflowed",
+        "r9-mermaid-renamed-node": "reflowed"
+      },
+      "w920": {
+        "r1-double-fire": "moved -180,0",
+        "r10-pinch-zoom": "moved -180,0",
+        "r2-double-fire-again": "moved -180,0",
+        "r3-mermaid-nodes": "moved -180,0",
+        "r4-abort-item": "moved -180,0",
+        "r5-notes-item": "hidden",
+        "r6-full-tab": "hidden",
+        "r7-figure": "moved -180,0",
+        "r8-table-scrolled": "moved -180,0",
+        "r9-mermaid-renamed-node": "moved -180,0"
+      },
+      "zoom125": {
+        "r1-double-fire": "moved -128,0",
+        "r10-pinch-zoom": "moved -128,0",
+        "r2-double-fire-again": "moved -128,0",
+        "r3-mermaid-nodes": "moved -128,0",
+        "r4-abort-item": "moved -128,0",
+        "r5-notes-item": "hidden",
+        "r6-full-tab": "hidden",
+        "r7-figure": "moved -128,0",
+        "r8-table-scrolled": "moved -128,0",
+        "r9-mermaid-renamed-node": "moved -128,0"
+      }
+    },
+    "b": {
+      "base": {
+        "r1-double-fire": "moved 0,102",
+        "r10-pinch-zoom": "moved 0,102",
+        "r2-double-fire-again": "moved 0,102",
+        "r3-mermaid-nodes": "moved 0,63",
+        "r4-abort-item": "moved 0,102",
+        "r5-notes-item": "hidden",
+        "r6-full-tab": "hidden",
+        "r7-figure": "moved 0,102",
+        "r8-table-scrolled": "moved 0,102",
+        "r9-mermaid-renamed-node": "moved 0,63"
+      },
+      "dpr2": {
+        "r1-double-fire": "moved 0,102",
+        "r10-pinch-zoom": "moved 0,102",
+        "r2-double-fire-again": "moved 0,102",
+        "r3-mermaid-nodes": "moved 0,63",
+        "r4-abort-item": "moved 0,102",
+        "r5-notes-item": "hidden",
+        "r6-full-tab": "hidden",
+        "r7-figure": "moved 0,102",
+        "r8-table-scrolled": "moved 0,102",
+        "r9-mermaid-renamed-node": "moved 0,63"
+      },
+      "tall": {
+        "r1-double-fire": "moved 0,102",
+        "r10-pinch-zoom": "moved 0,102",
+        "r2-double-fire-again": "moved 0,102",
+        "r3-mermaid-nodes": "moved 0,63",
+        "r4-abort-item": "moved 0,102",
+        "r5-notes-item": "hidden",
+        "r6-full-tab": "hidden",
+        "r7-figure": "moved 0,102",
+        "r8-table-scrolled": "moved 0,102",
+        "r9-mermaid-renamed-node": "moved 0,63"
+      },
+      "w1024": {
+        "r1-double-fire": "moved -128,102",
+        "r10-pinch-zoom": "moved -128,102",
+        "r2-double-fire-again": "moved -128,102",
+        "r3-mermaid-nodes": "moved -128,63",
+        "r4-abort-item": "moved -128,102",
+        "r5-notes-item": "hidden",
+        "r6-full-tab": "hidden",
+        "r7-figure": "moved -128,102",
+        "r8-table-scrolled": "moved -128,102",
+        "r9-mermaid-renamed-node": "moved -128,63"
+      },
+      "w600": {
+        "r1-double-fire": "reflowed",
+        "r10-pinch-zoom": "reflowed",
+        "r2-double-fire-again": "reflowed",
+        "r3-mermaid-nodes": "reflowed",
+        "r4-abort-item": "reflowed",
+        "r5-notes-item": "hidden",
+        "r6-full-tab": "hidden",
+        "r7-figure": "reflowed",
+        "r8-table-scrolled": "reflowed",
+        "r9-mermaid-renamed-node": "reflowed"
+      },
+      "w920": {
+        "r1-double-fire": "moved -180,102",
+        "r10-pinch-zoom": "moved -180,102",
+        "r2-double-fire-again": "moved -180,102",
+        "r3-mermaid-nodes": "moved -180,63",
+        "r4-abort-item": "moved -180,102",
+        "r5-notes-item": "hidden",
+        "r6-full-tab": "hidden",
+        "r7-figure": "moved -180,102",
+        "r8-table-scrolled": "moved -180,102",
+        "r9-mermaid-renamed-node": "moved -180,63"
+      },
+      "zoom125": {
+        "r1-double-fire": "moved -128,102",
+        "r10-pinch-zoom": "moved -128,102",
+        "r2-double-fire-again": "moved -128,102",
+        "r3-mermaid-nodes": "moved -128,63",
+        "r4-abort-item": "moved -128,102",
+        "r5-notes-item": "hidden",
+        "r6-full-tab": "hidden",
+        "r7-figure": "moved -128,102",
+        "r8-table-scrolled": "moved -128,102",
+        "r9-mermaid-renamed-node": "moved -128,63"
+      }
+    },
+    "c": {
+      "base": {
+        "r1-double-fire": "missing",
+        "r10-pinch-zoom": "missing",
+        "r2-double-fire-again": "missing",
+        "r3-mermaid-nodes": "moved -8,0",
+        "r4-abort-item": "ambiguous",
+        "r5-notes-item": "hidden",
+        "r6-full-tab": "hidden",
+        "r7-figure": "moved 0,78",
+        "r8-table-scrolled": "exact",
+        "r9-mermaid-renamed-node": "missing"
+      },
+      "dpr2": {
+        "r1-double-fire": "missing",
+        "r10-pinch-zoom": "missing",
+        "r2-double-fire-again": "missing",
+        "r3-mermaid-nodes": "moved -8,0",
+        "r4-abort-item": "ambiguous",
+        "r5-notes-item": "hidden",
+        "r6-full-tab": "hidden",
+        "r7-figure": "moved 0,78",
+        "r8-table-scrolled": "exact",
+        "r9-mermaid-renamed-node": "missing"
+      },
+      "tall": {
+        "r1-double-fire": "missing",
+        "r10-pinch-zoom": "missing",
+        "r2-double-fire-again": "missing",
+        "r3-mermaid-nodes": "moved -8,0",
+        "r4-abort-item": "ambiguous",
+        "r5-notes-item": "hidden",
+        "r6-full-tab": "hidden",
+        "r7-figure": "moved 0,78",
+        "r8-table-scrolled": "exact",
+        "r9-mermaid-renamed-node": "missing"
+      },
+      "w1024": {
+        "r1-double-fire": "missing",
+        "r10-pinch-zoom": "missing",
+        "r2-double-fire-again": "missing",
+        "r3-mermaid-nodes": "moved -136,0",
+        "r4-abort-item": "ambiguous",
+        "r5-notes-item": "hidden",
+        "r6-full-tab": "hidden",
+        "r7-figure": "moved -128,78",
+        "r8-table-scrolled": "moved -128,0",
+        "r9-mermaid-renamed-node": "missing"
+      },
+      "w600": {
+        "r1-double-fire": "missing",
+        "r10-pinch-zoom": "missing",
+        "r2-double-fire-again": "missing",
+        "r3-mermaid-nodes": "reflowed",
+        "r4-abort-item": "ambiguous",
+        "r5-notes-item": "hidden",
+        "r6-full-tab": "hidden",
+        "r7-figure": "reflowed",
+        "r8-table-scrolled": "reflowed",
+        "r9-mermaid-renamed-node": "missing"
+      },
+      "w920": {
+        "r1-double-fire": "missing",
+        "r10-pinch-zoom": "missing",
+        "r2-double-fire-again": "missing",
+        "r3-mermaid-nodes": "moved -188,0",
+        "r4-abort-item": "ambiguous",
+        "r5-notes-item": "hidden",
+        "r6-full-tab": "hidden",
+        "r7-figure": "moved -180,78",
+        "r8-table-scrolled": "moved -180,0",
+        "r9-mermaid-renamed-node": "missing"
+      },
+      "zoom125": {
+        "r1-double-fire": "missing",
+        "r10-pinch-zoom": "missing",
+        "r2-double-fire-again": "missing",
+        "r3-mermaid-nodes": "moved -136,0",
+        "r4-abort-item": "ambiguous",
+        "r5-notes-item": "hidden",
+        "r6-full-tab": "hidden",
+        "r7-figure": "moved -128,78",
+        "r8-table-scrolled": "moved -128,0",
+        "r9-mermaid-renamed-node": "missing"
+      }
+    }
+  },
+  "revealed": {
+    "a": {
+      "r5-notes-item": "exact",
+      "r6-full-tab": "exact"
+    },
+    "b": {
+      "r5-notes-item": "moved 0,102",
+      "r6-full-tab": "moved 0,102"
+    },
+    "c": {
+      "r5-notes-item": "moved 0,78",
+      "r6-full-tab": "moved 0,78"
+    }
+  },
+  "revisions": {
+    "a": "sha256:95eb8beda729590d28dd6f8a51931ea265cfc180aebe57796337689302bf73bd",
+    "b": "sha256:27dbb0e7f9a0bfe272242022cd4651c678edf109f0828213a6b0d6a5b5a2f9e1",
+    "c": "sha256:66df6f5cf229c2cbec32bd4834b889b5a722435e201ab27526cc073536f1fd9e"
+  },
+  "summary": "Where each capture in captures.json is placed on each revision and layout, as observed with the prototype in the environment below. Geometry depends on the browser and its fonts: only the same environment reproduces the offsets, and a host qualifies its own viewer by capturing its own strokes (see the spec)."
+}

@@ -35,6 +35,12 @@ func TestIsLedgerRepoChanged_GoGitShapes(t *testing.T) {
 			want: true,
 		},
 		{
+			// mmap has a separate sentinel with this message on Darwin and Linux.
+			name: "independent object not found error (flattened)",
+			err:  fmt.Errorf("diff tree: from: %s", errors.New("object not found")),
+			want: true,
+		},
+		{
 			name: "unrelated indexing failure",
 			err:  fmt.Errorf("index ledger repo: %w", errors.New("parse symbols: unexpected token")),
 			want: false,

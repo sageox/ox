@@ -25,6 +25,7 @@ func TestShouldPrune(t *testing.T) {
 		{"default_uploaded", session.StatusUploaded, false, false},
 		{"default_recording", session.StatusRecording, false, false},
 		{"default_suspended", session.StatusSuspended, false, false},
+		{"default_held", session.StatusHeld, false, false},
 
 		// --all mode — every non-uploaded, non-recording status is pruned
 		{"all_local", session.StatusLocal, true, true},
@@ -35,6 +36,8 @@ func TestShouldPrune(t *testing.T) {
 		{"all_uploaded", session.StatusUploaded, true, false},
 		{"all_recording", session.StatusRecording, true, false},
 		{"all_suspended", session.StatusSuspended, true, false},
+		// a held session is the coworker's to remove, by name (GH #1093)
+		{"all_held", session.StatusHeld, true, false},
 	}
 
 	for _, tt := range tests {

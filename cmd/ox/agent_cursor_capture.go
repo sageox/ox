@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/sageox/agentx"
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/selfexec"
 	"github.com/sageox/ox/internal/session"
@@ -170,12 +171,18 @@ func runCursorAgentHookWithPrime(event string, input *agentx.HookInput, projectR
 	if event == "sessionEnd" {
 		// Do not enqueue an incomplete raw file directly for publication. The
 		// daemon's recovery pass owns final drain, masking and finalization.
+		// Persist the stop-time publishing choice with the stop signal: the
+		// daemon cannot see a manual override in this hook's environment.
+		held := stopHoldsSession(projectRoot, state)
 		now := time.Now().UTC()
 		if err := session.UpdateRecordingStateForAgent(projectRoot, agentID, func(state *session.RecordingState) {
 			if state.StoppedAt == nil {
 				state.StoppedAt = &now
 			}
 			state.CursorFinalDrainPending = true
+			if held {
+				state.PublishingMode = config.SessionPublishingManual
+			}
 		}); err != nil && !errors.Is(err, session.ErrNotRecording) {
 			return err
 		}

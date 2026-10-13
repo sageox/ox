@@ -1,8 +1,11 @@
 package plan
 
 import (
+	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -318,4 +321,85 @@ func find(items []MergedItem, anchor string) *MergedItem {
 		}
 	}
 	return nil
+}
+
+// TestReviewContractFixtures pins what `ox plan feedback show --json`
+// (AssembleReview + CorruptFeedbackRounds) returns for the shared fixtures in
+// pkg/planreview/testdata/review-contract that this v1 reader can read: the
+// items its expect.json records, and as corrupt rounds the round files it
+// lists as failures. The other fixtures hold what only the module reads
+// (immutable-record retries and conflicts, per-entry remaps, record bounds).
+// Failure prevented: a reader change silently reinterprets, or drops the
+// words of, review data that released CLIs and other hosts read too.
+func TestReviewContractFixtures(t *testing.T) {
+	t.Parallel()
+	type item struct {
+		Anchor       string `json:"anchor"`
+		Reviewer     string `json:"reviewer"`
+		Status       string `json:"status"`
+		Label        string `json:"label"`
+		Note         string `json:"note"`
+		Open         bool   `json:"open"`
+		Resolution   string `json:"resolution,omitempty"`
+		RemappedFrom string `json:"remapped_from,omitempty"`
+	}
+	const root = "../../pkg/planreview/testdata/review-contract"
+	for _, name := range []string{"corrupt-records", "many-rounds", "region-items", "resolution-layouts", "same-id", "unknown-fields"} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			raw, err := os.ReadFile(filepath.Join(root, name, "expect.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var want struct {
+				Summary  string `json:"summary"`
+				Items    []item `json:"items"`
+				Failures []struct {
+					Path   string `json:"path"`
+					Reason string `json:"reason"`
+				} `json:"failures"`
+				Conflicts json.RawMessage `json:"conflicts"`
+			}
+			dec := json.NewDecoder(bytes.NewReader(raw))
+			dec.DisallowUnknownFields()
+			if err := dec.Decode(&want); err != nil {
+				t.Fatalf("decode expect.json: %v", err)
+			}
+			var wantCorrupt []string
+			for _, f := range want.Failures {
+				if strings.HasPrefix(f.Path, feedbackSubdir+"/"+roundPrefix) {
+					wantCorrupt = append(wantCorrupt, f.Path)
+				}
+			}
+
+			dir := filepath.Join(root, name, "plan")
+			merged, err := AssembleReview(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got []item
+			for _, it := range merged {
+				g := item{Anchor: it.Anchor, Reviewer: it.Reviewer, Status: string(it.Status), Label: it.Label, Note: it.Note, Open: it.Open, RemappedFrom: it.RemappedFrom}
+				if it.Resolution != nil {
+					g.Resolution = string(it.Resolution.State)
+				}
+				got = append(got, g)
+			}
+			if !slices.Equal(got, want.Items) {
+				t.Errorf("items:\n got %+v\nwant %+v", got, want.Items)
+			}
+
+			corrupt, err := CorruptFeedbackRounds(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var gotCorrupt []string
+			for _, p := range corrupt {
+				gotCorrupt = append(gotCorrupt, feedbackSubdir+"/"+filepath.Base(p))
+			}
+			if !slices.Equal(gotCorrupt, wantCorrupt) {
+				t.Errorf("corrupt_rounds = %v, want %v", gotCorrupt, wantCorrupt)
+			}
+		})
+	}
 }

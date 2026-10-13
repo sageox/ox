@@ -33,6 +33,8 @@ func newDiscoveryTestScheduler(t *testing.T) *SyncScheduler {
 	return s
 }
 
+// Repeated lazy refresh with the same bearer inside the dedup window must not
+// advance the refresh timestamp and continuously postpone the next allowed attempt.
 func TestRefreshCredentials_DedupWithinWindow(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: git operations")
@@ -40,7 +42,7 @@ func TestRefreshCredentials_DedupWithinWindow(t *testing.T) {
 	s := newDiscoveryTestScheduler(t)
 
 	// first call sets the timestamp
-	s.refreshCredentialsIfNeeded()
+	s.refreshCredentialsIfNeeded(context.Background())
 
 	s.mu.Lock()
 	firstStamp := s.lastCredentialRefresh
@@ -48,7 +50,7 @@ func TestRefreshCredentials_DedupWithinWindow(t *testing.T) {
 	assert.False(t, firstStamp.IsZero(), "first call should set lastCredentialRefresh")
 
 	// second call within 5min window should be a no-op (dedup)
-	s.refreshCredentialsIfNeeded()
+	s.refreshCredentialsIfNeeded(context.Background())
 
 	s.mu.Lock()
 	secondStamp := s.lastCredentialRefresh
@@ -57,6 +59,8 @@ func TestRefreshCredentials_DedupWithinWindow(t *testing.T) {
 		"second call within dedup window should not update timestamp")
 }
 
+// An elapsed dedup window must permit a new refresh; a prior attempt cannot
+// suppress credential maintenance indefinitely.
 func TestRefreshCredentials_AllowsAfterWindow(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: git operations")
@@ -70,7 +74,7 @@ func TestRefreshCredentials_AllowsAfterWindow(t *testing.T) {
 	s.mu.Unlock()
 
 	// call should proceed past the dedup check and update the timestamp
-	s.refreshCredentialsIfNeeded()
+	s.refreshCredentialsIfNeeded(context.Background())
 
 	s.mu.Lock()
 	newStamp := s.lastCredentialRefresh
@@ -79,6 +83,8 @@ func TestRefreshCredentials_AllowsAfterWindow(t *testing.T) {
 		"call after dedup window should update timestamp")
 }
 
+// Concurrent lazy refresh calls must safely share refresh state and leave a
+// valid attempt timestamp; the race detector exercises their synchronization.
 func TestRefreshCredentials_ConcurrentCalls(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: git operations")
@@ -90,7 +96,7 @@ func TestRefreshCredentials_ConcurrentCalls(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			s.refreshCredentialsIfNeeded()
+			s.refreshCredentialsIfNeeded(context.Background())
 		}()
 	}
 	wg.Wait()
@@ -110,6 +116,9 @@ func newCredentialDiscoveryScheduler(t *testing.T, server *httptest.Server) (*Sy
 	return newDiscoveryTestScheduler(t), credDir
 }
 
+// Bearer rotation must bypass dedup without destroying a usable cached PAT on
+// revocation. Recovery replaces credentials and clears the auth issue; unchanged
+// or failed persistence must not incorrectly change cache identity.
 func TestCredentialRotation_RevocationAndRecovery(t *testing.T) {
 	for _, mode := range []string{"refresh", "discovery"} {
 		t.Run(mode, func(t *testing.T) {
@@ -139,16 +148,16 @@ func TestCredentialRotation_RevocationAndRecovery(t *testing.T) {
 				BearerTokenHash: gitserver.BearerTokenFingerprint("oxt_test_1ljPfr"),
 			}))
 			t.Setenv("SAGEOX_TOKEN", "oxt_test_1ljPfX") // invalid checksum
-			s.refreshCredentialsIfNeeded()
+			s.refreshCredentialsIfNeeded(context.Background())
 			require.Zero(t, calls.Load(), "a malformed bearer must never reach the API")
 			t.Setenv("SAGEOX_TOKEN", "oxt_test_1ljPfr")
-			s.refreshCredentialsIfNeeded()
+			s.refreshCredentialsIfNeeded(context.Background())
 			require.Zero(t, calls.Load())
 			t.Setenv("SAGEOX_TOKEN", "oxt_rotated_1lKvCA")
 			for i, revoked := range []bool{true, false} {
 				rejected.Store(revoked)
 				if mode == "refresh" {
-					s.refreshCredentials(!revoked)
+					s.refreshCredentials(context.Background(), !revoked)
 				} else {
 					s.lastTeamDiscovery = time.Time{}
 					s.discoverTeams(context.Background())
@@ -168,7 +177,7 @@ func TestCredentialRotation_RevocationAndRecovery(t *testing.T) {
 					require.Equal(t, gitserver.BearerTokenFingerprint("oxt_rotated_1lKvCA"), creds.BearerTokenHash)
 				}
 			}
-			s.refreshCredentialsIfNeeded()
+			s.refreshCredentialsIfNeeded(context.Background())
 			require.EqualValues(t, 2, calls.Load(), "a matching fresh PAT must not refresh again")
 			if mode == "discovery" {
 				cachePath := filepath.Join(credDir, "sageox", "git-credentials-"+endpoint.NormalizeSlug(server.URL)+".json")
@@ -235,6 +244,8 @@ func TestTeamDiscovery_RefreshesPersonalBearerAndHonorsCancellation(t *testing.T
 	require.Equal(t, "cached-pat", creds.Token)
 }
 
+// A real Git authentication failure must force API credential refresh even when
+// the cached PAT and bearer fingerprint look fresh enough for lazy refresh to skip.
 func TestLedgerPull_AuthFailureRefreshesFreshPAT(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: real Git fetch")
@@ -255,7 +266,7 @@ func TestLedgerPull_AuthFailureRefreshesFreshPAT(t *testing.T) {
 		Token: "old-pat", ExpiresAt: time.Now().Add(24 * time.Hour),
 		BearerTokenHash: gitserver.BearerTokenFingerprint("oxt_test_1ljPfr"),
 	}))
-	s.refreshCredentialsIfNeeded()
+	s.refreshCredentialsIfNeeded(context.Background())
 	previousHelper := gitserver.DefaultHelperCommand()
 	gitserver.SetHelperCommand("!true")
 	t.Cleanup(func() { gitserver.SetHelperCommand(previousHelper) })

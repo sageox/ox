@@ -236,11 +236,14 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 			// merge local sessions with ledger sessions (local wins on duplicates)
 			sessions = mergeSessionSources(sessions, ledgerSessions)
 
-			// scan ledger cache for in-progress or unuploaded sessions
-			// recordings are initially written to {ledger}/.sageox/cache/sessions/ before upload
-			ledgerCachePath := filepath.Join(ledgerPath, ".sageox", "cache")
-			cacheStore, cacheErr := session.NewStore(ledgerCachePath)
-			if cacheErr == nil {
+			// scan every cache location for in-progress or unuploaded sessions:
+			// recordings are written to {ledger}/.sageox/cache/sessions/ before
+			// upload, and a held session may sit in any XDG cache (GH #1095)
+			for _, cacheSessionsDir := range session.HeldSessionDirs(ledgerPath) {
+				cacheStore, cacheErr := session.NewStore(filepath.Dir(cacheSessionsDir))
+				if cacheErr != nil {
+					continue
+				}
 				var cacheSessions []session.SessionInfo
 				if showAll {
 					cacheSessions, _ = cacheStore.ListAllSessions()
@@ -423,6 +426,11 @@ func printSessionRow(t session.SessionInfo, uploaded bool, localUser string) {
 	case session.StatusCanceled:
 		statusStr = "✗ canceled"
 		statusStyle = "ghost" // dim — discarded
+	case session.StatusHeld:
+		// Kept on this machine by choice (session_publishing: manual), not
+		// stranded: distinct from "local only", which reads as a failure.
+		statusStr = "◆ held · local"
+		statusStyle = "local"
 	default:
 		statusStr = "✗ local only"
 		statusStyle = "local"
@@ -668,7 +676,9 @@ func sessionMergeKey(s session.SessionInfo) string {
 }
 
 // mergeSessionSources deduplicates sessions by merge key.
-// Primary sessions take precedence over additional sessions.
+// Primary sessions take precedence over additional sessions, except that a
+// hold on any copy holds the session by name: the kept row carries it, or a
+// published Ledger row would hide a held cache copy as uploaded.
 // Returns merged sessions sorted newest-first by CreatedAt.
 //
 // One exception to primary-wins: a DRAFT placeholder loses to any non-draft
@@ -682,7 +692,8 @@ func mergeSessionSources(primary, additional []session.SessionInfo) []session.Se
 	result := make([]session.SessionInfo, 0, len(primary)+len(additional))
 	for _, s := range primary {
 		k := sessionMergeKey(s)
-		if _, dup := index[k]; dup {
+		if at, dup := index[k]; dup {
+			result[at].Held = result[at].Held || s.Held
 			continue
 		}
 		index[k] = len(result)
@@ -696,9 +707,11 @@ func mergeSessionSources(primary, additional []session.SessionInfo) []session.Se
 			result = append(result, s)
 			continue
 		}
+		held := result[at].Held || s.Held
 		if result[at].Draft && !s.Draft {
 			result[at] = s
 		}
+		result[at].Held = held
 	}
 	sort.Slice(result, func(i, j int) bool {
 		return result[i].CreatedAt.After(result[j].CreatedAt)

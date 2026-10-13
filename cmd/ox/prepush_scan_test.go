@@ -22,10 +22,9 @@ func makeLedgerWithCommit(t *testing.T, files map[string]string) string {
 	tmp := t.TempDir()
 	bare := filepath.Join(tmp, "bare.git")
 	work := filepath.Join(tmp, "work")
-	require.NoError(t, os.MkdirAll(bare, 0755))
 	require.NoError(t, os.MkdirAll(work, 0755))
 
-	mustGit(t, bare, "init", "--bare", "--initial-branch=main")
+	initBareRemote(t, bare, "--initial-branch=main")
 	mustGit(t, work, "init", "--initial-branch=main")
 	mustGit(t, work, "config", "user.email", "test@example.com")
 	mustGit(t, work, "config", "user.name", "test")

@@ -33,8 +33,7 @@ func newMarkedLedger(t *testing.T, withUnparseable bool) string {
 	remote := filepath.Join(base, "remote.git")
 	seed := filepath.Join(base, "seed")
 	ledger := filepath.Join(base, "ledger")
-	require.NoError(t, os.MkdirAll(remote, 0o755))
-	mustRunGit(t, remote, "init", "--bare", "--initial-branch=main")
+	initBareRemote(t, remote, "--initial-branch=main")
 	require.NoError(t, os.MkdirAll(seed, 0o755))
 	mustRunGit(t, seed, "init", "--initial-branch=main")
 	mustRunGit(t, seed, "config", "commit.gpgsign", "false")
@@ -73,7 +72,7 @@ func TestResolveCommittedConflictMarkers(t *testing.T) {
 		assert.Equal(t, head, after)
 	})
 
-	t.Run("repairs from upstream or the upstream side, then pushes", func(t *testing.T) {
+	t.Run("repairs from upstream, else the local side, then pushes", func(t *testing.T) {
 		ledger := newMarkedLedger(t, false)
 		userCommit, _ := runIsolatedGit(t, ledger, "rev-parse", "HEAD")
 		require.ErrorContains(t, lfs.ValidateUnpushedTip(ctx, ledger, "origin/main"), "unresolved conflict")
@@ -94,8 +93,8 @@ func TestResolveCommittedConflictMarkers(t *testing.T) {
 		assert.Equal(t, cleanUpstreamMeta, ledgerFile(t, ledger, "HEAD:"+markedUpstreamMeta), "upstream's version wins when it has the file")
 		localOnly := ledgerFile(t, ledger, "HEAD:"+markedLocalOnly)
 		assert.True(t, json.Valid([]byte(localOnly)))
-		assert.Contains(t, localOnly, `"kept"`)
-		assert.NotContains(t, localOnly, "stash side")
+		assert.Contains(t, localOnly, `"stash side"`, "with no summary_attempts to compare, the local write wins")
+		assert.NotContains(t, localOnly, `"kept"`)
 
 		require.NoError(t, lfs.ValidateUnpushedTip(ctx, ledger, "origin/main"))
 		mustRunGit(t, ledger, "push", "origin", "main")
@@ -154,6 +153,10 @@ func TestRunSessionConflictMarkers(t *testing.T) {
 			true, false, false, "could not be resolved", []string{markedUnparseable, "resolved 2", fixCmd}},
 		{"fully repairable ledger passes", func(t *testing.T) string { return newMarkedLedger(t, false) },
 			true, true, false, "resolved conflict markers in 2", nil},
+		{"pushed markers are reported as team-wide", func(t *testing.T) string { _, l := newPushedMarkedLedger(t); return l },
+			false, false, false, "4 already pushed, unreadable on every teammate's clone", []string{fixCmd}},
+		{"pushed markers are resolved", func(t *testing.T) string { _, l := newPushedMarkedLedger(t); return l },
+			true, true, false, "resolved conflict markers in 4", nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -227,29 +230,4 @@ func TestResolveMarkedFile_RefusesLocalEdit(t *testing.T) {
 	assert.Equal(t, markedLocalOnly, report.Unrepairable[0].Path)
 	assert.Contains(t, report.Unrepairable[0].Reason, "uncommitted local edit")
 	assert.Equal(t, []string{markedUpstreamMeta}, report.Resolved)
-}
-
-// diff3/zdiff3 conflict style adds a base section that must be dropped with the stash side.
-func TestKeepUpstreamSide(t *testing.T) {
-	tests := []struct {
-		name string
-		in   string
-		want string
-		ok   bool
-	}{
-		{"two-way", autostashConflict, "{\n\"title\":\"kept\"\n}\n", true},
-		{"diff3 base dropped", "{\n<<<<<<< Updated upstream\n\"a\":1\n||||||| base\n\"a\":0\n=======\n\"a\":2\n>>>>>>> Stashed changes\n}\n", "{\n\"a\":1\n}\n", true},
-		{"orphaned tail", "{}\n=======\n>>>>>>> Stashed changes\n", "", false},
-		{"nested start", "<<<<<<< Updated upstream\n<<<<<<< again\n=======\n>>>>>>> Stashed changes\n", "", false},
-		{"unterminated block", "<<<<<<< Updated upstream\n{}\n=======\n", "", false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, ok := keepUpstreamSide([]byte(tt.in))
-			assert.Equal(t, tt.ok, ok)
-			if ok {
-				assert.Equal(t, tt.want, string(got))
-			}
-		})
-	}
 }

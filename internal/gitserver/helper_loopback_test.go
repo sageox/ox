@@ -118,7 +118,7 @@ func TestInstallCredentialHelper_LoopbackHTTPPushNeedsNoPrompt(t *testing.T) {
 	git := func(args ...string) ([]byte, error) {
 		cmd := exec.Command("git", append([]string{"-C", work}, args...)...)
 		var env []string
-		for _, kv := range os.Environ() { // safe: git needs PATH; askpass is dropped and global/system config isolated
+		for _, kv := range os.Environ() { // safe: git needs PATH; askpass dropped and git config isolated below
 			if strings.HasPrefix(kv, "GIT_ASKPASS=") || strings.HasPrefix(kv, "SSH_ASKPASS=") {
 				continue
 			}

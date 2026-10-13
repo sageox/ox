@@ -655,6 +655,14 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 				b.WriteString(statusMutedStyle.Render("Run 'ox doctor --fix' to repair (or it will auto-repair on next session stop)"))
 				b.WriteString("\n")
 			}
+
+			// sessions kept on this machine (GH #1095); read-only here
+			if held := listUnpublishedCacheSessions(localCfg.Ledger.Path).Held; len(held) > 0 {
+				b.WriteString(statusLabelStyle.Render("  Held"))
+				b.WriteString(formatValue(fmt.Sprintf("%d session(s) on this machine", len(held)), "highlight"))
+				b.WriteString(statusMutedStyle.Render(" — publish with 'ox session upload <name>'"))
+				b.WriteString("\n")
+			}
 		}
 	} else if cloudLedgerURL != "" {
 		// cloud has ledger but local doesn't - show as "not cloned" with expected path

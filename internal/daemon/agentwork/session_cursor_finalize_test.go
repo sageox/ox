@@ -193,8 +193,10 @@ func TestRecoverRawFromSessionFile_CursorIncompleteTerminalDefers(t *testing.T) 
 	require.NoError(t, os.MkdirAll(filepath.Dir(source), 0o755))
 	require.NoError(t, os.WriteFile(source, []byte(`{"role":"user","content":"unfinished"}`+"\n"), 0o600))
 	recPath := filepath.Join(sessionDir, recordingMarker)
+	stoppedAt := time.Now().UTC()
 	writeRecordingState(t, recPath, session.RecordingState{
-		AgentID: "OxCursorIncomplete", AgentSessionID: cursorFinalizeConversationID,
+		StoppedAt: &stoppedAt,
+		AgentID:   "OxCursorIncomplete", AgentSessionID: cursorFinalizeConversationID,
 		AdapterName: "cursor", WatchMode: "tail", WorkspacePath: projectRoot, SessionPath: sessionDir,
 		SessionFile: source, StartOffsetKnown: true, SourcePrefixSHA256: watcherSHA256(nil),
 	})

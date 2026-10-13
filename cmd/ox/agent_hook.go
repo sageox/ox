@@ -15,7 +15,6 @@ import (
 
 	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/config"
-	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/logger"
 	"github.com/sageox/ox/internal/paths"
@@ -343,11 +342,17 @@ func stopSessionForClear(ctx *HookContext, agentID string) {
 	// done before we mutate state so SessionPath is still accurate.
 	ctx.ClearNotice = buildClearNoticeFromState(state)
 
-	// set StoppedAt to signal this session is complete
+	// set StoppedAt to signal this session is complete. A held stop saves
+	// the manual choice in the same write: StoppedAt is what daemon recovery
+	// reclaims, and it must never find a stopped recording that says auto.
+	held := stopHoldsSession(ctx.ProjectRoot, state)
 	now := time.Now()
 	if updateErr := session.UpdateRecordingStateForAgent(ctx.ProjectRoot, agentID, func(s *session.RecordingState) {
 		s.RecordTraceBoundary("stop", now)
 		s.StoppedAt = &now
+		if held {
+			s.PublishingMode = config.SessionPublishingManual
+		}
 		state = s
 	}); updateErr != nil {
 		slog.Debug("hook: clear could not set StoppedAt", "agent_id", agentID, "error", updateErr)
@@ -357,20 +362,14 @@ func stopSessionForClear(ctx *HookContext, agentID string) {
 	// gone; hand it the native session ids and the stop time on a footer
 	_ = stampRecordingCarrierAtStop(state, now)
 
-	// fire-and-forget IPC to daemon to finalize the stopped session
-	if state.SessionPath != "" {
-		if ledgerPath := deriveLedgerPath(state.SessionPath); ledgerPath != "" {
-			client := daemon.NewClientForCurrentRepoWithTimeout(100 * time.Millisecond)
-			sessionName := filepath.Base(state.SessionPath)
-			if ipcErr := client.SessionFinalize(daemon.SessionFinalizeIPCPayload{
-				SessionName: sessionName,
-				LedgerPath:  ledgerPath,
-				CachePath:   state.SessionPath,
-				ProjectRoot: ctx.ProjectRoot,
-			}); ipcErr != nil {
-				slog.Debug("hook: clear finalize IPC failed", "error", ipcErr)
-			}
-		}
+	// fire-and-forget IPC to daemon to finalize the stopped session, or hold it.
+	// A hold that could not be recorded keeps .recording.json: StoppedAt ends
+	// capture, and daemon recovery re-holds a recording started in manual mode.
+	// Cleared, the folder would look like an orphan the daemon publishes.
+	if holdErr := finalizeOrHoldOnHookStop(ctx, state, "clear"); holdErr != nil {
+		ctx.ClearNotice = nil // the previous session was not finalized
+		slog.Warn("hook: clear kept the recording, its hold could not be recorded", "agent_id", agentID, "error", holdErr)
+		return
 	}
 
 	// clear recording state so prime starts a fresh session
@@ -423,10 +422,15 @@ func handleEnd(ctx *HookContext) error {
 		return nil
 	}
 
+	// a held stop saves the manual choice with StoppedAt (see stopSessionForClear)
+	held := stopHoldsSession(ctx.ProjectRoot, state)
 	now := time.Now()
 	if updateErr := session.UpdateRecordingStateForAgent(ctx.ProjectRoot, agentID, func(s *session.RecordingState) {
 		s.RecordTraceBoundary("stop", now)
 		s.StoppedAt = &now
+		if held {
+			s.PublishingMode = config.SessionPublishingManual
+		}
 		state = s
 	}); updateErr != nil {
 		slog.Debug("hook: end could not set StoppedAt", "agent_id", agentID, "error", updateErr)
@@ -439,19 +443,10 @@ func handleEnd(ctx *HookContext) error {
 	// dispatch delegated finalization via daemon IPC. Best-effort: if the
 	// daemon is unreachable, the daemon's anti-entropy sweep will still
 	// pick up the StoppedAt-marked recording within the 24h stale window.
-	if state.SessionPath != "" {
-		if ledgerPath := deriveLedgerPath(state.SessionPath); ledgerPath != "" {
-			client := daemon.NewClientForCurrentRepoWithTimeout(100 * time.Millisecond)
-			sessionName := filepath.Base(state.SessionPath)
-			if ipcErr := client.SessionFinalize(daemon.SessionFinalizeIPCPayload{
-				SessionName: sessionName,
-				LedgerPath:  ledgerPath,
-				CachePath:   state.SessionPath,
-				ProjectRoot: ctx.ProjectRoot,
-			}); ipcErr != nil {
-				slog.Debug("hook: end finalize IPC failed", "error", ipcErr)
-			}
-		}
+	// A hold that could not be recorded keeps .recording.json for recovery
+	// (see stopSessionForClear) and fails the hook so the coworker hears of it.
+	if holdErr := finalizeOrHoldOnHookStop(ctx, state, "end"); holdErr != nil {
+		return fmt.Errorf("session end: %w", holdErr)
 	}
 
 	if clearErr := session.ClearRecordingStateForAgent(ctx.ProjectRoot, agentID); clearErr != nil {

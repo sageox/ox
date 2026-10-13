@@ -43,8 +43,7 @@ func newWedgedLedger(t *testing.T, withUnknown bool) (ledger string) {
 	remote := filepath.Join(base, "remote.git")
 	seed := filepath.Join(base, "seed")
 	ledger = filepath.Join(base, "ledger")
-	require.NoError(t, os.MkdirAll(remote, 0o755))
-	mustRunGit(t, remote, "init", "--bare", "--initial-branch=main")
+	initBareRemote(t, remote, "--initial-branch=main")
 
 	require.NoError(t, os.MkdirAll(seed, 0o755))
 	mustRunGit(t, seed, "init", "--initial-branch=main")

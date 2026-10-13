@@ -58,7 +58,7 @@ var errImportHeld = errors.New("held")
 // importDeps are the seams a test replaces. Production wires the real
 // adapters, isolated vendor runners, LFS client, push and notify.
 type importDeps struct {
-	readNative  func(agent nativeimport.Agent, path string) ([]adapters.RawEntry, error)
+	readNative  func(context.Context, nativeimport.Agent, string) ([]adapters.RawEntry, error)
 	runner      func(agent nativeimport.Agent) agentwork.Runner
 	lfsClient   func() (*lfs.Client, error)
 	push        func(ctx context.Context, ledgerPath string) error
@@ -69,6 +69,7 @@ type importDeps struct {
 	syncLedger  func()                              // best-effort fresh pull
 	interactive func() bool                         // a coworker can answer a prompt
 	confirm     func(prompt string) (bool, error)
+	review      func(context.Context, importDestination, []*importCandidate, importPreviewLoader, bool) (importReviewResult, error)
 }
 
 // importEnv is one run's fixed context.
@@ -90,10 +91,18 @@ type importEnv struct {
 
 // readNativeWithAdapter reads the exact discovered file through the session
 // adapter, never through a by-ID lookup that could return another session.
-func readNativeWithAdapter(agent nativeimport.Agent, path string) ([]adapters.RawEntry, error) {
+func readNativeWithAdapter(ctx context.Context, agent nativeimport.Agent, path string) ([]adapters.RawEntry, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	adapter, err := adapters.GetAdapter(adapterNameFor(agent))
 	if err != nil {
 		return nil, err
+	}
+	if contextual, ok := adapter.(interface {
+		ReadWithContext(context.Context, string, time.Duration) ([]adapters.RawEntry, error)
+	}); ok {
+		return contextual.ReadWithContext(ctx, path, importReadTimeout)
 	}
 	if timed, ok := adapter.(interface {
 		ReadWithTimeout(string, time.Duration) ([]adapters.RawEntry, error)
@@ -119,7 +128,10 @@ func prepareImport(ctx context.Context, env *importEnv, c *importCandidate) (pre
 	if err := ctx.Err(); err != nil {
 		return nil, "", err
 	}
-	if reason := justInTimeCheck(env, c); reason != "" {
+	if reason := justInTimeCheck(ctx, env, c); reason != "" {
+		if err := ctx.Err(); err != nil {
+			return nil, "", err
+		}
 		return nil, reason, nil
 	}
 	staging := filepath.Join(env.stagingRoot, c.Name)
@@ -135,12 +147,23 @@ func prepareImport(ctx context.Context, env *importEnv, c *importCandidate) (pre
 		}
 	}()
 
-	raw, err := env.deps.readNative(s.Agent, s.Path)
+	raw, err := env.deps.readNative(ctx, s.Agent, s.Path)
 	if err != nil {
+		if err := ctx.Err(); err != nil {
+			return nil, "", err
+		}
 		if errors.Is(err, adapters.ErrAdapterOutputLimit) {
 			return nil, "", heldf("too large to import: converted output exceeds the adapter's limit")
 		}
 		return nil, "", heldf("read %s session: %v", s.Agent, err)
+	}
+	// The adapter may have read a rewritten file with unchanged size/mtime.
+	// Refuse it before any retained raw content is written to staging.
+	if reason := justInTimeCheck(ctx, env, c); reason != "" {
+		if err := ctx.Err(); err != nil {
+			return nil, "", err
+		}
+		return nil, reason, nil
 	}
 	header := nativeimport.RawHeader{
 		SessionID: c.SessionID, AgentType: adapterNameFor(s.Agent), RepoID: env.repoID,
@@ -167,7 +190,10 @@ func prepareImport(ctx context.Context, env *importEnv, c *importCandidate) (pre
 		return nil, "", err
 	}
 	// Summarizing can take minutes; a session resumed meanwhile is not final.
-	if reason := justInTimeCheck(env, c); reason != "" {
+	if reason := justInTimeCheck(ctx, env, c); reason != "" {
+		if err := ctx.Err(); err != nil {
+			return nil, "", err
+		}
 		return nil, reason, nil
 	}
 	if verdict := importVerdictFor(summary); verdict != "" {
@@ -206,7 +232,10 @@ func publishPreparedImport(ctx context.Context, env *importEnv, c *importCandida
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	if reason := justInTimeCheck(env, c); reason != "" {
+	if reason := justInTimeCheck(ctx, env, c); reason != "" {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		return reason, nil
 	}
 	staging := prepared.staging
@@ -305,7 +334,7 @@ func clipImportText(s string, limit int) string {
 
 // justInTimeCheck repeats the in-progress checks right before publishing: the
 // file must be unchanged since it was inspected, and still quiet.
-func justInTimeCheck(env *importEnv, c *importCandidate) string {
+func justInTimeCheck(ctx context.Context, env *importEnv, c *importCandidate) string {
 	info, err := os.Stat(c.Session.Path)
 	if err != nil {
 		return "native file is gone"
@@ -315,6 +344,9 @@ func justInTimeCheck(env *importEnv, c *importCandidate) string {
 	}
 	if env.deps.now().Sub(info.ModTime()) < importQuietPeriod {
 		return "became active since the preview"
+	}
+	if snapshot := c.reviewedSnapshot.Load(); snapshot != nil && !snapshotMatches(ctx, c.Session.Path, *snapshot) {
+		return "changed since the content review"
 	}
 	return ""
 }

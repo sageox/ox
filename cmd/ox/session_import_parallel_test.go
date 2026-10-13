@@ -582,6 +582,29 @@ func TestImportE2E_ParallelCapturedMathBlitzFixture(t *testing.T) {
 				require.NoError(t, json.Unmarshal(out.Bytes(), &r.report), r.out)
 				return r
 			}
+			// Preview the captured Desktop payloads through the same real adapters
+			// before import: Codex app metadata must stay as context, never a title
+			// or a human request anchor.
+			candidates, _, failure := planImport(context.Background(), opts, env)
+			require.Nil(t, failure)
+			load := newImportPreviewLoader(env, candidates)
+			for id, opening := range map[string]string{
+				"01a0f8f3-d483-7643-b43d-e3fa4d8cee96": "Create a simple hello world program in python",
+				"01a0f957-40ec-7192-b67b-71c990b28f23": "We want to turn math_game.py into a game people actually keep playing.",
+				"01a0f968-60ef-7500-aaa4-13cbb34e5557": "Players say Math Blitz gets too easy after five minutes",
+			} {
+				preview, err := load(context.Background(), id)
+				require.NoError(t, err, id)
+				assert.True(t, strings.HasPrefix(preview.OpeningRequest, opening), "%s: %q", id, preview.OpeningRequest)
+				retainedMetadata := false
+				for _, entry := range preview.Entries {
+					retainedMetadata = retainedMetadata || strings.Contains(entry.Content, "<external_codex_apps_open_page>")
+				}
+				assert.True(t, retainedMetadata, "app context remains readable: %s", id)
+				for _, prompt := range preview.Prompts {
+					assert.NotContains(t, prompt.Content, "<external_codex_apps_open_page>", id)
+				}
+			}
 			r := run()
 			require.NoError(t, r.err, r.out)
 			require.Len(t, r.report.Sessions, 7)

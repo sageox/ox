@@ -95,6 +95,10 @@ func TestMain(m *testing.M) {
 	// register a test adapter so resolveAdapter("codex") works without
 	// the real ox-adapter-codex binary on PATH
 	adapters.Register(&testAdapter{name: "codex"})
+	// The finalize handler reads session_publishing as the CLI does. A
+	// coworker's own config or environment must not make these tests manual.
+	_ = os.Unsetenv("OX_SESSION_PUBLISHING")
+	_ = os.Setenv("OX_USER_CONFIG", filepath.Join(os.TempDir(), "ox-agentwork-tests-no-user-config.yaml"))
 	os.Exit(m.Run())
 }
 

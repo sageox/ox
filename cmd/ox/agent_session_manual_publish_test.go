@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -43,6 +44,9 @@ type agentSessionFixture struct {
 	appendMessage func(t *testing.T, sourcePath, role, content string)
 
 	stopDuringCapture bool
+
+	// holdFails makes recording the hold fail at stop.
+	holdFails bool
 }
 
 // blockingStopCodexAdapter holds the watcher's final native read in flight while
@@ -99,6 +103,13 @@ func TestManualPublishingSessionCapture_Matrix(t *testing.T) {
 			createSessionSource: writeCodexSessionFile,
 			appendMessage:       appendCodexMessage,
 			stopDuringCapture:   true,
+		},
+		{
+			name:                "codex_hold_fails",
+			agentType:           "codex",
+			createSessionSource: writeCodexSessionFile,
+			appendMessage:       appendCodexMessage,
+			holdFails:           true,
 		},
 	}
 
@@ -207,6 +218,11 @@ func runManualPublishingSessionCaptureTest(t *testing.T, fixture agentSessionFix
 	preCannedQuery := "PRE-CANNED-QUERY: verify manual publishing captures this"
 	fixture.appendMessage(t, sourcePath, "user", preCannedQuery)
 
+	// A team context on disk makes the stop's team-memory observation reachable,
+	// so the assertion below that nothing landed there can actually fail.
+	teamCtxPath := config.DefaultTeamContextPath("test-team", apiServer.URL)
+	require.NoError(t, os.MkdirAll(teamCtxPath, 0o755))
+
 	// (e) stop session and gather stored session data.
 	const finalResponse = "FINAL-CODEX-RESPONSE: the recording contains the completed work"
 	if fixture.stopDuringCapture {
@@ -281,13 +297,29 @@ func runManualPublishingSessionCaptureTest(t *testing.T, fixture agentSessionFix
 			"watcher must observe explicit stop without IPC")
 		require.NoFileExists(t, filepath.Join(state.SessionPath, ".recording.json"))
 		require.Zero(t, manager.DetectAndRestart(ledgerPath), "stopped recording must not restart")
+	} else if fixture.holdFails {
+		// Failure prevented: a stop that cannot record the hold clears the
+		// recording anyway, leaving a folder the daemon reclaims and publishes.
+		orig := writeSessionHold
+		writeSessionHold = func(string, session.HoldReason, string) error { return errors.New("disk full") }
+		t.Cleanup(func() { writeSessionHold = orig })
+		stopErr := runAgentSessionStop(inst)
+		require.ErrorContains(t, stopErr, "hold session on this machine")
+		require.ErrorContains(t, stopErr, "recording state preserved")
+		kept, loadErr := session.LoadRecordingStateForAgent(projectRoot, inst.AgentID)
+		require.NoError(t, loadErr)
+		require.NotNil(t, kept, "the recording must survive a hold that could not be recorded")
+		require.False(t, session.IsHeld(state.SessionPath))
+		return
 	} else {
 		require.NoError(t, runAgentSessionStop(inst))
 	}
 
 	var stored *session.StoredSession
+	var sessionDir string
 	if fixture.stopDuringCapture {
 		// Incremental stop finalizes the existing recording cache in place.
+		sessionDir = state.SessionPath
 		stored, err = session.ReadSessionFromPath(filepath.Join(state.SessionPath, "raw.jsonl"))
 		require.NoError(t, err)
 	} else {
@@ -298,6 +330,7 @@ func runManualPublishingSessionCaptureTest(t *testing.T, fixture agentSessionFix
 		require.NoError(t, err)
 		latest, err := s.GetLatestRaw()
 		require.NoError(t, err)
+		sessionDir = filepath.Dir(latest.FilePath)
 		stored, err = s.ReadSessionRaw(latest.SessionName)
 		require.NoError(t, err)
 	}
@@ -321,6 +354,21 @@ func runManualPublishingSessionCaptureTest(t *testing.T, fixture agentSessionFix
 		require.Equal(t, 1, counts[preCannedQuery], "initial prompt must remain captured once")
 		require.Equal(t, 1, counts[finalResponse], "final response must be drained exactly once")
 	}
+
+	// (g) The session is held on this machine (GH #1093): the hold travels
+	// with the session data, nothing invites the daemon (.needs-summary) or
+	// the AI coworker (summary prompt) to summarize and publish it, and
+	// nothing reaches the team's memory.
+	require.True(t, session.IsHeld(sessionDir), "a manual stop must hold the session it saved: %s", sessionDir)
+	require.NoFileExists(t, filepath.Join(sessionDir, ".needs-summary"), "a held session must not invite summarization")
+	var observations []string
+	_ = filepath.WalkDir(filepath.Join(teamCtxPath, "memory"), func(path string, d os.DirEntry, err error) error {
+		if err == nil && !d.IsDir() {
+			observations = append(observations, path)
+		}
+		return nil
+	})
+	require.Empty(t, observations, "a held session must leave nothing in team memory")
 }
 
 func writeCodexSessionFile(t *testing.T, homeDir, cwd string) string {

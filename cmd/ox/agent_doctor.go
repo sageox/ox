@@ -23,10 +23,15 @@ type AgentDoctorOutput struct {
 	Type               string                  `json:"type"` // "agent_doctor"
 	AgentID            string                  `json:"agent_id"`
 	IncompleteSessions []IncompleteSessionInfo `json:"incomplete_sessions,omitempty"`
-	StagedCount        int                     `json:"staged_count"`
-	CommitNeeded       bool                    `json:"commit_needed"`
-	PushNeeded         bool                    `json:"push_needed"`
-	NextSteps          []string                `json:"next_steps,omitempty"`
+	// HeldSessions are kept on this machine (session_publishing: manual);
+	// CacheOnlySessions wait in the cache for the daemon to reclaim them.
+	// Neither is published by doctor (GH #1095, #1077).
+	HeldSessions      []string `json:"held_sessions,omitempty"`
+	CacheOnlySessions []string `json:"cache_only_sessions,omitempty"`
+	StagedCount       int      `json:"staged_count"`
+	CommitNeeded      bool     `json:"commit_needed"`
+	PushNeeded        bool     `json:"push_needed"`
+	NextSteps         []string `json:"next_steps,omitempty"`
 }
 
 // IncompleteSessionInfo describes a session missing artifacts
@@ -94,6 +99,14 @@ func buildAgentDoctorOutput(agentID, projectRoot string) *AgentDoctorOutput {
 	sessionsDir := filepath.Join(ledgerPath, "sessions")
 	incompleteSessions := findIncompleteSessions(sessionsDir, agentID)
 	output.IncompleteSessions = incompleteSessions
+
+	unpublished := listUnpublishedCacheSessions(ledgerPath)
+	output.HeldSessions = unpublished.Held
+	output.CacheOnlySessions = unpublished.Waiting
+	for _, name := range unpublished.Held {
+		output.NextSteps = append(output.NextSteps,
+			fmt.Sprintf("Held on this machine: %s. Publish only if the coworker asks: 'ox session upload %s'", name, name))
+	}
 
 	// check for orphaned/stale recordings
 	if session.IsRecordingForAgent(projectRoot, agentID) {

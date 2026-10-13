@@ -19,6 +19,15 @@ const cloneBackoffMax = 1 * time.Hour
 // Kept short so that when the user runs 'ox login', the daemon retries quickly.
 const clonePermanentBackoffMax = 5 * time.Minute
 
+// backgroundCloneContext keeps clones tied to the daemon rather than the
+// request that triggered them. Unstarted schedulers have no lifecycle yet.
+func (s *SyncScheduler) backgroundCloneContext() context.Context {
+	if s.ctx != nil {
+		return s.ctx
+	}
+	return context.Background()
+}
+
 // isClonePermanentError returns true if the error message indicates a failure
 // that won't resolve on its own (bad credentials, missing permissions, bad URL).
 // Transient errors (network timeout, server 503) return false.
@@ -49,18 +58,14 @@ func isClonePermanentError(msg string) bool {
 // so the next sync will see the newly cloned repo.
 //
 // Concurrency is bounded by cloneSem inside Checkout().
-func (s *SyncScheduler) cloneInBackground(cloneURL, repoPath, repoType, workspaceID string) {
+func (s *SyncScheduler) cloneInBackground(ctx context.Context, cloneURL, repoPath, repoType, workspaceID string) {
 	// cloneWg.Add(1) is called by the caller BEFORE the go statement to
 	// avoid a race between Add and Wait.
 	defer s.cloneWg.Done()
 
 	// bail out if scheduler is shutting down
-	if s.ctx != nil {
-		select {
-		case <-s.ctx.Done():
-			return
-		default:
-		}
+	if ctx.Err() != nil {
+		return
 	}
 
 	// deduplicate: skip if clone already in progress for this workspace
@@ -83,7 +88,7 @@ func (s *SyncScheduler) cloneInBackground(cloneURL, repoPath, repoType, workspac
 	}, nil) // no progress writer for background clones
 
 	if err != nil {
-		s.refreshAfterAuthFailure(err)
+		s.refreshAfterAuthFailure(ctx, err)
 		s.logger.Error("background clone failed", "type", repoType, "path", repoPath, "error", err)
 
 		// semaphore timeout is transient — retry next cycle without escalating backoff
@@ -176,7 +181,7 @@ func (s *SyncScheduler) cloneInBackground(cloneURL, repoPath, repoType, workspac
 			if err := s.workspaceRegistry.UpdateConfigLastSync(workspaceID); err != nil {
 				s.logger.Warn("failed to backfill config last sync", "type", repoType, "path", repoPath, "error", err)
 			}
-			s.recordSyncState(context.Background(), repoPath)
+			s.recordSyncState(ctx, repoPath)
 		}
 	} else if result.Cloned {
 		s.logger.Info("background clone complete", "type", repoType, "path", repoPath)
@@ -190,7 +195,7 @@ func (s *SyncScheduler) cloneInBackground(cloneURL, repoPath, repoType, workspac
 		if err := s.workspaceRegistry.UpdateConfigLastSync(workspaceID); err != nil {
 			s.logger.Warn("failed to update config last sync after clone", "type", repoType, "path", repoPath, "error", err)
 		}
-		s.recordSyncState(context.Background(), repoPath)
+		s.recordSyncState(ctx, repoPath)
 	}
 
 	// update exists flags so status renders correctly before next Reload()
@@ -202,12 +207,15 @@ func (s *SyncScheduler) cloneInBackground(cloneURL, repoPath, repoType, workspac
 // triggerMissingClones immediately triggers clones for workspaces that don't exist
 // but have a clone URL. This is called on startup for self-healing behavior.
 // Also tries to bootstrap ledger from API if not in credentials.
-func (s *SyncScheduler) triggerMissingClones() {
+func (s *SyncScheduler) triggerMissingClones(ctx context.Context) {
+	if ctx.Err() != nil {
+		return
+	}
 	// check ledger - may need to fetch URL from API first
 	ledger := s.workspaceRegistry.GetLedger()
 	if ledger == nil || ledger.CloneURL == "" {
 		// try to fetch ledger URL from API using repo_id
-		s.fetchLedgerURLFromAPI()
+		s.fetchLedgerURLFromAPI(ctx)
 		// reload after API fetch
 		ledger = s.workspaceRegistry.GetLedger()
 	}
@@ -216,7 +224,7 @@ func (s *SyncScheduler) triggerMissingClones() {
 		if s.workspaceRegistry.ShouldRetryClone(ledger.ID) {
 			s.logger.Info("triggering immediate ledger clone (self-healing)", "path", ledger.Path)
 			if s.addClone() {
-				go s.cloneInBackground(ledger.CloneURL, ledger.Path, "ledger", ledger.ID)
+				go s.cloneInBackground(s.backgroundCloneContext(), ledger.CloneURL, ledger.Path, "ledger", ledger.ID)
 			}
 		}
 	}
@@ -228,7 +236,7 @@ func (s *SyncScheduler) triggerMissingClones() {
 				s.logger.Info("triggering immediate team context clone (self-healing)",
 					"team", ws.TeamName, "path", ws.Path)
 				if s.addClone() {
-					go s.cloneInBackground(ws.CloneURL, ws.Path, "team-context", ws.ID)
+					go s.cloneInBackground(s.backgroundCloneContext(), ws.CloneURL, ws.Path, "team-context", ws.ID)
 				}
 			}
 		}

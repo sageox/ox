@@ -312,6 +312,10 @@ func withCachedRecordingForRecovery(projectRoot string, state *session.Recording
 	})
 }
 
+// clearRecoveredRecording clears a held recovery's recording state. A variable
+// so tests can make it fail.
+var clearRecoveredRecording = session.ClearRecordingStateAt
+
 // recoverFromCache uploads raw.jsonl from cache when the adapter file is gone.
 // raw.jsonl is the source of truth -- all other artifacts (events, summary)
 // can be regenerated from it. This ensures no session data is lost even when
@@ -332,16 +336,55 @@ func recoverFromCache(inst *agentinstance.Instance, projectRoot string, state *s
 	// minutes and a live hook gives up on the lock after seconds. So this first
 	// pass only sizes the prompt; publishing re-takes the lock and re-reads.
 	var entryCount int
+	var held bool
 	err := withCachedRecordingForRecovery(projectRoot, state, rawPath, func(latest *session.RecordingState) error {
 		stored, readErr := session.ReadSessionFromPath(rawPath)
 		if readErr != nil {
 			return unreadableCachedSessionError(projectRoot, latest, readErr)
 		}
 		entryCount = len(stored.Entries)
+		// Held on this machine (session_publishing: manual, now or at start):
+		// recovered locally, never uploaded. The hold goes on before the
+		// recording is cleared, and both happen under the capture lock, so a
+		// queued hook never sees a finalized recording as live (GH #1093).
+		if !stopHoldsSession(projectRoot, latest) {
+			return nil
+		}
+		name := session.GetSessionName(latest.SessionPath)
+		// 'ox session upload' later publishes from raw.jsonl alone, so the
+		// native session IDs and trace boundaries the recording collected
+		// after start go onto it before the recording state is cleared.
+		if err := session.StampRawCarrier(rawPath, session.CarrierStamp{
+			NativeSessions: latest.NativeSessions,
+			StoppedAt:      session.ResolveStoppedAt(latest.StoppedAt, rawPath, time.Now()),
+			TraceCapture:   latest.Trace,
+		}); err != nil {
+			return fmt.Errorf("record recovered session %s details before holding it: %w", name, err)
+		}
+		if err := session.WriteHoldMarker(latest.SessionPath, session.HoldManualPublishing, "recover"); err != nil {
+			return fmt.Errorf("hold recovered session %s: %w", name, err)
+		}
+		held = true
+		if err := clearRecoveredRecording(latest.SessionPath, latest.SessionID); err != nil {
+			return fmt.Errorf("held recovered session %s, but could not clear its recording state: %w", name, err)
+		}
 		return nil
 	})
 	if err != nil {
 		return err
+	}
+
+	if held {
+		name := session.GetSessionName(state.SessionPath)
+		return outputRecoverJSON(&sessionRecoverOutput{
+			Success:     true,
+			Type:        "session_recover",
+			AgentID:     inst.AgentID,
+			RawPath:     rawPath,
+			EntryCount:  entryCount,
+			SessionName: name,
+			Message:     heldSessionWarning(name),
+		})
 	}
 
 	// interactive confirmation: prompt human users before uploading orphaned sessions

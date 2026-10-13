@@ -113,6 +113,11 @@ func withCursorControlState(ctx context.Context, projectRoot string, expected *R
 }
 
 func cursorSourceReady(state *RecordingState, data []byte) bool {
+	// Manual startup can bind an existing empty export before any prompt.
+	// Callers still prove the source exists and the checkpoint matches EOF.
+	if len(data) == 0 && state.CursorExpectedTurns == 0 {
+		return true
+	}
 	return cursorSourceTurnComplete(data) && cursorCompletedTurns(data) >= state.CursorExpectedTurns
 }
 

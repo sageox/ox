@@ -70,7 +70,7 @@ func (s *SyncScheduler) pullTeamContexts(ctx context.Context) {
 	defer span.End()
 
 	// anti-entropy: ensure missing workspaces get cloned
-	s.triggerMissingClones()
+	s.triggerMissingClones(ctx)
 
 	// bound the whole cycle so a DNS/network hang can't block the scheduler
 	// (the caller ctx has no deadline); each pull has its own, shorter budget
@@ -135,7 +135,7 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 	defer span.End()
 
 	// refresh credentials if expired or near expiry
-	s.refreshCredentialsIfNeeded()
+	s.refreshCredentialsIfNeeded(ctx)
 
 	// discover new teams independently of token refresh — ensures new teams
 	// are found even when the credential token is still fresh
@@ -225,7 +225,7 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 					_ = progress.WriteStage("cloning", fmt.Sprintf("Cloning team %s in background...", ws.TeamName))
 				}
 				if s.addClone() {
-					go s.cloneInBackground(ws.CloneURL, ws.Path, "team-context", ws.ID) //nolint:gosec // G118 - intentionally uses background context; goroutine outlives request scope
+					go s.cloneInBackground(s.backgroundCloneContext(), ws.CloneURL, ws.Path, "team-context", ws.ID)
 					cloningCount++
 				}
 				addResult(ws, "cloning", "")
@@ -337,7 +337,7 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 		s.workspaceRegistry.SetSyncInProgress(r.ws.ID, false)
 
 		if r.err != nil {
-			s.refreshAfterAuthFailure(r.err)
+			s.refreshAfterAuthFailure(ctx, r.err)
 			s.workspaceRegistry.SetWorkspaceError(r.ws.ID, r.err.Error())
 			// See teamFailureTakesBackoff for why this is a two-input
 			// decision and not an error-shape test.

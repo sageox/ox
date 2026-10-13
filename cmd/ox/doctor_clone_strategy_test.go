@@ -35,7 +35,7 @@ func TestTeamContextCloneStrategyResults(t *testing.T) {
 		require.NoError(t, err, "git %v: %s", args, out)
 	}
 	require.NoError(t, os.MkdirAll(src, 0o755))
-	run(root, "init", "-q", "--bare", "--initial-branch=main", origin)
+	initBareRemote(t, origin, "--initial-branch=main")
 	run(root, "-C", origin, "config", "uploadpack.allowFilter", "true")
 	run(src, "init", "-q", "--initial-branch=main")
 	run(src, "config", "user.name", "Test")

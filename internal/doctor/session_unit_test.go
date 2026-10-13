@@ -750,3 +750,32 @@ func TestSessionHealthCacheable_Interface(t *testing.T) {
 		check.SetHealthStatus(healthStatus)
 	}
 }
+
+// Failure prevented: `ox doctor --fix` clears a crashed manual-mode
+// recording's marker, and the daemon then publishes it (GH #1093).
+func TestSessionOrphanedCheck_FixHoldsManualRecording(t *testing.T) {
+	for _, mode := range []string{"manual", "auto"} {
+		t.Run(mode, func(t *testing.T) {
+			cacheDir := t.TempDir()
+			t.Setenv("OX_XDG_ENABLE", "1")
+			t.Setenv("HOME", cacheDir)
+			t.Setenv("XDG_CACHE_HOME", cacheDir)
+			project := t.TempDir()
+			require.NoError(t, os.MkdirAll(filepath.Join(project, ".sageox"), 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(project, ".sageox", "config.json"), []byte(`{"config_version":"2","repo_id":"test-repo-hold"}`), 0o644))
+			state, err := session.StartRecording(project, session.StartRecordingOptions{AgentID: "OxStale", AdapterName: "claude-code", Username: "testuser"})
+			require.NoError(t, err)
+			require.NoError(t, os.WriteFile(filepath.Join(state.SessionPath, "raw.jsonl"), []byte(`{"type":"user","content":"captured"}`+"\n"), 0o644))
+			require.NoError(t, session.UpdateRecordingStateAt(state.SessionPath, state.SessionID, func(s *session.RecordingState) {
+				s.StartedAt = time.Now().Add(-72 * time.Hour)
+				s.PublishingMode = mode
+			}))
+
+			result := NewSessionOrphanedCheck(project, true).Run(context.Background(), false)
+
+			assert.Contains(t, result.Message, "cleaned 1 orphaned", "the stale marker is reclaimed either way")
+			assert.Equal(t, mode == "manual", session.IsHeld(state.SessionPath), "only a manual-mode recording is held")
+			assert.FileExists(t, filepath.Join(state.SessionPath, "raw.jsonl"))
+		})
+	}
+}

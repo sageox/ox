@@ -23,6 +23,7 @@ var (
 	ErrCursorSourceChanged       = errors.New("source-changed: Cursor session export changed; checkpoint preserved")
 	ErrCursorBoundaryUnavailable = errors.New("boundary-unavailable: Cursor recording needs a saved source boundary")
 	ErrCursorFinalDrainPending   = errors.New("final-drain-pending: waiting for Cursor to finish exporting this turn")
+	ErrCursorRecordingActive     = errors.New("recording-active: Cursor activity resumed before finalization")
 )
 
 const cursorCaptureMaxBytes int64 = 64 << 20
@@ -165,6 +166,12 @@ func drainCursorSourceLocked(ctx context.Context, projectRoot, sessionPath, home
 	}
 	converted := ConvertRawEntries(entries)
 	rawPath := filepath.Join(sessionPath, "raw.jsonl")
+	// A previous checkpoint rename may be visible even if its directory sync
+	// failed. Prove it durable before journal settlement can discard rollback
+	// evidence or accept those bytes as an acknowledged capture.
+	if err := syncCursorRecordingDirectory(state); err != nil {
+		return nil, fmt.Errorf("sync Cursor checkpoint before recovery: %w", err)
+	}
 	if err := recoverRawAppend(rawPath, state.SourceOffset); err != nil {
 		return nil, fmt.Errorf("recover Cursor capture: %w", err)
 	}
@@ -206,7 +213,7 @@ func drainCursorSourceLocked(ctx context.Context, projectRoot, sessionPath, home
 	state.EntryCount += len(converted)
 	if changed {
 		// Save is atomic but deliberately does not acquire this already-held
-		// marker lock. A failure leaves the old checkpoint for reconciliation.
+		// marker lock. A write or sync failure leaves the journal for recovery.
 		if err := SaveRecordingState(projectRoot, state); err != nil {
 			return nil, fmt.Errorf("checkpoint Cursor capture: %w", err)
 		}
@@ -227,6 +234,18 @@ func drainCursorSourceLocked(ctx context.Context, projectRoot, sessionPath, home
 // The finalized flag travels in that same raw-file replacement, so a crash
 // cannot make a retry apply the mask twice or replay the source into masked raw.
 func FinalizeCursorCapture(ctx context.Context, projectRoot, sessionPath, homeDir string, reader adapters.IncrementalReader) (*RecordingState, error) {
+	return finalizeCursorCapture(ctx, projectRoot, sessionPath, homeDir, reader, time.Time{})
+}
+
+// FinalizeInactiveCursorCapture rechecks daemon inactivity under capture's
+// append and marker locks. A hook may refresh activity while the daemon waits
+// for raw ownership, so its earlier liveness observation cannot authorize the
+// rewrite. Persisted or explicit stops remain eligible regardless of activity.
+func FinalizeInactiveCursorCapture(ctx context.Context, projectRoot, sessionPath, homeDir string, reader adapters.IncrementalReader, inactiveBefore time.Time) (*RecordingState, error) {
+	return finalizeCursorCapture(ctx, projectRoot, sessionPath, homeDir, reader, inactiveBefore)
+}
+
+func finalizeCursorCapture(ctx context.Context, projectRoot, sessionPath, homeDir string, reader adapters.IncrementalReader, inactiveBefore time.Time) (*RecordingState, error) {
 	var state *RecordingState
 	err := withRawAppendLock(filepath.Join(sessionPath, "raw.jsonl"), func() error {
 		return WithRecordingStateLock(ctx, sessionPath, func() error {
@@ -248,7 +267,31 @@ func FinalizeCursorCapture(ctx context.Context, projectRoot, sessionPath, homeDi
 					return fmt.Errorf("%w: Cursor recording is held for ownership review", ErrNotRecording)
 				}
 				state = decoded
-				return nil
+				// A prior attempt may have renamed the finalized raw file but
+				// failed to sync its directory. A visible flag alone is not durable.
+				return syncCursorRecordingDirectory(state)
+			}
+			if !inactiveBefore.IsZero() {
+				checkpoint, err := loadCursorCaptureCheckpoint(projectRoot, sessionPath, true)
+				if err != nil {
+					return err
+				}
+				if checkpoint.StoppedAt == nil && !HasExplicitStop(projectRoot, checkpoint.AgentID) {
+					lastActivity := checkpoint.StartedAt
+					if checkpoint.LastHookAt != nil {
+						lastActivity = *checkpoint.LastHookAt
+					}
+					if lastActivity.IsZero() {
+						info, err := os.Stat(recordingStatePath(sessionPath))
+						if err != nil {
+							return err
+						}
+						lastActivity = info.ModTime()
+					}
+					if !lastActivity.Before(inactiveBefore) {
+						return ErrCursorRecordingActive
+					}
+				}
 			}
 			capture, err := drainCursorSourceLocked(ctx, projectRoot, sessionPath, homeDir, reader, true)
 			if err != nil {
@@ -322,12 +365,7 @@ func FinalizeCursorCapture(ctx context.Context, projectRoot, sessionPath, homeDi
 			if err := os.Rename(tmpPath, rawPath); err != nil {
 				return err
 			}
-			dir, err := os.Open(sessionPath)
-			if err != nil {
-				return err
-			}
-			defer dir.Close()
-			return dir.Sync()
+			return syncCursorRecordingDirectory(state)
 		})
 	})
 	return state, err

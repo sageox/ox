@@ -20,11 +20,17 @@ const credentialRefreshThreshold = 1 * time.Hour
 // Only uses the bearer to obtain a fresh PAT; the PAT
 // itself is what git/LFS operations use (HTTP Basic auth, not OAuth bearer).
 // See docs/specs/session-auth-model.md for the credential model.
-func (s *SyncScheduler) refreshCredentialsIfNeeded() {
-	s.refreshCredentials(false)
+func (s *SyncScheduler) refreshCredentialsIfNeeded(ctx context.Context) {
+	s.refreshCredentials(ctx, false)
 }
 
-func (s *SyncScheduler) refreshCredentials(force bool) {
+// refreshCredentials serializes endpoint-scoped PAT refresh within ctx. Force
+// bypasses freshness and timer checks, while concurrent requests still share
+// the in-flight refresh.
+func (s *SyncScheduler) refreshCredentials(ctx context.Context, force bool) {
+	if ctx.Err() != nil {
+		return
+	}
 	projectEndpoint := endpoint.GetForProject(s.config.ProjectRoot)
 	token, err := auth.GetTokenForEndpoint(projectEndpoint)
 	if err != nil {
@@ -68,7 +74,7 @@ func (s *SyncScheduler) refreshCredentials(force bool) {
 
 	// The scheduler refreshes within an hour of expiry; the shared cache
 	// helper also handles a changed bearer and explicit server rejections.
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	_, err = auth.RefreshGitCredentialsForEndpoint(ctx, projectEndpoint, true)
 	if err != nil {
@@ -88,18 +94,18 @@ func (s *SyncScheduler) refreshCredentials(force bool) {
 }
 
 // refreshAfterAuthFailure repairs a rejected PAT before the next sync attempt.
-func (s *SyncScheduler) refreshAfterAuthFailure(err error) {
+func (s *SyncScheduler) refreshAfterAuthFailure(ctx context.Context, err error) {
 	if err == nil || !gitserver.IsAuthFailure(err.Error()) {
 		return
 	}
 	ep := endpoint.GetForProject(s.config.ProjectRoot)
 	creds, _ := gitserver.LoadCredentialsForEndpoint(ep)
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	probeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	if probe := gitserver.ValidatePATLiveness(ctx, creds); probe.Valid {
+	if probe := gitserver.ValidatePATLiveness(probeCtx, creds); probe.Valid {
 		return // the credential helper already refreshed the rejected PAT
 	}
-	s.refreshCredentials(true)
+	s.refreshCredentials(ctx, true)
 }
 
 // discoverTeams re-fetches the team list from the API independently of token refresh.
@@ -191,7 +197,10 @@ func reposEqual(a, b map[string]gitserver.RepoEntry) bool {
 // This function handles many failure modes (no config, no auth, network errors, ledger not ready)
 // by logging and returning early. This is intentional - the daemon should continue operating
 // even if ledger URL fetch fails (e.g., when offline).
-func (s *SyncScheduler) fetchLedgerURLFromAPI() {
+func (s *SyncScheduler) fetchLedgerURLFromAPI(ctx context.Context) {
+	if ctx.Err() != nil {
+		return
+	}
 	// check if we already have a ledger URL
 	if ledger := s.workspaceRegistry.GetLedger(); ledger != nil && ledger.CloneURL != "" {
 		return
@@ -231,7 +240,10 @@ func (s *SyncScheduler) fetchLedgerURLFromAPI() {
 	// fall back to GetLedgerStatus if server hasn't implemented new endpoint (404 -> nil)
 	client := api.NewRepoClientWithEndpoint(projectEndpoint).WithAuthToken(token.AccessToken)
 
-	detail, detailErr := client.GetRepoDetail(repoID)
+	detail, detailErr := client.GetRepoDetailContext(ctx, repoID)
+	if ctx.Err() != nil {
+		return
+	}
 	if detailErr != nil {
 		s.logger.Warn("failed to fetch repo detail", "repo_id", repoID, "error", detailErr)
 		s.workspaceRegistry.RecordSyncFailure("ledger-api")
@@ -262,7 +274,10 @@ func (s *SyncScheduler) fetchLedgerURLFromAPI() {
 	}
 
 	// fallback: GetRepoDetail returned nil (404 -- server not updated yet)
-	status, err := client.GetLedgerStatus(repoID)
+	status, err := client.GetLedgerStatusContext(ctx, repoID)
+	if ctx.Err() != nil {
+		return
+	}
 	if err != nil {
 		// network errors are expected when offline - use Warn not Error
 		s.logger.Warn("failed to fetch ledger status", "repo_id", repoID, "error", err)
@@ -311,7 +326,7 @@ func (s *SyncScheduler) persistLedgerPath() {
 		if s.workspaceRegistry.ShouldRetryClone(ledger.ID) {
 			s.logger.Info("triggering ledger clone after API fetch", "path", ledger.Path)
 			if s.addClone() {
-				go s.cloneInBackground(ledger.CloneURL, ledger.Path, "ledger", ledger.ID)
+				go s.cloneInBackground(s.backgroundCloneContext(), ledger.CloneURL, ledger.Path, "ledger", ledger.ID)
 			}
 		}
 	}

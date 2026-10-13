@@ -357,3 +357,45 @@ func TestAbort_KillsCommittedThenFinalizedSessionAndAllSummarizedData(t *testing
 		"aborting one session must never delete a peer session")
 	assert.DirExists(t, filepath.Join(f.ledgerPath, "sessions", peerName))
 }
+
+// Failure prevented: a hold turned a published session into a "local" one, so
+// removing it by name only deleted this machine's copy while reporting
+// success, and the transcript stayed on the shared Ledger. Two ways in: a
+// .held committed into the shared tree (ox never writes one there, so it is
+// someone else's), or this machine's own hold on a session published before.
+func TestAbort_HoldNeverShieldsAPublishedSessionFromTheKill(t *testing.T) {
+	const sessionName = "2026-01-01T00-00-testuser-OxHeKl"
+	cases := []struct {
+		name string
+		hold func(t *testing.T, f *draftLedgerFixture)
+	}{
+		{"marker committed into the shared tree", func(t *testing.T, f *draftLedgerFixture) {
+			planted := filepath.Join(f.ledgerPath, "sessions", sessionName, session.HeldMarkerFile)
+			require.NoError(t, os.WriteFile(planted, []byte(`{"reason":"manual_publishing"}`), 0o644))
+			runGit(t, f.ledgerPath, "add", "-f", "--sparse", "--", "sessions/"+sessionName+"/"+session.HeldMarkerFile)
+			runGit(t, f.ledgerPath, "commit", "--no-verify", "-q", "-m", "plant hold")
+			f.push(t)
+		}},
+		{"this machine holds a copy of a published session", func(t *testing.T, f *draftLedgerFixture) {
+			local := filepath.Join(session.GetContextPath(getRepoIDOrDefault(f.projectRoot)), "sessions", sessionName)
+			require.NoError(t, os.MkdirAll(local, 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(local, "raw.jsonl"), []byte("local raw"), 0o644))
+			require.NoError(t, session.WriteHoldMarker(local, session.HoldManualPublishing, "test"))
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newDraftLedgerFixture(t)
+			t.Chdir(f.projectRoot)
+			cfg = &config.Config{}
+			seedFinalizedLedgerSessionWithArtifacts(t, f.ledgerPath, sessionName)
+			commitAndPushFinalized(t, f, sessionName)
+			tc.hold(t, f)
+
+			setForceFlag(t, true)
+			require.NoError(t, runAgentSessionAbort(&agentinstance.Instance{AgentID: "OxKill"}, agentCmd, []string{sessionName}))
+
+			assert.Empty(t, remotePathsUnder(t, f.barePath, sessionName), "the published session is removed from the remote")
+		})
+	}
+}

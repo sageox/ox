@@ -1,0 +1,17 @@
+{
+  "created_at": "2026-10-01T06:00:00Z",
+  "id": "r-v2-0004",
+  "items": [
+    {
+      "anchor": "h4",
+      "label": "The fourth risk",
+      "note": "Edited after it was named.",
+      "reviewer": "Ben",
+      "section": "Risks",
+      "status": "comment"
+    }
+  ],
+  "request_sha256": "6c7f10115af61f9089229f3026c788196c49589102ca81a8bd4700fe365d1c00",
+  "reviewer": "Ben",
+  "slug": "rc-v2-records"
+}

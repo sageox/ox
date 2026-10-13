@@ -240,3 +240,23 @@ func TestCleanupOrphanedStubsInDir_ErrorPaths(t *testing.T) {
 		assert.FileExists(t, filepath.Join(base, "stray.txt"), "a stray file must be left untouched")
 	})
 }
+
+// Failure prevented: a session the coworker held on this machine looks like a
+// phantom (header-only, no meta.json, old) and the sweep deletes it; a held
+// session is only ever removed by name (GH #1093).
+func TestCleanupOrphanedStubsInDir_KeepsHeldSession(t *testing.T) {
+	base := t.TempDir()
+	held := makeStub(t, base, "2026-10-05T10-00-faridun-OxHeLd", map[string]string{
+		"raw.jsonl": headerLine,
+		".held":     `{"reason":"manual_publishing"}`,
+	}, 2*orphanStubGracePeriod)
+	phantom := makeStub(t, base, "2026-10-05T10-01-faridun-OxPhnt", map[string]string{
+		"raw.jsonl": headerLine,
+	}, 2*orphanStubGracePeriod)
+
+	result := CleanupOrphanedStubsInDir(base)
+
+	assert.DirExists(t, held, "a held session must survive the sweep")
+	assert.NoDirExists(t, phantom, "control: an unheld phantom is still reclaimed")
+	assert.Equal(t, 1, result.Removed)
+}

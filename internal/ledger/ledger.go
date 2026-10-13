@@ -534,10 +534,17 @@ func sparseCheckoutDirs() []string {
 // Future: daemon GC reclone will also call this to reconfigure the sliding window
 // on fresh clones, pruning old data/github/ directories outside the 30-day window.
 //
+// It also turns off symlink checkout first (DisableSymlinks), so every path it
+// materializes, and every later pull, arrives as a plain file.
+//
 // TODO: consolidate with team context sparse checkout (gitserver). Both use similar
 // clone/sparse/pull plumbing but different implementations. See team context's
 // ComputeSparseSet() and manifest-driven approach vs this static list + sliding window.
 func ConfigureSparseCheckout(path string) error {
+	if err := DisableSymlinks(path); err != nil {
+		return err
+	}
+
 	// Only run sparse-checkout init on repos that don't have it yet.
 	// Re-running "init --cone" is destructive: it reapplies the cone rules,
 	// which deletes untracked files in directories outside the cone (e.g.
@@ -583,6 +590,73 @@ func ConfigureSparseCheckout(path string) error {
 	}
 
 	return nil
+}
+
+// DisableSymlinks saves core.symlinks=false so git checks Ledger symlinks out
+// as plain files holding the link text. Teammates write this repo, and ox's
+// writes into it (plan saves, review records, AGENTS.md) follow a symlink at
+// the path they write, so a committed link could aim them outside the Ledger.
+// ox never writes a symlink here itself.
+//
+// Links an older clone already checked out become files holding their
+// current link text, so an unchanged one reads as clean and a local retarget
+// stays an uncommitted change. The setting is saved last: a failed run
+// repeats on the next call.
+func DisableSymlinks(path string) error {
+	// --local: a global or system core.symlinks=false says nothing about links
+	// this clone already checked out, and can be removed later.
+	if out, _ := exec.Command("git", "-C", path, "config", "--local", "--type=bool", "--get", "core.symlinks").Output(); strings.TrimSpace(string(out)) == "false" {
+		return nil
+	}
+	tracked, err := exec.Command("git", "-C", path, "ls-files", "-s", "-z").Output()
+	if err != nil {
+		return fmt.Errorf("list tracked files: %w", err)
+	}
+	for _, rec := range strings.Split(string(tracked), "\x00") {
+		meta, rel, ok := strings.Cut(rec, "\t") // "<mode> <object> <stage>\t<path>"
+		if !ok || !strings.HasPrefix(meta, "120000 ") {
+			continue
+		}
+		full := filepath.Join(path, filepath.FromSlash(rel))
+		info, err := os.Lstat(full)
+		if errors.Is(err, os.ErrNotExist) || err == nil && info.Mode()&os.ModeSymlink == 0 {
+			continue // outside the sparse cone, deleted, or already a plain file
+		}
+		// A path Lstat could not inspect still goes to Readlink, which either
+		// converts it or fails the run. Skipping it could save the setting with
+		// a live link that no later call would look at again.
+		target, err := os.Readlink(full)
+		if err != nil {
+			return fmt.Errorf("read symlink %s: %w", rel, err)
+		}
+		if err := replaceLinkWithFile(full, target); err != nil {
+			return fmt.Errorf("convert symlink %s: %w", rel, err)
+		}
+	}
+	if output, err := exec.Command("git", "-C", path, "config", "core.symlinks", "false").CombinedOutput(); err != nil {
+		return fmt.Errorf("config core.symlinks: %w: %s", err, output)
+	}
+	return nil
+}
+
+// replaceLinkWithFile swaps the symlink at full for a file holding text.
+// rename(2) replaces the link itself; it never writes through it.
+func replaceLinkWithFile(full, text string) error {
+	tmp, err := os.CreateTemp(filepath.Dir(full), ".ox-symlink-*")
+	if err != nil {
+		return err
+	}
+	_, err = tmp.WriteString(text)
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Rename(tmp.Name(), full)
+	}
+	if err != nil {
+		_ = os.Remove(tmp.Name())
+	}
+	return err
 }
 
 // validateSparseCheckoutDirs returns an error if required directories are missing
