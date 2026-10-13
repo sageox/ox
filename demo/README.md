@@ -21,7 +21,7 @@ are mocked in `demo/mock/` for reproducible, offline recording.
 
 ```bash
 brew install vhs
-brew install sops yq
+brew install sops yq awscli
 node --version  # 18+
 ```
 
@@ -38,8 +38,8 @@ The demo uses a dedicated demo account (`you@yourcompany.com`).
 ```bash
 cp demo/credentials.example.yaml demo/credentials.yaml
 vim demo/credentials.yaml
-cd demo && sops -e --filename-override credentials.sops.yaml credentials.yaml > credentials.sops.yaml
-rm credentials.yaml
+cd demo && sops -e --filename-override credentials.sops.yaml credentials.yaml > credentials.sops.yaml.tmp \
+  && mv credentials.sops.yaml.tmp credentials.sops.yaml && rm credentials.yaml
 ```
 
 `--filename-override` makes sops apply the `credentials.sops.yaml` rule in `demo/.sops.yaml`, so the file gets the KMS and break-glass recipients.
