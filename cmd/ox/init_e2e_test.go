@@ -479,15 +479,18 @@ func TestRunInit_SessionImportDiscovery(t *testing.T) {
 	}
 }
 
-// TestRunInit_SkippedRegistrationHidesSessionImport prevents stale repo/team IDs
-// from advertising import after skipped registration or endpoint rebinding.
-func TestRunInit_SkippedRegistrationHidesSessionImport(t *testing.T) {
+// TestRunInit_RegistrationConfirmationGatesSessionImport prevents stale IDs from
+// advertising import after skipped registration or unconfirmed team registration.
+func TestRunInit_RegistrationConfirmationGatesSessionImport(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		rebind bool
+		name                                     string
+		rebind, skipped, confirmedTeam, wantHint bool
 	}{
-		{name: "existing binding"},
-		{name: "endpoint rebind", rebind: true},
+		{name: "existing binding, registration skipped", skipped: true},
+		{name: "endpoint rebind, registration skipped", rebind: true, skipped: true},
+		{name: "endpoint rebind, team unconfirmed", rebind: true},
+		{name: "existing binding, team unconfirmed"},
+		{name: "endpoint rebind, team confirmed", rebind: true, confirmedTeam: true, wantHint: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env := newOxE2E(t)
@@ -503,14 +506,29 @@ func TestRunInit_SkippedRegistrationHidesSessionImport(t *testing.T) {
 				projectCfg.Endpoint = "https://old.sageox.example"
 				require.NoError(t, config.SaveProjectConfig(env.Root, projectCfg))
 			}
-			env.register = func(api.RepoInitRequest) (int, any) { return 404, nil }
+			env.register = func(api.RepoInitRequest) (int, any) {
+				if tc.skipped {
+					return 404, nil
+				}
+				response := api.RepoInitResponse{RepoID: env.RepoID}
+				if tc.confirmedTeam {
+					response.TeamID = env.TeamID
+				}
+				return 200, response
+			}
 			initQuiet = false
 			output := captureStdoutForPlanCLI(t, func() {
 				withStdin(t, "yes\n", func() { err = runInit() })
 			})
 			require.NoError(t, err)
-			assert.Contains(t, output, "API registration skipped")
-			assert.NotContains(t, output, "ox session import", "old IDs do not confirm registration to the current endpoint")
+			if tc.skipped {
+				assert.Contains(t, output, "API registration skipped")
+			}
+			if tc.wantHint {
+				assert.Contains(t, output, "ox session import", "a confirmed binding should advertise optional import")
+			} else {
+				assert.NotContains(t, output, "ox session import", "old IDs do not establish fresh team confirmation")
+			}
 			projectCfg, err = config.LoadProjectConfig(env.Root)
 			require.NoError(t, err)
 			assert.Equal(t, env.Server.URL, projectCfg.Endpoint)

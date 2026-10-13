@@ -1039,9 +1039,9 @@ func runInit() error {
 		fmt.Println(cli.StyleBold.Render("SageOx initialized successfully!"))
 		fmt.Println(ui.MutedStyle.Render(ui.SeparatorHeavy))
 
-		// Existing IDs can survive skipped registration, including an endpoint
-		// rebind. Only a response confirms the binding to this endpoint.
-		if resp != nil {
+		// Old IDs can survive skipped or partial registration and later reinit.
+		// Only fresh team confirmation qualifies for this optional guidance.
+		if resp != nil && resp.TeamID != "" {
 			printInitSessionImportHint(gitRoot, cfg)
 		}
 
