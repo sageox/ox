@@ -158,7 +158,7 @@ func listReviewPending(ledgerPath string) ([]reviewPending, error) {
 	}
 	var out []reviewPending
 	for _, de := range entries {
-		if de.IsDir() || !strings.HasSuffix(de.Name(), ".json") || strings.HasPrefix(de.Name(), ".") {
+		if !isPendingEntry(de) {
 			continue
 		}
 		e, err := readReviewPending(filepath.Join(dir, de.Name()))
@@ -210,6 +210,13 @@ func flushPendingReviewRecords(ctx context.Context, ledgerPath string) (succeede
 		succeeded++
 	}
 	return succeeded, failed, nil
+}
+
+// isPendingEntry reports whether de is a plan push marker or a review entry:
+// a .json file, never a dotfile such as the ".tmp-*" a crash can leave behind
+// fileutil.AtomicWriteBytes.
+func isPendingEntry(de os.DirEntry) bool {
+	return !de.IsDir() && strings.HasSuffix(de.Name(), ".json") && !strings.HasPrefix(de.Name(), ".")
 }
 
 func clearReviewPending(ctx context.Context, ledgerPath string, e reviewPending) {
@@ -302,7 +309,7 @@ func listPlanPushPending(ledgerPath string) ([]planPushPending, error) {
 	}
 	var out []planPushPending
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") || strings.HasPrefix(e.Name(), ".") {
+		if !isPendingEntry(e) {
 			continue
 		}
 		b, err := os.ReadFile(filepath.Join(ledgerPath, filepath.FromSlash(planPushPendingDir), e.Name()))
@@ -373,8 +380,13 @@ func kickPendingPlanPushes(projectRoot string) {
 		return
 	}
 	// counted, not parsed: an entry carries a whole record
-	reviews, _ := os.ReadDir(filepath.Join(ledgerPath, filepath.FromSlash(planReviewPendingDir)))
-	pending := len(markers) + len(reviews)
+	entries, _ := os.ReadDir(filepath.Join(ledgerPath, filepath.FromSlash(planReviewPendingDir)))
+	pending := len(markers)
+	for _, de := range entries {
+		if isPendingEntry(de) {
+			pending++
+		}
+	}
 	if pending == 0 {
 		return
 	}

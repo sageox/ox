@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -283,6 +284,31 @@ func TestKickPendingPlanPushes_EarlyReturnsLeaveMarkers(t *testing.T) {
 	kickPendingPlanPushes(t.TempDir())
 	if left, err := listReviewPending(reviewsOnly); err != nil || len(left) != 1 {
 		t.Fatalf("a review entry must survive a kick that could not start, %d left (err %v)", len(left), err)
+	}
+
+	// a temp file a crash left behind is not pending work, so no retry is
+	// attempted; the entry above is, so one is (the log is the only witness:
+	// the retry cannot start under go test)
+	var logs bytes.Buffer
+	prevLog := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prevLog) })
+	tmpOnly := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmpOnly, filepath.FromSlash(planReviewPendingDir)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpOnly, filepath.FromSlash(planReviewPendingDir), ".tmp-123"), []byte("{"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	planLedgerPathFor = func(string) (string, error) { return tmpOnly, nil }
+	kickPendingPlanPushes(t.TempDir())
+	if strings.Contains(logs.String(), "plan push retry") {
+		t.Fatalf("a temp file alone must not start a retry, logged:\n%s", logs.String())
+	}
+	planLedgerPathFor = func(string) (string, error) { return reviewsOnly, nil }
+	kickPendingPlanPushes(t.TempDir())
+	if !strings.Contains(logs.String(), "plan push retry not started") {
+		t.Fatalf("a review entry must attempt a retry, logged:\n%s", logs.String())
 	}
 
 	// an unreadable marker dir is an early return, not a crash
