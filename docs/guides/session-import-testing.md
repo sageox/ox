@@ -29,7 +29,9 @@ is disabled, `--browse` falls back to a structural preview without launching.
 ## Manual testing against a running SageOx service
 
 Use a disposable repository in a team on the service you're testing. The
-cleaned Math Blitz fixture contains eight native recordings and cannot read
+cleaned Math Blitz fixture contains eight native recordings. The testbed downloads
+it from a [pinned public release asset](https://github.com/sageox/ox/releases/tag/session-import-fixtures-v1)
+and verifies its SHA-256 before creating the repository. It cannot read
 your personal session stores when `--from-test-data` is supplied.
 
 The same workflow works with Tilt, another development setup, or a hosted
@@ -101,6 +103,7 @@ go test -race ./cmd/ox ./internal/session/nativeimport \
 go test -tags browser ./cmd/ox -run '^TestImportBrowser' -count=1
 node --check cmd/ox/session_import_browser.js
 python3 scripts/session_import_testbed_test.py
+python3 scripts/session_import_fixture_test.py
 ```
 
 The reader opens in your default browser, including Safari; Chrome/Chromium is
@@ -108,6 +111,14 @@ required only by the automated `chromedp` browser tests. To capture desktop, mob
 QA images, add `-args -import-browser-screenshots=/private/tmp/ox-import-qa` to
 the browser test command. Real-adapter fixture tests build the adapter binaries
 from this checkout; fast `-short` tests omit that build.
+
+Manual and automated fixture tests share the same artifact cache under
+`${XDG_CACHE_HOME:-~/.cache}/sageox/test-fixtures/session-import/`. The first run
+needs access to the public release asset; subsequent runs verify cached bytes and
+work offline. To download it ahead of time, run
+`python3 scripts/session_import_testbed.py fixture`. A download or checksum failure
+fails the fixture test with a diagnostic. For a fixture you captured yourself,
+pass `--fixture /path/to/fixture` to the `create` command.
 
 To keep the complete gate independent of saved machine credentials and shared
 data, scope fresh XDG directories to that command:

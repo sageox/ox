@@ -265,6 +265,22 @@ class Testbed(unittest.TestCase):
         self.assertIsNotNone(tb.word("dreal").search('"push it:\\n\\ndreal@laptop repo %"'))
         self.assertIsNone(tb.word("dreal").search("xdreal"))
 
+    def test_create_without_override_uses_the_shared_artifact(self):
+        code, text, fixture = self.capture()
+        self.assertEqual(0, code, text)
+        target = self.tmp / "artifact-bed"
+        with mock.patch.object(tb, "resolve_fixture", return_value=fixture) as resolve:
+            code, text = self.run_tb("create", str(target))
+        self.assertEqual(0, code, text)
+        resolve.assert_called_once_with()
+        self.assertTrue((target / ".git/ox-test-data").is_dir())
+
+    def test_fixture_command_reports_download_failure_without_a_traceback(self):
+        with mock.patch.object(tb, "resolve_fixture", side_effect=tb.FixtureError("artifact unavailable")):
+            code, text = self.run_tb("fixture")
+        self.assertEqual(1, code)
+        self.assertEqual("refused: artifact unavailable\n", text)
+
 
 if __name__ == "__main__":
     unittest.main()

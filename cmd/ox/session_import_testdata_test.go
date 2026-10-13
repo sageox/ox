@@ -2,10 +2,13 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,7 +17,41 @@ import (
 
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/session/nativeimport"
+	"github.com/sageox/ox/internal/testguard"
 )
+
+var capturedFixture struct {
+	sync.Once
+	path string
+	err  error
+	text string
+}
+
+// Preserve the invocation's cache location before individual tests sandbox HOME
+// and XDG paths. The downloaded artifact is test data, never a personal session store.
+var capturedFixtureEnv = testguard.MinimalEnv([]string{
+	"PYTHONDONTWRITEBYTECODE=1",
+	"XDG_CACHE_HOME=" + os.Getenv("XDG_CACHE_HOME"),
+})
+
+// Resolve real recordings once through the same verified loader as manual tests.
+// Missing assets fail the corpus tests; they must never silently lose coverage.
+func capturedSessionFixture(t *testing.T) string {
+	t.Helper()
+	capturedFixture.Do(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "python3", repoPath("..", "..", "scripts", "session_import_testbed.py"), "fixture")
+		cmd.Env = capturedFixtureEnv
+		output, err := cmd.CombinedOutput()
+		capturedFixture.err = err
+		capturedFixture.text = string(output)
+		capturedFixture.path = strings.TrimSpace(string(output))
+	})
+	require.NoError(t, capturedFixture.err, "resolve session-import artifact: %s", capturedFixture.text)
+	require.DirExists(t, capturedFixture.path)
+	return capturedFixture.path
+}
 
 // --from-test-data lets a test run import sessions seeded into a directory
 // that stands in for this machine's stores: <dir>/claude for ~/.claude and
@@ -73,8 +110,11 @@ func TestImportE2E_FromTestDataSurvivesThePrintedCommand(t *testing.T) {
 // Failure prevented: a change in either app's file format, or in ox's reading
 // of it, silently dropping real sessions from an import.
 func TestImportE2E_CapturedDesktopSessions(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: captured-session corpus uses a public fixture artifact")
+	}
 	f := newImportFixture(t)
-	testData := seedCapturedSessions(t, repoPath("testdata", "session-import", "math-blitz"), f.projectRoot)
+	testData := seedCapturedSessions(t, capturedSessionFixture(t), f.projectRoot)
 
 	r := f.run(t, importOptions{jsonOut: true, testData: testData})
 	require.NoError(t, r.err, r.out)

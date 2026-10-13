@@ -571,7 +571,7 @@ func TestImportE2E_ParallelCapturedMathBlitzFixture(t *testing.T) {
 	for _, parallel := range []int{1, 3} {
 		t.Run(fmt.Sprintf("parallel%d", parallel), func(t *testing.T) {
 			f := parallelImportFixture(t)
-			testData := seedCapturedSessions(t, repoPath("testdata", "session-import", "math-blitz"), f.projectRoot)
+			testData := seedCapturedSessions(t, capturedSessionFixture(t), f.projectRoot)
 			opts := importOptions{yes: true, jsonOut: true, parallel: parallel, testData: testData}
 			env, dest := f.envFor(f.ledgerPath, opts)
 			env.deps.readNative = readNativeWithAdapter

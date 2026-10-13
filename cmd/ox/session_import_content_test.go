@@ -211,17 +211,18 @@ func TestImportContent_RealAdapterFixtures(t *testing.T) {
 	}
 	_, source, _, ok := runtime.Caller(0)
 	require.True(t, ok)
+	fixture := capturedSessionFixture(t)
 	// Real cleaned vendor recordings exercise the same adapters used in
 	// production, including Codex's injected context before the first request.
 	for _, tc := range []struct {
 		agent   nativeimport.Agent
 		pattern string
 	}{
-		{nativeimport.AgentClaude, "testdata/session-import/math-blitz/claude/*.jsonl"},
-		{nativeimport.AgentCodex, "testdata/session-import/math-blitz/codex/*.jsonl"},
+		{nativeimport.AgentClaude, "claude/*.jsonl"},
+		{nativeimport.AgentCodex, "codex/*.jsonl"},
 	} {
 		t.Run(string(tc.agent), func(t *testing.T) {
-			files, err := filepath.Glob(filepath.Join(filepath.Dir(source), tc.pattern))
+			files, err := filepath.Glob(filepath.Join(fixture, tc.pattern))
 			require.NoError(t, err)
 			require.NotEmpty(t, files)
 			adapterName := adapterNameFor(tc.agent)
