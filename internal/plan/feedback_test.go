@@ -184,8 +184,10 @@ func TestReadReview_ToleratesACRLFCheckout(t *testing.T) {
 
 // TestReadReview_ToleratesACRLFCheckoutAtTheRecordLimit verifies a record a
 // writer stored just under the size limit still reads after a CRLF checkout
-// pushes it over. Failure prevented: on Windows a large review record is
-// refused as too large and drops out of every digest.
+// pushes it over, and a record over the limit as committed is still refused.
+// Failure prevented: on Windows a large review record is refused as too large
+// and drops out of every digest; or the read's doubled limit admits a record
+// larger than any writer stores.
 func TestReadReview_ToleratesACRLFCheckoutAtTheRecordLimit(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: builds an 8 MiB record")
@@ -213,6 +215,14 @@ func TestReadReview_ToleratesACRLFCheckoutAtTheRecordLimit(t *testing.T) {
 	}
 	if rev := ReadReview(dir); !rev.Complete() || len(rev.Items) != len(items) {
 		t.Fatalf("want a complete read of %d items, got %d items, failures %+v", len(items), len(rev.Items), rev.Failures)
+	}
+
+	// as many bytes with LF endings is over the limit as committed
+	if err := os.WriteFile(paths[0], bytes.ReplaceAll(lf, []byte("\n"), []byte("\n ")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if rev := ReadReview(dir); len(rev.Items) != 0 || len(rev.Failures) != 1 || rev.Failures[0].Reason != planreview.ReasonTooLarge {
+		t.Fatalf("an LF record over the limit must be refused as too large, got %d items, failures %+v", len(rev.Items), rev.Failures)
 	}
 }
 
