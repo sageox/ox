@@ -616,7 +616,7 @@
     }
     function onPlaced(items) {
       placed = items;
-      const seen = {};
+      const seen = /* @__PURE__ */ Object.create(null);
       placed.forEach((p) => {
         seen[p.anchor] = true;
       });
@@ -695,7 +695,7 @@
           });
         }
       }
-      const nth = {};
+      const nth = /* @__PURE__ */ Object.create(null);
       placed.forEach((p) => {
         const k = nth[p.anchor] = nth[p.anchor] === void 0 ? 0 : nth[p.anchor] + 1;
         add({ anchor: p.anchor, nth: k }, p.anchor, p.section, p.label, p.quote || "");

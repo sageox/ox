@@ -50,7 +50,13 @@ export function connectFrame(frame: HTMLIFrameElement, instance: string): HostPo
   };
   window.addEventListener('message', onMessage);
   return {
-    send: (m) => port && port.postMessage(envelope(m, instance)),
+    // Re-parse before posting: the frame's own scripts see the raw message, so
+    // fields the protocol does not name (a note spread in with a stored item)
+    // must never leave the host.
+    send: (m) => {
+      const clean = parseHostMessage(envelope(m, instance), instance);
+      if (port && clean) port.postMessage(envelope(clean, instance));
+    },
     listen: (fn) => { handler = fn; },
     close: () => {
       window.removeEventListener('message', onMessage);

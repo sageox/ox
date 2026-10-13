@@ -218,7 +218,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): vo
   }
   function onPlaced(items: Placed[]) {
     placed = items;
-    const seen: Record<string, boolean> = {};
+    const seen: Record<string, boolean> = Object.create(null);
     placed.forEach((p) => { seen[p.anchor] = true; });
     // comments whose text is gone from the page — rewritten by the agent, or
     // edited while this tab was away — keep a rail row, so an addressed one can
@@ -279,7 +279,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): vo
         });
       }
     }
-    const nth: Record<string, number> = {};
+    const nth: Record<string, number> = Object.create(null);
     placed.forEach((p) => {
       const k = nth[p.anchor] = (nth[p.anchor] === undefined ? 0 : nth[p.anchor] + 1);
       add({ anchor: p.anchor, nth: k }, p.anchor, p.section, p.label, p.quote || '');

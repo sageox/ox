@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import { load } from './load.mjs';
 
 const { PROTOCOL, envelope, parseDocumentMessage, parseHostMessage } = await load('protocol.ts');
+const { connectFrame } = await load('ports.ts');
 const I = 'inst-0001';
 const doc = (m) => envelope(m, I);
 const element = { anchor: 'h1234abcd', section: 'Risks', label: 'Retry storms', rect: { left: 10, bottom: 20 } };
@@ -56,4 +57,27 @@ test('host messages carry no names or notes, and only anchors the document can p
     { type: 'focus', anchor: '__proto__' },
     { type: 'reveal', anchor: 'h1234abcd', nth: -1 },
   ]) assert.equal(parseHostMessage(doc(bad), I), null, JSON.stringify(bad));
+});
+
+// The frame's own scripts read the raw message, so stripping unknown fields on
+// arrival is too late. Failure prevented: a host that spreads a stored review
+// item into a paint posts its note and reviewer to the plan.
+test('connectFrame posts only the protocol\'s fields, on the port the document handed over', () => {
+  const listeners = [];
+  globalThis.window = { addEventListener: (_, fn) => listeners.push(fn), removeEventListener: () => {} };
+  try {
+    const frame = { contentWindow: {} };
+    const posted = [];
+    const port = { postMessage: (m) => posted.push(m), close: () => {} };
+    const host = connectFrame(frame, I);
+    const heard = [];
+    host.listen((m) => heard.push(m));
+    listeners[0]({ source: frame.contentWindow, origin: 'null', data: doc({ type: 'ready' }), ports: [port] });
+    assert.deepEqual(heard, [{ type: 'ready' }]);
+    const item = { anchor: 'h1234abcd', kind: 'committed', status: 'flag', state: 'open', glyph: '⚑', tint: 'amber' };
+    host.send({ type: 'paint', items: [{ ...item, note: 'rotate the key', reviewer: 'Devon' }] });
+    assert.deepEqual(posted, [doc({ type: 'paint', items: [item] })]);
+  } finally {
+    delete globalThis.window;
+  }
 });
