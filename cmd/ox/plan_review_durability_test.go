@@ -171,22 +171,40 @@ func TestPlanReviewDurability_FeedbackCommittedAndPushed(t *testing.T) {
 
 // TestPlanReviewDurability_PushedMeansOnTheRemoteTip: a push that succeeds
 // without putting the record on the branch the Ledger tracks is not reported
-// published, and the record's entry stays for the retry. Failure prevented:
-// the page tells the reviewer "synced" for a record no teammate can see.
+// published, and the record's entry stays for the retry; a branch tracking no
+// upstream is verified on the ref its push to origin updates. Failure
+// prevented: the page tells the reviewer "synced" for a record no teammate can
+// see, or a published record is retried forever.
 func TestPlanReviewDurability_PushedMeansOnTheRemoteTip(t *testing.T) {
-	f := newDurableReviewFixture(t)
-	runGitInDir(t, f.ledger, "config", "remote.origin.push", "refs/heads/main:refs/heads/elsewhere")
-
-	code, body := reviewPOSTBody(t, f.srv.URL+"/feedback", "secret", roundBody("round-0001", "h1"))
-	if code != http.StatusOK {
-		t.Fatalf("status %d: %s", code, body)
+	post := func(f *durableReviewFixture) reviewDurabilityResp {
+		t.Helper()
+		code, body := reviewPOSTBody(t, f.srv.URL+"/feedback", "secret", roundBody("round-0001", "h1"))
+		if code != http.StatusOK {
+			t.Fatalf("status %d: %s", code, body)
+		}
+		return decodeReviewResp(t, body)
 	}
-	if r := decodeReviewResp(t, body); !r.Saved || !r.Committed || r.Pushed {
-		t.Fatalf("want saved+committed, not published; got %+v", r)
-	}
-	if left, err := listReviewPending(f.ledger); err != nil || len(left) != 1 {
-		t.Fatalf("an unverified record must keep its entry, got %+v (err %v)", left, err)
-	}
+	t.Run("push lands on another branch", func(t *testing.T) {
+		f := newDurableReviewFixture(t)
+		runGitInDir(t, f.ledger, "config", "remote.origin.push", "refs/heads/main:refs/heads/elsewhere")
+		if r := post(f); !r.Saved || !r.Committed || r.Pushed {
+			t.Fatalf("want saved+committed, not published; got %+v", r)
+		}
+		if left, err := listReviewPending(f.ledger); err != nil || len(left) != 1 {
+			t.Fatalf("an unverified record must keep its entry, got %+v (err %v)", left, err)
+		}
+	})
+	t.Run("branch tracks no upstream", func(t *testing.T) {
+		f := newDurableReviewFixture(t)
+		runGitInDir(t, f.ledger, "config", "push.default", "current")
+		runGitInDir(t, f.ledger, "branch", "--unset-upstream")
+		if r := post(f); !r.Pushed {
+			t.Fatalf("a record the push put on origin must be published, got %+v", r)
+		}
+		if left, err := listReviewPending(f.ledger); err != nil || len(left) != 0 {
+			t.Fatalf("a verified record must clear its entry, got %+v (err %v)", left, err)
+		}
+	})
 }
 
 // TestPlanReviewDurability_RetryPublishesOnlyTheOriginalRecord is the
@@ -603,6 +621,51 @@ func TestPlanReviewDurability_UnrelatedConflictDefersTheCommit(t *testing.T) {
 	}
 	if n := feedbackRoundsOnRemote(t, f.origin); n != 1 {
 		t.Fatalf("the deferred round must reach the remote, got %d", n)
+	}
+}
+
+// TestPlanReviewDurability_EntrySurvivesAWriteThatFailsLate: a write that
+// fails after its record is on disk (Publish syncs the directory last) keeps
+// the operation's entry, so the retry lands the record; an entry that cannot
+// be read is never written over by a resend. Failure prevented: a reviewer's
+// feedback is left on disk with nothing to publish it, or an unreadable entry
+// holding the only copy is replaced.
+func TestPlanReviewDurability_EntrySurvivesAWriteThatFailsLate(t *testing.T) {
+	f := newDurableReviewFixture(t)
+	prev := publishReviewFile
+	publishReviewFile = func(planDir string, rec planreview.File) (planreview.Receipt, error) {
+		r, err := prev(planDir, rec)
+		if err == nil {
+			err = errors.New("sync directory: injected")
+		}
+		return r, err
+	}
+	t.Cleanup(func() { publishReviewFile = prev })
+	if code, _ := reviewPOSTBody(t, f.srv.URL+"/feedback", "secret", roundBody("round-0001", "h1")); code != http.StatusInternalServerError {
+		t.Fatalf("a failed write must be 500, got %d", code)
+	}
+	publishReviewFile = prev
+	if ok, failed, err := flushPendingReviewRecords(context.Background(), f.ledger); err != nil || ok != 1 || failed != 0 {
+		t.Fatalf("the kept entry must land the record: ok=%d failed=%d err=%v", ok, failed, err)
+	}
+	if n := feedbackRoundsOnRemote(t, f.origin); n != 1 {
+		t.Fatalf("remote rounds = %d, want 1", n)
+	}
+
+	// an unreadable entry for an operation blocks that operation
+	rel, err := ledgerRelPath(f.ledger, f.planDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	corrupt := reviewPendingPath(f.ledger, filepath.Base(f.planDir), "round", "round-0002")
+	if err := os.WriteFile(corrupt, []byte(`{"plan_dir":"`+rel+`"`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code, _ := reviewPOSTBody(t, f.srv.URL+"/feedback", "secret", roundBody("round-0002", "h2")); code != http.StatusInternalServerError {
+		t.Fatalf("a resend over an unreadable entry must be 500, got %d", code)
+	}
+	if b, err := os.ReadFile(corrupt); err != nil || string(b) != `{"plan_dir":"`+rel+`"` {
+		t.Fatalf("the unreadable entry must be left as it was (err %v): %q", err, b)
 	}
 }
 

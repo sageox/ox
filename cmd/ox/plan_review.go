@@ -605,7 +605,7 @@ func renderLive(gitRoot, slug, base, token string) ([]byte, error) {
 func renderSavedReviewPage(gitRoot, slug, planDir string, in plan.Input, res plan.Result, rev plan.Review, opts plan.RenderOptions) ([]byte, error) {
 	opts.Slug = slug
 	opts.Review = rev.Items
-	opts.ReviewFailures = len(rev.Failures)
+	opts.ReviewProblems = rev.Problems()
 	opts.PriorArtURL = priorArtURLResolver(gitRoot)
 	meta, metaErr := plan.LoadMeta(planDir)
 	if metaErr == nil {

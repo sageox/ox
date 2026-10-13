@@ -111,8 +111,11 @@ The CLI reads and writes review records only through `pkg/planreview`.
   as committed when HEAD holds it; a conflicting one is a 409 and nothing is
   written). The recovery entry, holding the record's path, SHA-256 and bytes,
   is written durably before the record is published create-only, and only
-  then is the operation reported saved. `apply` freezes an export
-  canonically, so whitespace never makes a retry a different operation.
+  then is the operation reported saved. An entry that cannot be read blocks
+  its operation, since it may hold the only copy; a write that fails after its
+  record reached the disk keeps the entry for the retry. `apply` freezes an
+  export canonically, so whitespace or key order never makes a retry a
+  different operation.
 - **Commit:** the record's bytes are staged as a blob at its one path and
   committed by `CommitLedgerSnapshot` with that path as the only pathspec, so no
   other index entry or worktree file reaches a review commit.
@@ -133,7 +136,8 @@ The CLI reads and writes review records only through `pkg/planreview`.
   endings is read with LF endings. `feedback show` (text and
   `--json`), `review await`, the digest, `ox plan list`, prime's count and the
   rendered page all report an incomplete read; the list and prime surface a
-  plan whose review is incomplete even with nothing open.
+  plan whose review is incomplete even with nothing open, and the page also
+  warns when an operation is stored with differing content.
 - `/approve` and the lifecycle verbs still write `events.jsonl` and `meta.json`
   and commit the whole plan dir: the author-side lifecycle is unchanged.
 

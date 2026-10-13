@@ -41,7 +41,7 @@ type ChromeData struct {
 	ReviewJSON     string
 	ReviewEndpoint string // live review server base URL ("" = static)
 	ReviewToken    string
-	ReviewFailures int    // what reading the review could not use (0 = complete)
+	ReviewProblems int    // failures and conflicting operations the review read reported
 	SessionURL     string // /c/ conversation link ("" = omit)
 	FooterCredit   bool   // true when any enrichment exists (earned credit)
 }
@@ -75,7 +75,7 @@ type chromePayload struct {
 	Context      []ChromeContext `json:"context"`
 	Endpoint     string          `json:"endpoint"`
 	Token        string          `json:"token"`
-	Failures     int             `json:"review_failures,omitempty"`
+	Problems     int             `json:"review_problems,omitempty"`
 	SessionURL   string          `json:"session_url"`
 	FooterCredit bool            `json:"footer_credit"`
 }
@@ -116,7 +116,7 @@ func BuildChromeData(res Result, opts RenderOptions) ChromeData {
 		ReviewJSON:     string(reviewJSON),
 		ReviewEndpoint: opts.ReviewEndpoint,
 		ReviewToken:    opts.ReviewToken,
-		ReviewFailures: opts.ReviewFailures,
+		ReviewProblems: opts.ReviewProblems,
 		SessionURL:     opts.SessionURL,
 		// Mirrors RenderHTMLOpts's FooterCredit: earned only when ox actually
 		// found something to say, not on a greenfield plan with zero signals.
@@ -232,7 +232,7 @@ func buildChromeBundle(data ChromeData) []byte {
 		Context:      data.Context,
 		Endpoint:     data.ReviewEndpoint,
 		Token:        data.ReviewToken,
-		Failures:     data.ReviewFailures,
+		Problems:     data.ReviewProblems,
 		SessionURL:   data.SessionURL,
 		FooterCredit: data.FooterCredit,
 	}

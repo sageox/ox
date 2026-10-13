@@ -182,6 +182,40 @@ func TestReadReview_ToleratesACRLFCheckout(t *testing.T) {
 	}
 }
 
+// TestReadReview_ToleratesACRLFCheckoutAtTheRecordLimit verifies a record a
+// writer stored just under the size limit still reads after a CRLF checkout
+// pushes it over. Failure prevented: on Windows a large review record is
+// refused as too large and drops out of every digest.
+func TestReadReview_ToleratesACRLFCheckoutAtTheRecordLimit(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: builds an 8 MiB record")
+	}
+	dir := t.TempDir()
+	var items []planreview.Item
+	for i := 0; i < 76_000; i++ {
+		items = append(items, planreview.Item{Anchor: fmt.Sprintf("h%07d", i), Status: planreview.StatusFlag})
+	}
+	writeRound(t, dir, "devon", time.Now(), items...)
+	paths, _ := filepath.Glob(filepath.Join(dir, "feedback", "round-*.json"))
+	if len(paths) != 1 {
+		t.Fatalf("want one round record, got %v", paths)
+	}
+	lf, err := os.ReadFile(paths[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	crlf := bytes.ReplaceAll(lf, []byte("\n"), []byte("\r\n"))
+	if len(lf) > planreview.MaxRecordBytes || len(crlf) <= planreview.MaxRecordBytes {
+		t.Fatalf("fixture must straddle the limit: %d LF bytes, %d CRLF bytes", len(lf), len(crlf))
+	}
+	if err := os.WriteFile(paths[0], crlf, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if rev := ReadReview(dir); !rev.Complete() || len(rev.Items) != len(items) {
+		t.Fatalf("want a complete read of %d items, got %d items, failures %+v", len(items), len(rev.Items), rev.Failures)
+	}
+}
+
 // TestReviewWarnings_NameEveryProblem verifies the digest's head names each
 // failure (by path, or the whole read) and each conflicting operation, quotes
 // paths so a hostile file name cannot forge a line, and is empty for a clean
@@ -306,20 +340,20 @@ func TestRenderHTML_CarriesReviewState(t *testing.T) {
 			t.Errorf("render missing %q", want)
 		}
 	}
-	if strings.Contains(s, `data-review-failures="`) {
+	if strings.Contains(s, `data-review-problems="`) {
 		t.Error("a complete review must not be flagged incomplete")
 	}
 
-	opts.ReviewFailures = 2
+	opts.ReviewProblems = 2
 	if out, err = RenderHTMLOpts(in, Result{}, opts); err != nil {
 		t.Fatalf("render: %v", err)
 	}
-	if !strings.Contains(string(out), `data-review-failures="2"`) {
-		t.Error("a generated page must carry the review's failure count")
+	if !strings.Contains(string(out), `data-review-problems="2"`) {
+		t.Error("a generated page must carry the review's problem count")
 	}
 	authored := InjectChrome([]byte("<html><body><p>x</p></body></html>"), BuildChromeData(Result{}, opts))
-	if !strings.Contains(string(authored), `"review_failures":2`) {
-		t.Error("an authored page's chrome must carry the review's failure count")
+	if !strings.Contains(string(authored), `"review_problems":2`) {
+		t.Error("an authored page's chrome must carry the review's problem count")
 	}
 }
 

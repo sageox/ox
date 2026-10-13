@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -103,11 +104,19 @@ func readReviewPending(path string) (reviewPending, error) {
 	return e, nil
 }
 
-// writeReviewPending writes an entry atomically and durably (fsync'd temp,
-// rename, fsync'd directory).
+// writeReviewPending writes an entry atomically and durably: fsync'd temp,
+// rename, and an fsync'd directory, whose failure is returned (AtomicWriteBytes
+// tolerates it), and .git/ is fsync'd when the directory is new.
 func writeReviewPending(path string, e reviewPending) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	dir := filepath.Dir(path)
+	_, statErr := os.Stat(dir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create review pending dir: %w", err)
+	}
+	if errors.Is(statErr, os.ErrNotExist) {
+		if err := syncDir(filepath.Dir(dir)); err != nil {
+			return fmt.Errorf("sync review pending dir's parent: %w", err)
+		}
 	}
 	b, err := json.MarshalIndent(e, "", "  ")
 	if err != nil {
@@ -116,7 +125,23 @@ func writeReviewPending(path string, e reviewPending) error {
 	if err := fileutil.AtomicWriteBytes(path, b, 0o644); err != nil {
 		return fmt.Errorf("write review pending entry: %w", err)
 	}
+	if err := syncDir(dir); err != nil {
+		return fmt.Errorf("sync review pending dir: %w", err)
+	}
 	return nil
+}
+
+// syncDir makes a directory's entries durable. Windows cannot fsync a
+// directory; there NTFS commits a rename with its journal.
+func syncDir(dir string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	return errors.Join(d.Sync(), d.Close())
 }
 
 // listReviewPending returns the readable review entries in a Ledger. An

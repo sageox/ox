@@ -58,7 +58,8 @@ func TestRunPlanFeedbackApply_Idempotent(t *testing.T) {
 			}
 			for i := 0; i < 2; i++ {
 				if i == 1 {
-					pasted := strings.ReplaceAll(tt.feedback, ",", ",\n  ") + "\n"
+					// an editor re-indented the export and reordered an item's keys
+					pasted := strings.ReplaceAll(strings.Replace(tt.feedback, `"anchor":"h1","status":"flag"`, `"status":"flag","anchor":"h1"`, 1), ",", ",\n  ") + "\n"
 					if err := os.WriteFile(src, []byte(pasted), 0o644); err != nil {
 						t.Fatal(err)
 					}
@@ -73,6 +74,10 @@ func TestRunPlanFeedbackApply_Idempotent(t *testing.T) {
 				already := strings.Contains(out.String(), "already applied (round ")
 				if already != (i == 1) {
 					t.Errorf("apply #%d already-applied=%v, output:\n%s", i+1, already, out.String())
+				}
+				// the test Ledger is no git checkout, so nothing is ever shared
+				if !strings.Contains(out.String(), "not yet shared with your team") {
+					t.Errorf("apply #%d must say the round is not yet shared, output:\n%s", i+1, out.String())
 				}
 				if i == 1 && tt.wantID != "" && !strings.Contains(out.String(), tt.wantID) {
 					t.Errorf("second apply must name round %s, got:\n%s", tt.wantID, out.String())
@@ -265,6 +270,26 @@ func TestPlanSurfaces_MarkAnIncompleteReview(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeTornRound(t, unread)
+	twice, _, err := plan.Save(root, plan.Input{Raw: "# twice\n"}, plan.Result{}, nil, plan.Meta{Topic: "twice", Slug: "twice"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, body := range []string{
+		`{"id":"round-dup1","items":[{"anchor":"h1","status":"flag"}]}`,
+		`{"id":"round-dup1","items":[{"anchor":"h1","status":"approve"}]}`,
+	} {
+		q, err := planreview.ParseRoundRequest([]byte(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec, err := q.Record("twice", "devon", time.Now().Add(time.Duration(i)*time.Second))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := planreview.Publish(twice, rec); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	cmd := &cobra.Command{}
 	var out bytes.Buffer
@@ -282,11 +307,14 @@ func TestPlanSurfaces_MarkAnIncompleteReview(t *testing.T) {
 		t.Errorf("want partly-read as \"1 open, incomplete\" and unread as \"incomplete\", got:\n%s", out.String())
 	}
 
-	page := filepath.Join(t.TempDir(), "page.html")
-	if err := runPlanRenderSaved(cmd, "unread", page, false, false); err != nil {
-		t.Fatalf("render: %v", err)
-	}
-	if b, err := os.ReadFile(page); err != nil || !strings.Contains(string(b), `data-review-failures="1"`) {
-		t.Fatalf("the rendered page must carry the review's failure count (err %v)", err)
+	// an unreadable record and a conflicting copy are each one problem
+	for _, slug := range []string{"unread", "twice"} {
+		page := filepath.Join(t.TempDir(), "page.html")
+		if err := runPlanRenderSaved(cmd, slug, page, false, false); err != nil {
+			t.Fatalf("render %s: %v", slug, err)
+		}
+		if b, err := os.ReadFile(page); err != nil || !strings.Contains(string(b), `data-review-problems="1"`) {
+			t.Fatalf("%s's page must carry the review's problem count (err %v)", slug, err)
+		}
 	}
 }

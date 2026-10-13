@@ -60,6 +60,10 @@ type Review struct {
 // Complete reports whether the read holds every review record of the plan.
 func (r Review) Complete() bool { return len(r.Failures) == 0 }
 
+// Problems counts what a page must warn about: failures, and operations
+// stored with differing content, of which only the earliest copy is shown.
+func (r Review) Problems() int { return len(r.Failures) + len(r.Conflicts) }
+
 // OpenCount counts the open, actionable items: an approval closes the loop
 // rather than opening it.
 func (r Review) OpenCount() int {
@@ -96,9 +100,14 @@ func assembleReview(planDir string) planreview.Review {
 // the digest their names pin. A record whose bytes miss that digest but match
 // it with LF line endings is taken with LF endings: the bytes that were
 // committed. Writers emit JSON with no raw carriage return, so no record a
-// writer stored is changed.
+// writer stored is changed. CRLF endings can push a record a writer stored at
+// the limit past it, so the read allows each record and the capture twice
+// their limits; Assemble applies the real ones to the bytes as committed.
 func CaptureReview(planDir, gitDir string) planreview.Inventory {
-	inv := planreview.Capture(planDir, gitDir, planreview.Limits{})
+	inv := planreview.Capture(planDir, gitDir, planreview.Limits{
+		RecordBytes:  2 * planreview.MaxRecordBytes,
+		CaptureBytes: 2 * planreview.DefaultLimits.CaptureBytes,
+	})
 	for i, f := range inv.Files {
 		lf := bytes.ReplaceAll(f.Data, []byte("\r\n"), []byte("\n"))
 		if len(lf) == len(f.Data) || RecordIntact(f) {
@@ -112,9 +121,12 @@ func CaptureReview(planDir, gitDir string) planreview.Inventory {
 }
 
 // RecordIntact reports whether f's bytes hash to the digest its name pins; a
-// name that pins none (a record from before immutable names) always is.
+// name that pins none (a record from before immutable names) always is. The
+// limits admit f whatever its size, since one refused as too large is never
+// checked.
 func RecordIntact(f planreview.File) bool {
-	rev := planreview.Assemble(planreview.Inventory{Files: []planreview.File{f}}, planreview.Limits{})
+	size := int64(len(f.Data))
+	rev := planreview.Assemble(planreview.Inventory{Files: []planreview.File{f}}, planreview.Limits{Records: 1, RecordBytes: size, CaptureBytes: size})
 	return !slices.ContainsFunc(rev.Failures, func(x planreview.Failure) bool { return x.Reason == planreview.ReasonAltered })
 }
 

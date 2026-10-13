@@ -247,16 +247,17 @@
   }
 
   var orphanBar;
-  // failures: how much of this plan's review the server could not read. The
-  // committed state below is then partial, and the bar says so first.
-  var failures = +body.getAttribute('data-review-failures') || 0;
+  // problems: what of this plan's review the server could not read, or found
+  // stored twice with differing content. The committed state below is then
+  // partial or showing one copy, and the bar says so first.
+  var problems = +body.getAttribute('data-review-problems') || 0;
   function renderOrphans(orphans) {
     if (orphanBar) { orphanBar.remove(); orphanBar = null; }
     var open = orphans.filter(function (o) { return o.state === 'open'; });
-    if (!open.length && !failures) return;
+    if (!open.length && !problems) return;
     orphanBar = document.createElement('div');
     orphanBar.className = 'rev-orphans';
-    var html = failures ? '<div class="rev-orphans-h">⚠ This review could not be fully read (' + failures + ' problem(s)): notes may be missing or shown resolved. <code>ox plan feedback show ' + esc(slug) + '</code> lists them.</div>' : '';
+    var html = problems ? '<div class="rev-orphans-h">⚠ This review could not be fully read or holds conflicting copies (' + problems + ' problem(s)): notes may be missing or shown resolved. <code>ox plan feedback show ' + esc(slug) + '</code> lists them.</div>' : '';
     if (open.length) {
       var items = open.map(function (o) {
         return '<li><strong>' + esc(o.status) + '</strong> ' + esc(o.label || o.anchor) + (o.note ? ' — ' + esc(o.note) : '') + '</li>';

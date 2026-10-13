@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -106,14 +107,17 @@ func runPlanFeedbackApply(cmd *cobra.Command, slug, from string) error {
 	if slug == "" {
 		return fmt.Errorf("no slug: pass it as an argument or include it in the feedback JSON")
 	}
-	// The CLI freezes an export, so it freezes it canonically (sorted keys, no
-	// insignificant whitespace), and names one without an id by its content:
-	// applying the same export twice (a retried paste, a re-run script) is one
-	// round, whatever whitespace a paste or an editor added.
-	var obj map[string]json.RawMessage
-	_ = json.Unmarshal(raw, &obj) // ParseRoundRequest decoded raw as an object
+	// The CLI freezes an export, so it freezes it canonically (keys sorted at
+	// every level, no insignificant whitespace, numbers as written), and names
+	// one without an id by its content: applying the same export twice (a
+	// retried paste, a re-run script) is one round, whatever an editor did to
+	// its whitespace or key order.
+	var obj map[string]any
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	_ = dec.Decode(&obj) // ParseRoundRequest decoded raw as an object
 	if q.ID == "" {
-		obj["id"], _ = json.Marshal(planreview.ContentRoundID(q.Round))
+		obj["id"] = planreview.ContentRoundID(q.Round)
 	}
 	frozen, _ := json.Marshal(obj) // decoded JSON values: Marshal cannot fail
 	if q, err = planreview.ParseRoundRequest(frozen); err != nil {
@@ -135,6 +139,9 @@ func runPlanFeedbackApply(cmd *cobra.Command, slug, from string) error {
 	}
 	path := filepath.Join(info.Dir, filepath.FromSlash(receipt.Path))
 	out := cmd.OutOrStdout()
+	if !st.Pushed {
+		cli.PrintHintTo(out, "feedback saved locally, not yet shared with your team (`ox agent prime` retries it): "+st.Err)
+	}
 	if receipt.State == planreview.ReceiptAlreadyPublished {
 		// Already stored by an earlier apply, which notified: exit 0 — the
 		// caller's intent is met.
@@ -142,9 +149,6 @@ func runPlanFeedbackApply(cmd *cobra.Command, slug, from string) error {
 			return fmt.Errorf("write output: %w", werr)
 		}
 		return nil
-	}
-	if !st.Pushed {
-		cli.PrintHint("feedback saved locally, not yet shared with your team (`ox agent prime` retries it): " + st.Err)
 	}
 	if err := enqueuePlanFeedbackTask(gitRoot, info.Dir, slug, len(q.Items)); err != nil {
 		cli.PrintWarning("could not notify the plan's authoring coworker automatically — tell them directly, or they'll miss this round of feedback")

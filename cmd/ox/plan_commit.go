@@ -231,7 +231,12 @@ func saveReviewRecord(ctx context.Context, ledgerPath, rel, planDir string, rec 
 	var e reviewPending
 	duplicate := false
 	err := fileutil.WithFileLock(ctx, entryPath, func() error {
-		if prev, err := readReviewPending(entryPath); err == nil {
+		prev, err := readReviewPending(entryPath)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			// it may hold the only copy of a review: never write over it
+			return fmt.Errorf("read this review operation's recovery entry: %w", err)
+		}
+		if err == nil {
 			stored := planreview.File{Path: prev.Path, Data: prev.Data}
 			if r, _ := planreview.Prior(planreview.Inventory{Files: []planreview.File{stored}}, rec); r.State != planreview.ReceiptAlreadyPublished {
 				return errReviewConflict
@@ -261,7 +266,12 @@ func saveReviewRecord(ctx context.Context, ledgerPath, rel, planDir string, rec 
 			return err
 		}
 		if err := publishRecord(planDir, rec); err != nil {
-			_ = os.Remove(entryPath) // this call wrote it and nothing was saved: the client keeps its draft
+			// Publish can fail after the record exists (its directory sync);
+			// then the entry stays so the retry lands it. With no record on
+			// disk, nothing was saved and the client keeps its draft.
+			if _, lerr := os.Lstat(filepath.Join(planDir, filepath.FromSlash(rec.Path))); lerr != nil {
+				_ = os.Remove(entryPath)
+			}
 			return err
 		}
 		return nil
@@ -286,9 +296,13 @@ func storedRecord(ctx context.Context, ledgerPath, rel string, inv planreview.In
 	return inv.Files[i], nil
 }
 
+// publishReviewFile is planreview.Publish, a variable so a test can fail it
+// after the record is written.
+var publishReviewFile = planreview.Publish
+
 // publishRecord writes rec into the plan's worktree create-only.
 func publishRecord(planDir string, rec planreview.File) error {
-	r, err := planreview.Publish(planDir, rec)
+	r, err := publishReviewFile(planDir, rec)
 	if err == nil && r.State == planreview.ReceiptConflict {
 		err = fmt.Errorf("another file holds the name %s", rec.Path)
 	}
@@ -321,7 +335,7 @@ func landReviewRecord(ctx context.Context, ledgerPath string, e reviewPending) p
 		return fail(st, fmt.Errorf("push %s: %w", path, err))
 	}
 	// the remote-tracking ref is the remote tip the push just updated
-	if blobAt(ctx, ledgerPath, "@{upstream}", path) != oid {
+	if ref, err := gitutil.UpstreamTrackingRef(ctx, ledgerPath); err != nil || blobAt(ctx, ledgerPath, ref, path) != oid {
 		return fail(st, fmt.Errorf("pushed, but the remote tip does not hold %s as recorded", path))
 	}
 	st.Pushed = true
@@ -392,7 +406,11 @@ func remoteHoldsBlob(ctx context.Context, ledgerPath, dir string, data []byte) b
 	if err != nil {
 		return false
 	}
-	tree, err := gitStdout(ctx, ledgerPath, nil, "ls-tree", "-r", "@{upstream}", "--", dir)
+	ref, err := gitutil.UpstreamTrackingRef(ctx, ledgerPath)
+	if err != nil {
+		return false
+	}
+	tree, err := gitStdout(ctx, ledgerPath, nil, "ls-tree", "-r", ref, "--", dir)
 	return err == nil && bytes.Contains(tree, []byte(" "+strings.TrimSpace(string(oid))+"\t"))
 }
 
