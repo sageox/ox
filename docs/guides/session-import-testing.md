@@ -26,21 +26,24 @@ preview behavior. `--yes` continues to import the explicitly selected sessions.
 Browser review cannot be combined with `--yes` or JSON output. If terminal input
 is disabled, `--browse` falls back to a structural preview without launching.
 
-## Manual testing with a SageOx account
+## Manual testing against a running SageOx service
 
-Use a disposable private repository in a local team. The cleaned Math Blitz
-fixture contains eight native recordings and cannot read your personal session
-stores when `--from-test-data` is supplied.
+Use a disposable repository in a team on the service you're testing. The
+cleaned Math Blitz fixture contains eight native recordings and cannot read
+your personal session stores when `--from-test-data` is supplied.
 
-Use a SageOx account and a team you belong to. The commands below use the
-public SageOx service. To test another service, change `ox_import_endpoint`;
-both `login` and `init` must use the same endpoint.
+The same workflow works with Tilt, another development setup, or a hosted
+service. Start your development stack as usual, then use its endpoint URL and
+a team you belong to on that service. Set `ox_import_endpoint` and
+`ox_import_team` once below; both `login` and `init` use those settings.
+The example uses `http://localhost:3100`; replace it with your service's URL
+(for example, `https://sageox.ai` for the public service).
 
 Build this checkout and seed a fresh fixture repository:
 
 ```sh
 ox_import_worktree=/path/to/ox-checkout
-ox_import_endpoint=https://sageox.ai
+ox_import_endpoint=http://localhost:3100
 ox_import_team='YOUR TEAM SLUG'
 cd "$ox_import_worktree"
 make build
