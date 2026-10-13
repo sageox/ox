@@ -455,6 +455,14 @@ jobs:
       - name: Build
         run: go build -v ./...
 
+      # Match the FreeBSD release target and catch platform-specific imports.
+      - name: Cross-build FreeBSD CLI
+        env:
+          CGO_ENABLED: '0'
+          GOOS: freebsd
+          GOARCH: amd64
+        run: go build -v -o /dev/null ./cmd/ox
+
       - name: Check generated CLI docs
         run: make docs-check
 
