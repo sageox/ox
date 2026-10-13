@@ -19,6 +19,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/plan"
 	"github.com/sageox/ox/pkg/planreview"
 )
@@ -710,6 +711,67 @@ func TestFlushPending_RenamedPlanDir(t *testing.T) {
 	left, err := listReviewPending(f.ledger)
 	if err != nil || len(left) != 1 || left[0].ID != "round-000B" {
 		t.Fatalf("only the unpublished record's entry may stay, left %+v (err %v)", left, err)
+	}
+}
+
+// TestPlanReviewDurability_ResendFollowsARenamedPlan: `ox plan backfill`
+// renames a plan dir while two of its rounds are pending, one never written.
+// Resent from the renamed dir, each finds its entry by the plan's id and lands
+// there. Failure prevented: the record is committed under the old dir, where
+// no one opening the renamed plan sees it, and its entry is cleared.
+func TestPlanReviewDurability_ResendFollowsARenamedPlan(t *testing.T) {
+	f := newDurableReviewFixture(t)
+	if err := plan.AppendEvent(context.Background(), f.planDir, plan.Event{PlanID: "pln_renamed01", Kind: plan.EventCreated}); err != nil {
+		t.Fatal(err)
+	}
+	lock := filepath.Join(f.ledger, ".git", "index.lock")
+	if err := os.WriteFile(lock, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rounds := map[string]string{"round-000A": "hA", "round-000B": "hB"}
+	for id, anchor := range rounds {
+		reviewPOST(t, f.srv.URL+"/feedback", "secret", roundBody(id, anchor))
+	}
+	if err := os.Remove(lock); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := listReviewPending(f.ledger)
+	if err != nil || len(entries) != 2 {
+		t.Fatalf("want two pending entries, got %+v (err %v)", entries, err)
+	}
+	for _, e := range entries {
+		if e.ID == "round-000B" { // its attempt stopped before writing the record
+			if err := os.Remove(filepath.Join(f.planDir, filepath.FromSlash(e.Path))); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	runGitInDir(t, f.ledger, "mv", "data/plans/2026-10-01-durable", "data/plans/2026-10-01-renamed")
+	runGitInDir(t, f.ledger, "add", "data/plans/2026-10-01-renamed")
+	runGitInDir(t, f.ledger, "commit", "-q", "-m", "plan: backfill 1 title(s)")
+	runGitInDir(t, f.ledger, "push", "-q")
+
+	h := liveReviewHandler("", "durable", filepath.Join(f.ledger, "data", "plans", "2026-10-01-renamed"), "http://x", "secret",
+		newBroadcaster(), make(chan int, 8), make(chan struct{}, 1))
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	for id, anchor := range rounds {
+		if code := reviewPOST(t, srv.URL+"/feedback", "secret", roundBody(id, anchor)); code != http.StatusOK {
+			t.Fatalf("resend %s: %d", id, code)
+		}
+	}
+	ref, err := gitutil.UpstreamTrackingRef(context.Background(), f.ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote := runGitInDir(t, f.ledger, "ls-tree", "-r", "--name-only", ref, "--", "data/plans")
+	for _, e := range entries {
+		if !strings.Contains(remote, "data/plans/2026-10-01-renamed/"+e.Path) || strings.Contains(remote, "data/plans/2026-10-01-durable/") {
+			t.Fatalf("%s must be on the remote under the renamed dir only, remote tree:\n%s", e.ID, remote)
+		}
+	}
+	if left, err := listReviewPending(f.ledger); err != nil || len(left) != 0 {
+		t.Fatalf("both entries must clear, left %+v (err %v)", left, err)
 	}
 }
 

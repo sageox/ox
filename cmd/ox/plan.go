@@ -1486,14 +1486,14 @@ func runPlanList(cmd *cobra.Command, jsonOut bool) error {
 		rev := plan.ReadReview(p.Dir)
 		open := rev.OpenCount()
 		anyOpen = anyOpen || open > 0
-		anyIncomplete = anyIncomplete || !rev.Complete()
+		anyIncomplete = anyIncomplete || rev.Problems() > 0
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			p.Slug,
 			planDate(p.CreatedAt),
 			string(plan.KindOrDefault(p.Kind)),
 			statusMark(p.Status),
 			htmlMark(p.HasHTML),
-			reviewMark(open, rev.Complete()),
+			reviewMark(open, rev.Problems() == 0),
 			authorsLabel(p.Authors),
 			truncate(p.Topic, 60),
 		)
@@ -1505,7 +1505,7 @@ func runPlanList(cmd *cobra.Command, jsonOut bool) error {
 		cli.PrintHint("Plans with open review items — `ox plan feedback show <slug>`, address, then `ox plan feedback resolve`.")
 	}
 	if anyIncomplete {
-		cli.PrintHint("An incomplete review could not be fully read — `ox plan feedback show <slug>` lists what failed.")
+		cli.PrintHint("An incomplete review could not be fully read or holds conflicting copies — `ox plan feedback show <slug>` lists them.")
 	}
 	printUnsavedArtifactHint(gitRoot)
 	return nil
@@ -1530,7 +1530,7 @@ func printUnsavedArtifactHint(gitRoot string) {
 }
 
 // countOpenPlanFeedback returns how many saved plans have open human review
-// feedback, or a review that could not be fully read — the count `ox agent
+// feedback, or a review that may be incomplete — the count `ox agent
 // prime` surfaces so a NEW session (any agent) discovers waiting feedback even
 // when the push task missed. Best-effort: 0 when the plans cannot be listed
 // (outside a project, no ledger).
@@ -1545,8 +1545,9 @@ func countOpenPlanFeedback(gitRoot string) int {
 	return len(plans)
 }
 
-// reviewMark renders a plan's review for the list table. An incomplete read
-// is never shown as "—": the records it could not read may hold open feedback.
+// reviewMark renders a plan's review for the list table. A review that is not
+// complete (a record it could not read, or an operation stored with differing
+// content) is never shown as "—": what it does not show may hold open feedback.
 func reviewMark(open int, complete bool) string {
 	switch {
 	case !complete && open > 0:

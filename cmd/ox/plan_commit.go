@@ -242,6 +242,14 @@ func saveReviewRecord(ctx context.Context, ledgerPath, rel, planDir string, rec 
 				return errReviewConflict
 			}
 			e = prev
+			if e.PlanDir != rel {
+				// found by the plan's id after `ox plan backfill` renamed its
+				// dir: the record lands where the plan is now
+				e.PlanDir = rel
+				if err := writeReviewPending(entryPath, e); err != nil {
+					return err
+				}
+			}
 			if _, err := os.Lstat(filepath.Join(planDir, filepath.FromSlash(prev.Path))); err == nil {
 				duplicate = true
 				return nil

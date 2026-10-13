@@ -54,10 +54,11 @@ const planPushFlushTimeout = 5 * time.Minute
 // record (see landReviewRecord), never by another operation's success.
 const planReviewPendingDir = ".git/ox-plan-review-pending"
 
-// reviewPending is one review operation's recovery entry, written once and
-// removed once its record is verified. It holds the exact record bytes, so a
-// retry can publish the record again even when the worktree copy is gone, and
-// publishes nothing else.
+// reviewPending is one review operation's recovery entry, removed once its
+// record is verified. It holds the exact record bytes, which never change, so
+// a retry can publish the record again even when the worktree copy is gone,
+// and publishes nothing else. Only PlanDir is rewritten: when a resend finds
+// the plan's dir renamed.
 type reviewPending struct {
 	PlanDir string `json:"plan_dir"` // slash path relative to the Ledger root
 	Plan    string `json:"plan"`     // the plan's pln_ id, else its dir name

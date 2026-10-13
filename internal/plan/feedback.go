@@ -297,14 +297,15 @@ type OpenFeedbackSummary struct {
 	Topic     string `json:"topic,omitempty"`
 	Open      int    `json:"open"`                 // open, actionable items (approvals excluded)
 	AgentType string `json:"agent_type,omitempty"` // authoring coworker type, if recorded
-	// Incomplete is true when the plan's review could not be fully read: it
-	// may hold open feedback Open does not count.
+	// Incomplete is true when the plan's review could not be fully read, or
+	// holds an operation stored with differing content, of which Open counts
+	// only the earliest copy: it may hold open feedback Open does not count.
 	Incomplete bool   `json:"incomplete,omitempty"`
 	Dir        string `json:"-"` // absolute plan dir (local only)
 }
 
 // OpenFeedbackPlans returns every saved plan in the project's ledger that has
-// open review feedback, or a review that could not be fully read, newest
+// open review feedback, or a review that may be incomplete, newest
 // first. It is the PULL half of the feedback loop: the push (a plan-feedback
 // agent-task) can miss — wrong agent type, a failed queue write, an unlinked
 // plan, or simply a human choosing to look — so this reads the ledger directly
@@ -318,10 +319,10 @@ func OpenFeedbackPlans(gitRoot string) ([]OpenFeedbackSummary, error) {
 	for _, p := range plans {
 		rev := ReadReview(p.Dir)
 		open := rev.OpenCount()
-		if open == 0 && rev.Complete() {
+		if open == 0 && rev.Problems() == 0 {
 			continue
 		}
-		s := OpenFeedbackSummary{Slug: p.Slug, Topic: p.Topic, Open: open, Incomplete: !rev.Complete(), Dir: p.Dir}
+		s := OpenFeedbackSummary{Slug: p.Slug, Topic: p.Topic, Open: open, Incomplete: rev.Problems() > 0, Dir: p.Dir}
 		if meta, err := readMeta(p.Dir); err == nil && meta.Provenance != nil {
 			s.AgentType = meta.Provenance.AgentType
 		}

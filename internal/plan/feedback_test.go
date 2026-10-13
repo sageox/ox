@@ -427,10 +427,11 @@ func TestOpenFeedbackPlans_ListsOnlyPlansWithOpenItems(t *testing.T) {
 }
 
 // TestOpenFeedbackPlans_SurfacesAnIncompleteReview verifies a plan whose
-// review cannot be fully read surfaces as incomplete beside a healthy open
-// plan, instead of being skipped as if it had nothing open. Failure prevented:
-// a damaged record hides a reviewer's open feedback from every discovery
-// surface.
+// review cannot be fully read, or holds a round stored twice with differing
+// content, surfaces as incomplete beside a healthy open plan, instead of being
+// skipped as if it had nothing open. Failure prevented: a damaged record, or a
+// later copy that is not the one shown, hides a reviewer's open feedback from
+// every discovery surface.
 func TestOpenFeedbackPlans_SurfacesAnIncompleteReview(t *testing.T) {
 	ledger := t.TempDir()
 	withLedger(t, ledger)
@@ -443,6 +444,21 @@ func TestOpenFeedbackPlans_SurfacesAnIncompleteReview(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(bad, "feedback", "round-x.json"), []byte("{not json"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// the earliest copy, the one shown, approves; the later one flags
+	twice := savePlanWithFeedback(t, "/any", "Twice plan", nil, nil)
+	for i, status := range []planreview.Status{planreview.StatusApprove, planreview.StatusFlag} {
+		q, err := planreview.ParseRoundRequest([]byte(`{"id":"round-dup1","items":[{"anchor":"t1","status":"` + string(status) + `"}]}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec, err := q.Record("twice-plan", "devon", time.Now().Add(time.Duration(i)*time.Second))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := planreview.Publish(twice, rec); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	open, err := OpenFeedbackPlans("/any")
 	if err != nil {
@@ -452,8 +468,13 @@ func TestOpenFeedbackPlans_SurfacesAnIncompleteReview(t *testing.T) {
 	for _, s := range open {
 		got[s.Slug] = s
 	}
-	if len(open) != 2 || got["good-plan"].Open != 1 || got["good-plan"].Incomplete || !got["bad-plan"].Incomplete || got["bad-plan"].Open != 0 {
-		t.Errorf("want the good plan open and the damaged one incomplete, got %+v", open)
+	if len(open) != 3 || got["good-plan"].Open != 1 || got["good-plan"].Incomplete {
+		t.Errorf("want three plans listed, the good one open and complete, got %+v", open)
+	}
+	for _, slug := range []string{"bad-plan", "twice-plan"} {
+		if !got[slug].Incomplete || got[slug].Open != 0 {
+			t.Errorf("want %s incomplete with nothing counted open, got %+v", slug, open)
+		}
 	}
 }
 

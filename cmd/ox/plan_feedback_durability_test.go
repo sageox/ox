@@ -257,10 +257,12 @@ func writeTornRound(t *testing.T, planDir string) {
 }
 
 // TestPlanSurfaces_MarkAnIncompleteReview verifies `ox plan list` and a saved
-// plan's render say when its review could not be fully read: the REVIEW column
-// never shows "—" for one, and the page carries the failure count its warning
-// bar reads. Failure prevented: a damaged record hides a reviewer's open
-// feedback behind a table and a page that look complete.
+// plan's render say when its review could not be fully read or holds
+// conflicting copies: the REVIEW column never shows "—" for one, and the page
+// carries the problem count its warning bar reads. Failure prevented: a damaged
+// record, or a later copy whose request for changes is not the one shown,
+// hides a reviewer's open feedback behind a table and a page that look
+// complete.
 func TestPlanSurfaces_MarkAnIncompleteReview(t *testing.T) {
 	root, partly := saveFeedbackTestPlan(t, "partly-read")
 	roundForTest(t, partly, time.Now(), planreview.Item{Anchor: "h1", Status: planreview.StatusRequestChange})
@@ -275,8 +277,8 @@ func TestPlanSurfaces_MarkAnIncompleteReview(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i, body := range []string{
-		`{"id":"round-dup1","items":[{"anchor":"h1","status":"flag"}]}`,
 		`{"id":"round-dup1","items":[{"anchor":"h1","status":"approve"}]}`,
+		`{"id":"round-dup1","items":[{"anchor":"h1","status":"flag"}]}`,
 	} {
 		q, err := planreview.ParseRoundRequest([]byte(body))
 		if err != nil {
@@ -303,8 +305,14 @@ func TestPlanSurfaces_MarkAnIncompleteReview(t *testing.T) {
 			rows[f[0]] = line
 		}
 	}
-	if !strings.Contains(rows["partly-read"], "1 open, incomplete") || !strings.Contains(rows["unread"], "incomplete") || strings.Contains(rows["unread"], "open") {
-		t.Errorf("want partly-read as \"1 open, incomplete\" and unread as \"incomplete\", got:\n%s", out.String())
+	if !strings.Contains(rows["partly-read"], "1 open, incomplete") {
+		t.Errorf("want partly-read as \"1 open, incomplete\", got:\n%s", out.String())
+	}
+	// twice shows its earliest copy, an approval, so nothing counts as open
+	for _, slug := range []string{"unread", "twice"} {
+		if !strings.Contains(rows[slug], "incomplete") || strings.Contains(rows[slug], "open") {
+			t.Errorf("want %s as \"incomplete\", got:\n%s", slug, out.String())
+		}
 	}
 
 	// an unreadable record and a conflicting copy are each one problem
