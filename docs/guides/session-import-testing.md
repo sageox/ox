@@ -26,73 +26,38 @@ preview behavior. `--yes` continues to import the explicitly selected sessions.
 Browser review cannot be combined with `--yes` or JSON output. If terminal input
 is disabled, `--browse` falls back to a structural preview without launching.
 
-## Automated import acceptance against Tilt
-
-The monorepo's BDD scenario
-`tests/acceptance/features/context-injection/import-past-sessions.feature`
-automates repository creation, `ox init`, import preview and approval through
-`ox session import --from-test-data`, and verification of all four selected
-Claude Code and Codex sessions in the Ledger, including summaries and links.
-It uses the sanitized Math Blitz fixture in an isolated scenario VM and the
-existing BDD compiler, CLI checkpoint, and orchestrator.
-
-Run from `sageox-monorepo/tests/bdd` after the normal BDD and Tilt setup:
-
-```sh
-pnpm bdd:compiled:compile features/context-injection/import-past-sessions.feature
-pnpm bdd:compiled:exec features/context-injection/import-past-sessions.feature \
-  --base-url "$BDD_BASE_URL" --orch-url http://localhost:9090
-```
-
-`BDD_BASE_URL` must be the VM-reachable Tilt edge router. Start Tilt with
-`SAGEOX_TILT_WEB_HOST` set to that hostname so authentication and public links
-use the same origin. Start the BDD orchestrator with
-`BDD_VM_EXPOSE_HOST=8929,<public_port>` and Shuru 0.7.0; the scenario bridges
-guest loopback to the real host API and GitLab, keeping the laptop flow's
-localhost endpoint, credential key, and clone/LFS URLs.
-Keep the manual checks below for the terminal and browser selection interfaces.
-
-## Manual testing against Tilt
+## Manual testing with a SageOx account
 
 Use a disposable private repository in a local team. The cleaned Math Blitz
 fixture contains eight native recordings and cannot read your personal session
 stores when `--from-test-data` is supplied.
 
-Find the running monorepo stack:
+Use a SageOx account and a team you belong to. The commands below use the
+public SageOx service. To test another service, change `ox_import_endpoint`;
+both `login` and `init` must use the same endpoint.
+
+Build this checkout and seed a fresh fixture repository:
 
 ```sh
-ox_import_monorepo=/path/to/sageox-monorepo
-cd "$ox_import_monorepo"
-make dev-ls
-# If needed: make dev-shared-up, make dev, then make dev-wait.
-```
-
-The CLI endpoint is the edge router, `http://localhost:<3000 + stack offset>`.
-The checked stack had offset `100`, so its endpoint was `http://localhost:3100`.
-Use your stack's offset; the API and web application ports are different.
-
-Build the PR checkout and seed a fresh fixture repository:
-
-```sh
-ox_import_worktree=/path/to/ox-pr-checkout
-ox_import_stack=http://localhost:3100
-ox_import_team='YOUR LOCAL TEAM SLUG'
+ox_import_worktree=/path/to/ox-checkout
+ox_import_endpoint=https://sageox.ai
+ox_import_team='YOUR TEAM SLUG'
 cd "$ox_import_worktree"
 make build
 ox_import_bin="$ox_import_worktree/bin/ox"
 ox_import_parent=$(mktemp -d)
 ox_import_repo="$ox_import_parent/math-blitz"
 python3 "$ox_import_worktree/scripts/session_import_testbed.py" create "$ox_import_repo"
-"$ox_import_bin" login --endpoint "$ox_import_stack"
+"$ox_import_bin" login --endpoint "$ox_import_endpoint"
 cd "$ox_import_repo"
-"$ox_import_bin" init --endpoint "$ox_import_stack" --team "$ox_import_team"
+"$ox_import_bin" init --endpoint "$ox_import_endpoint" --team "$ox_import_team"
 "$ox_import_bin" config set session_recording auto --repo
 "$ox_import_bin" sync
 "$ox_import_bin" status
 ```
 
-The local account must belong to that team, and Ledger provisioning/cloning must
-finish. An actual import also needs an installed, authenticated Claude Code or
+Ledger provisioning and cloning must finish before importing. An actual import
+also needs an installed, authenticated Claude Code or
 Codex CLI to summarize. `--summarizer codex` or `--summarizer claude` can choose
 one usable CLI for both types. Previews make no summarization calls.
 
@@ -118,8 +83,8 @@ Check these paths:
 - Try `--browse --no-input`; it prints a structural preview and does not wait
   for the browser. Try `--preview --session 21BB267B`; prefixes are case tolerant.
 
-The local browser binds an ephemeral port on `127.0.0.1`, independently of Tilt.
-The browser returns native session IDs; it never calls Tilt or uploads sessions.
+The local browser binds an ephemeral port on `127.0.0.1`.
+The browser returns native session IDs; it does not upload sessions.
 The CLI verifies the destination, confirms, and then uses the existing Ledger
 upload pipeline. Authentication for the preview API is a per-run token in the
 opened URL fragment, carried in a header on subsequent local API requests.
