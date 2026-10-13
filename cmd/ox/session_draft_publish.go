@@ -52,6 +52,12 @@ func maybePublishSessionDraft(ctx *HookContext) {
 		slog.Debug("draft: no recording state for turn count", "agent_id", agentID, "error", err)
 		return
 	}
+	// A start-time or pending-stop hold survives the environment that set it.
+	// Keep counting locally, but publish neither registration nor draft metadata
+	// when a later native Stop runs with auto publishing restored.
+	if state.RecordedManualPublishing() {
+		return
+	}
 
 	// Register the /c/ link now that a real turn exists. Start-time registration
 	// is deferred (see notifySessionStartedAsync) so no-user-turn phantoms never

@@ -53,13 +53,15 @@ type SessionMarker struct {
 // overlapping hooks cannot replace an earlier beforeSubmitPrompt boundary.
 // SourcePath is deterministic and may name a not-yet-created native export.
 type CursorSourceBoundary struct {
-	WorkspacePath      string `json:"workspace_path"`
-	SourcePath         string `json:"source_path"`
-	SourcePending      bool   `json:"source_pending,omitempty"`
-	GenerationID       string `json:"generation_id,omitempty"`
-	Offset             int64  `json:"offset"`
-	KnownZero          bool   `json:"known_zero,omitempty"`
-	SourcePrefixSHA256 string `json:"source_prefix_sha256,omitempty"`
+	WorkspacePath      string   `json:"workspace_path"`
+	SourcePath         string   `json:"source_path"`
+	SourcePending      bool     `json:"source_pending,omitempty"`
+	GenerationID       string   `json:"generation_id,omitempty"`
+	PromptGenerations  []string `json:"prompt_generations,omitempty"`   // distinct prompts awaiting/owned by this boundary
+	RecordingSessionID string   `json:"recording_session_id,omitempty"` // recording which consumed this boundary
+	Offset             int64    `json:"offset"`
+	KnownZero          bool     `json:"known_zero,omitempty"`
+	SourcePrefixSHA256 string   `json:"source_prefix_sha256,omitempty"`
 }
 
 // IsPrimed reports whether a marker represents a completed prime. Boundary-only

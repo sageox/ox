@@ -65,12 +65,12 @@ func notifySessionStarted(projectRoot string, state *session.RecordingState, sen
 	// reaches the cloud until the user explicitly uploads it. This POST would
 	// send session_id, repo_id, session_name, agent id/type, and the BRANCH
 	// NAME — exactly the kind of implicit publish manual mode exists to
-	// prevent. Deliberately checked AFTER the no-user-turn branch above and
-	// left at "deferred" (not flipped to "pending"/"confirmed"): every retry
-	// site (prime, doctor, the per-turn draft path) re-runs this same check,
-	// so switching back to auto mid-session, or an explicit later upload,
-	// registers normally on the next attempt rather than being wedged.
-	if config.GetSessionPublishing(projectRoot) == config.SessionPublishingManual {
+	// prevent. Deliberately checked AFTER the no-user-turn branch above,
+	// leaving registration state unchanged: every retry site (prime, doctor,
+	// the per-turn draft path) re-runs this same check.
+	// A saved manual choice also survives a later auto environment; only an
+	// explicit upload may publish that held recording.
+	if state.RecordedManualPublishing() || config.GetSessionPublishing(projectRoot) == config.SessionPublishingManual {
 		slog.Debug("session registration suppressed: session_publishing is manual", "session_id", state.SessionID)
 		return
 	}

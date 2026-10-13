@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"github.com/sageox/agentx"
@@ -27,6 +28,21 @@ func prepareCursorHookBoundary(input *cursorNativeInput, event string) (*Session
 	if event == "beforeSubmitPrompt" && input.GenerationID == "" {
 		return nil, fmt.Errorf("boundary-unavailable: Cursor prompt generation is required")
 	}
+	// Prompt admission and recording publication share this lock. Keep the
+	// order startup -> session marker -> append -> recording marker so a
+	// prompt either joins the unpublished boundary or the published recording.
+	var marker *SessionMarker
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err := fileutil.WithFileLock(ctx, markerPath(input.ConversationID)+".recording-start", func() error {
+		var err error
+		marker, err = prepareCursorHookBoundaryLocked(input, event)
+		return err
+	})
+	return marker, err
+}
+
+func prepareCursorHookBoundaryLocked(input *cursorNativeInput, event string) (*SessionMarker, error) {
 	return UpdateSessionMarker(input.ConversationID, func(marker *SessionMarker) error {
 		previous := marker.CursorSourceBoundary
 		if previous != nil && (previous.WorkspacePath != input.WorkspacePath || previous.SourcePath != input.SourcePath) {
@@ -42,6 +58,9 @@ func prepareCursorHookBoundary(input *cursorNativeInput, event string) (*Session
 				return fmt.Errorf("identity-conflict: Cursor hook does not own this recording")
 			}
 			active = state != nil
+			if active && previous != nil {
+				previous.RecordingSessionID = state.SessionID
+			}
 			if active && event == "beforeSubmitPrompt" {
 				home, err := os.UserHomeDir()
 				if err != nil {
@@ -52,7 +71,21 @@ func prepareCursorHookBoundary(input *cursorNativeInput, event string) (*Session
 				}
 			}
 		}
-		if previous != nil && (active || event == "sessionStart" || previous.GenerationID == input.GenerationID || previous.GenerationID == "") {
+		// Preserve every submission which arrives before auto-start publishes
+		// its recording. A later prompt must never move the first prompt's
+		// native byte boundary past rows Cursor already exported.
+		auto := config.ResolveSessionRecording(input.WorkspacePath).IsAuto()
+		unconsumed := previous != nil && previous.RecordingSessionID == ""
+		pending := unconsumed && len(previous.PromptGenerations) != 0 && auto && !session.HasExplicitStop(input.WorkspacePath, marker.AgentID)
+		if previous != nil && (active || (unconsumed && (pending || event == "sessionStart" || previous.GenerationID == input.GenerationID || previous.GenerationID == ""))) {
+			if unconsumed && auto && event == "beforeSubmitPrompt" {
+				if len(previous.PromptGenerations) == 0 && previous.GenerationID != "" {
+					previous.PromptGenerations = append(previous.PromptGenerations, previous.GenerationID)
+				}
+				if !slices.Contains(previous.PromptGenerations, input.GenerationID) {
+					previous.PromptGenerations = append(previous.PromptGenerations, input.GenerationID)
+				}
+			}
 			if previous.GenerationID == "" && event == "beforeSubmitPrompt" {
 				previous.GenerationID = input.GenerationID
 			}
@@ -61,6 +94,9 @@ func prepareCursorHookBoundary(input *cursorNativeInput, event string) (*Session
 		boundary, err := cursorBoundaryForHook(input, event)
 		if err != nil {
 			return err
+		}
+		if auto && input.GenerationID != "" {
+			boundary.PromptGenerations = []string{input.GenerationID}
 		}
 		marker.CursorSourceBoundary = &boundary
 		return nil

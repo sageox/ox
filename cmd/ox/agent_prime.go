@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1377,11 +1378,48 @@ func startSessionRecording(projectRoot, agentID, agentType, parentAgentID, conti
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	err := fileutil.WithFileLock(ctx, markerPath(agentSessionID)+".recording-start", func() error {
-		status = startSessionRecordingUnlocked(projectRoot, agentID, agentType, parentAgentID, continuedFromSessionID, agentSessionID, cursorBoundaries...)
-		return nil
+		// Reload after acquiring prompt admission's lock: the caller's copy
+		// may predate one or more queued beforeSubmitPrompt hooks. Hold the
+		// marker through publication so that handoff cannot split again.
+		_, err := UpdateSessionMarker(agentSessionID, func(marker *SessionMarker) error {
+			if marker.AgentID != "" && marker.AgentID != agentID {
+				return fmt.Errorf("identity-conflict: Cursor startup belongs to another AI coworker")
+			}
+			if marker.CursorSourceBoundary == nil && len(cursorBoundaries) > 0 && cursorBoundaries[0] != nil {
+				boundary := *cursorBoundaries[0]
+				boundary.PromptGenerations = slices.Clone(boundary.PromptGenerations)
+				marker.CursorSourceBoundary = &boundary
+			}
+			marker.AgentID = agentID
+			status = startSessionRecordingUnlocked(projectRoot, agentID, agentType, parentAgentID, continuedFromSessionID, agentSessionID, marker.CursorSourceBoundary)
+			if status != nil && status.Recording && marker.CursorSourceBoundary != nil {
+				state, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+				if err != nil {
+					return err
+				}
+				if state != nil && state.AdapterName == "cursor" && state.AgentSessionID == agentSessionID {
+					marker.CursorSourceBoundary.RecordingSessionID = state.SessionID
+					marker.RecordingSessionID = state.SessionID
+				}
+			}
+			return nil
+		})
+		if err != nil && status != nil && status.Recording {
+			// The recording can finish before another prompt repairs its source
+			// association. Block automatic restart before releasing admission's
+			// lock so that an unconsumed boundary cannot replay completed rows.
+			if stopErr := session.MarkExplicitStop(projectRoot, agentID); stopErr != nil {
+				return fmt.Errorf("cursor recording association failed (%w); could not block automatic restart: %w", err, stopErr)
+			}
+			return fmt.Errorf("cursor recording association failed; automatic recording stopped, run 'ox agent %s session start' after recovery: %w", agentID, err)
+		}
+		return err
 	})
 	if err != nil {
-		slog.Debug("Cursor recording startup deferred", "error", err)
+		// Publication may already have succeeded; surface any recovery guard
+		// failure as well as the association error instead of reporting success.
+		slog.Warn("Cursor recording startup deferred", "error", err)
+		return nil
 	}
 	return status
 }
@@ -1576,6 +1614,15 @@ func startSessionRecordingUnlocked(projectRoot, agentID, agentType, parentAgentI
 			if cursorBoundary != nil {
 				if err := session.InitializeCursorTurnBoundary(state, cursorBoundary.SourcePath, cursorBoundary.GenerationID); err != nil {
 					return err
+				}
+				for _, generation := range cursorBoundary.PromptGenerations {
+					if generation == "" || slices.Contains(state.CursorPromptGenerations, generation) {
+						continue
+					}
+					if len(state.CursorPromptGenerations) > 0 {
+						state.CursorExpectedTurns++
+					}
+					state.CursorPromptGenerations = append(state.CursorPromptGenerations, generation)
 				}
 			}
 			if inheritedPause {

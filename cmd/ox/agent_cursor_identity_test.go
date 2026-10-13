@@ -88,6 +88,7 @@ func TestPrepareCursorHookBoundary_RefreshesNewGenerationOnlyWhenInactive(t *tes
 	require.NoError(t, err)
 	first := *marker.CursorSourceBoundary
 	state := f.record(t)
+	first.RecordingSessionID = state.SessionID
 
 	second := cursorHostUser + cursorHostTerminal + cursorHostUser
 	f.write(t, second)
@@ -138,6 +139,7 @@ func TestPrepareCursorHookBoundary_RejectsRebinding(t *testing.T) {
 }
 
 func TestStartSessionRecordingCursor_UsesSavedBoundaryAndKeepsNativeIdentity(t *testing.T) {
+	isolateSessionMarkerDir(t)
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
