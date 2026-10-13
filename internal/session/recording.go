@@ -1317,8 +1317,32 @@ func loadRecordingStatesFromDir(sessionsDir string) ([]*RecordingState, error) {
 	return states, nil
 }
 
+// PreparedRecordingIdentity holds a project-scoped identity check performed
+// before acquiring a recording startup lock. Its zero value is not valid.
+type PreparedRecordingIdentity struct {
+	projectRoot string
+	coworker    *auth.Coworker
+}
+
+// PrepareRecordingIdentity resolves the canonical team-token identity before
+// startup enters a critical section. The result is only for the ensuing start
+// in this project, and does not depend on the auth cache being writable.
+func PrepareRecordingIdentity(projectRoot string) (*PreparedRecordingIdentity, error) {
+	if projectRoot == "" {
+		return nil, fmt.Errorf("%w: project root", ErrEmptyPath)
+	}
+	coworker, err := auth.TeamCoworker(endpoint.GetForProject(projectRoot))
+	if err != nil {
+		return nil, err
+	}
+	return &PreparedRecordingIdentity{projectRoot: projectRoot, coworker: coworker}, nil
+}
+
 // StartRecordingOptions contains options for starting a recording.
 type StartRecordingOptions struct {
+	// PreparedIdentity avoids repeating network identity lookup under a caller's
+	// startup lock. Obtain it through PrepareRecordingIdentity for this project.
+	PreparedIdentity *PreparedRecordingIdentity
 	// BeforePublish initializes adapter metadata before capture can discover the marker.
 	BeforePublish  func(*RecordingState) error
 	AgentID        string
@@ -1370,11 +1394,19 @@ func StartRecording(projectRoot string, opts StartRecordingOptions) (*RecordingS
 	}
 
 	// A team token with no AI coworker attached would record the session under
-	// the git identity of the machine running it.
-	coworker, err := auth.TeamCoworker(endpoint.GetForProject(projectRoot))
-	if err != nil {
-		return nil, err
+	// the git identity of the machine running it. Cursor prepares this check
+	// outside its startup lock so auth cannot block prompt admission.
+	prepared := opts.PreparedIdentity
+	if prepared == nil {
+		var err error
+		prepared, err = PrepareRecordingIdentity(projectRoot)
+		if err != nil {
+			return nil, err
+		}
+	} else if prepared.projectRoot != projectRoot {
+		return nil, fmt.Errorf("prepared recording identity belongs to another project")
 	}
+	coworker := prepared.coworker
 
 	// clean up stale empty recording stubs to prevent accumulation
 	cleanupStaleEmptyRecordings(projectRoot)

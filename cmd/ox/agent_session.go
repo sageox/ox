@@ -267,17 +267,18 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 	// determine parent PID for liveness detection.
 	// prefer OX_PARENT_PID env (set by prime, stable) over FindAgentAncestorPID()
 	// which can return a transient shell PID if the process tree walk fails.
-	parentPID := proc.FindAgentAncestorPID()
-	if envPID := os.Getenv("OX_PARENT_PID"); envPID != "" {
-		if parsed, parseErr := strconv.Atoi(envPID); parseErr == nil && parsed > 0 {
-			parentPID = parsed
+	parentPID := 0
+	if agentType != "cursor" {
+		parentPID = proc.FindAgentAncestorPID()
+		if envPID := os.Getenv("OX_PARENT_PID"); envPID != "" {
+			if parsed, parseErr := strconv.Atoi(envPID); parseErr == nil && parsed > 0 {
+				parentPID = parsed
+			}
 		}
 	}
 
 	// start recording with agent ID from session
-	if agentType == "cursor" {
-		parentPID = 0
-	}
+	attribution := identity.ResolveAttribution(endpoint.GetForProject(projectRoot), config.GetDisplayName())
 	opts := session.StartRecordingOptions{
 		AgentID:            inst.AgentID,
 		AgentSessionID:     agentSessionID,
@@ -285,7 +286,7 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 		AgentType:          agentTypeName,
 		SessionFile:        sessionFile,
 		Title:              title,
-		Username:           identity.AttributionUsername(endpoint.GetForProject(projectRoot), config.GetDisplayName()),
+		Username:           attribution.Username,
 		WorkspacePath:      projectRoot,
 		Branch:             repotools.GetCurrentBranch(projectRoot),
 		ParentPID:          parentPID,
@@ -297,7 +298,13 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 
 	var state *session.RecordingState
 	if adapterName == "cursor" {
-		opts.BeforePublish = func(s *session.RecordingState) error { return writeRawHeader(projectRoot, s) }
+		opts.PreparedIdentity, err = session.PrepareRecordingIdentity(projectRoot)
+		if err != nil {
+			return fmt.Errorf("prepare Cursor recording identity: %w", err)
+		}
+		opts.BeforePublish = func(s *session.RecordingState) error {
+			return writeRawHeaderWithAttribution(projectRoot, s, &attribution)
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		err = fileutil.WithFileLock(ctx, markerPath(agentSessionID)+".recording-start", func() error {

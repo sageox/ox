@@ -14,22 +14,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// A metadata read happens in BeforePublish, after startup has chosen its
-// native boundary and before .recording.json becomes visible to prompt hooks.
+// This adapter can keep a redundant metadata read blocked beyond the native
+// prompt hook's deadline, reproducing the pre-fix loss of queued submissions.
 type gatedCursorStartupReader struct {
 	*cursorHostReader
 	entered chan struct{}
 	release chan struct{}
 	once    sync.Once
-}
-
-type callbackCursorStartupReader struct {
-	*cursorHostReader
-	beforePublish func() error
-}
-
-func (r *callbackCursorStartupReader) ReadMetadata(string) (*adapters.SessionMetadata, error) {
-	return nil, r.beforePublish()
 }
 
 func (r *gatedCursorStartupReader) ReadMetadata(string) (*adapters.SessionMetadata, error) {
@@ -121,14 +112,17 @@ func TestCursorPromptDuringPublicationWaitsThenJoinsRecording(t *testing.T) {
 	stale := *initial.CursorSourceBoundary
 	reserveCursorStartupIdentity(t, f, "Oxqueued")
 	gate := &gatedCursorStartupReader{cursorHostReader: f.reader, entered: make(chan struct{}), release: make(chan struct{})}
-	adapters.Unregister("cursor")
-	adapters.Register(gate)
 	release := sync.OnceFunc(func() { close(gate.release) })
 	started := make(chan struct{})
 	var status *sessionStatus
 	go func() {
 		defer close(started)
-		status = startSessionRecording(f.root, "Oxqueued", "cursor", "", "", cursorConversationID, &stale)
+		status = startCursorSessionRecording(f.root, "Oxqueued", "cursor", "", "", cursorConversationID,
+			func(root string, state *session.RecordingState) error {
+				close(gate.entered)
+				<-gate.release
+				return writeRawHeader(root, state)
+			}, &stale)
 	}()
 	t.Cleanup(func() { release(); <-started })
 	select {
@@ -167,6 +161,66 @@ func TestCursorPromptDuringPublicationWaitsThenJoinsRecording(t *testing.T) {
 	stored, err := session.ReadSessionFromPath(filepath.Join(state.SessionPath, "raw.jsonl"))
 	require.NoError(t, err)
 	require.Len(t, stored.Entries, 4)
+}
+
+func TestCursorSlowMetadataDoesNotBlockPromptAdmission(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: reproduces a metadata read exceeding the prompt lock deadline")
+	}
+	f := cursorAutoRecordingFixture(t)
+	old, first, second := cursorReviewTurn("OLD"), cursorReviewTurn("FIRST"), cursorReviewTurn("SECOND")
+	f.write(t, old)
+	initial := prepareCursorStartupPrompt(t, f, "g1")
+	stale := *initial.CursorSourceBoundary
+	reserveCursorStartupIdentity(t, f, "Oxqueued")
+	gate := &gatedCursorStartupReader{cursorHostReader: f.reader, entered: make(chan struct{}), release: make(chan struct{})}
+	adapters.Unregister("cursor")
+	adapters.Register(gate)
+	release := sync.OnceFunc(func() { close(gate.release) })
+	started := make(chan struct{})
+	var status *sessionStatus
+	go func() {
+		defer close(started)
+		status = startSessionRecording(f.root, "Oxqueued", "cursor", "", "", cursorConversationID, &stale)
+	}()
+	t.Cleanup(func() { release(); <-started })
+	slowMetadata := false
+	select {
+	case <-gate.entered:
+		slowMetadata = true
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("startup neither completed nor reached the metadata read")
+	}
+	f.write(t, old+first)
+	input, err := normalizeCursorHookInput(f.input(t, "beforeSubmitPrompt", "g2").RawBytes, f.root, f.home)
+	require.NoError(t, err)
+	admitted := make(chan error, 1)
+	go func() { _, err := prepareCursorHookBoundary(input, "beforeSubmitPrompt"); admitted <- err }()
+	if slowMetadata {
+		// Keep the native adapter blocked beyond admission's two-second
+		// deadline. Before the fix this drops g2 even though Cursor submits it.
+		<-time.After(2250 * time.Millisecond)
+	}
+	select {
+	case err := <-admitted:
+		assert.NoError(t, err, "optional metadata must not prevent durable prompt admission")
+	case <-time.After(3 * time.Second):
+		t.Fatal("queued prompt did not finish admission")
+	}
+	release()
+	<-started
+	require.NotNil(t, status)
+	require.True(t, status.Recording)
+	state, err := session.LoadRecordingStateForAgent(f.root, "Oxqueued")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"g1", "g2"}, state.CursorPromptGenerations)
+	assert.ErrorIs(t, finalizeCursorHostRecording(t, f, state), session.ErrCursorFinalDrainPending)
+	f.write(t, old+first+second)
+	require.NoError(t, finalizeCursorHostRecording(t, f, state))
+	stored, err := session.ReadSessionFromPath(filepath.Join(state.SessionPath, "raw.jsonl"))
+	require.NoError(t, err)
+	assert.Len(t, stored.Entries, 4)
 }
 
 func TestCursorCompletedRecordingRefreshesConsumedBoundary(t *testing.T) {
@@ -218,14 +272,16 @@ func TestCursorStartupAssociationSaveFailureBlocksAutomaticRestart(t *testing.T)
 			path := markerPath(cursorConversationID)
 			original, err := os.ReadFile(path)
 			require.NoError(t, err)
-			adapters.Unregister("cursor")
-			adapters.Register(&callbackCursorStartupReader{cursorHostReader: f.reader, beforePublish: func() error {
-				if err := os.Remove(path); err != nil {
-					return err
-				}
-				return os.Mkdir(path, 0o700)
-			}})
-			status := startSessionRecording(f.root, "Oxqueued", "cursor", "", "", cursorConversationID, initial.CursorSourceBoundary)
+			status := startCursorSessionRecording(f.root, "Oxqueued", "cursor", "", "", cursorConversationID,
+				func(root string, state *session.RecordingState) error {
+					if err := os.Remove(path); err != nil {
+						return err
+					}
+					if err := os.Mkdir(path, 0o700); err != nil {
+						return err
+					}
+					return writeRawHeader(root, state)
+				}, initial.CursorSourceBoundary)
 			require.Nil(t, status, "association failure must not report successful startup")
 			state, err := session.LoadRecordingStateForAgent(f.root, "Oxqueued")
 			require.NoError(t, err)
@@ -233,8 +289,6 @@ func TestCursorStartupAssociationSaveFailureBlocksAutomaticRestart(t *testing.T)
 			require.True(t, session.HasExplicitStop(f.root, "Oxqueued"), "uncertain association must prevent replay after this recording is cleared")
 			require.NoError(t, os.Remove(path))
 			require.NoError(t, os.WriteFile(path, original, 0o600))
-			adapters.Unregister("cursor")
-			adapters.Register(f.reader)
 			switch retry {
 			case "startup":
 				status = startSessionRecording(f.root, "Oxqueued", "cursor", "", "", cursorConversationID, initial.CursorSourceBoundary)

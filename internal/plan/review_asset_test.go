@@ -1,57 +1,67 @@
 package plan
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
 
-// TestReviewJS_AnchorIgnoresReviewGlyph verifies the review asset hashes the
-// underlying content, not the glyphs it injects during paint. Failure prevented:
-// re-clicking an already-marked item computes a different anchor and creates an
-// unreachable duplicate mark instead of editing the existing one.
-func TestReviewJS_AnchorIgnoresReviewGlyph(t *testing.T) {
-	b, err := renderAssets.ReadFile("assets/review.js")
+// reviewServerProtocol is the protocol the `ox plan review` server
+// (cmd/ox/plan_review.go) speaks with the review page: the bodies of POST
+// /feedback, /accept, /reopen and /approve. Raise it with the server change
+// that serves a new one.
+const reviewServerProtocol = 1
+
+// TestReviewAssets_MatchTheirManifest: review.js and review.css are built from
+// packages/plan-review, and review.manifest.json records that build. CI's
+// plan-review job rebuilds them and compares; this check needs no node.
+// Failure prevented: a hand edit to a generated asset, which the next build
+// silently reverts and the npm package never gets, or a page built for a
+// protocol this server does not speak.
+func TestReviewAssets_MatchTheirManifest(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("assets", "review.manifest.json"))
 	if err != nil {
-		t.Fatalf("read review.js: %v", err)
+		t.Fatalf("read review.manifest.json: %v", err)
 	}
-	s := string(b)
-	for _, want := range []string{
-		"function anchorText(el)",
-		"clone.querySelectorAll('.rev-glyph')",
-		"norm(anchorText(el))",
-	} {
-		if !strings.Contains(s, want) {
-			t.Errorf("review.js missing %q", want)
+	var m struct {
+		Package  string            `json:"package"`
+		Protocol int               `json:"protocol"`
+		Files    map[string]string `json:"files"`
+	}
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatalf("parse review.manifest.json: %v", err)
+	}
+	if m.Package != "@sageox/plan-review" || m.Protocol != reviewServerProtocol {
+		t.Errorf("review assets are %s protocol %d; the review server speaks protocol %d", m.Package, m.Protocol, reviewServerProtocol)
+	}
+	// the bytes ox ships: review.js in the render embed, review.css in the chrome one
+	for name, data := range map[string][]byte{"review.js": mustReviewScript(), "review.css": mustChromeAsset("assets/review.css")} {
+		sum := sha256.Sum256(data)
+		if got := hex.EncodeToString(sum[:]); got != m.Files[name] {
+			t.Errorf("assets/%s is not the file its manifest records: edit packages/plan-review/src and run `make plan-review`", name)
 		}
 	}
 }
 
-// TestReviewJS_DisconnectedModeContract pins the connection-state layer: the
-// page must detect a dead server (SSE error AND failed POST), say plainly that
-// feedback is NOT being saved, keep marks in localStorage, poll /healthz, and
-// reload on recovery. Failure prevented: a reviewer keeps marking up a dead
-// page believing their feedback is reaching the agent.
-func TestReviewJS_DisconnectedModeContract(t *testing.T) {
-	b, err := renderAssets.ReadFile("assets/review.js")
+// TestReviewCSS_InBothPageKinds: the review layer has one stylesheet, carried
+// by the generated page and by the chrome injected into an authored one.
+// Failure prevented: review runs unstyled on one page kind, invisible until a
+// hover, with its rail looking like a mark-up target.
+func TestReviewCSS_InBothPageKinds(t *testing.T) {
+	css := string(mustChromeAsset("assets/review.css"))
+	page, err := RenderHTMLOpts(Parse("# Plan\n\n## Rollout\n\nShip it."), Result{}, RenderOptions{Slug: "plan"})
 	if err != nil {
-		t.Fatalf("read review.js: %v", err)
+		t.Fatalf("render: %v", err)
 	}
-	s := string(b)
-	for _, want := range []string{
-		"es.onerror",              // SSE drop detection
-		"es.onopen",               // recovery detection
-		"setOffline(true)",        // failed POST flips the page offline
-		"NOT being saved",         // the banner says it plainly
-		"rev-offline-bar",         // sticky banner element
-		"'/healthz'",              // recovery probe endpoint
-		"ox plan review ' + slug", // copyable restart command
-		"serviceWorker",           // offline shell registration
-		"unsent mark(s) restored", // restored-marks notice after reconnect
-		"if (offline) { offlineNotice(); if (fail) fail('offline', true); return; }", // sends refused while offline
-	} {
-		if !strings.Contains(s, want) {
-			t.Errorf("review.js missing %q", want)
-		}
+	if !strings.Contains(string(page), css) {
+		t.Error("a generated page does not carry review.css")
+	}
+	if !strings.Contains(string(InjectChrome([]byte(`<html><body></body></html>`), ChromeData{Slug: "plan"})), css) {
+		t.Error("the chrome injected into an authored page does not carry review.css")
 	}
 }
 
@@ -82,188 +92,15 @@ func TestReviewSW_OfflineShellContract(t *testing.T) {
 	}
 }
 
-// TestReviewJS_ModeExitContract pins that review mode announces itself, keeps
-// its exit in view, and survives the live loop: the toggle relabels to "Exit
-// review", entry shows a toast that names Esc, Esc closes the note then the
-// mode, `r` toggles the mode (handled ONCE — review.js, not scaffold.js, so
-// authored HTML plans get it too), keys are shared with the page through
-// defaultPrevented, the mode is restored silently across a live reload but
-// scoped to the tab, and review chrome is never a mark-up target.
-// The real-browser proofs are TestBrowser_ReviewModeExitIsVisibleAndEscapable,
-// TestBrowser_ReviewModeSurvivesLiveReload and TestBrowser_ReviewKeysWorkOnAuthoredPlan
-// (cmd/ox, build tag `browser`); this is the hermetic guard CI sees.
-// Failure prevented: a reviewer clicks Review, sees only a green button, and has
-// no visible way back to reading the plan — or gets dropped out of review mode
-// by every agent fix.
-func TestReviewJS_ModeExitContract(t *testing.T) {
-	b, err := renderAssets.ReadFile("assets/review.js")
-	if err != nil {
-		t.Fatalf("read review.js: %v", err)
-	}
-	s := string(b)
-	for _, want := range []string{
-		"on ? 'Exit review' : 'Review'",                              // the button becomes the exit
-		"Esc or Exit review to leave",                                // entry toast names both exits
-		"if (e.defaultPrevented) return;",                            // a key the page already handled is left alone
-		"if (pop) { closePop(); e.preventDefault(); }",               // Esc: note first…
-		"else if (on) { setReview(false); e.preventDefault(); }",     // …then mode, marked handled
-		"if (e.key === 'r' && !typing(e)",                            // r toggles, not from a text field
-		"sessionStorage.setItem(ON_KEY, '1')",                        // persisted per tab, not per browser
-		"if (sessionStorage.getItem(ON_KEY)) setReview(true, true);", // restored silently after a reload
-		"if (ev.target.closest(CHROME)) { closePop(); return; }",     // chrome clicks dismiss a note, never open one
-		"if (!el) { closePop(); return; }",                           // click-away dismisses a note
-		"if (toastEl === el) toastEl = null;",                        // a toast timer removes only its own toast
-	} {
-		if !strings.Contains(s, want) {
-			t.Errorf("review.js missing %q", want)
-		}
-	}
+// TestScaffoldJS_LeavesReviewKeysToTheReviewLayer: the review layer handles
+// `r` on every page kind (authored pages have no scaffold.js). Failure
+// prevented: one keypress toggles review mode twice on a generated page.
+func TestScaffoldJS_LeavesReviewKeysToTheReviewLayer(t *testing.T) {
 	sc, err := renderAssets.ReadFile("assets/scaffold.js")
 	if err != nil {
 		t.Fatalf("read scaffold.js: %v", err)
 	}
 	if strings.Contains(string(sc), "e.key==='r'") {
 		t.Error("scaffold.js handles r too — one keypress would toggle review mode twice")
-	}
-}
-
-// TestReviewRail_MinimizeContract pins the comments-rail Hide/Show toggle: the
-// buttons flip a per-tab sessionStorage flag, the flag is read back on load so
-// a live reload keeps the rail hidden, and both stylesheets style the buttons
-// and shrink the hidden rail to fit the Show button. The real-browser proof is
-// TestBrowser_CommentsRailMinimizes (cmd/ox, build tag `browser`); this is the
-// hermetic guard CI sees.
-// Failure prevented: the rail covers plan text with no way to read what is
-// behind it, or an agent fix's live reload pops it back open.
-func TestReviewRail_MinimizeContract(t *testing.T) {
-	js, err := renderAssets.ReadFile("assets/review.js")
-	if err != nil {
-		t.Fatalf("read review.js: %v", err)
-	}
-	for _, want := range []string{
-		`'<button class="rev-rail-hide"`,                 // the open rail's way out…
-		`'<button class="rev-rail-show"`,                 // …and the hidden rail's way back
-		"BUBBLE + rows.length",                           // including an explicit zero-comment count
-		"sessionStorage.setItem(MIN_KEY, '1')",           // hidden is kept per tab…
-		"railMin = !!sessionStorage.getItem(MIN_KEY)",    // …and read back after a reload
-		"rail.classList.toggle('rev-rail-min', railMin)", // the class both stylesheets key on
-	} {
-		if !strings.Contains(string(js), want) {
-			t.Errorf("review.js missing %q", want)
-		}
-	}
-	for _, f := range []struct {
-		name string
-		read func(string) ([]byte, error)
-	}{
-		{"assets/scaffold.css", renderAssets.ReadFile},
-		{"assets/chrome.css", chromeAssets.ReadFile},
-	} {
-		b, err := f.read(f.name)
-		if err != nil {
-			t.Fatalf("read %s: %v", f.name, err)
-		}
-		for _, want := range []string{
-			".rev-rail.rev-rail-min{width:fit-content", // hidden, the rail shrinks off the plan
-			".rev-rail-hide{",                          // both buttons are styled…
-			".rev-rail-show{",                          // …on both page kinds
-			"margin:24px 16px 72px",                    // in flow, it ends above the review bar
-		} {
-			if !strings.Contains(string(b), want) {
-				t.Errorf("%s missing %q", f.name, want)
-			}
-		}
-	}
-}
-
-// TestReviewJS_HighlightContract pins how a highlight coexists with the
-// click-an-element mark: a selection this click made (not one left over)
-// comments on those words before any element is considered, a click opens a
-// highlight only on the highlight's own words, the words are saved with the
-// mark, they match only as whole words — with text split by anything but
-// inline markup kept apart — and words the section repeats are refused, the
-// note opens below the click (so a double-click's second press reaches the
-// word), a comment whose text is gone keeps a rail row that opens it, a click
-// elsewhere closes that note even outside review mode, and every tint
-// review.js paints is styled on both page kinds. The real-browser proofs are
-// TestBrowser_HighlightCommentsOnExactWords,
-// TestBrowser_LeftoverSelectionDoesNotHijackAClick and
-// TestBrowser_HighlightStopsAtElementEdges (cmd/ox, build tag `browser`); this
-// is the hermetic guard CI sees.
-// Failure prevented: highlighting a phrase opens a whole-section note, the
-// agent receives the comment without the words it is about, or an addressed
-// highlight whose words were rewritten can no longer be accepted.
-func TestReviewJS_HighlightContract(t *testing.T) {
-	js, err := renderAssets.ReadFile("assets/review.js")
-	if err != nil {
-		t.Fatalf("read review.js: %v", err)
-	}
-	for _, want := range []string{
-		"var t = (madeSelection(ev) && selectionTarget()) || highlightAt(ev);",                                // this click's selection wins over the element click
-		"var rects = qRanges[a].range.getClientRects();",                                                      // a click opens a highlight only on its own words
-		"if (t.quote) marks[a].quote = t.quote;",                                                              // the words travel with the mark
-		"(/^\\w/.test(q) ? '(^|\\\\W)' : '()')",                                                               // word edges match only at word boundaries…
-		"if (prev && (brk || !inlineBetween(prev, n))) text += '\\n';",                                        // …and text split by more than inline markup stays apart
-		"if (n > 1) return { refuse:",                                                                         // a repeated word names no one place
-		"var r = t.rect || { left: ev.clientX, bottom: ev.clientY };",                                         // the note opens below, never over
-		"if (!r.at) { openPop({ a: r.a, section: r.section, label: r.label, quote: r.quote }, ev); return; }", // a comment with no text left opens from its row
-		"if (pop && !pop.contains(ev.target)) closePop();",                                                    // …and closes on a click elsewhere, even outside review mode
-		"['sage', 'amber', 'red', 'gold', 'faint'].forEach",                                                   // the tints the stylesheets must style
-	} {
-		if !strings.Contains(string(js), want) {
-			t.Errorf("review.js missing %q", want)
-		}
-	}
-	for _, f := range []struct {
-		name string
-		read func(string) ([]byte, error)
-	}{
-		{"assets/scaffold.css", renderAssets.ReadFile},
-		{"assets/chrome.css", chromeAssets.ReadFile},
-	} {
-		b, err := f.read(f.name)
-		if err != nil {
-			t.Fatalf("read %s: %v", f.name, err)
-		}
-		for _, tint := range []string{"sage", "amber", "red", "gold", "faint", "focus"} {
-			if !strings.Contains(string(b), "::highlight(rev-q-"+tint+"){") {
-				t.Errorf("%s does not style the %s highlight", f.name, tint)
-			}
-		}
-		for _, want := range []string{".rev-pop .rev-quote{", ".rev-rail-quote{"} {
-			if !strings.Contains(string(b), want) {
-				t.Errorf("%s missing %q", f.name, want)
-			}
-		}
-	}
-}
-
-// TestReviewCSS_ModeStylingInBothPageKinds pins the review-mode styling in both
-// stylesheets: scaffold.css (markdown-derived pages) and chrome.css (authored
-// HTML plans) each carry their own copy. The browser tests render the scaffold
-// page only, so this is what keeps the authored-page copy from drifting.
-// Failure prevented: on authored plans only, review mode is invisible until a
-// hover, or the comments rail looks like a mark-up target.
-func TestReviewCSS_ModeStylingInBothPageKinds(t *testing.T) {
-	for _, f := range []struct {
-		name string
-		read func(string) ([]byte, error)
-	}{
-		{"assets/scaffold.css", renderAssets.ReadFile},
-		{"assets/chrome.css", chromeAssets.ReadFile},
-	} {
-		b, err := f.read(f.name)
-		if err != nil {
-			t.Fatalf("read %s: %v", f.name, err)
-		}
-		for _, want := range []string{
-			"body.rev-on{cursor:crosshair}",                               // the mode is visible without a hover
-			"body.rev-on .rev-rail li:hover{outline:none;cursor:pointer}", // rail rows are not targets
-			"body.rev-on .rev-orphans li:hover{outline:none;cursor:auto}", // nor are orphan rows
-		} {
-			if !strings.Contains(string(b), want) {
-				t.Errorf("%s missing %q", f.name, want)
-			}
-		}
 	}
 }

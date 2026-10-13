@@ -466,3 +466,29 @@ func TestBrowser_ApproveConfirmsInlineAndReportsSync(t *testing.T) {
 }
 
 func jsString(s string) string { b, _ := json.Marshal(s); return string(b) }
+
+// TestBrowser_ReservedAnchorNoteStaysVisible: a stored note whose anchor is
+// named like an Object member ("constructor") still lists in the rail and the
+// orphan banner. No reader validates stored anchors. Failure prevented: the
+// page grouped review state into plain objects, where such an anchor collides
+// with an inherited member and the note silently drops out of view.
+func TestBrowser_ReservedAnchorNoteStaysVisible(t *testing.T) {
+	base, planDir, _ := serveLivePlanReview(t)
+	if _, err := plan.SaveFeedback(planDir, plan.FeedbackSet{Reviewer: "Avery", Items: []plan.FeedbackItem{
+		{Anchor: "constructor", Label: "Rollout", Status: plan.FeedbackRequestChange, Note: "reserved anchor note"},
+	}}, time.Now()); err != nil {
+		t.Fatalf("save feedback: %v", err)
+	}
+	ctx := newChrome(t)
+	if err := chromedp.Run(ctx, chromedp.Navigate(base+"/"), chromedp.WaitVisible(".rev-toggle", chromedp.ByQuery)); err != nil {
+		t.Fatalf("open page: %v", err)
+	}
+	rail := evalString(t, ctx, `(document.querySelector('.rev-rail')||{}).textContent||''`)
+	orphans := evalString(t, ctx, `(document.querySelector('.rev-orphans')||{}).textContent||''`)
+	if !strings.Contains(rail, "reserved anchor note") || !strings.Contains(rail, "text changed") {
+		t.Errorf("the rail lost the note: %q", rail)
+	}
+	if !strings.Contains(orphans, "reserved anchor note") {
+		t.Errorf("the orphan banner lost the note: %q", orphans)
+	}
+}

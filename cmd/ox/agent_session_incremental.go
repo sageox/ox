@@ -24,6 +24,13 @@ import (
 // writeRawHeader writes the metadata header line to raw.jsonl so that
 // incremental hooks can append entries after it. Called at session start.
 func writeRawHeader(projectRoot string, state *session.RecordingState) error {
+	return writeRawHeaderWithAttribution(projectRoot, state, nil)
+}
+
+// Cursor prepares attribution before prompt admission's lock: resolving the
+// local Git identity can run a subprocess, while header publication must stay
+// within the native prompt hook's short deadline.
+func writeRawHeaderWithAttribution(projectRoot string, state *session.RecordingState, attribution *identity.Attribution) error {
 	if state.SessionPath == "" {
 		return fmt.Errorf("session path is empty")
 	}
@@ -32,6 +39,12 @@ func writeRawHeader(projectRoot string, state *session.RecordingState) error {
 
 	projectEndpoint := endpoint.GetForProject(projectRoot)
 	repoID := getRepoIDOrDefault(projectRoot)
+	username := ""
+	if attribution != nil {
+		username = attribution.DisplayName
+	} else {
+		username = identity.AttributionDisplayName(projectEndpoint, config.GetDisplayName())
+	}
 
 	agentTypeForMeta := adapters.CanonicalAdapterName(state.AgentType)
 	if agentTypeForMeta == "" {
@@ -46,15 +59,18 @@ func writeRawHeader(projectRoot string, state *session.RecordingState) error {
 		ContinuedFromSessionID: state.ContinuedFromSessionID,
 		AgentType:              agentTypeForMeta,
 		Model:                  state.Model,
-		Username:               identity.AttributionDisplayName(projectEndpoint, config.GetDisplayName()),
+		Username:               username,
 		RepoID:                 repoID,
 		OxVersion:              version.Version,
 		NativeSessions:         state.NativeSessions,
 		TraceCapture:           state.Trace,
 	}
 
-	// enrich with adapter metadata if available
-	if state.SessionFile != "" {
+	// Cursor's supported JSONL export has no model/version metadata. Its
+	// external ReadMetadata only parses the source and returns empty fields;
+	// spawning it here can exceed prompt admission's deadline for no metadata.
+	// Cursor startup already validates its native source before publication.
+	if state.SessionFile != "" && adapters.CanonicalAdapterName(state.AdapterName) != "cursor" {
 		adapter, err := adapters.GetAdapter(state.AdapterName)
 		if err == nil {
 			if sessionMeta, _ := adapter.ReadMetadata(state.SessionFile); sessionMeta != nil {

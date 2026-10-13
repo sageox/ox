@@ -1369,15 +1369,47 @@ func recordingSessionIDForMarker(projectRoot, agentID, prior string) string {
 
 func startSessionRecording(projectRoot, agentID, agentType, parentAgentID, continuedFromSessionID, agentSessionID string, cursorBoundaries ...*CursorSourceBoundary) *sessionStatus {
 	if canonicalAgentType(agentType) != "cursor" {
-		return startSessionRecordingUnlocked(projectRoot, agentID, agentType, parentAgentID, continuedFromSessionID, agentSessionID, cursorBoundaries...)
+		return startSessionRecordingUnlocked(projectRoot, agentID, agentType, parentAgentID, continuedFromSessionID, agentSessionID, nil, cursorBoundaries...)
 	}
 	if agentSessionID == "" {
-		return startSessionRecordingUnlocked(projectRoot, agentID, agentType, parentAgentID, continuedFromSessionID, agentSessionID, cursorBoundaries...)
+		return startSessionRecordingUnlocked(projectRoot, agentID, agentType, parentAgentID, continuedFromSessionID, agentSessionID, nil, cursorBoundaries...)
+	}
+	return startCursorSessionRecording(projectRoot, agentID, agentType, parentAgentID, continuedFromSessionID, agentSessionID, nil, cursorBoundaries...)
+}
+
+type cursorRecordingStartup struct {
+	username         string
+	branch           string
+	ledgerExists     bool
+	preparedIdentity *session.PreparedRecordingIdentity
+	writeHeader      func(string, *session.RecordingState) error
+	startedState     *session.RecordingState
+	watchState       *session.RecordingState
+}
+
+func startCursorSessionRecording(projectRoot, agentID, agentType, parentAgentID, continuedFromSessionID, agentSessionID string, writeHeader func(string, *session.RecordingState) error, cursorBoundaries ...*CursorSourceBoundary) *sessionStatus {
+	// These best-effort metadata lookups can run Git commands. Resolve them
+	// before taking prompt admission's lock; only local publication belongs in
+	// that transaction. Header injection is per-call for publication tests.
+	preparedIdentity, err := session.PrepareRecordingIdentity(projectRoot)
+	if err != nil {
+		slog.Warn("Cursor recording startup deferred", "error", err)
+		return nil
+	}
+	attribution := identity.ResolveAttribution(endpoint.GetForProject(projectRoot), config.GetDisplayName())
+	startup := &cursorRecordingStartup{
+		username: attribution.Username, branch: repotools.GetCurrentBranch(projectRoot),
+		ledgerExists: ledger.Exists(""), preparedIdentity: preparedIdentity, writeHeader: writeHeader,
+	}
+	if startup.writeHeader == nil {
+		startup.writeHeader = func(root string, state *session.RecordingState) error {
+			return writeRawHeaderWithAttribution(root, state, &attribution)
+		}
 	}
 	var status *sessionStatus
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	err := fileutil.WithFileLock(ctx, markerPath(agentSessionID)+".recording-start", func() error {
+	err = fileutil.WithFileLock(ctx, markerPath(agentSessionID)+".recording-start", func() error {
 		// Reload after acquiring prompt admission's lock: the caller's copy
 		// may predate one or more queued beforeSubmitPrompt hooks. Hold the
 		// marker through publication so that handoff cannot split again.
@@ -1391,7 +1423,7 @@ func startSessionRecording(projectRoot, agentID, agentType, parentAgentID, conti
 				marker.CursorSourceBoundary = &boundary
 			}
 			marker.AgentID = agentID
-			status = startSessionRecordingUnlocked(projectRoot, agentID, agentType, parentAgentID, continuedFromSessionID, agentSessionID, marker.CursorSourceBoundary)
+			status = startSessionRecordingUnlocked(projectRoot, agentID, agentType, parentAgentID, continuedFromSessionID, agentSessionID, startup, marker.CursorSourceBoundary)
 			if status != nil && status.Recording && marker.CursorSourceBoundary != nil {
 				state, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
 				if err != nil {
@@ -1421,10 +1453,18 @@ func startSessionRecording(projectRoot, agentID, agentType, parentAgentID, conti
 		slog.Warn("Cursor recording startup deferred", "error", err)
 		return nil
 	}
+	// Notifications and daemon IPC are optional and can outlive admission's
+	// two-second deadline. The complete recording is already visible here.
+	if startup.startedState != nil {
+		notifySessionStartedAsync(projectRoot, startup.startedState)
+	}
+	if startup.watchState != nil {
+		sendSessionWatchStart(startup.watchState, projectRoot)
+	}
 	return status
 }
 
-func startSessionRecordingUnlocked(projectRoot, agentID, agentType, parentAgentID, continuedFromSessionID, agentSessionID string, cursorBoundaries ...*CursorSourceBoundary) *sessionStatus {
+func startSessionRecordingUnlocked(projectRoot, agentID, agentType, parentAgentID, continuedFromSessionID, agentSessionID string, cursorStartup *cursorRecordingStartup, cursorBoundaries ...*CursorSourceBoundary) *sessionStatus {
 	var cursorBoundary *CursorSourceBoundary
 	if len(cursorBoundaries) > 0 {
 		cursorBoundary = cursorBoundaries[0]
@@ -1449,7 +1489,13 @@ func startSessionRecordingUnlocked(projectRoot, agentID, agentType, parentAgentI
 	}
 
 	// check if ledger is provisioned and cloned (required for session storage)
-	if !ledger.Exists("") {
+	ledgerExists := false
+	if cursorStartup != nil {
+		ledgerExists = cursorStartup.ledgerExists
+	} else {
+		ledgerExists = ledger.Exists("")
+	}
+	if !ledgerExists {
 		// return status indicating ledger needed
 		return &sessionStatus{
 			Recording:    false,
@@ -1527,7 +1573,11 @@ func startSessionRecordingUnlocked(projectRoot, agentID, agentType, parentAgentI
 				}
 				existing.AgentSessionID = agentSessionID
 			}
-			sendSessionWatchStart(existing, projectRoot)
+			if cursorStartup != nil {
+				cursorStartup.watchState = existing
+			} else {
+				sendSessionWatchStart(existing, projectRoot)
+			}
 		}
 		return &sessionStatus{
 			Recording: true,
@@ -1550,17 +1600,25 @@ func startSessionRecordingUnlocked(projectRoot, agentID, agentType, parentAgentI
 	// PID which dies immediately after the hook. OX_PARENT_PID is set by the hook
 	// to proc.FindAgentAncestorPID(), which walks the tree to find the agent process.
 	// If OX_PARENT_PID is missing (direct invocation), walk the tree ourselves.
-	parentPID := proc.FindAgentAncestorPID()
-	if envPID := os.Getenv("OX_PARENT_PID"); envPID != "" {
-		if parsed, parseErr := strconv.Atoi(envPID); parseErr == nil && parsed > 0 {
-			parentPID = parsed
+	parentPID := 0
+	if agentType != "cursor" {
+		parentPID = proc.FindAgentAncestorPID()
+		if envPID := os.Getenv("OX_PARENT_PID"); envPID != "" {
+			if parsed, parseErr := strconv.Atoi(envPID); parseErr == nil && parsed > 0 {
+				parentPID = parsed
+			}
 		}
 	}
-	if agentType == "cursor" {
-		parentPID = 0 // a transient hook shell is not the native conversation owner
-	}
+	// A transient Cursor hook shell is not the native conversation owner.
 
 	watchMode := sessionWatchMode(agentType)
+	username, branch := "", ""
+	if cursorStartup != nil {
+		username, branch = cursorStartup.username, cursorStartup.branch
+	} else {
+		username = identity.AttributionUsername(endpoint.GetForProject(projectRoot), config.GetDisplayName())
+		branch = repotools.GetCurrentBranch(projectRoot)
+	}
 
 	opts := session.StartRecordingOptions{
 		AgentID:                agentID,
@@ -1569,11 +1627,14 @@ func startSessionRecordingUnlocked(projectRoot, agentID, agentType, parentAgentI
 		OutputFile:             outputFile,
 		FilterMode:             resolved.Mode,
 		ParentPID:              parentPID,
-		Username:               identity.AttributionUsername(endpoint.GetForProject(projectRoot), config.GetDisplayName()),
+		Username:               username,
 		WorkspacePath:          projectRoot,
-		Branch:                 repotools.GetCurrentBranch(projectRoot),
+		Branch:                 branch,
 		WatchMode:              watchMode,
 		ContinuedFromSessionID: continuedFromSessionID,
+	}
+	if cursorStartup != nil {
+		opts.PreparedIdentity = cursorStartup.preparedIdentity
 	}
 	if canonicalAgentType(agentType) == string(agentx.AgentTypeCursor) && cursorBoundary != nil {
 		opts.StartOffset = cursorBoundary.Offset
@@ -1637,7 +1698,7 @@ func startSessionRecordingUnlocked(projectRoot, agentID, agentType, parentAgentI
 				}
 				state.Lifecycle = append(state.Lifecycle, session.LifecycleEvent{Action: session.LifecycleActionPause, At: now, Seq: 0, Reason: reason})
 			}
-			return writeRawHeader(projectRoot, state)
+			return cursorStartup.writeHeader(projectRoot, state)
 		}
 	}
 
@@ -1714,7 +1775,11 @@ func startSessionRecordingUnlocked(projectRoot, agentID, agentType, parentAgentI
 	}
 
 	// register-at-start so /c/<session_id> resolves from t=0 (fire-and-forget)
-	notifySessionStartedAsync(projectRoot, state)
+	if cursorStartup != nil {
+		cursorStartup.startedState = state
+	} else {
+		notifySessionStartedAsync(projectRoot, state)
+	}
 
 	// for tail-mode sessions: try to find the agent's session file and tell
 	// the daemon to start tailing it. If TryConnect returns nil (daemon not
@@ -1722,7 +1787,11 @@ func startSessionRecordingUnlocked(projectRoot, agentID, agentType, parentAgentI
 	// SourceOffset=0, catching up from the beginning of the file once the
 	// daemon starts and discovers the active recording.
 	if state.WatchMode == "tail" {
-		sendSessionWatchStart(state, projectRoot)
+		if cursorStartup != nil {
+			cursorStartup.watchState = state
+		} else {
+			sendSessionWatchStart(state, projectRoot)
+		}
 	}
 
 	// build user notification message
