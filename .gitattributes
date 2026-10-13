@@ -18,3 +18,9 @@
 extensions/skills/**/*.md text eol=lf
 extensions/rulecatalog/**/*.md text eol=lf
 extensions/packs/**/*.md text eol=lf
+
+# review.manifest.json records the SHA-256 of the review assets ox embeds, and
+# the package build hashes its source the same way. A CRLF checkout would
+# fail both checks on Windows.
+internal/plan/assets/review.* text eol=lf
+packages/plan-review/** text eol=lf

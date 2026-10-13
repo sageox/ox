@@ -2,7 +2,7 @@
 
 .PHONY: check-no-git-lfs-shell check-raw-writer-chokepoint check-session-meta-rmw check-codedb-guarded-open check-test-tiers test-tiers
 .PHONY: test-all-split test-split-slots test-split-slot coverage-merge-unit warm-test-cache coverage-integration-profile coverage-merge
-.PHONY: help build build-ox build-adapters build-acceptance install install-adapters clean dev run test test-cover test-timings test-all test-slow test-fuzz test-browser test-integration test-acceptance test-acceptance-cover test-acceptance-run test-release test-release-coverage release-stages test-agents test-preflight test-digital-twin test-digital-twin-cover test-cloud-api-twin test-ledger-twin eval eval-smoke eval-no-bash eval-scaffold-check test-sequential test-profile test-watch coverage coverage-report coverage-func coverage-baseline coverage-diff coverage-check coverage-ratchet coverage-ratchet-diff coverage-ratchet-test build-cover coverage-integration smoke-test lint lint-test-env format release release-snapshot dist install-hooks docs docs-check docs-publish refresh-friction-catalog bump-version verify-version check-release-drift beads-setup
+.PHONY: help build build-ox build-adapters build-acceptance install install-adapters clean dev run test test-cover test-timings test-all test-slow test-fuzz test-browser test-integration test-acceptance test-acceptance-cover test-acceptance-run test-release test-release-coverage release-stages test-agents test-preflight test-digital-twin test-digital-twin-cover test-cloud-api-twin test-ledger-twin eval eval-smoke eval-no-bash eval-scaffold-check test-sequential test-profile test-watch coverage coverage-report coverage-func coverage-baseline coverage-diff coverage-check coverage-ratchet coverage-ratchet-diff coverage-ratchet-test build-cover coverage-integration smoke-test lint lint-test-env format release release-snapshot dist install-hooks docs docs-check docs-publish plan-review plan-review-check refresh-friction-catalog bump-version verify-version check-release-drift beads-setup
 
 # Variables
 GO := go
@@ -897,6 +897,15 @@ docs-check: ## Fail when committed CLI reference docs differ from Cobra
 			echo "docs/package.json is stale. Run 'make docs' and commit the result."; \
 			exit 1; \
 		fi
+
+# @sageox/plan-review (packages/plan-review) builds the review page's
+# internal/plan/assets/review.{js,css} from its TypeScript source. The built
+# assets are committed so that building ox never needs node.
+plan-review: ## Build packages/plan-review and regenerate internal/plan/assets/review.*
+	cd packages/plan-review && npm ci --ignore-scripts && npm run build
+
+plan-review-check: ## Fail when internal/plan/assets/review.* is stale; test and clean-install the package
+	cd packages/plan-review && npm ci --ignore-scripts && npm run check && npm run build && npm test && node pack-check.mjs
 
 docs-publish: docs ## Publish docs to GitHub Packages
 	@echo "Publishing docs to GitHub Packages..."

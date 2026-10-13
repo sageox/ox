@@ -18,7 +18,7 @@ contract choices the shared module implements.
 | Where | What it pins |
 |---|---|
 | `pkg/planreview/testdata/review-contract/<fixture>/` | Shared fixtures: a plan dir (`plan/`) and what assembling it yields (`expect.json`): the merged items, projected to the fields every host must agree on (the reviewer's label and note included), every failure by path and reason, and every conflicting operation; `limits` when the fixture needs its own |
-| `pkg/planreview/testdata/anchors.json` | The review page's anchor, label and markable-element vectors; the anchors are goldens from a JS engine running review.js |
+| `pkg/planreview/testdata/anchors.json` | The review page's anchor, label and markable-element vectors; the anchors are goldens from a JS engine running review.js. `packages/plan-review` is checked against them: anchors and labels in node, the page in Chrome (`TestBrowser_DocumentToolsMatchSharedPageVectors`) |
 | `TestContractFixtures` (`pkg/planreview/review_test.go`) | Every fixture through two transports (`Capture` and a plain read of every file) and the shared assembler |
 | `TestPublish_*`, `TestCapture_*` (`pkg/planreview/local_test.go`) | 3.5 and 3.6 |
 | `TestReviewContractFixtures` (`internal/plan/feedback_test.go`) | The CLI's v1 reader against the six fixtures it can read, `many-rounds` (120 rounds, every layout) and `region-items` (drawn regions, #1292) included, until #1289 replaces it |

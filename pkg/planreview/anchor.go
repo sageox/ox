@@ -1,8 +1,9 @@
 package planreview
 
-// Parity with the review page's content anchors (review.js, at
-// internal/plan/assets/review.js in the ox repository). A mark's anchor is a
-// content hash of (section heading + element text), computed in the browser as
+// Parity with the review page's content anchors: in the ox repository,
+// packages/plan-review/src/anchor.ts, built into internal/plan/assets/review.js.
+// A mark's anchor is a content hash of (section heading + element text),
+// computed in the browser as
 //
 //	anchor = 'h' + fnv1a(norm(heading) + '\u0000' + norm(text))
 //

@@ -111,6 +111,8 @@ team-contexts/
 
 demo/credentials.sops.yaml
 demo/playwright/node_modules/
+packages/plan-review/node_modules/
+packages/plan-review/dist/
 .
 # Conductor workspace artifacts (blue-green GC reclone). Artifact paths are
 # <workspace-path> + suffix (no separator, e.g. "ledger.gc-diff"), so these
