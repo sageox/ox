@@ -351,6 +351,15 @@ func TestRenderHTML_CarriesReviewState(t *testing.T) {
 	if !strings.Contains(string(out), `data-review-problems="2"`) {
 		t.Error("a generated page must carry the review's problem count")
 	}
+	// an artifact carries no review layer: its summary strip says so instead
+	opts.Artifact = true
+	if out, err = RenderHTMLOpts(in, Result{}, opts); err != nil {
+		t.Fatalf("render artifact: %v", err)
+	}
+	if !strings.Contains(string(out), "2 problem(s) reading it: may be incomplete") {
+		t.Error("an artifact's summary strip must carry the review's problem count")
+	}
+	opts.Artifact = false
 	authored := InjectChrome([]byte("<html><body><p>x</p></body></html>"), BuildChromeData(Result{}, opts))
 	if !strings.Contains(string(authored), `"review_problems":2`) {
 		t.Error("an authored page's chrome must carry the review's problem count")
