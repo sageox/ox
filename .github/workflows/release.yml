@@ -183,7 +183,15 @@ jobs:
       - name: Run release stage
         env:
           STAGE: ${{ matrix.stage }}
-        run: make "$STAGE"
+        # Split slots each own a runner in PR CI. Packing all eight processes
+        # onto this one runner oversubscribes indexing and preview timeouts.
+        # One full-suite process preserves every package, flag, and coverage gate.
+        run: |
+          if [ "$STAGE" = test-release-coverage ]; then
+            make "$STAGE" TEST_SPLIT_LAYOUT=
+          else
+            make "$STAGE"
+          fi
 
   build-release-assets:
     if: github.repository == 'sageox/ox'
