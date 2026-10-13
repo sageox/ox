@@ -112,18 +112,18 @@ func TestSessionWatcherRestart_RollsBackSealedUncheckpointedFirstBatch(t *testin
 	}, time.Second, 10*time.Millisecond)
 }
 
-func TestSessionWatcher_RejectsAcknowledgedEntriesWithoutSourceCursor(t *testing.T) {
-	home, source, cachePath, _ := checkpointWatcherFixture(t)
-	state := loadCheckpointState(t, cachePath)
-	state.EntryCount = 1
-	writeRecordingState(t, filepath.Join(cachePath, recordingMarker), state)
-
-	mgr := NewSessionWatcherManager(slog.Default())
-	mgr.SetHomeDirForTest(home)
-	t.Cleanup(mgr.StopAll)
-	err := mgr.StartWatch("missing-cursor", source, "codex", t.TempDir(), cachePath)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "acknowledged entries without a source cursor")
+// Cursor counts describe native rows only, so an acknowledged count without a
+// corresponding source cursor must still be held instead of replaying its source.
+func TestCursorWatcher_RejectsNativeEntriesWithoutSourceProgress(t *testing.T) {
+	installCursorWatcherAdapter(t)
+	f := newCursorWatcherFixture(t, `{"role":"user","content":"must not replay"}`+"\n", false, false)
+	f.state.EntryCount = 1
+	writeRecordingState(t, filepath.Join(f.cachePath, recordingMarker), f.state)
+	mgr := newCursorWatcherManager(t, f.homeDir)
+	err := mgr.StartWatch(f.sessionName, f.sourcePath, "cursor", f.ledgerPath, f.cachePath)
+	require.ErrorContains(t, err, "acknowledged entries without a source cursor")
+	assert.Empty(t, mgr.ActiveSessions())
+	assert.NoFileExists(t, filepath.Join(f.cachePath, "raw.jsonl"))
 }
 
 func TestSessionWatcherRestart_RollsBackSealedUncheckpointedLaterBatch(t *testing.T) {

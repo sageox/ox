@@ -2433,6 +2433,9 @@ func recordEntriesToSession(projectRoot string, state *session.RecordingState, e
 	if state == nil || state.SessionPath == "" {
 		return 0, fmt.Errorf("invalid recording state")
 	}
+	if state.AdapterName == "cursor" {
+		return 0, fmt.Errorf("unsupported-scope: session record cannot add entries to a native Cursor recording")
+	}
 
 	rawPath := filepath.Join(state.SessionPath, ledgerFileRaw)
 	w, err := session.NewRawWriter(rawPath, projectRoot)

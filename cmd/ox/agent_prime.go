@@ -1385,6 +1385,10 @@ type cursorRecordingStartup struct {
 	writeHeader      func(string, *session.RecordingState) error
 	startedState     *session.RecordingState
 	watchState       *session.RecordingState
+	// A successful header is the last fallible step before marker publication.
+	// Preserve its identity when a later save error may leave a visible marker.
+	publicationCandidate *session.RecordingState
+	publicationErr       error
 }
 
 func startCursorSessionRecording(projectRoot, agentID, agentType, parentAgentID, continuedFromSessionID, agentSessionID string, writeHeader func(string, *session.RecordingState) error, cursorBoundaries ...*CursorSourceBoundary) *sessionStatus {
@@ -1407,6 +1411,7 @@ func startCursorSessionRecording(projectRoot, agentID, agentType, parentAgentID,
 		}
 	}
 	var status *sessionStatus
+	publicationPossible := false
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	err = fileutil.WithFileLock(ctx, markerPath(agentSessionID)+".recording-start", func() error {
@@ -1424,19 +1429,16 @@ func startCursorSessionRecording(projectRoot, agentID, agentType, parentAgentID,
 			}
 			marker.AgentID = agentID
 			status = startSessionRecordingUnlocked(projectRoot, agentID, agentType, parentAgentID, continuedFromSessionID, agentSessionID, startup, marker.CursorSourceBoundary)
-			if status != nil && status.Recording && marker.CursorSourceBoundary != nil {
-				state, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
-				if err != nil {
-					return err
-				}
-				if state != nil && state.AdapterName == "cursor" && state.AgentSessionID == agentSessionID {
-					marker.CursorSourceBoundary.RecordingSessionID = state.SessionID
-					marker.RecordingSessionID = state.SessionID
-				}
+			publicationPossible = (status != nil && status.Recording) || startup.publicationErr != nil
+			if publicationPossible && marker.CursorSourceBoundary != nil {
+				return associateCursorStartupRecording(projectRoot, agentID, agentSessionID, startup, marker)
+			}
+			if startup.publicationErr != nil {
+				return startup.publicationErr
 			}
 			return nil
 		})
-		if err != nil && status != nil && status.Recording {
+		if err != nil && publicationPossible {
 			// The recording can finish before another prompt repairs its source
 			// association. Block automatic restart before releasing admission's
 			// lock so that an unconsumed boundary cannot replay completed rows.
@@ -1462,6 +1464,32 @@ func startCursorSessionRecording(projectRoot, agentID, agentType, parentAgentID,
 		sendSessionWatchStart(startup.watchState, projectRoot)
 	}
 	return status
+}
+
+// associateCursorStartupRecording consumes the source boundary while admission
+// is locked. A daemon can finish and clear a recording before this runs, so a
+// successful start's known identity is stronger evidence than a later reload.
+func associateCursorStartupRecording(projectRoot, agentID, agentSessionID string, startup *cursorRecordingStartup, marker *SessionMarker) error {
+	state := startup.startedState
+	if state == nil {
+		var err error
+		state, err = session.LoadRecordingStateForAgent(projectRoot, agentID)
+		if err != nil {
+			return err
+		}
+	}
+	if state != nil && state.AgentID == agentID && state.AdapterName == "cursor" && state.AgentSessionID == agentSessionID &&
+		(startup.publicationErr == nil || state.SessionID == startup.publicationCandidate.SessionID) {
+		marker.CursorSourceBoundary.RecordingSessionID = state.SessionID
+		marker.RecordingSessionID = state.SessionID
+		return nil
+	}
+	// Missing state cannot prove a post-header save never landed. Preserve its
+	// error so the outer transaction installs the automatic-restart guard.
+	if startup.publicationErr != nil {
+		return startup.publicationErr
+	}
+	return fmt.Errorf("published Cursor recording is unavailable for source association")
 }
 
 func startSessionRecordingUnlocked(projectRoot, agentID, agentType, parentAgentID, continuedFromSessionID, agentSessionID string, cursorStartup *cursorRecordingStartup, cursorBoundaries ...*CursorSourceBoundary) *sessionStatus {
@@ -1698,7 +1726,11 @@ func startSessionRecordingUnlocked(projectRoot, agentID, agentType, parentAgentI
 				}
 				state.Lifecycle = append(state.Lifecycle, session.LifecycleEvent{Action: session.LifecycleActionPause, At: now, Seq: 0, Reason: reason})
 			}
-			return cursorStartup.writeHeader(projectRoot, state)
+			if err := cursorStartup.writeHeader(projectRoot, state); err != nil {
+				return err
+			}
+			cursorStartup.publicationCandidate = state
+			return nil
 		}
 	}
 
@@ -1720,6 +1752,9 @@ func startSessionRecordingUnlocked(projectRoot, agentID, agentType, parentAgentI
 				Mode:      resolved.Mode,
 				Source:    string(resolved.Source),
 			}
+		}
+		if cursorStartup != nil && cursorStartup.publicationCandidate != nil {
+			cursorStartup.publicationErr = err
 		}
 		// non-fatal but visible — agent sees stderr and can surface it
 		fmt.Fprintf(os.Stderr, "warning: session recording failed to start: %v\n", err)

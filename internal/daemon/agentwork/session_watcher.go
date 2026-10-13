@@ -180,7 +180,9 @@ func (m *SessionWatcherManager) startWatchAt(
 	if state.AdapterName == "cursor" && m.cursorRecordingInactive(recPath) {
 		return fmt.Errorf("recording is inactive and awaiting Cursor finalization")
 	}
-	if state.EntryCount > 0 && state.SourceOffset <= state.StartOffset {
+	// Cursor counts native rows exclusively. Other adapters also allow manual
+	// batches, which increase EntryCount without moving their native cursor.
+	if state.AdapterName == "cursor" && state.EntryCount > 0 && state.SourceOffset <= state.StartOffset {
 		return fmt.Errorf("recording has acknowledged entries without a source cursor: entries=%d source_offset=%d start_offset=%d",
 			state.EntryCount, state.SourceOffset, state.StartOffset)
 	}
