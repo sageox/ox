@@ -133,6 +133,9 @@ This command will:
 
 Use --team to specify a team by name, slug, or ID, or let ox init prompt you.
 
+After setup and sync, optionally run 'ox session import' to preview and choose
+past Claude Code or Codex sessions from this repo for your team's Ledger.
+
 After init, run 'ox guide getting-started' for a five-minute walkthrough,
 or 'ox guide team-rules' to learn how to share AI coworker conventions
 across your whole team (Claude, Codex, Amp, etc.).`,
@@ -1034,6 +1037,8 @@ func runInit() error {
 		fmt.Println(cli.StyleBold.Render("SageOx initialized successfully!"))
 		fmt.Println(ui.MutedStyle.Render(ui.SeparatorHeavy))
 
+		printInitSessionImportHint(gitRoot, cfg)
+
 		// next steps - THE primary call to action
 		fmt.Println()
 		fmt.Println(ui.RenderCategory("Next Steps"))
@@ -1099,6 +1104,22 @@ func runInit() error {
 	}
 
 	return nil
+}
+
+// printInitSessionImportHint is deterministic setup help, independent of tips.
+// Sync requests do not establish import readiness; the importer owns preflight.
+func printInitSessionImportHint(gitRoot string, projectCfg *config.ProjectConfig) {
+	if initQuiet || (cfg != nil && (cfg.JSON || cfg.Quiet)) || projectCfg == nil ||
+		projectCfg.RepoID == "" || projectCfg.TeamID == "" ||
+		!config.ResolveSessionRecording(gitRoot).ShouldRecord() {
+		return
+	}
+
+	fmt.Println()
+	fmt.Println(cli.StyleBold.Render("Optional: Bring past sessions into your team’s Ledger"))
+	fmt.Println("Claude Code and Codex sessions from this repo.")
+	fmt.Println("After setup and sync: " + cli.StyleCommand.Render("ox session import"))
+	fmt.Println("Preview and choose; nothing uploads until you confirm.")
 }
 
 // fetchGitCredentials fetches git credentials from GET /api/v1/cli/repos (team context repos only).

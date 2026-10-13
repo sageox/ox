@@ -418,3 +418,61 @@ func TestRunInit_DashboardHandoffIsNotAnInit(t *testing.T) {
 	assert.NotContains(t, env.Requested(), "/api/v1/repo/init", "nothing was registered")
 	assert.NoDirExists(t, filepath.Join(env.Root, ".sageox"), "nothing was initialized")
 }
+
+func TestRunInit_SessionImportDiscovery(t *testing.T) {
+	for _, tc := range []struct {
+		name                                               string
+		quiet, json, tipsOff, recordingOff, noTeam, reinit bool
+		wantHint                                           bool
+	}{
+		{name: "sync deferred", wantHint: true},
+		{name: "tips disabled", tipsOff: true, wantHint: true},
+		{name: "reinit", reinit: true, wantHint: true},
+		{name: "quiet", quiet: true},
+		{name: "JSON", json: true},
+		{name: "recording disabled", recordingOff: true},
+		{name: "no bound team", noTeam: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newOxE2E(t)
+			withInitFlags(t, env.TeamID)
+			initQuiet, initAgentsFlag = tc.quiet, "claude-code"
+			prevCfg := cfg
+			cfg = &config.Config{JSON: tc.json}
+			t.Cleanup(func() { cfg = prevCfg })
+			t.Setenv(config.EnvSessionRecording, config.SessionRecordingManual)
+			if tc.recordingOff {
+				t.Setenv(config.EnvSessionRecording, config.SessionRecordingDisabled)
+			}
+			if tc.tipsOff {
+				disabled := false
+				require.NoError(t, config.SaveUserConfig(&config.UserConfig{TipsEnabled: &disabled}))
+			}
+			if tc.noTeam {
+				env.register = func(api.RepoInitRequest) (int, any) {
+					return 200, api.RepoInitResponse{RepoID: env.RepoID}
+				}
+			}
+			if tc.reinit {
+				require.NoError(t, runInit())
+			}
+			var err error
+			output := captureStdoutForPlanCLI(t, func() { err = runInit() })
+			require.NoError(t, err)
+			if !tc.wantHint {
+				assert.NotContains(t, output, "ox session import")
+				return
+			}
+			require.Equal(t, 1, strings.Count(output, "ox session import"))
+			assert.Contains(t, output, "After setup and sync:")
+			assert.Contains(t, output, "nothing uploads until you confirm")
+			assert.Less(t, strings.Index(output, "initialized successfully"), strings.Index(output, "ox session import"))
+			assert.Less(t, strings.Index(output, "ox session import"), strings.Index(strings.ToLower(output), "next steps"))
+			assert.Contains(t, output, "ox sync")
+			assert.Contains(t, output, "ox doctor")
+			for _, path := range env.Requested() {
+				assert.NotContains(t, path, "session", "init must not start an import")
+			}
+		})
+	}
+}

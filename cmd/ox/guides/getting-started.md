@@ -28,6 +28,18 @@ git push
 
 Verify with `ox doctor` and `ox status`.
 
+## Bring past sessions into your Ledger
+
+Optional: after setup and sync, run this from the repo you connected:
+
+```bash
+ox session import
+```
+
+Preview and choose past Claude Code or Codex sessions from this repo that are worth sharing. Check the destination and visibility; nothing uploads until you confirm. You can skip this and import later. If you have no local history, there is nothing to import.
+
+Active sessions and history already imported or recorded by ox are handled by the existing import flow. Summaries use an installed, authenticated Claude Code or Codex CLI and may consume its allowance. If sync is still pending, check `ox status` before importing. Run `ox session import --help` for options.
+
 ## Daily use
 
 Once initialized, you usually don't need to think about ox — it runs in the background. The pieces that surface during normal work:
