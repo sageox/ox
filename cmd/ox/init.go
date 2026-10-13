@@ -1037,7 +1037,11 @@ func runInit() error {
 		fmt.Println(cli.StyleBold.Render("SageOx initialized successfully!"))
 		fmt.Println(ui.MutedStyle.Render(ui.SeparatorHeavy))
 
-		printInitSessionImportHint(gitRoot, cfg)
+		// Existing IDs can survive skipped registration, including an endpoint
+		// rebind. Only a response confirms the binding to this endpoint.
+		if resp != nil {
+			printInitSessionImportHint(gitRoot, cfg)
+		}
 
 		// next steps - THE primary call to action
 		fmt.Println()

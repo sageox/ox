@@ -476,3 +476,42 @@ func TestRunInit_SessionImportDiscovery(t *testing.T) {
 		})
 	}
 }
+
+func TestRunInit_SkippedRegistrationHidesSessionImport(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		rebind bool
+	}{
+		{name: "existing binding"},
+		{name: "endpoint rebind", rebind: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newOxE2E(t)
+			withInitFlags(t, env.TeamID)
+			initAgentsFlag = "claude-code"
+			t.Setenv(config.EnvSessionRecording, config.SessionRecordingManual)
+			require.NoError(t, runInit())
+			projectCfg, err := config.LoadProjectConfig(env.Root)
+			require.NoError(t, err)
+			require.NotEmpty(t, projectCfg.RepoID)
+			require.NotEmpty(t, projectCfg.TeamID)
+			if tc.rebind {
+				projectCfg.Endpoint = "https://old.sageox.example"
+				require.NoError(t, config.SaveProjectConfig(env.Root, projectCfg))
+			}
+			env.register = func(api.RepoInitRequest) (int, any) { return 404, nil }
+			initQuiet = false
+			output := captureStdoutForPlanCLI(t, func() {
+				withStdin(t, "yes\n", func() { err = runInit() })
+			})
+			require.NoError(t, err)
+			assert.Contains(t, output, "API registration skipped")
+			assert.NotContains(t, output, "ox session import", "old IDs do not confirm registration to the current endpoint")
+			projectCfg, err = config.LoadProjectConfig(env.Root)
+			require.NoError(t, err)
+			assert.Equal(t, env.Server.URL, projectCfg.Endpoint)
+			assert.Equal(t, env.RepoID, projectCfg.RepoID)
+			assert.Equal(t, env.TeamID, projectCfg.TeamID)
+		})
+	}
+}
