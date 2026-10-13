@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.22.0] - 2026-10-12
+## [0.23.0] - 2026-10-12
 
 Bring past AI coworker sessions into your Ledger, find recorded conversations, and give your AI coworker a screen walkthrough it can read.
 
