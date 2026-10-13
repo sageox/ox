@@ -243,6 +243,10 @@ func RenderHTMLOpts(in Input, res Result, opts RenderOptions) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read review.js: %w", err)
 	}
+	pageCSS := string(css)
+	if !opts.Artifact { // the template carries review.js only then
+		pageCSS += string(mustChromeAsset("assets/review.css"))
+	}
 	tmplBytes, err := renderAssets.ReadFile("assets/plan.html.tmpl")
 	if err != nil {
 		return nil, fmt.Errorf("read plan.html.tmpl: %w", err)
@@ -265,7 +269,7 @@ func RenderHTMLOpts(in Input, res Result, opts RenderOptions) ([]byte, error) {
 	data := renderData{
 		Title:          Title(in),
 		Slug:           opts.Slug,
-		CSS:            template.CSS(string(css) + highlightCSS()),
+		CSS:            template.CSS(pageCSS + highlightCSS()),
 		JS:             template.JS(js),
 		ReviewJS:       template.JS(reviewJS),
 		ReviewEndpoint: opts.ReviewEndpoint,

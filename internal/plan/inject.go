@@ -18,7 +18,7 @@ import (
 // enrichment overlay, the footer credit, and the review loop — never the
 // author's markup, layout, or scripting.
 
-//go:embed assets/chrome.css assets/chrome.js
+//go:embed assets/chrome.css assets/chrome.js assets/review.css
 var chromeAssets embed.FS
 
 // ChromeMarkerStart / ChromeMarkerEnd delimit the injected ox chrome bundle
@@ -266,6 +266,7 @@ func buildChromeBundle(data ChromeData) []byte {
 
 	b.WriteString(`<style id="ox-chrome-style">`)
 	b.Write(mustChromeAsset("assets/chrome.css"))
+	b.Write(mustChromeAsset("assets/review.css"))
 	b.WriteString("</style>\n")
 
 	b.WriteString(`<script id="ox-chrome-boot">`)
@@ -300,11 +301,11 @@ func escapeScriptIsland(jsonStr string) string {
 	return strings.ReplaceAll(jsonStr, "<", jsonLessThanEscape)
 }
 
-// mustChromeAsset reads an embedded chrome.css/chrome.js asset. Both are
-// embedded above; a read failure means the embed directive itself is
-// broken (a compile-time condition), not a runtime one — panicking here
-// mirrors template.Must's contract for a compiled-in asset that cannot
-// legitimately be missing.
+// mustChromeAsset reads an embedded chrome.css/chrome.js/review.css asset
+// (render.go reads review.css here too). All are embedded above; a read
+// failure means the embed directive itself is broken (a compile-time
+// condition), not a runtime one — panicking here mirrors template.Must's
+// contract for a compiled-in asset that cannot legitimately be missing.
 func mustChromeAsset(path string) []byte {
 	b, err := chromeAssets.ReadFile(path)
 	if err != nil {

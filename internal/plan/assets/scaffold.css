@@ -292,120 +292,13 @@ table.flagm td:first-child{font-family:"Spline Sans Mono",ui-monospace,SFMono-Re
 .foot-live{color:var(--sage);font-weight:600}
 .foot-live::before{content:"●";color:var(--teal);font-size:.7em;vertical-align:middle;margin-right:5px}
 @media(max-width:1000px){.shell{grid-template-columns:1fr}nav.toc{display:none}main{padding:28px 20px 90px}section.risk{margin-left:0}}
-/* --- in-document review layer (ox plan review / feedback) --- */
-/* committed review-state strip (server-rendered, JS-independent) */
+/* --- review (ox plan review / feedback): the review layer's own styles are
+   assets/review.css, generated from packages/plan-review; only the
+   server-rendered review-state strip lives here --- */
 .rev-status{background:var(--panel2);border:1px solid var(--hair2);border-left:3px solid var(--gold);border-radius:9px;padding:10px 14px;margin:12px 0 6px;font-size:13.5px;color:var(--dim)}
 .rev-status-tag{font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--gold);margin-right:8px}
 .rev-status strong{color:var(--ink)}
-.rev-bar{position:fixed;left:16px;bottom:16px;z-index:60;display:flex;align-items:center;gap:8px;background:var(--panel);border:1px solid var(--hair);border-radius:9px;padding:6px 8px;box-shadow:var(--shadow)}
-.rev-bar button{background:var(--panel2);border:1px solid var(--hair2);color:var(--dim);border-radius:6px;padding:4px 9px;font-size:12px;cursor:pointer;font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace}
-.rev-bar button:hover{color:var(--ink)}
-.rev-bar .rev-toggle.on{background:var(--sage);border-color:var(--sage);color:#111411}
-.rev-bar .rev-submit{border-color:var(--sage);color:var(--sage)}
-.rev-bar .rev-count{font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:var(--faint)}
-.rev-bar .rev-who{max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--faint)}
-.rev-bar .rev-who:hover{color:var(--sage);border-color:var(--sage)}
-/* the mode is visible without a hover: crosshair page-wide, sage-bordered bar.
-   Review chrome keeps its normal cursor and gets no target outline — clicks
-   there never mark up. The li rules outrank the generic li:hover target rule. */
-body.rev-on{cursor:crosshair}
-body.rev-on .rev-bar{border-color:var(--sage)}
-body.rev-on .rev-bar,body.rev-on .rev-rail,body.rev-on .rev-pop,body.rev-on .rev-orphans,body.rev-on .rev-toast,body.rev-on .rev-sync,body.rev-on .rev-offline-bar{cursor:auto}
-body.rev-on .rev-rail li:hover{outline:none;cursor:pointer}
-body.rev-on .rev-orphans li:hover{outline:none;cursor:auto}
-body.rev-on [data-rev],body.rev-on section[id]:hover,body.rev-on li:hover,body.rev-on tr:hover,body.rev-on .ox-chip:hover,body.rev-on .stat:hover,body.rev-on .bar-row:hover{outline:1px dashed var(--sage);outline-offset:2px;cursor:crosshair}
-/* inline mark glyph — redundant encoding: distinct GLYPH per status, color reinforces (never color alone) */
-.rev-marked,.rev-committed{position:relative;box-shadow:inset 3px 0 0 var(--hair)}
-.rev-glyph{position:absolute;left:-1.25em;top:0;font-size:12px;line-height:1.5;color:var(--dim)}
-.rev-marked[data-rev="approve"]{box-shadow:inset 3px 0 0 var(--sage)} .rev-marked[data-rev="approve"] .rev-glyph{color:var(--sage)}
-.rev-marked[data-rev="request-change"]{box-shadow:inset 3px 0 0 var(--amber)} .rev-marked[data-rev="request-change"] .rev-glyph{color:var(--amber)}
-.rev-marked[data-rev="flag"]{box-shadow:inset 3px 0 0 var(--red)} .rev-marked[data-rev="flag"] .rev-glyph{color:var(--red)}
-.rev-marked[data-rev="comment"]{box-shadow:inset 3px 0 0 var(--gold)} .rev-marked[data-rev="comment"] .rev-glyph{color:var(--gold)}
-/* committed states: addressed/verified struck + green-check; open keeps status; wontfix muted */
-.rev-committed[data-revstate="addressed"],.rev-committed[data-revstate="verified"]{box-shadow:inset 3px 0 0 var(--sage)}
-.rev-committed[data-revstate="addressed"] .rev-glyph,.rev-committed[data-revstate="verified"] .rev-glyph{color:var(--sage)}
-.rev-committed[data-revstate="open"]{box-shadow:inset 3px 0 0 var(--amber)} .rev-committed[data-revstate="open"] .rev-glyph{color:var(--amber)}
-.rev-committed[data-revstate="wontfix"] .rev-glyph{color:var(--faint)}
-.rev-pop{position:absolute;z-index:70;width:280px;background:var(--panel);border:1px solid var(--hair);border-radius:9px;padding:10px;box-shadow:var(--shadow)}
-.rev-pop .rev-row{display:flex;flex-wrap:wrap;gap:5px;margin:4px 0}
-.rev-pop .rev-s{flex:1 1 auto;background:var(--panel2);border:1px solid var(--hair2);color:var(--dim);border-radius:5px;padding:3px 6px;font-size:10.5px;cursor:pointer;font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace}
-/* control color PREDICTS the resulting mark color */
-.rev-pop .rev-s[data-s="approve"].on{background:var(--sage);border-color:var(--sage);color:#111411}
-.rev-pop .rev-s[data-s="request-change"].on{background:var(--amber);border-color:var(--amber);color:#111411}
-.rev-pop .rev-s[data-s="flag"].on{background:var(--red);border-color:var(--red);color:#fff}
-.rev-pop .rev-s[data-s="comment"].on{background:var(--gold);border-color:var(--gold);color:#111411}
-.rev-pop .rev-note{width:100%;min-height:54px;background:var(--bg);border:1px solid var(--hair2);border-radius:5px;color:var(--ink);font-family:Inter,sans-serif;font-size:12.5px;padding:6px;resize:vertical}
-.rev-pop .rev-save{flex:1;background:var(--sage);border:1px solid var(--sage);color:#111411;border-radius:5px;padding:4px;font-size:11px;cursor:pointer}
-.rev-pop .rev-del{background:var(--panel2);border:1px solid var(--hair2);color:var(--dim);border-radius:5px;padding:4px 8px;font-size:11px;cursor:pointer}
-.rev-pop .rev-cap{font-size:11.5px;color:var(--dim);margin-bottom:6px}
-.rev-pop .rev-accept{flex:1;background:var(--sage);border:1px solid var(--sage);color:#111411;border-radius:5px;padding:4px;font-size:11px;cursor:pointer}
-.rev-pop .rev-reopen{background:var(--panel2);border:1px solid var(--amber);color:var(--amber);border-radius:5px;padding:4px 8px;font-size:11px;cursor:pointer}
-/* top-level Approve (closes the loop) */
-.rev-bar .rev-approve{border-color:var(--sage);color:var(--sage)}
-.rev-bar .rev-approve:hover{background:var(--sage);color:#111411}
-/* orphaned-note banner — feedback whose anchored text changed */
-.rev-orphans{position:fixed;left:50%;top:14px;transform:translateX(-50%);z-index:65;max-width:680px;background:var(--panel);border:1px solid var(--amber);border-left:3px solid var(--amber);border-radius:9px;padding:10px 14px;box-shadow:var(--shadow);font-size:13px;color:var(--dim)}
-.rev-orphans-h{color:var(--amber);font-weight:600;margin-bottom:4px}
-.rev-orphans ul{margin:.3em 0;padding-left:1.1em}
-.rev-orphans .rev-orphans-x{margin-top:6px;background:var(--panel2);border:1px solid var(--hair2);color:var(--dim);border-radius:5px;padding:3px 9px;font-size:11px;cursor:pointer;font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace}
-/* first-visit discoverability bubble near the Review toggle */
-/* A quiet outlined chip, not a filled shout — it sits over the plan's own
-   bottom-left corner and must not win the reader's first fixation. The infinite
-   1.4s bob it used to run repeated forever without ever communicating anything
-   new; one settle on entry says "I just appeared" and then stops.
-   Keep in sync with the .rev-hint copy in chrome.css. */
-.rev-hint{position:fixed;left:96px;bottom:20px;z-index:61;background:var(--panel);border:1px solid var(--sage);color:var(--sage);border-radius:7px;padding:6px 10px;font-size:12px;font-weight:500;box-shadow:var(--shadow);animation:rev-hint-in .25s ease-out both}
-@keyframes rev-hint-in{from{opacity:0;transform:translateX(-6px)}to{opacity:1;transform:none}}
-@media (prefers-reduced-motion:reduce){.rev-hint{animation:none}}
-/* review comments rail — surfaces the note TEXT (not just a margin glyph) in the
-   right gutter; each row scroll-jumps to its anchored element. */
-.rev-rail{position:fixed;top:64px;right:18px;z-index:55;width:266px;max-height:calc(100vh - 100px);overflow-y:auto;background:var(--panel);border:1px solid var(--hair);border-radius:10px;padding:10px 12px;box-shadow:var(--shadow)}
-.rev-rail-h{font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--dim);margin-bottom:8px;display:flex;align-items:center;gap:6px}
-/* Hide shrinks the rail to the Show button (comment icon + count), as tall as
-   the theme toggle above it, so the plan under the rail can be read */
-.rev-rail-hide{margin-left:auto;background:var(--panel2);border:1px solid var(--hair2);border-radius:6px;color:var(--dim);padding:2px 8px;font:11px/1.4 "Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;text-transform:none;letter-spacing:0;cursor:pointer}
-.rev-rail-hide:hover{color:var(--ink)}
-.rev-rail.rev-rail-min{width:fit-content;padding:0;border-radius:8px}
-.rev-rail-show{display:flex;align-items:center;gap:6px;height:32px;padding:0 10px;background:none;border:0;color:var(--dim);font:12px/1 "Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;cursor:pointer}
-.rev-rail-show:hover{color:var(--ink)}
-.rev-rail-n{background:var(--panel2);border:1px solid var(--hair2);border-radius:8px;padding:0 6px;font-size:10.5px;color:var(--faint)}
-.rev-rail-empty{color:var(--faint);font-size:12px;line-height:1.5}
-.rev-rail-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
-.rev-rail-item{display:flex;gap:8px;padding:7px 8px;background:var(--bg);border:1px solid var(--hair2);border-left:3px solid var(--hair);border-radius:7px;cursor:pointer}
-.rev-rail-item:hover{border-color:var(--hair);background:var(--panel2)}
-.rev-rail-item[data-status="approve"]{border-left-color:var(--sage)} .rev-rail-item[data-status="approve"] .rev-rail-glyph{color:var(--sage)}
-.rev-rail-item[data-status="request-change"]{border-left-color:var(--amber)} .rev-rail-item[data-status="request-change"] .rev-rail-glyph{color:var(--amber)}
-.rev-rail-item[data-status="flag"]{border-left-color:var(--red)} .rev-rail-item[data-status="flag"] .rev-rail-glyph{color:var(--red)}
-.rev-rail-item[data-status="comment"]{border-left-color:var(--gold)} .rev-rail-item[data-status="comment"] .rev-rail-glyph{color:var(--gold)}
-.rev-rail-glyph{flex:none;font-size:12px;line-height:1.4;color:var(--dim)}
-.rev-rail-body{min-width:0;flex:1}
-.rev-rail-sec{display:flex;align-items:center;gap:6px;margin-bottom:3px}
-.rev-rail-sec-t{flex:1;min-width:0;font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10px;color:var(--faint);text-transform:uppercase;letter-spacing:.03em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.rev-rail-who{flex:none;font-size:9px;border-radius:6px;padding:0 5px;border:1px solid var(--hair2);color:var(--sage);text-transform:none;letter-spacing:0;max-width:90px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.rev-rail-note{font-size:12.5px;color:var(--ink);line-height:1.45;overflow-wrap:anywhere}
-.rev-rail-note.muted{color:var(--dim)}
-.rev-rail-tag{flex:none;font-size:9px;border-radius:6px;padding:0 5px;border:1px solid var(--hair2);color:var(--dim);text-transform:uppercase;letter-spacing:.02em}
-.rev-rail-tag.unsent{color:var(--gold);border-color:var(--gold)}
-.rev-rail-tag.addressed,.rev-rail-tag.verified{color:var(--sage);border-color:var(--sage)}
-.rev-rail-tag.wontfix{color:var(--faint)}
-.rev-flash{animation:rev-flash 1.2s ease-out}
-@keyframes rev-flash{0%{background:var(--amber)}100%{background:transparent}}
-/* highlights — review.js tints a reviewer's highlighted words (CSS Custom
-   Highlight API) in the element-mark colors, translucent so the words stay
-   readable; focus marks the words an open note is about. Keep in sync with
-   the copy in chrome.css. */
-::highlight(rev-q-sage){background-color:rgba(153,198,147,.28)}
-::highlight(rev-q-amber){background-color:rgba(198,162,60,.34)}
-::highlight(rev-q-red){background-color:rgba(215,126,108,.34)}
-::highlight(rev-q-gold){background-color:rgba(217,182,84,.3)}
-::highlight(rev-q-faint){background-color:rgba(140,142,126,.22)}
-::highlight(rev-q-focus){background-color:rgba(217,182,84,.55)}
-.rev-pop .rev-quote{font-size:12px;line-height:1.4;color:var(--ink);border-left:2px solid var(--gold);padding:1px 0 1px 8px;margin:0 0 6px;overflow-wrap:anywhere}
-.rev-rail-quote{font-size:12px;line-height:1.4;color:var(--dim);border-left:2px solid var(--hair2);padding-left:6px;margin:1px 0 3px;overflow-wrap:anywhere}
-/* narrow viewports: the fixed rail would cover the prose, so drop it into flow;
-   the bottom margin keeps it above the fixed review bar when scrolled to the end */
-@media(max-width:1400px){.rev-rail{position:static;width:auto;max-height:none;margin:24px 16px 72px;right:auto;top:auto}}
-@media print{.rev-bar,.toggle,.rev-orphans,.rev-hint,.rev-rail{display:none}}
+@media print{.toggle{display:none}}
 
 /* partition maps — partition-bar (proportional) + partition-map (ordered, log rail).
    Pure-CSS: staggered grow-in entrance, hover lift/brighten, and a hover tooltip
@@ -583,24 +476,6 @@ body.rev-on [data-rev],body.rev-on section[id]:hover,body.rev-on li:hover,body.r
 .chord-arc{stroke:var(--bg);stroke-width:1}
 .chord-lab{fill:var(--ink);font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:9.5px}
 @media(prefers-reduced-motion:reduce){.tmap-cell rect,.sankey-link,.chord-rib{transition:none}}
-
-/* review connection state — the page must never look live when the server is gone */
-.rev-conn{font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px}
-.rev-conn.ok{color:var(--sage)}
-.rev-conn.off{color:var(--red);animation:rev-conn-pulse 1.6s ease-in-out infinite}
-@keyframes rev-conn-pulse{50%{opacity:.45}}
-.rev-offline-bar{position:fixed;top:0;left:0;right:0;z-index:80;background:var(--panel);border-bottom:2px solid var(--red);color:var(--ink);padding:9px 14px;font-size:13px;box-shadow:var(--shadow)}
-.rev-offline-bar code{background:var(--panel2);border:1px solid var(--hair2);border-radius:5px;padding:2px 7px;font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;user-select:all}
-.rev-offline-bar .rev-offline-copy{margin-left:6px;background:var(--panel2);border:1px solid var(--hair2);color:var(--dim);border-radius:5px;padding:2px 8px;font-size:11px;cursor:pointer}
-.rev-offline-bar .rev-offline-copy:hover{color:var(--ink)}
-body.rev-offline .rev-bar .rev-submit,body.rev-offline .rev-bar .rev-approve{opacity:.45;cursor:not-allowed}
-.rev-toast{position:fixed;left:16px;bottom:64px;z-index:60;background:var(--panel);border:1px solid var(--sage);color:var(--ink);border-radius:9px;padding:8px 12px;font-size:12.5px;box-shadow:var(--shadow)}
-/* sync status: what happened to the reviewer's feedback; sits above the toast so both read */
-.rev-sync{position:fixed;left:16px;bottom:104px;z-index:61;max-width:min(560px,calc(100vw - 32px));display:flex;flex-wrap:wrap;align-items:center;gap:8px;background:var(--panel);border:1px solid var(--hair);border-left-width:3px;color:var(--ink);border-radius:9px;padding:8px 10px 8px 12px;font-size:12.5px;box-shadow:var(--shadow)}
-.rev-sync.ok{border-color:var(--sage)}.rev-sync.warn,.rev-sync.ask{border-color:var(--amber)}.rev-sync.err{border-color:var(--red)}.rev-sync.pending{border-color:var(--hair);color:var(--dim)}
-.rev-sync-msg{flex:1 1 220px}
-.rev-sync button,.rev-sync-input{background:var(--panel2);border:1px solid var(--hair);color:var(--ink);border-radius:6px;padding:3px 9px;font-size:12px;font-family:inherit}
-.rev-sync button{cursor:pointer}.rev-sync button:hover{color:var(--ink)}.rev-sync .rev-sync-x{border:0;background:none;padding:0 4px;font-size:15px;line-height:1}
 
 /* Judgment signal colors (agent-authored, cited): aligns=positive, conflicts=
    blocker, expert view=gold — same one-meaning-per-hue map as above. */
