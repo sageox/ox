@@ -18,4 +18,4 @@
 creation_rules:
   - path_regex: .*\.sops\.yaml$
     kms: arn:aws:kms:us-west-2:824122457598:key/9cba0596-0c4f-4a04-b32a-44352ca7f3ab
-    age: age1wuz203ect95vc29wrt8myk90qwljkt9vga7kg9j2tjhstmk5quzsyyrx58,age16kjzfgzf5ujandrjqfd6ngld7mjn9jyyqen4g9fx26ncj48tas9qau92pw,age178wh4th3zfavgttz84ufxx2dyqh8ttuq4umru7z9nkntzy37a5psajyeg6
+    age: age16kjzfgzf5ujandrjqfd6ngld7mjn9jyyqen4g9fx26ncj48tas9qau92pw,age178wh4th3zfavgttz84ufxx2dyqh8ttuq4umru7z9nkntzy37a5psajyeg6
