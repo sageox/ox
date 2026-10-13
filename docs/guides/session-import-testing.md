@@ -26,6 +26,32 @@ preview behavior. `--yes` continues to import the explicitly selected sessions.
 Browser review cannot be combined with `--yes` or JSON output. If terminal input
 is disabled, `--browse` falls back to a structural preview without launching.
 
+## Automated import acceptance against Tilt
+
+The monorepo's BDD scenario
+`tests/acceptance/features/context-injection/import-past-sessions.feature`
+automates repository creation, `ox init`, import preview and approval through
+`ox session import --from-test-data`, and verification of all four selected
+Claude Code and Codex sessions in the Ledger, including summaries and links.
+It uses the sanitized Math Blitz fixture in an isolated scenario VM and the
+existing BDD compiler, CLI checkpoint, and orchestrator.
+
+Run from `sageox-monorepo/tests/bdd` after the normal BDD and Tilt setup:
+
+```sh
+pnpm bdd:compiled:compile features/context-injection/import-past-sessions.feature
+pnpm bdd:compiled:exec features/context-injection/import-past-sessions.feature \
+  --base-url "$BDD_BASE_URL" --orch-url http://localhost:9090
+```
+
+`BDD_BASE_URL` must be the VM-reachable Tilt edge router. Start Tilt with
+`SAGEOX_TILT_WEB_HOST` set to that hostname so authentication and public links
+use the same origin. Start the BDD orchestrator with
+`BDD_VM_EXPOSE_HOST=8929,<public_port>` and Shuru 0.7.0; the scenario bridges
+guest loopback to the real host API and GitLab, keeping the laptop flow's
+localhost endpoint, credential key, and clone/LFS URLs.
+Keep the manual checks below for the terminal and browser selection interfaces.
+
 ## Manual testing against Tilt
 
 Use a disposable private repository in a local team. The cleaned Math Blitz
