@@ -31,6 +31,7 @@ import { localPorts } from './ports.js';
     endpoint: body.getAttribute('data-review-endpoint') || '',
     token: body.getAttribute('data-review-token') || '',
     committed,
+    problems: Number(body.getAttribute('data-review-problems')) || 0,
   });
   startDocumentTools(ports.document);
 })();

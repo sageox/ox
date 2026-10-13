@@ -472,6 +472,7 @@
     const slug = opts.slug;
     const base = opts.endpoint;
     const token = opts.token;
+    const problems = opts.problems || 0;
     const live = base !== "";
     const KEY = "ox-plan-fb:" + slug;
     const ON_KEY = "ox-plan-rev-on:" + slug;
@@ -635,11 +636,15 @@
         orphanBar = null;
       }
       const open = orphans.filter((o) => o.state === "open");
-      if (!open.length) return;
+      if (!open.length && !problems) return;
       const bar2 = orphanBar = document.createElement("div");
       bar2.className = "rev-orphans";
-      const items = open.map((o) => "<li><strong>" + esc(o.status) + "</strong> " + esc(o.label || o.anchor) + (o.note ? " — " + esc(o.note) : "") + "</li>").join("");
-      bar2.innerHTML = '<div class="rev-orphans-h">⚠ ' + open.length + " review note(s) no longer anchored (the text changed) — still open:</div><ul>" + items + '</ul><button class="rev-orphans-x">dismiss</button>';
+      let html = problems ? '<div class="rev-orphans-h">⚠ This review could not be fully read or holds conflicting copies (' + problems + " problem(s)): notes may be missing or shown resolved. <code>ox plan feedback show " + esc(slug) + "</code> lists them.</div>" : "";
+      if (open.length) {
+        const items = open.map((o) => "<li><strong>" + esc(o.status) + "</strong> " + esc(o.label || o.anchor) + (o.note ? " — " + esc(o.note) : "") + "</li>").join("");
+        html += '<div class="rev-orphans-h">⚠ ' + open.length + " review note(s) no longer anchored (the text changed) — still open:</div><ul>" + items + "</ul>";
+      }
+      bar2.innerHTML = html + '<button class="rev-orphans-x">dismiss</button>';
       document.body.appendChild(bar2);
       bar2.querySelector(".rev-orphans-x").onclick = () => {
         bar2.remove();
@@ -1301,7 +1306,8 @@
       slug: (body.getAttribute("data-slug") || document.title || "plan").trim(),
       endpoint: body.getAttribute("data-review-endpoint") || "",
       token: body.getAttribute("data-review-token") || "",
-      committed
+      committed,
+      problems: Number(body.getAttribute("data-review-problems")) || 0
     });
     startDocumentTools(ports.document);
   })();

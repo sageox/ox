@@ -33,6 +33,8 @@ export interface HostControlsOptions {
   endpoint: string;
   token: string;
   committed: CommittedItem[];
+  /** Problems the server had reading this review: each record or read it could not complete, and each operation stored with differing content. Non-zero means `committed` may be partial or show one copy. */
+  problems?: number;
 }
 
 /** What a note is about, and where its composer opens. */
@@ -96,6 +98,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): vo
   const slug = opts.slug;
   const base = opts.endpoint; // live server base, else ""
   const token = opts.token;
+  const problems = opts.problems || 0;
   const live = base !== '';
   const KEY = 'ox-plan-fb:' + slug;
   const ON_KEY = 'ox-plan-rev-on:' + slug; // sessionStorage: survives a reload, not a new tab
@@ -235,11 +238,15 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): vo
   function renderOrphans(orphans: CommittedItem[]) {
     if (orphanBar) { orphanBar.remove(); orphanBar = null; }
     const open = orphans.filter((o) => o.state === 'open');
-    if (!open.length) return;
+    if (!open.length && !problems) return;
     const bar = orphanBar = document.createElement('div');
     bar.className = 'rev-orphans';
-    const items = open.map((o) => '<li><strong>' + esc(o.status) + '</strong> ' + esc(o.label || o.anchor) + (o.note ? ' — ' + esc(o.note) : '') + '</li>').join('');
-    bar.innerHTML = '<div class="rev-orphans-h">⚠ ' + open.length + ' review note(s) no longer anchored (the text changed) — still open:</div><ul>' + items + '</ul><button class="rev-orphans-x">dismiss</button>';
+    let html = problems ? '<div class="rev-orphans-h">⚠ This review could not be fully read or holds conflicting copies (' + problems + ' problem(s)): notes may be missing or shown resolved. <code>ox plan feedback show ' + esc(slug) + '</code> lists them.</div>' : '';
+    if (open.length) {
+      const items = open.map((o) => '<li><strong>' + esc(o.status) + '</strong> ' + esc(o.label || o.anchor) + (o.note ? ' — ' + esc(o.note) : '') + '</li>').join('');
+      html += '<div class="rev-orphans-h">⚠ ' + open.length + ' review note(s) no longer anchored (the text changed) — still open:</div><ul>' + items + '</ul>';
+    }
+    bar.innerHTML = html + '<button class="rev-orphans-x">dismiss</button>';
     document.body.appendChild(bar);
     (bar.querySelector('.rev-orphans-x') as HTMLElement).onclick = () => { bar.remove(); if (orphanBar === bar) orphanBar = null; };
   }
