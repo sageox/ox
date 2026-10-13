@@ -102,7 +102,7 @@ class EnvelopeTest(unittest.TestCase):
             {"type": "result", "subtype": "success", "is_error": False, "total_cost_usd": 0.132036,
              "usage": {"input_tokens": 18}, "structured_output": {"findings": []}}
         )
-        self.assertEqual(fields, ["0.132036", "success", "false", "0"])
+        self.assertEqual(fields, ["0.132036", "success", "false", "0", "false"])
         self.assertEqual(json.loads(payload), {"findings": []})
 
     def test_budget_stop_reports_what_it_spent_and_writes_an_error_stub(self):
@@ -110,13 +110,67 @@ class EnvelopeTest(unittest.TestCase):
             {"type": "result", "subtype": "error_max_budget_usd", "is_error": True, "result": None,
              "total_cost_usd": 0.0191667}
         )
-        self.assertEqual(fields, ["0.019167", "error_max_budget_usd", "true", "0"])
+        self.assertEqual(fields, ["0.019167", "error_max_budget_usd", "true", "0", "false"])
         self.assertEqual(json.loads(payload)["verdict"], "error")
 
     def test_no_envelope_is_an_error_with_no_spend(self):
         fields, payload = self.run_envelope("claude: command crashed\n")
-        self.assertEqual(fields, ["0.000000", "no-envelope", "true", "0"])
+        self.assertEqual(fields, ["0.000000", "no-envelope", "true", "0", "false"])
         self.assertEqual(json.loads(payload)["verdict"], "error")
+
+    def test_rate_or_usage_limit_is_reported_apart_from_other_errors(self):
+        """The CLI has already retried a limited call; the orchestrator must see it as a limit."""
+        cases = [
+            ("subtype", {"type": "result", "subtype": "usage_limit", "is_error": True,
+                         "result": "You've hit your session limit", "total_cost_usd": 0}),
+            ("result text", {"type": "result", "subtype": "error_during_execution", "is_error": True,
+                             "result": "API Error: Request rejected (429) · rate limit exceeded", "total_cost_usd": 0}),
+            ("no subtype", {"type": "result", "is_error": True,
+                            "result": "API Error: Request rejected (429)", "total_cost_usd": 0}),
+            ("overloaded", {"type": "result", "subtype": "error_during_execution", "is_error": True,
+                            "result": "API Error: 529 Overloaded", "total_cost_usd": 0}),
+            ("no envelope", "Claude AI usage limit reached|1760000000\n"),
+        ]
+        for name, envelope in cases:
+            with self.subTest(name):
+                fields, payload = self.run_envelope(envelope)
+                self.assertEqual((fields[2], fields[4]), ("true", "true"))
+                self.assertEqual(json.loads(payload)["verdict"], "rate-limited")
+
+    def test_a_missing_subtype_prints_a_placeholder_so_no_field_is_empty(self):
+        """bash's read with IFS=tab merges adjacent tabs: an empty field would shift the rest."""
+        fields, _ = self.run_envelope(
+            {"type": "result", "is_error": True, "result": "API Error: Request rejected (429)", "total_cost_usd": 0}
+        )
+        self.assertEqual(fields, ["0.000000", "-", "true", "0", "true"])
+
+    def test_text_that_only_resembles_a_limit_is_not_one(self):
+        cases = [
+            ("bare 429", "panic: index 429 out of range\n"),
+            ("overloaded outside an envelope", "warning: server overloaded, see log\n"),
+            ("cut-off envelope quoting a finding",
+             '{"type": "result", "subtype": "success", "structured_output": {"findings": [{"title": "no rate limit on'),
+        ]
+        for name, raw in cases:
+            with self.subTest(name):
+                fields, payload = self.run_envelope(raw)
+                self.assertEqual(fields[4], "false")
+                self.assertEqual(json.loads(payload)["verdict"], "error")
+
+    def test_an_error_that_is_not_a_limit_stays_an_error(self):
+        fields, payload = self.run_envelope(
+            {"type": "result", "subtype": "error_during_execution", "is_error": True,
+             "result": "tool failed", "total_cost_usd": 0.01}
+        )
+        self.assertEqual(fields[4], "false")
+        self.assertEqual(json.loads(payload)["verdict"], "error")
+
+    def test_a_successful_result_mentioning_a_rate_limit_is_not_a_limit(self):
+        fields, _ = self.run_envelope(
+            {"type": "result", "subtype": "success", "is_error": False, "total_cost_usd": 0.01,
+             "structured_output": {"findings": [{"title": "no rate limit on the upload endpoint"}]}}
+        )
+        self.assertEqual(fields[4], "false")
 
     def test_result_text_is_used_without_a_schema(self):
         fields, payload = self.run_envelope(
@@ -275,6 +329,7 @@ def full_state() -> dict:
         "dedup": "skipped-empty",
         "findings": [],
         "cap_hit": "",
+        "rate_limited": "",
         "cap": 2.0,
     }
 
@@ -373,6 +428,13 @@ class CoverageTest(unittest.TestCase):
             s["cap_hit"] = "hunt:c01"
             s["hunter_rows"] = [("cli-input", 1, "cap", 0), ("daemon-ipc", 1, "cap", 0)]
         self.check(mutate, "none", 3, "no hunter run completed (2× cap)", "reached during the hunt phase")
+
+    def test_rate_limit_is_partial_exit_1_and_names_the_phase(self):
+        def mutate(s):
+            s["rate_limited"] = "validate:2"
+            s["findings"] = [{"title": "t", "verdict": "unvalidated"}]
+        self.check(mutate, "partial", 1, "rate or usage limit hit during the validation phase",
+                   "re-run once the limit resets", "1 finding(s) could not be validated")
 
     def test_truncated_review_input_is_partial(self):
         def mutate(s):
@@ -685,6 +747,7 @@ class ValidatorResultTest(unittest.TestCase):
     def test_failed_validation_keeps_the_finding_unvalidated(self):
         for output, reason in [('{"verdict": "error", "reason": "x"}', "did not complete (cli-error)"),
                                ('{"verdict": "cap", "reason": "x"}', "cost cap reached"),
+                               ('{"verdict": "rate-limited", "reason": "x"}', "rate or usage limit reached"),
                                (None, "did not complete (io-error)")]:
             with self.subTest(output=output):
                 got = self.merge({"title": "t"}, output)

@@ -290,11 +290,15 @@ style was needed.
 - The document accepts messages only from its parent.
 - A forged capture posted from another window was ignored.
 
-**The shipped review layer cannot run here.** `review.js` reads `localStorage`
-at load outside a `try` (`internal/plan/assets/review.js:51`). Framed with
-`sandbox="allow-scripts"`, it throws `SecurityError` and never draws its
-toolbar; with `allow-same-origin` added, it starts. Drafts and the outbox for
-hosted review therefore have to live in the host (#1291).
+**The CLI's review layer does not run here; the document tools do.** Before
+#1290, `review.js` read `localStorage` at load outside a `try`, so framed with
+`sandbox="allow-scripts"` it threw `SecurityError` and never drew its toolbar
+(with `allow-same-origin` added, it started). It is now built from
+`packages/plan-review` and returns before drawing anything when storage is
+denied. A host instead injects the package's document tools, which need no
+storage and talk to the host by `postMessage`
+(`TestBrowser_DocumentToolsInOpaqueFrame` in `cmd/ox`). Drafts and the outbox
+for hosted review live in the host (#1291).
 
 ## 7. Released readers and writers
 

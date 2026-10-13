@@ -1,0 +1,31 @@
+/* @sageox/plan-review document tools: the marks painted into a plan and the
+   look of review mode inside it. Colors use the plan's own tokens (--sage,
+   --amber, …) when it defines them, else the SageOx palette. */
+
+/* the mode is visible without a hover: crosshair page-wide, and the element
+   under the pointer outlined */
+body.rev-on{cursor:crosshair}
+body.rev-on [data-rev],body.rev-on section[id]:hover,body.rev-on li:hover,body.rev-on tr:hover,body.rev-on .ox-chip:hover,body.rev-on .stat:hover,body.rev-on .bar-row:hover,body.rev-on [data-ox-section]:hover{outline:1px dashed var(--sage, #99c693);outline-offset:2px;cursor:crosshair}
+/* inline mark glyph — redundant encoding: distinct GLYPH per status, color reinforces (never color alone) */
+.rev-marked,.rev-committed{position:relative;box-shadow:inset 3px 0 0 var(--hair, #212620)}
+.rev-glyph{position:absolute;left:-1.25em;top:0;font-size:12px;line-height:1.5;color:var(--dim, #b7b6a3)}
+.rev-marked[data-rev="approve"]{box-shadow:inset 3px 0 0 var(--sage, #99c693)} .rev-marked[data-rev="approve"] .rev-glyph{color:var(--sage, #99c693)}
+.rev-marked[data-rev="request-change"]{box-shadow:inset 3px 0 0 var(--amber, #c6a23c)} .rev-marked[data-rev="request-change"] .rev-glyph{color:var(--amber, #c6a23c)}
+.rev-marked[data-rev="flag"]{box-shadow:inset 3px 0 0 var(--red, #d77e6c)} .rev-marked[data-rev="flag"] .rev-glyph{color:var(--red, #d77e6c)}
+.rev-marked[data-rev="comment"]{box-shadow:inset 3px 0 0 var(--gold, #d9b654)} .rev-marked[data-rev="comment"] .rev-glyph{color:var(--gold, #d9b654)}
+/* committed states: addressed/verified struck + green-check; open keeps status; wontfix muted */
+.rev-committed[data-revstate="addressed"],.rev-committed[data-revstate="verified"]{box-shadow:inset 3px 0 0 var(--sage, #99c693)}
+.rev-committed[data-revstate="addressed"] .rev-glyph,.rev-committed[data-revstate="verified"] .rev-glyph{color:var(--sage, #99c693)}
+.rev-committed[data-revstate="open"]{box-shadow:inset 3px 0 0 var(--amber, #c6a23c)} .rev-committed[data-revstate="open"] .rev-glyph{color:var(--amber, #c6a23c)}
+.rev-committed[data-revstate="wontfix"] .rev-glyph{color:var(--faint, #8c8e7e)}
+.rev-flash{animation:rev-flash 1.2s ease-out}
+@keyframes rev-flash{0%{background:var(--amber, #c6a23c)}100%{background:transparent}}
+/* highlights — a reviewer's highlighted words, tinted (CSS Custom Highlight
+   API) in the element-mark colors, translucent so the words stay readable;
+   focus marks the words an open note is about. */
+::highlight(rev-q-sage){background-color:rgba(153,198,147,.28)}
+::highlight(rev-q-amber){background-color:rgba(198,162,60,.34)}
+::highlight(rev-q-red){background-color:rgba(215,126,108,.34)}
+::highlight(rev-q-gold){background-color:rgba(217,182,84,.3)}
+::highlight(rev-q-faint){background-color:rgba(140,142,126,.22)}
+::highlight(rev-q-focus){background-color:rgba(217,182,84,.55)}

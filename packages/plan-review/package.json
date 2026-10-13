@@ -1,0 +1,44 @@
+{
+  "name": "@sageox/plan-review",
+  "version": "0.1.0",
+  "description": "Plan review in the browser: document tools that run inside a SageOx plan, and the message protocol a trusted host drives them with.",
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sageox/ox.git",
+    "directory": "packages/plan-review"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./document-tools": {
+      "types": "./dist/document-tools.d.ts",
+      "default": "./dist/document-tools.js"
+    },
+    "./document-tools-script": {
+      "types": "./dist/document-tools-script.d.ts",
+      "default": "./dist/document-tools-script.js"
+    },
+    "./document-tools.iife.js": "./dist/document-tools.iife.js",
+    "./document-tools.css": "./dist/document-tools.css",
+    "./manifest.json": "./dist/manifest.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "node build.mjs",
+    "check": "node build.mjs --check",
+    "test": "node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "typescript": "7.0.2"
+  }
+}

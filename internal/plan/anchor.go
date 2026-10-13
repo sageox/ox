@@ -1,8 +1,9 @@
 package plan
 
 // anchor.go — Go-side parity with the review layer's content anchors
-// (assets/review.js). A review mark's anchor is a content hash of
-// (section heading + element text), computed IN THE BROWSER as:
+// (packages/plan-review/src/anchor.ts, built into assets/review.js). A review
+// mark's anchor is a content hash of (section heading + element text),
+// computed IN THE BROWSER as:
 //
 //	anchor = 'h' + fnv1a(norm(heading) + '\\u0000' + norm(text))
 //
