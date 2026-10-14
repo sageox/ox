@@ -120,7 +120,8 @@ func maybePublishSessionDraft(ctx *HookContext) {
 //
 // Attribution off is the same gate as notifySessionStartedAsync: there is no
 // /c/ page to make resolvable, so a draft would be pure ledger noise. Every
-// session-link surface stays on one switch.
+// session-link surface stays on one switch. It is read for projectRoot, not the
+// working directory, which is another repo when OX_PROJECT_ROOT selects one.
 //
 // session_publishing: manual means nothing about a session leaves the machine
 // until the user explicitly uploads it. A draft is a real ledger commit
@@ -128,7 +129,7 @@ func maybePublishSessionDraft(ctx *HookContext) {
 // daemon's sync cycle pushes to the remote ~60s later — exactly the implicit
 // publish manual mode promises will not happen.
 func repoDraftPolicy(projectRoot string) *config.ResolvedSessionDraft {
-	if loadResolvedAttribution().Session == "" ||
+	if loadResolvedAttributionFor(projectRoot).Session == "" ||
 		config.GetSessionPublishing(projectRoot) == config.SessionPublishingManual {
 		return &config.ResolvedSessionDraft{Enabled: false}
 	}

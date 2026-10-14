@@ -1208,6 +1208,23 @@ func hasAliveRecordingForID(states []*session.RecordingState, agentID string) bo
 // loadResolvedAttribution loads and merges attribution from user and project configs.
 // Project config takes precedence over user config, which takes precedence over defaults.
 func loadResolvedAttribution() config.ResolvedAttribution {
+	// load project config (ignore errors, use defaults)
+	projectCfg, _, _ := config.GetProjectContext()
+	return mergeResolvedAttribution(projectCfg)
+}
+
+// loadResolvedAttributionFor is loadResolvedAttribution for a project the
+// caller already resolved. loadResolvedAttribution finds the project from the
+// working directory, which is another repo when OX_PROJECT_ROOT selects one, so
+// a gate decided for projectRoot must read projectRoot's setting.
+func loadResolvedAttributionFor(projectRoot string) config.ResolvedAttribution {
+	// ignore errors, use defaults
+	projectCfg, _ := config.LoadProjectConfig(projectRoot)
+	return mergeResolvedAttribution(projectCfg)
+}
+
+// mergeResolvedAttribution merges projectCfg's attribution over the user's.
+func mergeResolvedAttribution(projectCfg *config.ProjectConfig) config.ResolvedAttribution {
 	// load user config (ignore errors, use defaults)
 	userCfg, _ := config.LoadUserConfig()
 	var userAttr *config.Attribution
@@ -1215,8 +1232,6 @@ func loadResolvedAttribution() config.ResolvedAttribution {
 		userAttr = userCfg.Attribution
 	}
 
-	// load project config (ignore errors, use defaults)
-	projectCfg, _, _ := config.GetProjectContext()
 	var projectAttr *config.Attribution
 	if projectCfg != nil {
 		projectAttr = projectCfg.Attribution

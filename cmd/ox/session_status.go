@@ -298,7 +298,7 @@ func newDraftStatusContext(projectRoot string) draftStatusContext {
 	return draftStatusContext{
 		resolved:      repoDraftPolicy(projectRoot),
 		projectCfg:    projectCfg,
-		attributionOn: loadResolvedAttribution().Session != "",
+		attributionOn: loadResolvedAttributionFor(projectRoot).Session != "",
 	}
 }
 
