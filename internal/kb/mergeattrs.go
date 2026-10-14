@@ -37,9 +37,10 @@ import (
 //     automatically.
 const mergeAttributesRelPath = ".git/info/attributes"
 
-// MergeUnionPaths lists the root metadata files where multiple writers
+// MergeUnionPaths lists the metadata files where multiple writers
 // (server-side seed, CLI seed, coworker edits, doctor) routinely touch
-// the same file concurrently in BOTH ledger and team-context repos.
+// the same file concurrently. The same block is written to ledger and
+// team-context clones; a path one repo type lacks matches nothing there.
 // Declaring merge=union for these tells git to concatenate both sides
 // on conflict instead of halting the rebase, which turns "wedged repo
 // after first push" into "repo keeps moving; duplicate lines can be
@@ -60,6 +61,12 @@ const mergeAttributesRelPath = ".git/info/attributes"
 //     point of the file.
 //   - .gitignore — both repo types may have ignore patterns added by
 //     either side.
+//   - data/plans/*/events.jsonl — a Ledger plan's append-only lifecycle
+//     log, appended on any clone by the author's saves, reviewers'
+//     approvals, and session processing. Without union, two clones'
+//     appends always conflict, and the Ledger's data/ auto-resolve then
+//     keeps the rebasing clone's whole file, silently dropping the other's
+//     events (an approval among them).
 //
 // Exported so external tooling and tests can introspect the canonical
 // list without re-deriving it.
@@ -70,6 +77,7 @@ var MergeUnionPaths = []string{
 	"CONVENTIONS.md",
 	"SOUL.md",
 	".gitignore",
+	"data/plans/*/events.jsonl",
 }
 
 // managed-block markers. Anything between the header and footer is

@@ -151,7 +151,7 @@ func runPlanReviewAwait(cmd *cobra.Command, slug string, timeout time.Duration) 
 func awaitSnapshot(planDir string) (awaitResult, bool) {
 	rev := plan.ReadReview(planDir)
 	res := awaitResult{Complete: rev.Complete(), Failures: rev.Failures, Conflicts: rev.Conflicts}
-	if meta, err := plan.LoadMeta(planDir); err == nil && meta.Status == plan.PlanStatusApproved {
+	if plan.CurrentStatus(planDir) == plan.PlanStatusApproved {
 		res.Status = "approved"
 		return res, true
 	}

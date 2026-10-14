@@ -93,19 +93,8 @@ func commitPlanToLedger(gitRoot, planDir string) error {
 	return err
 }
 
-// commitPlanToLedgerStatus is commitPlanToLedger for callers that must report
-// the outcome rather than just log it (the live review server's responses).
-func commitPlanToLedgerStatus(ctx context.Context, gitRoot, planDir string) planCommitStatus {
-	ledgerPath, err := planLedgerPathFor(gitRoot)
-	if err != nil {
-		return planCommitStatus{Err: err.Error()}
-	}
-	st, err := commitAndPushPlanDir(ctx, ledgerPath, planDir)
-	recordPlanPushOutcome(ctx, ledgerPath, planDir, err)
-	return st
-}
-
 // commitAndPushPlanDir stages planDir, commits ONLY that path, and pushes.
+// Given files (names in planDir), it stages and commits only those.
 //
 // Path-scoped on purpose: a bare `git commit` takes the whole index, so any
 // unrelated change someone else staged in the Ledger (a half-finished session
@@ -119,7 +108,7 @@ func commitPlanToLedgerStatus(ctx context.Context, gitRoot, planDir string) plan
 // Add+commit run under gitutil.WithRepoLock (cross-process) and planCommitMu
 // (in-process, held through the push as well). The push runs outside the repo
 // lock because PushWithRetry takes it itself when it must pull.
-func commitAndPushPlanDir(ctx context.Context, ledgerPath, planDir string) (planCommitStatus, error) {
+func commitAndPushPlanDir(ctx context.Context, ledgerPath, planDir string, files ...string) (planCommitStatus, error) {
 	planCommitMu.Lock()
 	defer planCommitMu.Unlock()
 
@@ -128,7 +117,17 @@ func commitAndPushPlanDir(ctx context.Context, ledgerPath, planDir string) (plan
 		return planCommitStatus{Err: err.Error()}, err
 	}
 
-	if err := commitPlanLocalCtx(ctx, ledgerPath, planDir, ""); err != nil {
+	if len(files) == 0 {
+		err = commitPlanLocalCtx(ctx, ledgerPath, planDir, "")
+	} else {
+		err = gitutil.WithRepoLock(ctx, ledgerPath, func() error {
+			if err := gitutil.IsSafeForGitOps(ledgerPath); err != nil {
+				return fmt.Errorf("ledger not safe for plan commit (%s): %w", ledgerPath, err)
+			}
+			return commitPlanPathsLocked(ctx, ledgerPath, "plan: "+filepath.Base(planDir), rel, files)
+		})
+	}
+	if err != nil {
 		return planCommitStatus{Err: gitutil.SanitizeOutput(err.Error())}, err
 	}
 
@@ -141,6 +140,77 @@ func commitAndPushPlanDir(ctx context.Context, ledgerPath, planDir string) (plan
 	}
 	st.Pushed = true
 	return st, nil
+}
+
+// errLedgerNotSafe: the Ledger is mid-rebase, locked, or holds unresolved
+// conflicts, so a plan event was not recorded at all.
+var errLedgerNotSafe = errors.New("ledger needs repair before a plan event can be recorded")
+
+// planEventFiles are the files plan.AppendPlanEvent writes in a plan dir.
+var planEventFiles = []string{"events.jsonl", "meta.json"}
+
+// commitPlanEvent records a lifecycle event (approve, realize, abandon,
+// supersede) and commits exactly the files that writes, in one hold of the
+// repo lock: a pull never finds them half written, and nothing else in the
+// plan dir (an author's unsaved plan.md) rides along. While the Ledger is
+// mid-rebase, locked, or conflicted it records nothing (errLedgerNotSafe):
+// the files would stay uncommitted where the daemon's next autostash pull can
+// conflict on them. A commit that fails after the write returns changed with
+// the error, the event recorded and its files unstaged.
+func commitPlanEvent(ctx context.Context, ledgerPath, planDir string, kind plan.EventKind, fields plan.PlanEventFields) (changed bool, err error) {
+	rel, err := ledgerRelPath(ledgerPath, planDir)
+	if err != nil {
+		return false, err
+	}
+	// git run in a directory that is not a checkout finds any enclosing
+	// repository and would commit the event there
+	if !gitutil.IsGitRepo(ledgerPath) {
+		return false, fmt.Errorf("ledger %s is not a git checkout", ledgerPath)
+	}
+	planCommitMu.Lock()
+	defer planCommitMu.Unlock()
+	err = gitutil.WithRepoLock(ctx, ledgerPath, func() error {
+		if err := gitutil.IsSafeForGitOps(ledgerPath); err != nil {
+			return fmt.Errorf("%w: %w", errLedgerNotSafe, err)
+		}
+		if unmerged, err := gitutil.HasUnmergedEntries(ctx, ledgerPath); err != nil || unmerged {
+			if err == nil {
+				err = errors.New("the index holds unresolved conflicts")
+			}
+			return fmt.Errorf("%w: %w", errLedgerNotSafe, err)
+		}
+		var err error
+		if changed, err = plan.AppendPlanEvent(ctx, planDir, kind, fields); err != nil || !changed {
+			return err
+		}
+		return commitPlanPathsLocked(ctx, ledgerPath, "plan: "+string(kind)+" "+filepath.Base(planDir), rel, planEventFiles)
+	})
+	return changed, err
+}
+
+// commitPlanPathsLocked stages the named files of the plan dir at rel (those
+// that exist) and commits only them. On failure it unstages them, so no later
+// commit carries what this one refused. The caller holds the repo lock.
+func commitPlanPathsLocked(ctx context.Context, ledgerPath, msg, rel string, files []string) error {
+	var paths []string
+	for _, f := range files {
+		if _, err := os.Lstat(filepath.Join(ledgerPath, filepath.FromSlash(rel), f)); err == nil {
+			paths = append(paths, rel+"/"+f)
+		}
+	}
+	if len(paths) == 0 {
+		return nil
+	}
+	unstage := func() { _, _ = gitutil.RunGit(ctx, ledgerPath, append([]string{"reset", "-q", "--"}, paths...)...) }
+	if out, err := gitutil.RunGit(ctx, ledgerPath, append([]string{"add", "--sparse", "--"}, paths...)...); err != nil {
+		unstage()
+		return fmt.Errorf("git add %s failed: %s: %w", strings.Join(paths, " "), gitutil.SanitizeOutput(out), err)
+	}
+	if _, err := gitutil.CommitLedgerSnapshot(ctx, ledgerPath, msg, paths...); err != nil {
+		unstage()
+		return fmt.Errorf("commit %s: %w", strings.Join(paths, " "), err)
+	}
+	return nil
 }
 
 // errReviewConflict: the operation is already stored with other content or

@@ -166,19 +166,18 @@ func runPlanLifecycleVerbOnDir(cmd *cobra.Command, gitRoot, planDir, slug string
 	fields.Reason = flags.Reason
 	fields.SupersededBy = flags.SupersededBy
 
-	changed, err := plan.AppendPlanEvent(cmd.Context(), planDir, kind, fields)
+	// Recorded, committed and pushed exactly like the browser /approve path
+	// (commitPlanEvent). Without the commit, `ox plan approve` wrote
+	// events.jsonl into the working tree and nothing else: the approval existed
+	// on one laptop until some unrelated later commit swept it up. Observed
+	// rather than best-effort-logged so the verb can say when the approval did
+	// not reach teammates.
+	changed, st, err := sharePlanEvent(cmd.Context(), gitRoot, planDir, kind, fields)
 	if err != nil {
 		return fmt.Errorf("record %s event for plan %q: %w", kind, slug, err)
 	}
 	var share *planShareStatus
 	if changed {
-		// Commit + push the event exactly like the browser /approve path
-		// (commitPlanBestEffort) does. Without this, `ox plan approve` wrote
-		// events.jsonl into the working tree and nothing else: the approval
-		// existed on one laptop until some unrelated later commit swept it up.
-		// Observed rather than best-effort-logged so the verb can say when the
-		// approval did not reach teammates.
-		st := sharePlanDir(gitRoot, planDir)
 		share = &st
 		if !st.Shared {
 			cli.PrintWarningTo(cmd.ErrOrStderr(), fmt.Sprintf("NOT SHARED — %s recorded locally only: %s. Fix: `%s`", kind, st.Reason, st.Fix))

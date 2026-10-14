@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -21,6 +22,37 @@ func writePlanPushMarkerFile(t *testing.T, ledger, name, body string) {
 	}
 	if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A marker owes the union of what its failed attempts tried to commit, and
+// the whole dir absorbs any files. Failure prevented: a later lifecycle
+// failure narrows a marker an author's save left owing the whole dir, or one
+// file set's retry drops another's.
+func TestRecordPlanPushOutcome_MergesWhatEachAttemptOwes(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name          string
+		first, second []string
+		want          []string
+	}{
+		{"whole dir, then files", nil, []string{"events.jsonl"}, nil},
+		{"files, then whole dir", []string{"events.jsonl"}, nil, nil},
+		{"two file sets", []string{"events.jsonl"}, []string{"meta.json"}, []string{"meta.json", "events.jsonl"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ledger := t.TempDir()
+			planDir := filepath.Join(ledger, "data", "plans", "p")
+			if err := os.MkdirAll(planDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			recordPlanPushOutcome(ctx, ledger, planDir, errors.New("offline"), tc.first...)
+			recordPlanPushOutcome(ctx, ledger, planDir, errors.New("offline"), tc.second...)
+			markers, err := listPlanPushPending(ledger)
+			if err != nil || len(markers) != 1 || !slices.Equal(markers[0].Files, tc.want) {
+				t.Fatalf("want one marker owing %v, got %+v (err %v)", tc.want, markers, err)
+			}
+		})
 	}
 }
 

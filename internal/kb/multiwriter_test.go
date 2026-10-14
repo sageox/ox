@@ -1,6 +1,7 @@
 package kb
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -49,6 +50,11 @@ func TestMultiWriter(t *testing.T) {
 	t.Run("contentContent_SOUL_md_UnionMerges_TeamContext", testContentContentSOULUnionMerges)
 	t.Run("contentContent_gitignore_UnionMerges", testContentContentGitignoreUnionMerges)
 	t.Run("everyUnionPath_HasMergeRule", testEveryUnionPathHasMergeRule)
+
+	// A plan's event log is appended on every clone: author saves,
+	// reviewers' approvals, session processing.
+	t.Run("appendAppend_PlanEvents_UnionMerges", testAppendAppendPlanEventsUnionMerges)
+	t.Run("autostash_PlanEvents_UnionMerges", testAutostashPlanEventsUnionMerges)
 }
 
 // mwGit runs a git command in dir with isolated config and a deterministic
@@ -461,6 +467,86 @@ func testContentContentGitignoreUnionMerges(t *testing.T) {
 //
 // Failure prevented: silent drift between MergeUnionPaths (the public
 // contract) and the actual attribute file written to .git/info/attributes.
+// --- Plan event logs ---
+//
+// Failure prevented: two clones append to one plan's events.jsonl (a
+// reviewer approves while the author revises). Without union the rebase
+// conflicts, and the Ledger's data/ auto-resolve keeps the rebasing
+// clone's whole file, so the other clone's event (the approval) is gone.
+
+const planEvents = "data/plans/2026-10-01-p/events.jsonl"
+
+// seedPlanEvents pushes a one-event log and returns the seed commit.
+func seedPlanEvents(t *testing.T, bare string) string {
+	t.Helper()
+	seeder := cloneFresh(t, bare)
+	require.NoError(t, os.MkdirAll(filepath.Join(seeder, filepath.Dir(planEvents)), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(seeder, planEvents), []byte(`{"kind":"created"}`+"\n"), 0o644))
+	mwGit(t, seeder, "add", planEvents)
+	mwGit(t, seeder, "commit", "-m", "plan: created")
+	mwGit(t, seeder, "push", "origin", "main")
+	return mwGit(t, seeder, "rev-parse", "HEAD")
+}
+
+// appendLine appends line to the plan's event log in clone.
+func appendLine(t *testing.T, clone, line string) {
+	t.Helper()
+	f, err := os.OpenFile(filepath.Join(clone, planEvents), os.O_APPEND|os.O_WRONLY, 0)
+	require.NoError(t, err)
+	_, err = f.WriteString(line + "\n")
+	require.NoError(t, errors.Join(err, f.Close()))
+}
+
+func testAppendAppendPlanEventsUnionMerges(t *testing.T) {
+	bare := setupBareRemoteWithSeed(t)
+	base := seedPlanEvents(t, bare)
+
+	reviewer := cloneFresh(t, bare)
+	appendLine(t, reviewer, `{"kind":"approved"}`)
+	mwGit(t, reviewer, "commit", "-am", "plan: approved")
+	mwGit(t, reviewer, "push", "origin", "main")
+
+	author := cloneFresh(t, bare)
+	mwGit(t, author, "reset", "--hard", base)
+	_, err := EnsureMergeAttributes(author)
+	require.NoError(t, err)
+	appendLine(t, author, `{"kind":"revised"}`)
+	mwGit(t, author, "commit", "-am", "plan: revised")
+
+	out, err := mwGitTry(t, author, "pull", "--rebase", "--autostash", "origin", "main")
+	require.NoErrorf(t, err, "rebase should succeed under merge=union; output:\n%s", out)
+	data, err := os.ReadFile(filepath.Join(author, planEvents))
+	require.NoError(t, err)
+	assert.Equal(t, `{"kind":"created"}`+"\n"+`{"kind":"approved"}`+"\n"+`{"kind":"revised"}`+"\n", string(data),
+		"both clones' events, upstream's first")
+}
+
+// The daemon's pull finds the author's append still uncommitted: the
+// autostash re-apply must merge it, not leave an unmerged index that stops
+// every later sync.
+func testAutostashPlanEventsUnionMerges(t *testing.T) {
+	bare := setupBareRemoteWithSeed(t)
+	base := seedPlanEvents(t, bare)
+
+	reviewer := cloneFresh(t, bare)
+	appendLine(t, reviewer, `{"kind":"approved"}`)
+	mwGit(t, reviewer, "commit", "-am", "plan: approved")
+	mwGit(t, reviewer, "push", "origin", "main")
+
+	author := cloneFresh(t, bare)
+	mwGit(t, author, "reset", "--hard", base)
+	_, err := EnsureMergeAttributes(author)
+	require.NoError(t, err)
+	appendLine(t, author, `{"kind":"worked"}`)
+
+	out, err := mwGitTry(t, author, "pull", "--rebase", "--autostash", "origin", "main")
+	require.NoErrorf(t, err, "pull should succeed; output:\n%s", out)
+	assert.Empty(t, mwGit(t, author, "ls-files", "-u"), "the autostash re-apply must leave no unmerged entries")
+	data, err := os.ReadFile(filepath.Join(author, planEvents))
+	require.NoError(t, err)
+	assert.Equal(t, `{"kind":"created"}`+"\n"+`{"kind":"approved"}`+"\n"+`{"kind":"worked"}`+"\n", string(data))
+}
+
 func testEveryUnionPathHasMergeRule(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".git"), 0o755))

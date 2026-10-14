@@ -125,10 +125,14 @@ The CLI reads and writes review records only through `pkg/planreview`.
 - **Retry:** entries live in `<ledger>/.git/ox-plan-review-pending/`, one per
   `(plan, kind, id)`. `ox plan flush-pending` (started by `ox agent prime`)
   restores a record the worktree lost, then commits, pushes and verifies each
-  entry on its own. An entry whose plan dir is gone (`ox plan backfill`
-  renames plan dirs, records included) is cleared once the remote tip holds
-  its bytes anywhere among the plans, and kept otherwise. Plan-dir markers
-  remain for authoring commits only.
+  entry on its own, and stops at the first rejected push. A restore happens
+  only under the repo lock and never while a rebase is in progress: a rebase
+  replaying the record's commit has the record off disk, and a copy written
+  then stops the replay for good. An entry whose plan dir is gone (`ox plan
+  backfill` renames plan dirs, records included) is cleared once the remote
+  tip holds its bytes anywhere among the plans, and kept otherwise. Plan-dir
+  markers remain for authoring commits (the whole dir) and lifecycle events
+  (their files).
 - **Read** (`plan.ReadReview`): `Capture` of the worktree, the Ledger's git dir
   passed for the replay check, then `Assemble`. A clone with `core.autocrlf`
   checks records out with CRLF endings, so the worktree is not byte-exact
@@ -138,8 +142,19 @@ The CLI reads and writes review records only through `pkg/planreview`.
   rendered page all report an incomplete read; the list and prime surface a
   plan whose review is incomplete even with nothing open, and the page also
   warns when an operation is stored with differing content.
-- `/approve` and the lifecycle verbs still write `events.jsonl` and `meta.json`
-  and commit the whole plan dir: the author-side lifecycle is unchanged.
+- **Lifecycle** (`commitPlanEvent`, `cmd/ox/plan_commit.go`): `/approve` and
+  the lifecycle verbs append their event and commit only `events.jsonl` and
+  `meta.json`, in one hold of the repo lock, so a pull never finds them half
+  written and an author's unsaved files never ride along. While the Ledger is
+  mid-rebase, locked, or holds unmerged entries they record nothing, and
+  `/approve` answers 503. A failed push leaves a plan-dir marker owing only
+  those files (`files`); a lifecycle push never clears a marker owed for the
+  whole dir. With no Ledger checkout the event is recorded and reported not
+  committed, and no git command runs.
+- **Event logs merge:** `data/plans/*/events.jsonl` is `merge=union` in each
+  clone's `.git/info/attributes` (`kb.MergeUnionPaths`, rewritten before every
+  push and pull), so two clones' appends merge, upstream's lines first, in a
+  rebase and in an autostash re-apply.
 
 ---
 
@@ -162,9 +177,21 @@ The CLI reads and writes review records only through `pkg/planreview`.
 | H13 | `CommitLedgerSnapshot` refuses every commit while any index entry is unmerged | an exact-set review commit is still blocked by an unrelated conflict (relevant to H5's fix) | code: global check in `CommitLedgerSnapshotPreserving` | decided in #1289 (3.7); Ledger owns the refusal |
 
 **Since #1289** (§1.1): the CLI fixes H2–H4 and H6–H9, and H1 for review files,
-which it no longer writes to any shared file. `events.jsonl` and `meta.json`
-stay shared, so H1 and H5 remain for the author-side lifecycle. H10–H12 are
-unchanged.
+which it no longer writes to any shared file. `events.jsonl` stays shared but
+merges (`merge=union`), so H1 no longer drops events, and its autostash
+re-apply no longer conflicts; this needs no per-entry layout, and a reader
+sees the same file format. Lifecycle writes commit under the repo lock and
+refuse while the Ledger needs repair, so they leave no plan file uncommitted
+for a pull to conflict on. Still open:
+
+- `meta.json` stays keep-local on a rebase conflict, so its status can lag
+  `events.jsonl`; readers fold the log (`plan.CurrentStatus`) instead of
+  trusting it.
+- H5 remains for `meta.json` and the authoring files left uncommitted by a
+  failed save.
+- An in-place rewrite of an `events.jsonl` line (`BackfillSessionID`) racing an
+  append can keep both versions of that line.
+- H10–H12 are unchanged.
 
 **Reproductions** (real clones of one Ledger with a bare remote, publishing
 through `commitAndPushPlanDir`; one-off, not kept as tests because they assert

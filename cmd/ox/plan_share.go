@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/sageox/ox/internal/config"
@@ -128,11 +129,49 @@ func sharePlanDir(gitRoot, planDir string) planShareStatus {
 	return classifyPlanShare(f)
 }
 
+// sharePlanEvent is the lifecycle verbs' write: the event committed alone
+// (commitPlanEvent), pushed, and the outcome classified like a save's, with
+// only the event's own files checked for uncommitted changes. An error means
+// nothing was recorded. With no Ledger checkout the event is recorded and
+// reported not shared, as before: nothing pulls or pushes that dir.
+func sharePlanEvent(ctx context.Context, gitRoot, planDir string, kind plan.EventKind, fields plan.PlanEventFields) (bool, planShareStatus, error) {
+	f := planShareFacts{DaemonRunning: daemonRunningFn()}
+	ledgerPath, err := planLedgerPathFor(gitRoot)
+	if err != nil || !gitutil.IsGitRepo(ledgerPath) {
+		if err != nil {
+			f.NoLedger = true
+		} else {
+			f.CommitErr = fmt.Errorf("ledger %s is not a git checkout", ledgerPath)
+		}
+		changed, err := plan.AppendPlanEvent(ctx, planDir, kind, fields)
+		return changed, classifyPlanShare(f), err
+	}
+	f.LedgerPath = ledgerPath
+	changed, err := commitPlanEvent(ctx, ledgerPath, planDir, kind, fields)
+	switch {
+	case err != nil && !changed:
+		return false, planShareStatus{}, err
+	case err != nil:
+		f.CommitErr = err
+	case !changed:
+		return false, planShareStatus{}, nil
+	default:
+		f.PushErr = pushLedger(ctx, ledgerPath)
+	}
+	var paths []string
+	for _, name := range planEventFiles {
+		paths = append(paths, filepath.Join(planDir, name))
+	}
+	f.Dirty = planDirDirty(ledgerPath, paths...)
+	f.Ahead, f.Behind, f.UpstreamKnown = gitAheadBehind(ledgerPath)
+	return true, classifyPlanShare(f), nil
+}
+
 // planDirDirty reports whether the plan dir has staged or unstaged changes in
 // the ledger. An unreadable status reads as dirty: "could not look" must not
 // be reported as "shared".
-func planDirDirty(ledgerPath, planDir string) bool {
-	out, err := exec.Command("git", "-C", ledgerPath, "status", "--porcelain", "--", planDir).Output()
+func planDirDirty(ledgerPath string, paths ...string) bool {
+	out, err := exec.Command("git", append([]string{"-C", ledgerPath, "status", "--porcelain", "--"}, paths...)...).Output()
 	if err != nil {
 		return true
 	}
