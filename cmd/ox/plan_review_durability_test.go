@@ -714,6 +714,98 @@ func TestFlushPending_RenamedPlanDir(t *testing.T) {
 	}
 }
 
+// TestFlushPending_NeverRestoresARecordARebaseIsReplaying: a rebase replaying
+// the commit that adds a pending record has the record off disk until the
+// replay; the flush must not write it back in that window. Failure prevented:
+// the copy stops the replay ("untracked working tree files would be
+// overwritten"), --continue, --skip and --abort all refuse, and the clone is
+// stuck mid-rebase, the daemon's sync with it, until a human repairs it.
+func TestFlushPending_NeverRestoresARecordARebaseIsReplaying(t *testing.T) {
+	f := newDurableReviewFixture(t)
+	// the round commits but cannot push, so its entry stays pending
+	runGitInDir(t, f.ledger, "remote", "set-url", "origin", filepath.Join(t.TempDir(), "gone.git"))
+	reviewPOST(t, f.srv.URL+"/feedback", "secret", roundBody("round-000R", "hR"))
+	runGitInDir(t, f.ledger, "remote", "set-url", "origin", f.origin)
+	entries, err := listReviewPending(f.ledger)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("want one pending entry, got %+v (err %v)", entries, err)
+	}
+	record := filepath.Join(f.planDir, filepath.FromSlash(entries[0].Path))
+
+	// a teammate pushes, so the local commit has to be replayed onto theirs
+	other := filepath.Join(t.TempDir(), "other")
+	runGitInDir(t, filepath.Dir(other), "clone", "-q", "-b", "main", f.origin, other)
+	if err := os.WriteFile(filepath.Join(other, "teammate.txt"), []byte("hi\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitInDir(t, other, "add", "teammate.txt")
+	runGitInDir(t, other, "commit", "-q", "-m", "teammate")
+	runGitInDir(t, other, "push", "-q", "origin", "main")
+
+	// a rebase stopped before its first pick has upstream checked out, so the
+	// record is off disk until the replay
+	runGitInDir(t, f.ledger, "fetch", "-q", "origin")
+	editor := filepath.Join(t.TempDir(), "break.sh")
+	if err := os.WriteFile(editor, []byte("#!/bin/sh\n{ echo break; cat \"$1\"; } > \"$1.tmp\" && mv \"$1.tmp\" \"$1\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rebase := exec.Command("git", "rebase", "-i", "origin/main")
+	rebase.Dir = f.ledger
+	rebase.Env = append(isolatedGitEnv(f.ledger), "GIT_SEQUENCE_EDITOR="+editor)
+	if out, err := rebase.CombinedOutput(); err != nil {
+		t.Fatalf("start the rebase: %v\n%s", err, out)
+	}
+	if _, err := os.Lstat(record); !errors.Is(err, os.ErrNotExist) || !gitutil.IsRebaseInProgress(f.ledger) {
+		t.Fatalf("want a rebase in progress with the record off disk (lstat err %v)", err)
+	}
+
+	if _, _, err := flushPendingReviewRecords(context.Background(), f.ledger); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(record); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the flush wrote the record back mid-rebase (lstat err %v)", err)
+	}
+	if out, err := runIsolatedGit(t, f.ledger, "rebase", "--continue"); err != nil {
+		t.Fatalf("the rebase must still replay the record: %v\n%s", err, out)
+	}
+	if gitutil.IsRebaseInProgress(f.ledger) {
+		t.Fatal("the clone is still mid-rebase")
+	}
+	if ok, failed, err := flushPendingReviewRecords(context.Background(), f.ledger); err != nil || ok != 1 || failed != 0 {
+		t.Fatalf("after the rebase, the flush must land the record: ok=%d failed=%d err=%v", ok, failed, err)
+	}
+}
+
+// TestFlushPending_StopsAtTheFirstRejectedPush: with the remote refusing,
+// the flush pushes once, not once per pending record. Failure prevented: on
+// a Ledger whose pushes keep failing, every prime runs a rejected push (and
+// its LFS repair, under the repo lock) for each pending record.
+func TestFlushPending_StopsAtTheFirstRejectedPush(t *testing.T) {
+	f := newDurableReviewFixture(t)
+	lock := filepath.Join(f.ledger, ".git", "index.lock")
+	if err := os.WriteFile(lock, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reviewPOST(t, f.srv.URL+"/feedback", "secret", roundBody("round-000A", "hA"))
+	reviewPOST(t, f.srv.URL+"/feedback", "secret", roundBody("round-000B", "hB"))
+	if err := os.Remove(lock); err != nil {
+		t.Fatal(err)
+	}
+	runGitInDir(t, f.ledger, "remote", "set-url", "origin", filepath.Join(t.TempDir(), "gone.git"))
+
+	ok, failed, err := flushPendingReviewRecords(context.Background(), f.ledger)
+	if err != nil || ok != 0 || failed != 2 {
+		t.Fatalf("flush: ok=%d failed=%d err=%v", ok, failed, err)
+	}
+	committed := strings.Fields(runGitInDir(t, f.ledger, "log", "--format=%H", "--grep=plan review:"))
+	if len(committed) != 1 {
+		t.Fatalf("one record is committed and its push refused; the other must wait, got %d review commits", len(committed))
+	}
+	if left, err := listReviewPending(f.ledger); err != nil || len(left) != 2 {
+		t.Fatalf("both entries stay pending, left %+v (err %v)", left, err)
+	}
+}
+
 // TestPlanReviewDurability_ResendFollowsARenamedPlan: `ox plan backfill`
 // renames a plan dir while two of its rounds are pending, one never written.
 // Resent from the renamed dir, each finds its entry by the plan's id and lands

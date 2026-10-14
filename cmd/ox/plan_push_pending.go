@@ -20,7 +20,6 @@ import (
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/proc"
 	"github.com/sageox/ox/internal/selfexec"
-	"github.com/sageox/ox/pkg/planreview"
 	"github.com/spf13/cobra"
 )
 
@@ -179,7 +178,7 @@ func flushPendingReviewRecords(ctx context.Context, ledgerPath string) (succeede
 	if err != nil {
 		return 0, 0, err
 	}
-	for _, e := range pending {
+	for i, e := range pending {
 		planDir := filepath.Join(ledgerPath, filepath.FromSlash(e.PlanDir))
 		if _, statErr := os.Stat(planDir); statErr != nil {
 			// `ox plan backfill` renames plan dirs, records included, so the
@@ -195,15 +194,15 @@ func flushPendingReviewRecords(ctx context.Context, ledgerPath string) (succeede
 			succeeded++
 			continue
 		}
-		// The commit carries the entry's bytes, not the worktree's. A record an
-		// earlier attempt froze but never wrote is restored, create-only, so
-		// local reads see it too.
-		if _, lerr := os.Lstat(filepath.Join(planDir, filepath.FromSlash(e.Path))); errors.Is(lerr, os.ErrNotExist) {
-			if perr := publishRecord(planDir, planreview.File{Path: e.Path, Data: e.Data}); perr != nil {
-				slog.WarnContext(ctx, "plan review record not restored to the worktree", "plan_dir", e.PlanDir, "record", e.Path, "error", perr)
-			}
-		}
+		// the commit carries the entry's bytes, not the worktree's, and
+		// restores a record the worktree lost (commitReviewRecord)
 		if st := landReviewRecord(ctx, ledgerPath, e); !st.Pushed {
+			if st.Committed {
+				// the push is the branch's, so every later entry's would fail
+				// the same way: one rejected push per flush, not one per entry
+				failed += len(pending) - i
+				break
+			}
 			failed++
 			continue
 		}

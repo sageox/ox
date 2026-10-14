@@ -254,7 +254,14 @@ func saveReviewRecord(ctx context.Context, ledgerPath, rel, planDir string, rec 
 				duplicate = true
 				return nil
 			}
-			return publishRecord(planDir, stored) // on failure the entry stays: it holds the only copy
+			// the attempt that froze it never wrote it; on failure the entry
+			// stays, since it holds the only copy
+			return gitutil.WithRepoLock(ctx, ledgerPath, func() error {
+				if err := gitutil.IsSafeForGitOps(ledgerPath); err != nil {
+					return fmt.Errorf("ledger not safe for restoring a review record (%s): %w", ledgerPath, err)
+				}
+				return restoreReviewRecord(ledgerPath, e)
+			})
 		}
 		inv := plan.CaptureReview(planDir, "")
 		if r, ok := planreview.Prior(inv, rec); ok {
@@ -334,7 +341,7 @@ func landReviewRecord(ctx context.Context, ledgerPath string, e reviewPending) p
 		slog.WarnContext(ctx, "plan review record pending: will retry on next `ox agent prime`", "record", path, "error", st.Err)
 		return st
 	}
-	oid, err := commitReviewRecord(ctx, ledgerPath, path, e.Data, "plan review: "+filepath.Base(e.PlanDir))
+	oid, err := commitReviewRecord(ctx, ledgerPath, e, "plan review: "+filepath.Base(e.PlanDir))
 	if err != nil {
 		return fail(planCommitStatus{}, err)
 	}
@@ -351,14 +358,15 @@ func landReviewRecord(ctx context.Context, ledgerPath string, e reviewPending) p
 	return st
 }
 
-// commitReviewRecord commits exactly one record, data at path (relative to
-// the Ledger root), and returns its blob id. The bytes are staged as a blob
-// and CommitLedgerSnapshot commits HEAD plus that one index entry, so nothing
-// else in the index or the worktree — an author's half-written plan.md, a
-// staged session — reaches the commit, and the worktree file is never read.
-// A record HEAD already holds is not committed again, and one that fails to
-// commit is unstaged, so no other commit can carry bytes this one refused.
-func commitReviewRecord(ctx context.Context, ledgerPath, path string, data []byte, msg string) (string, error) {
+// commitReviewRecord commits exactly e's record and returns its blob id. The
+// entry's bytes are staged as a blob and CommitLedgerSnapshot commits HEAD plus
+// that one index entry, so nothing else in the index or the worktree — an
+// author's half-written plan.md, a staged session — reaches the commit, and
+// the worktree file is never read. A record HEAD already holds is not
+// committed again, and one that fails to commit is unstaged, so no other
+// commit can carry bytes this one refused.
+func commitReviewRecord(ctx context.Context, ledgerPath string, e reviewPending, msg string) (string, error) {
+	path := e.PlanDir + "/" + e.Path
 	var oid string
 	err := gitutil.WithRepoLock(ctx, ledgerPath, func() error {
 		// git run in a directory that is not a checkout finds any enclosing
@@ -369,8 +377,13 @@ func commitReviewRecord(ctx context.Context, ledgerPath, path string, data []byt
 		if err := gitutil.IsSafeForGitOps(ledgerPath); err != nil {
 			return fmt.Errorf("ledger not safe for a review commit (%s): %w", ledgerPath, err)
 		}
+		// a commit the worktree cannot match would leave HEAD holding a file
+		// where the worktree has none
+		if err := restoreReviewRecord(ledgerPath, e); err != nil {
+			return fmt.Errorf("restore %s: %w", path, err)
+		}
 		var err error
-		if oid, err = gitutil.StageLedgerBlob(ctx, ledgerPath, path, data); err != nil {
+		if oid, err = gitutil.StageLedgerBlob(ctx, ledgerPath, path, e.Data); err != nil {
 			return err
 		}
 		if _, err = gitutil.CommitLedgerSnapshot(ctx, ledgerPath, msg, path); err == nil && blobAt(ctx, ledgerPath, "HEAD", path) != oid {
@@ -383,6 +396,19 @@ func commitReviewRecord(ctx context.Context, ledgerPath, path string, data []byt
 		return nil
 	})
 	return oid, err
+}
+
+// restoreReviewRecord writes e's record back into its plan dir when the
+// worktree lacks it, so local reads see it. The caller holds the repo lock and
+// has run IsSafeForGitOps: a rebase replaying the record's commit has it off
+// disk, and a copy written then stops the replay for good (--continue, --skip
+// and --abort all refuse to overwrite it).
+func restoreReviewRecord(ledgerPath string, e reviewPending) error {
+	planDir := filepath.Join(ledgerPath, filepath.FromSlash(e.PlanDir))
+	if _, err := os.Lstat(filepath.Join(planDir, filepath.FromSlash(e.Path))); err == nil {
+		return nil
+	}
+	return publishRecord(planDir, planreview.File{Path: e.Path, Data: e.Data})
 }
 
 // gitStdout runs git in repo and returns its stdout alone: an answer compared
