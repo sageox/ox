@@ -76,28 +76,13 @@ func maybePublishSessionDraft(ctx *HookContext) {
 		return
 	}
 
-	resolved := config.ResolveSessionDraft()
-
-	// Same gate as notifySessionStartedAsync. If session attribution is off
-	// there is no /c/ page to make resolvable, so publishing a draft would be
-	// pure ledger noise. Every session-link surface stays on one switch.
-	if attr := loadResolvedAttribution(); attr.Session == "" {
-		resolved = &config.ResolvedSessionDraft{Enabled: false}
-	}
-
-	// session_publishing: manual means nothing about this session leaves the
-	// machine until the user explicitly uploads it. A draft is a real ledger
-	// commit (session name, agent id/type, model, repo id, username, title)
-	// that the daemon's sync cycle pushes to the remote ~60s later — exactly
-	// the implicit publish manual mode promises will not happen. Checked here
-	// (after the cheap turn-count early-out above, so the common case below
-	// DraftPublishTurn still costs nothing) rather than at the top of the
-	// function, because the turn counter must still increment for every
-	// session regardless of publishing mode — see the comment on the
-	// UpdateRecordingStateForAgent call above.
-	if config.GetSessionPublishing(ctx.ProjectRoot) == config.SessionPublishingManual {
-		resolved = &config.ResolvedSessionDraft{Enabled: false}
-	}
+	// Resolved here, after the cheap turn-count early-out above, rather than at
+	// the top of the function: the turn counter must still increment for every
+	// session regardless of policy — see the comment on the
+	// UpdateRecordingStateForAgent call above. `ox session status` resolves the
+	// same policy (draftStateFor), so it never reports a draft this hook will
+	// not publish.
+	resolved := repoDraftPolicy(ctx.ProjectRoot)
 
 	action := draftDecision(state.TurnCount, state.DraftPublishedTurn, state.DraftPublishedAt != nil, resolved)
 	if action == draftActionNone {
@@ -126,6 +111,28 @@ func maybePublishSessionDraft(ctx *HookContext) {
 			s.DraftPublishedAt = &now
 		}
 	})
+}
+
+// repoDraftPolicy is the draft policy for every recording in projectRoot: the
+// session.draft setting, turned off where no draft may be published at all.
+// A recording that saved session_publishing: manual is excluded before this
+// runs, by maybePublishSessionDraft's early return and by draftStateFor.
+//
+// Attribution off is the same gate as notifySessionStartedAsync: there is no
+// /c/ page to make resolvable, so a draft would be pure ledger noise. Every
+// session-link surface stays on one switch.
+//
+// session_publishing: manual means nothing about a session leaves the machine
+// until the user explicitly uploads it. A draft is a real ledger commit
+// (session name, agent id/type, model, repo id, username, title) that the
+// daemon's sync cycle pushes to the remote ~60s later — exactly the implicit
+// publish manual mode promises will not happen.
+func repoDraftPolicy(projectRoot string) *config.ResolvedSessionDraft {
+	if loadResolvedAttribution().Session == "" ||
+		config.GetSessionPublishing(projectRoot) == config.SessionPublishingManual {
+		return &config.ResolvedSessionDraft{Enabled: false}
+	}
+	return config.ResolveSessionDraft()
 }
 
 // resolveDraftLedgerPath returns the ledger this recording belongs to, or ""

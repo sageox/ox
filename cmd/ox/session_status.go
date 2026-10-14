@@ -235,11 +235,16 @@ func buildSessionRecordingEntry(s *session.RecordingState, alive *bool, status s
 // so the (turn set, time nil) pair is the durable record of "we tried and it
 // did not land" — the state that otherwise looks identical to a healthy
 // session whose server page is merely lagging.
+//
+// resolved is the repo policy (repoDraftPolicy), the same one the Stop hook
+// applies. A recording that saved session_publishing: manual is held on this
+// machine and the hook never drafts it, so it reports "disabled" rather than a
+// "pending" that never arrives.
 func draftStateFor(resolved *config.ResolvedSessionDraft, s *session.RecordingState) string {
 	if s == nil {
 		return ""
 	}
-	if resolved == nil || !resolved.Enabled {
+	if resolved == nil || !resolved.Enabled || s.RecordedManualPublishing() {
 		return "disabled"
 	}
 	// Order matters: check the FAILED shape before the published shape.
@@ -288,10 +293,10 @@ type draftStatusContext struct {
 	attributionOn bool
 }
 
-func newDraftStatusContext() draftStatusContext {
+func newDraftStatusContext(projectRoot string) draftStatusContext {
 	projectCfg, _ := config.LoadProjectConfig("")
 	return draftStatusContext{
-		resolved:      config.ResolveSessionDraft(),
+		resolved:      repoDraftPolicy(projectRoot),
 		projectCfg:    projectCfg,
 		attributionOn: loadResolvedAttribution().Session != "",
 	}
@@ -426,7 +431,7 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 			}
 			// ADR-029: surface draft-placeholder state so "my /c/ link 404s"
 			// is diagnosable rather than a guess.
-			newDraftStatusContext().applyTo(state, &output.TurnCount, &output.DraftState,
+			newDraftStatusContext(projectRoot).applyTo(state, &output.TurnCount, &output.DraftState,
 				&output.DraftPublishedAt, &output.ConversationURL)
 			return outputJSON(cmd.OutOrStdout(), output)
 		}
@@ -485,7 +490,7 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 	// multiple recordings
 	if jsonOutput {
 		// Loaded once for the whole invocation, not per row.
-		draftCtx := newDraftStatusContext()
+		draftCtx := newDraftStatusContext(projectRoot)
 		var entries []sessionRecordingEntry
 		for _, s := range states {
 			alive, status := agentLivenessFor(agentAlive, s.AgentID)
