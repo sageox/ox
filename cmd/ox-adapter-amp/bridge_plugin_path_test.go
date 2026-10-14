@@ -3,7 +3,6 @@ package main
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -279,41 +278,42 @@ func TestDiagnose_SafeFixesRunUnderDoctorFix(t *testing.T) {
 // "all checks passed".
 func TestDiagnose_UnreadableBridgePathIsReported(t *testing.T) {
 	tests := []struct {
-		name      string
-		block     func(t *testing.T, plugin string)
-		skipOn    string
-		skipWhy   string
-		wantInErr string
+		name string
+		// block puts something in the way and returns what the detail must say
+		block func(t *testing.T, xdg string) string
 	}{
 		{
 			name: "file where the plugins directory should be",
-			block: func(t *testing.T, plugin string) {
-				require.NoError(t, os.MkdirAll(filepath.Dir(filepath.Dir(plugin)), 0o755))
-				require.NoError(t, os.WriteFile(filepath.Dir(plugin), []byte("not a directory"), 0o644))
+			block: func(t *testing.T, xdg string) string {
+				blocker := filepath.Dir(pluginUnder(xdg))
+				require.NoError(t, os.MkdirAll(filepath.Dir(blocker), 0o755))
+				require.NoError(t, os.WriteFile(blocker, []byte("not a directory"), 0o644))
+				return blocker + " is a file"
 			},
-			// stat through a file component reports "path not found" on
-			// Windows, which is ErrNotExist, so this setup reads as missing there
-			skipOn:  "windows",
-			skipWhy: "a file in place of a directory is not-exist on Windows, not ENOTDIR",
+		},
+		{
+			name: "file where the amp directory should be",
+			block: func(t *testing.T, xdg string) string {
+				blocker := filepath.Join(xdg, "amp")
+				require.NoError(t, os.WriteFile(blocker, []byte("not a directory"), 0o644))
+				return blocker + " is a file"
+			},
 		},
 		{
 			name: "directory where the plugin file should be",
-			block: func(t *testing.T, plugin string) {
-				require.NoError(t, os.MkdirAll(plugin, 0o755))
+			block: func(t *testing.T, xdg string) string {
+				require.NoError(t, os.MkdirAll(pluginUnder(xdg), 0o755))
+				return "is a directory"
 			},
-			wantInErr: "is a directory",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if runtime.GOOS == tt.skipOn {
-				t.Skip(tt.skipWhy)
-			}
 			xdg, repo := t.TempDir(), t.TempDir()
 			setHome(t, t.TempDir())
 			t.Setenv("XDG_CONFIG_HOME", xdg)
-			tt.block(t, pluginUnder(xdg))
+			wantInDetail := tt.block(t, xdg)
 
 			res, err := handleDiagnose(adapterprotocol.DiagnoseParams{RepoRoot: repo, Scope: "project"})
 			require.NoError(t, err)
@@ -321,15 +321,62 @@ func TestDiagnose_UnreadableBridgePathIsReported(t *testing.T) {
 			require.NotNil(t, issue, "an unusable plugin path must not read as healthy, got %+v", res.Issues)
 			assert.Equal(t, "amp:bridge-plugin-unreadable", issue.Slug)
 			assert.Contains(t, issue.Detail, pluginUnder(xdg), "the detail must name the path")
-			if tt.wantInErr != "" {
-				assert.Contains(t, issue.Detail, tt.wantInErr)
-			}
+			assert.Contains(t, issue.Detail, wantInDetail, "the detail must say what is in the way")
 
 			// the premise for offering no fix: install fails on this path too
 			_, installErr := handleInstallHooks(adapterprotocol.HookParams{RepoRoot: repo, Scope: "project"})
 			require.Error(t, installErr, "install-hooks repaired this path; diagnose could offer it as a fix")
 			assert.False(t, issue.FixSafe, "install-hooks fails on this path, so it is not a safe fix")
 			assert.Empty(t, issue.FixArgv)
+		})
+	}
+}
+
+// TestFileBlockingPluginDir pins the walk that finds a file standing where a
+// directory of the plugin path must be. It is what keeps Windows honest: stat
+// through a file component there says "not found", so without the walk a
+// blocked path reads as missing and diagnose offers an install that fails.
+// Failure prevented: a FixSafe repair offered for a path install cannot create.
+func TestFileBlockingPluginDir(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(t *testing.T, root string) (path, want string)
+	}{
+		{
+			name: "nothing exists below a directory",
+			setup: func(t *testing.T, root string) (string, string) {
+				return pluginUnder(root), ""
+			},
+		},
+		{
+			name: "plugins directory exists",
+			setup: func(t *testing.T, root string) (string, string) {
+				require.NoError(t, os.MkdirAll(filepath.Dir(pluginUnder(root)), 0o755))
+				return pluginUnder(root), ""
+			},
+		},
+		{
+			name: "file at the plugins directory",
+			setup: func(t *testing.T, root string) (string, string) {
+				blocker := filepath.Dir(pluginUnder(root))
+				require.NoError(t, os.MkdirAll(filepath.Dir(blocker), 0o755))
+				require.NoError(t, os.WriteFile(blocker, nil, 0o644))
+				return pluginUnder(root), blocker
+			},
+		},
+		{
+			name: "file two levels up",
+			setup: func(t *testing.T, root string) (string, string) {
+				blocker := filepath.Join(root, "amp")
+				require.NoError(t, os.WriteFile(blocker, nil, 0o644))
+				return pluginUnder(root), blocker
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path, want := tt.setup(t, t.TempDir())
+			assert.Equal(t, want, fileBlockingPluginDir(path))
 		})
 	}
 }

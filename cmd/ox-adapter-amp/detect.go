@@ -104,6 +104,11 @@ func diagnoseBridgePlugin(repoRoot string) []adapterprotocol.DiagnoseIssue {
 	if statErr == nil {
 		return nil
 	}
+	// checked before trusting a "not found": on Windows a file in the way
+	// reports exactly that
+	if blocker := fileBlockingPluginDir(bridgePath); blocker != "" {
+		statErr = fmt.Errorf("%s is a file, so the plugin directory cannot exist", blocker)
+	}
 	if !errors.Is(statErr, fs.ErrNotExist) {
 		return []adapterprotocol.DiagnoseIssue{{
 			Slug:     "amp:bridge-plugin-unreadable",
@@ -148,4 +153,28 @@ func diagnoseBridgePlugin(repoRoot string) []adapterprotocol.DiagnoseIssue {
 		FixArgv:  fixArgv,
 		FixSafe:  true,
 	}}
+}
+
+// fileBlockingPluginDir returns the nearest existing ancestor of path when it
+// is a file rather than a directory: install-hooks cannot create the plugin
+// directory through it, and Amp loads nothing below it. It returns "" when the
+// nearest existing ancestor is a directory.
+//
+// The walk is needed because stat's own answer differs by platform: through a
+// file component, unix reports ENOTDIR but Windows reports "not found", which
+// would otherwise read as a plugin that is merely missing.
+func fileBlockingPluginDir(path string) string {
+	for dir := filepath.Dir(path); ; {
+		if info, err := os.Stat(dir); err == nil {
+			if info.IsDir() {
+				return ""
+			}
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
 }
