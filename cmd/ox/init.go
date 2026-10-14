@@ -44,6 +44,7 @@ var initTeamFlag string
 var initForce bool
 var initEndpointFlag string
 var initAgentsFlag string
+var initAgentsFlagExplicit bool
 
 // configResult indicates what happened when ensuring config exists
 type configResult int
@@ -138,6 +139,13 @@ After init, run 'ox guide getting-started' for a five-minute walkthrough,
 or 'ox guide team-rules' to learn how to share AI coworker conventions
 across your whole team (Claude, Codex, Amp, etc.).`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		initAgentsFlagExplicit = cmd.Flags().Changed("agents")
+		defer func() {
+			initAgentsFlagExplicit = false
+			if flag := cmd.Flags().Lookup("agents"); flag != nil {
+				flag.Changed = false
+			}
+		}()
 		return runInit()
 	},
 }
@@ -329,7 +337,7 @@ func runInit() error {
 	// remote requests. Keep the parsed selection so later setup uses the same
 	// adapter names that passed validation.
 	var explicitAgents map[string]bool
-	if initAgentsFlag != "" {
+	if initAgentsFlagWasSet() {
 		explicitAgents, err = selectAgentsForInit(gitRoot)
 		if err != nil {
 			return err
@@ -2098,7 +2106,7 @@ func displayPath(absPath string) string {
 // Returns adapter names the user selected.
 func selectAgentsForInit(gitRoot string) (map[string]bool, error) {
 	// if --agents flag provided, use it directly
-	if initAgentsFlag != "" {
+	if initAgentsFlagWasSet() {
 		return parseInitAgentsFlag(initAgentsFlag, adapters.DiscoverExternalAdapters())
 	}
 
@@ -2172,6 +2180,10 @@ func selectAgentsForInit(gitRoot string) (map[string]bool, error) {
 		selected[name] = true
 	}
 	return selected, nil
+}
+
+func initAgentsFlagWasSet() bool {
+	return initAgentsFlagExplicit || initAgentsFlag != ""
 }
 
 func parseInitAgentsFlag(value string, externalAdapters []*adapters.ExternalAdapter) (map[string]bool, error) {

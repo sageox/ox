@@ -109,6 +109,24 @@ func TestRunInit_UnknownAgentFailsBeforeInitialization(t *testing.T) {
 	assert.Empty(t, env.Requested(), "invalid input must fail before any API request")
 }
 
+func TestRunInit_ExplicitEmptyAgentFailsBeforeInitialization(t *testing.T) {
+	env := newOxE2E(t)
+	withInitFlags(t, env.TeamID)
+	initAgentsFlag = ""
+	previousExplicit := initAgentsFlagExplicit
+	initAgentsFlagExplicit = false
+	t.Cleanup(func() { initAgentsFlagExplicit = previousExplicit })
+	require.NoError(t, initCmd.ParseFlags([]string{"--agents="}))
+	t.Setenv("OX_ADAPTER_PATH", t.TempDir())
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+
+	err := initCmd.RunE(initCmd, nil)
+	require.ErrorContains(t, err, "--agents must include at least one agent")
+	require.ErrorContains(t, err, "valid values:")
+	assert.NoDirExists(t, filepath.Join(env.Root, ".sageox"))
+	assert.Empty(t, env.Requested(), "an explicitly empty selection must fail before any API request")
+}
+
 // TestRunInit_WritesScopedIgnoreAndNeverStagesReservedArtifacts drives runInit
 // end to end for the first time.
 //
