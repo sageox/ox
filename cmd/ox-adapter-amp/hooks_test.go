@@ -15,7 +15,7 @@ import (
 // TestMain points the home directory at a throwaway sandbox for the whole
 // package. handleInstallHooks writes the bridge plugin user-globally, so a test
 // that forgets t.Setenv("HOME", ...) would otherwise overwrite the developer's
-// real ~/.config/amp/plugins/ox-bridge.ts with whatever branch is under test.
+// real ox-bridge.ts in Amp's plugin dir with whatever branch is under test.
 // Failure prevented: `make test` silently replacing a working Amp install.
 func TestMain(m *testing.M) {
 	sandbox, err := os.MkdirTemp("", "ox-adapter-amp-home-")
@@ -26,6 +26,10 @@ func TestMain(m *testing.M) {
 	// USERPROFILE is what os.UserHomeDir reads on Windows.
 	_ = os.Setenv("HOME", sandbox)
 	_ = os.Setenv("USERPROFILE", sandbox)
+	// The plugin follows XDG_CONFIG_HOME ahead of HOME. Unset rather than point
+	// into the sandbox, so each test's t.Setenv("HOME", ...) still gives it a
+	// plugin dir of its own; tests that need XDG_CONFIG_HOME set it themselves.
+	_ = os.Unsetenv("XDG_CONFIG_HOME")
 
 	// Fail fast, before any test runs, if the redirect did not take on this
 	// platform: the bridge plugin must resolve inside the sandbox.

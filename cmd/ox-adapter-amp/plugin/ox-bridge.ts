@@ -7,8 +7,9 @@
  * `ox-adapter-amp` Go binary already understands (`session_meta`,
  * `user`, `assistant`, `tool_use`, `tool_result`).
  *
- * Installed by `ox-adapter-amp install-hooks` into the user-scope plugin
- * dir (`~/.config/amp/plugins/`) so one plugin serves every project.
+ * Installed by `ox-adapter-amp install-hooks` into Amp's system plugin dir
+ * (`$XDG_CONFIG_HOME/amp/plugins/`, else `~/.config/amp/plugins/`) so one
+ * plugin serves every project.
  */
 
 import type { PluginAPI } from '@ampcode/plugin';
