@@ -255,8 +255,10 @@ func recordPlanPushOutcome(ctx context.Context, ledgerPath, planDir string, push
 	path := planPushMarkerPath(ledgerPath, rel)
 	// read, merge and write as one step: two processes failing on one plan
 	// dir (an author's save, a reviewer's approval) must not drop what the
-	// other's marker owes
-	if lerr := fileutil.WithFileLock(ctx, path, func() error {
+	// other's marker owes. The lock waits out a canceled ctx (a reviewer who
+	// closed the page): the marker is the retry for work already written. Its
+	// own acquire timeout still bounds the wait.
+	if lerr := fileutil.WithFileLock(context.WithoutCancel(ctx), path, func() error {
 		updatePlanPushMarker(ctx, path, rel, pushErr, files)
 		return nil
 	}); lerr != nil {

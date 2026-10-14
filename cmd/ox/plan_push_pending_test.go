@@ -28,10 +28,11 @@ func writePlanPushMarkerFile(t *testing.T, ledger, name, body string) {
 	}
 }
 
-// A marker's read, merge and write wait for its lock, so two processes
-// failing on one plan dir cannot drop what the other's marker owes.
-func TestRecordPlanPushOutcome_HoldsTheMarkerLock(t *testing.T) {
-	ctx := context.Background()
+// A marker's read, merge and write wait for its lock, even under a canceled
+// context, as a reviewer closing the page mid-Approve cancels it. Failure
+// prevented: two processes failing on one plan dir drop what the other's
+// marker owes, or a canceled Approve leaves its approval with no retry.
+func TestRecordPlanPushOutcome_WaitsForTheMarkerLock(t *testing.T) {
 	ledger := t.TempDir()
 	planDir := filepath.Join(ledger, "data", "plans", "p")
 	if err := os.MkdirAll(planDir, 0o755); err != nil {
@@ -39,26 +40,28 @@ func TestRecordPlanPushOutcome_HoldsTheMarkerLock(t *testing.T) {
 	}
 	held, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	go func() {
-		_ = fileutil.WithFileLock(ctx, planPushMarkerPath(ledger, "data/plans/p"), func() error {
+		_ = fileutil.WithFileLock(context.Background(), planPushMarkerPath(ledger, "data/plans/p"), func() error {
 			close(held)
 			<-release
 			return nil
 		})
 	}()
 	<-held
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
 	go func() {
-		recordPlanPushOutcome(ctx, ledger, planDir, errors.New("offline"), "events.jsonl")
+		recordPlanPushOutcome(ctx, ledger, planDir, errors.New("push canceled"), planEventFiles...)
 		close(done)
 	}()
 	select {
 	case <-done:
-		t.Fatal("the marker was updated while its lock was held")
+		t.Fatal("the marker update ran or gave up while its lock was held")
 	case <-time.After(200 * time.Millisecond):
 	}
 	close(release)
 	<-done
-	if markers, err := listPlanPushPending(ledger); err != nil || len(markers) != 1 {
-		t.Fatalf("want the marker written once the lock is free, got %+v (err %v)", markers, err)
+	if markers, err := listPlanPushPending(ledger); err != nil || len(markers) != 1 || !slices.Equal(markers[0].Files, planEventFiles) {
+		t.Fatalf("want the retry marker once the lock is free, got %+v (err %v)", markers, err)
 	}
 }
 
