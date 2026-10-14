@@ -185,6 +185,7 @@ func (r *Reader) walkthroughEvidence(start time.Time, id *ID, rw row, root *os.R
 	if opts.Transcript {
 		data.Moments = []WalkthroughMoment{}
 	}
+	r.joinPlayback(data, id, cues, opts)
 	if len(data.Moments) == 0 && !opts.Transcript {
 		data.Notes = append(data.Notes, "No retained images in this window. Source words remain available; missing frames do not mean there is no feedback.")
 	}

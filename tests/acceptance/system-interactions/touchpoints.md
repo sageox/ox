@@ -76,6 +76,12 @@ has initialized the repository".
 | bulletin/publish-post.feature | `ox bulletin post <file> --ttl` (`--title`, `--slug`, `--format`, `--board`, `--team`, `--yes`, `--json`); the command is present only for people the server has enrolled | Server-side publish into the team's Team Context repo (the laptop never writes the post); per-person pilot enrollment via the cached CLI settings, refreshed hourly; the next Team Context sync delivers the post to teammates |
 | bulletin/publish-post.feature (reading + health) | `ox agent prime`, `ox guide team-context`, `ox doctor` | Board pointer and trust framing from the local Team Context checkout (no cloud call; never inlines a post body); sync brings down active posts but never the archive; doctor treats a board holding only archived posts as healthy |
 
+## Screen Walkthroughs
+
+| Feature | ox surface | SageOx touchpoint |
+|---|---|---|
+| walkthrough/joined-moments.feature | `ox walkthrough <id>` (`--text`, `--cues`, `--from`/`--to`, `--limit`, `--fetch`, `--overview`) | One playback-data lookup per read (absence or an outage falls back to the standard evidence index with a note); zoomed and whole-frame pictures fetched from short-lived links without the sign-in, saved under the team context cache |
+
 ## Code Intelligence
 
 | Feature | ox surface | SageOx touchpoint |

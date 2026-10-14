@@ -35,7 +35,13 @@ const maxAncestorHops = 8
 type ScreenElement struct {
 	Role  string `json:"role,omitempty"`
 	Title string `json:"title,omitempty"`
+	// Name is Title's spelling in joined (playback) moments, where for a text
+	// selection it holds the selected text. A moment sets one or the other.
+	Name  string `json:"name,omitempty"`
 	DOMID string `json:"dom_id,omitempty"`
+	// Ancestor is set on joined moments when the element is the nearest named
+	// ancestor of what the pointer was over, not the node under it.
+	Ancestor bool `json:"ancestor,omitempty"`
 	// Unnamed marks an element with no title, description, or DOM id, or one
 	// the accessibility layer could not resolve.
 	Unnamed bool `json:"unnamed,omitempty"`
