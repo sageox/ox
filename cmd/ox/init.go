@@ -2191,6 +2191,7 @@ func parseInitAgentsFlag(value string, externalAdapters []*adapters.ExternalAdap
 		"claude-code": "claude-code",
 		"opencode":    "opencode",
 	}
+	externalNames := make(map[string]string, len(externalAdapters))
 	for name, supported := range prime.SupportedAgents {
 		if supported {
 			valid[name] = name
@@ -2198,7 +2199,9 @@ func parseInitAgentsFlag(value string, externalAdapters []*adapters.ExternalAdap
 	}
 	for _, ea := range externalAdapters {
 		name := ea.Name()
-		valid[strings.ToLower(name)] = name
+		key := strings.ToLower(name)
+		valid[key] = name
+		externalNames[key] = name
 	}
 
 	validNames := make([]string, 0, len(valid))
@@ -2212,6 +2215,11 @@ func parseInitAgentsFlag(value string, externalAdapters []*adapters.ExternalAdap
 	for _, input := range strings.Split(value, ",") {
 		name := strings.ToLower(strings.TrimSpace(input))
 		if name == "" {
+			continue
+		}
+
+		if resolved, ok := externalNames[name]; ok {
+			selected[resolved] = true
 			continue
 		}
 

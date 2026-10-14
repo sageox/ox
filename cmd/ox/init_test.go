@@ -319,18 +319,18 @@ func TestSelectAgentsForInit_ExplicitNamesCanonicalizeAliases(t *testing.T) {
 
 func TestSelectAgentsForInit_ExplicitAliasPreservesDynamicAdapterName(t *testing.T) {
 	adapterDir := t.TempDir()
-	createFakeAdapterWithHooks(t, adapterDir, "windsurf", "0.1.0", "session", ".windsurf")
+	createFakeAdapterWithHooks(t, adapterDir, "pi-coding-agent", "0.1.0", "session", ".pi")
 	t.Setenv("OX_ADAPTER_PATH", adapterDir)
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("LOCALAPPDATA", t.TempDir())
 
 	previousAgentsFlag := initAgentsFlag
-	initAgentsFlag = "windsurf"
+	initAgentsFlag = "pi-coding-agent"
 	t.Cleanup(func() { initAgentsFlag = previousAgentsFlag })
 
 	selected, err := selectAgentsForInit(t.TempDir())
 	require.NoError(t, err)
-	assert.Equal(t, map[string]bool{"windsurf": true}, selected)
+	assert.Equal(t, map[string]bool{"pi-coding-agent": true}, selected)
 }
 
 func TestSelectAgentsForInit_RejectsUnknownNamesWithValidValues(t *testing.T) {
