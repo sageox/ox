@@ -3,12 +3,15 @@
 package main
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/manifest"
 )
 
@@ -204,7 +207,34 @@ func TestRepairTeamSparseCheckout_MaterializesManifestIncludedDirectory(t *testi
 	if !strings.Contains(strings.Join(locallyRepairableMissingDirs(cfg, missing), ","), "agents/") {
 		t.Fatalf("fixture did not classify the omitted manifest directory as locally repairable: %v", missing)
 	}
-	if err := repairTeamSparseCheckout(repo); err != nil {
+	// another ox process (the daemon mid-pull) holds the team context: the
+	// repair waits rather than rewrite the index under it
+	held, release, lockDone := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	go func() {
+		lockDone <- gitutil.WithRepoLock(context.Background(), repo, func() error {
+			close(held)
+			<-release
+			return nil
+		})
+	}()
+	<-held
+	repaired := make(chan error, 1)
+	go func() { repaired <- repairTeamSparseCheckout(repo) }()
+	select {
+	case err := <-repaired:
+		close(release)
+		t.Fatalf("the repair ran while another process held the team context: %v", err)
+	case <-time.After(500 * time.Millisecond):
+	}
+	if _, err := os.Stat(filepath.Join(repo, "agents", "rules", "team.md")); err == nil {
+		close(release)
+		t.Fatal("the repair rewrote the sparse checkout while another process held the team context")
+	}
+	close(release)
+	if err := <-lockDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-repaired; err != nil {
 		t.Fatalf("repairTeamSparseCheckout: %v", err)
 	}
 	if missing := missingSparseTopLevelDirs(repo, cfg); len(missing) != 0 {

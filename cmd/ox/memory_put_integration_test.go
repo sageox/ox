@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/facts"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -88,15 +90,12 @@ func TestWriteObservation_ConcurrentPuts(t *testing.T) {
 	}
 	wg.Wait()
 
-	// at least some should succeed; concurrent git commits may cause lock
-	// contention, but unique UUIDs mean no file conflicts
-	successCount := 0
-	for _, err := range errs {
-		if err == nil {
-			successCount++
-		}
+	// the repo lock serializes the puts: every one commits
+	for i, err := range errs {
+		require.NoError(t, err, "put %d", i)
 	}
-	require.Greater(t, successCount, 0, "at least one concurrent write should succeed")
+	status := runGitInDir(t, dir, "status", "--porcelain", "--", "memory")
+	require.Empty(t, status, "every observation must be committed")
 
 	// verify JSONL files exist for each success
 	today := time.Now().UTC().Format("2006-01-02")
@@ -104,6 +103,66 @@ func TestWriteObservation_ConcurrentPuts(t *testing.T) {
 	entries, err := os.ReadDir(dateDir)
 	require.NoError(t, err)
 	require.Equal(t, goroutines, len(entries), "all goroutines should create unique JSONL files")
+}
+
+// TestWriteObservation_WaitsForTheRepoLock: a put while the daemon pulls the
+// team context waits for the pull. Failure prevented: the put's git add and
+// commit run inside the pull and fail on index.lock, or land mid-rebase.
+func TestWriteObservation_WaitsForTheRepoLock(t *testing.T) {
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	head := runGitInDir(t, dir, "rev-parse", "HEAD")
+
+	held, release, lockDone := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	go func() {
+		lockDone <- gitutil.WithRepoLock(context.Background(), dir, func() error {
+			close(held)
+			<-release
+			return nil
+		})
+	}()
+	<-held
+	done := make(chan error, 1)
+	go func() { done <- writeObservation(dir, []observation{{Content: "waits for the pull"}}) }()
+	select {
+	case err := <-done:
+		close(release)
+		t.Fatalf("the put returned while the pull held the team context: %v", err)
+	case <-time.After(500 * time.Millisecond):
+	}
+	require.Equal(t, head, runGitInDir(t, dir, "rev-parse", "HEAD"), "the put committed while the pull held the team context")
+	close(release)
+	require.NoError(t, <-lockDone)
+	require.NoError(t, <-done)
+	require.Empty(t, runGitInDir(t, dir, "status", "--porcelain", "--", "memory"))
+}
+
+// TestWriteObservation_SurvivesARebaseAbort: a put while the team context is
+// mid-rebase (the daemon's pull stopped on a conflict) leaves its file
+// unstaged. Failure prevented: the file is staged, and the daemon's
+// `rebase --abort` deletes it with the rest of the index; the next put
+// commits it instead.
+func TestWriteObservation_SurvivesARebaseAbort(t *testing.T) {
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	base := runGitInDir(t, dir, "rev-parse", "HEAD")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "README.md"), []byte("local"), 0o644))
+	runGitInDir(t, dir, "commit", "-qam", "local")
+	runGitInDir(t, dir, "checkout", "-qb", "upstream", base)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "README.md"), []byte("upstream"), 0o644))
+	runGitInDir(t, dir, "commit", "-qam", "upstream")
+	runGitInDir(t, dir, "checkout", "-q", "-")
+	cmd := exec.Command("git", "rebase", "upstream")
+	cmd.Dir = dir
+	require.Error(t, cmd.Run(), "the rebase must stop on the conflict")
+
+	require.Error(t, writeObservation(dir, []observation{{Content: "recorded mid-rebase"}}))
+	runGitInDir(t, dir, "rebase", "--abort")
+	file := findObservationFile(t, dir) // fails if the abort deleted it
+
+	require.NoError(t, writeObservation(dir, []observation{{Content: "next put"}}))
+	require.Empty(t, runGitInDir(t, dir, "status", "--porcelain", "--", "memory"), "the next put must commit the earlier observation too")
+	require.FileExists(t, file)
 }
 
 // ---------------------------------------------------------------------------

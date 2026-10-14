@@ -14,6 +14,7 @@ import (
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/manifest"
 	"github.com/sageox/ox/internal/tokens"
@@ -773,17 +774,20 @@ func repairTeamSparseCheckout(tcPath string) error {
 		return fmt.Errorf("no sparse paths computed from manifest")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	// under the repo lock: `git sparse-checkout set` rewrites the index, so a
+	// run outside it can fail an ox commit to this clone on index.lock
+	return gitutil.WithRepoLock(context.Background(), tcPath, func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
 
-	args := append([]string{"-C", tcPath, "sparse-checkout", "set", "--no-cone"}, sparsePaths...)
-	cmd := exec.CommandContext(ctx, "git", args...)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("git sparse-checkout set: %w: %s", err, strings.TrimSpace(string(output)))
-	}
-
-	return nil
+		args := append([]string{"-C", tcPath, "sparse-checkout", "set", "--no-cone"}, sparsePaths...)
+		cmd := exec.CommandContext(ctx, "git", args...)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("git sparse-checkout set: %w: %s", err, strings.TrimSpace(string(output)))
+		}
+		return nil
+	})
 }
 
 // runGitStatus runs git status --porcelain on a directory and returns the output.
