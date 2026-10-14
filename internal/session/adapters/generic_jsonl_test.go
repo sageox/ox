@@ -277,6 +277,7 @@ func TestGenericJSONLAdapter_AliasResolution(t *testing.T) {
 	Register(&mockAdapter{name: "aider"})
 	Register(&mockAdapter{name: "droid"})
 	Register(&mockAdapter{name: "goose"})
+	Register(&mockAdapter{name: "cursor"})
 
 	tests := []struct {
 		name     string
@@ -288,7 +289,7 @@ func TestGenericJSONLAdapter_AliasResolution(t *testing.T) {
 		{"Codex case-insensitive", "Codex", "codex", false},
 		{"amp resolves to amp", "amp", "amp", false},
 		{"Amp case-insensitive", "AMP", "amp", false},
-		{"cursor resolves to generic", "cursor", "generic", false},
+		{"cursor resolves to cursor", "cursor", "cursor", false},
 		{"windsurf resolves to generic", "windsurf", "generic", false},
 		{"copilot resolves to generic", "copilot", "generic", false},
 		{"aider resolves to aider", "aider", "aider", false},

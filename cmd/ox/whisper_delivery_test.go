@@ -101,6 +101,7 @@ func TestWhisperCanary_ModelReadsSystemReminder(t *testing.T) {
 	if v := strings.TrimSpace(strings.ToLower(os.Getenv("OX_LIVE_CANARY"))); v != "1" && v != "true" {
 		t.Skip("set OX_LIVE_CANARY=1 to run the live model canary")
 	}
+	useDeveloperHome(t) // the canary needs the developer's real, logged-in claude
 	claudeBin, err := exec.LookPath("claude")
 	if err != nil {
 		t.Skip("claude CLI not on PATH")

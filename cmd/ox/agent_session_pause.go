@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/session"
+	"github.com/sageox/ox/internal/session/adapters"
 )
 
 // sessionPauseOutput is the JSON output format for session pause.
@@ -76,7 +78,7 @@ func runAgentSessionPause(inst *agentinstance.Instance, _ []string) error {
 		pauseCount  int
 		sessionName string
 	)
-	if err := session.UpdateRecordingStateForAgent(projectRoot, inst.AgentID, func(s *session.RecordingState) {
+	if err := updateRecordingControl(projectRoot, state, session.LifecycleActionPause, func(s *session.RecordingState) {
 		seq = s.EntryCount
 		s.SuspendedAt = &now
 		s.PauseCount++
@@ -122,4 +124,25 @@ func emitPauseOutput(w io.Writer, output *sessionPauseOutput) error {
 		}
 	}
 	return cli.PrintJSONTo(w, output)
+}
+
+// Cursor controls share the watcher's short capture transaction, not its
+// lifetime raw-owner lock; other adapters keep the existing marker update.
+func updateRecordingControl(projectRoot string, state *session.RecordingState, action session.LifecycleAction, update func(*session.RecordingState)) error {
+	if state.AdapterName != "cursor" {
+		return session.UpdateRecordingStateForAgent(projectRoot, state.AgentID, update)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	adapter, err := adapters.GetAdapter("cursor")
+	if err != nil {
+		return err
+	}
+	reader, ok := adapter.(adapters.IncrementalReader)
+	if !ok {
+		return fmt.Errorf("adapter-missing: Cursor incremental reader is unavailable")
+	}
+	return session.UpdateCursorRecordingControl(context.Background(), projectRoot, state, home, reader, action, update)
 }

@@ -20,9 +20,21 @@ task. --cues N-M works even if that window has no frames or semantic points.
 Use --revision to pin immutable images and source words; an unavailable pin
 fails instead of returning newer text.
 
+Visual walkthroughs recorded with SageOx Desktop also return joined moments:
+what was said, the element under the pointer, what the screen did next, and a
+focus image, a zoomed crop around that element with the element outlined.
+Quiet and typing stretches come back as spans, navigations as pages, keyboard
+shortcuts the narrator chose to show as shortcuts, and chapters (one per page
+or topic) as chapters; --chapter "<title>" reads one chapter. When the
+recording has no such data, the standard evidence index is returned with a note
+saying so. A camera track, if the recording has one, is reported but never
+offered.
+
 --prepare explicitly creates immutable evidence for a legacy recording before
 its first pinned read. It returns a job receipt and spends server compute.
---fetch downloads only registered image references in the selected window.
+--fetch downloads only registered image references in the selected window:
+focus images for joined moments, keyframes otherwise. --overview also
+downloads each joined moment's whole-frame overview image (implies --fetch).
 --extract explicitly requests bounded server decoding with --revision and a
 cue/time window. It does not invoke a semantic model. Read its job receipt
 using --job; no raw video or local decoder is needed.
@@ -38,10 +50,11 @@ ox conversation walkthrough <id> [flags]
 ### Options
 
 ```
+      --chapter string    only this chapter of a Visual walkthrough, by title (see data.chapters); not with --cues/--from/--to
       --cues string       only moments in this inclusive 1-based cue range, N-M (or a single cue N)
       --cursor string     continue a revision-bound transcript page
       --extract           request bounded server frame extraction (no semantic model call)
-      --fetch             download only image references in the returned evidence window
+      --fetch             download only image references in the returned evidence window (focus images for joined moments)
       --format string     output format: json|text (default "json")
       --from string       window start on the media clock (hh:mm:ss[.mmm] or a duration like 3m12s)
   -h, --help              help for walkthrough
@@ -49,6 +62,7 @@ ox conversation walkthrough <id> [flags]
       --limit int         cap the number of moments returned (default 80)
       --max-frames int    maximum images for a server extraction request (1-8) (default 5)
       --max-width int     maximum extraction image width (320-4096); increase for unreadable detail (default 1280)
+      --overview          also download each joined moment's whole-frame overview image (implies --fetch)
       --prepare           explicitly prepare an immutable evidence revision for a legacy recording (bounded server work)
       --retry             explicitly retry a failed prepare/extract job within the server retry budget
       --revision string   read this exact immutable evidence revision; never substitute current text

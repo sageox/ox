@@ -1,0 +1,17 @@
+{
+  "conversation_id": "conversation-1",
+  "generation_id": "generation-1",
+  "model": "grok-4.6",
+  "command": "sh -c 'printf FIXTURE_TOOL_FAIL_A >&2; exit 7'",
+  "output": "FIXTURE_TOOL_FAIL_A",
+  "duration": 282.077,
+  "sandbox": true,
+  "session_id": "conversation-1",
+  "hook_event_name": "afterShellExecution",
+  "cursor_version": "3.20.21",
+  "workspace_roots": [
+    "<WORKSPACE>/.context/cursor-adapter/evidence/fixture-control-project"
+  ],
+  "user_email": "<USER_EMAIL>",
+  "transcript_path": "<HOME>/.cursor/projects/<CONTROL_PROJECT_KEY>/agent-transcripts/conversation-1/conversation-1.jsonl"
+}

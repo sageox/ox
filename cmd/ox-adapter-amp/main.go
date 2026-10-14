@@ -5,10 +5,12 @@
 //
 //  1. an AGENTS.md "ox prime" marker block so the model knows to run
 //     `ox agent prime` at session start, and
-//  2. a Bun plugin at ~/.config/amp/plugins/ox-bridge.ts (embedded via
-//     Go's embed package, installed user-globally so one plugin serves
-//     every project) that subscribes to Amp's plugin events and writes a
-//     per-thread JSONL sidecar to ~/.cache/amp/ox-sessions/<thread-id>.jsonl.
+//  2. a Bun plugin, ox-bridge.ts, in Amp's system plugin dir
+//     ($XDG_CONFIG_HOME/amp/plugins/, else ~/.config/amp/plugins/; see
+//     userBridgePluginPath). It is embedded via Go's embed package and
+//     installed user-globally so one plugin serves every project; it
+//     subscribes to Amp's plugin events and writes a per-thread JSONL
+//     sidecar to ~/.cache/amp/ox-sessions/<thread-id>.jsonl.
 //
 // The adapter discovers and tails those sidecar files via FindSession +
 // Serve. For pre-2026 Amp installs that wrote ~/.amp/sessions/*.jsonl

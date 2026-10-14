@@ -1,0 +1,6 @@
+{
+  "additional_context": "OX_CURSOR_START_CONTEXT=FIXTURE_MARKER_1",
+  "env": {
+    "OX_CURSOR_SESSION_MARKER": "FIXTURE_MARKER_4"
+  }
+}

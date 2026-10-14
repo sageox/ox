@@ -79,9 +79,10 @@ func handleInstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.InstallH
 	}
 
 	// User-global: ox-bridge.ts plugin. Installed once per machine
-	// regardless of which project triggered install-hooks — Amp loads
-	// ~/.config/amp/plugins/ for every session, so we don't need (and
-	// shouldn't) drop a plugin file into each repo.
+	// regardless of which project triggered install-hooks — Amp loads its
+	// system plugin dir for every session, so we don't need (and
+	// shouldn't) drop a plugin file into each repo. userBridgePluginPath
+	// decides where that dir is.
 	bridgePath, err := userBridgePluginPath()
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve plugin path: %w", err)

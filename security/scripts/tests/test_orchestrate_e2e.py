@@ -346,6 +346,28 @@ class OrchestrateE2ETest(unittest.TestCase):
         self.assertLessEqual(spent, 1.0 + 5 * 0.001 + 1e-9, self.explain(result))  # + the CLI's per-call overshoot
         self.assertIn("cost cap ($1.00) reached during the hunt phase", self.repo.output("FINDINGS.md"))
 
+    def test_rate_limit_stops_later_calls_and_keeps_the_findings(self):
+        """Quinn's subscription hits its rate limit mid-validation; the run stops calling, keeps both findings."""
+        self.assert_rate_limit_stops_the_run()
+
+    def test_rate_limit_with_no_subtype_still_stops_the_run(self):
+        """The same limit, reported without a subtype: the stop must survive the shell's field parsing."""
+        self.assert_rate_limit_stops_the_run(FAKE_RATE_LIMIT_NO_SUBTYPE="1")
+
+    def assert_rate_limit_stops_the_run(self, **env):
+        self.repo.plant_feature()
+        self.repo.install("claude", "golangci-lint")
+        result = self.repo.run("orchestrate.sh", FAKE_DAEMON_FINDING="1", FAKE_RATE_LIMIT_ROLE="validator", **env)
+
+        # Two findings reach validation. The CLI already retried the first call with
+        # backoff, so the run must not send the second one into the same limit.
+        self.assertEqual(len(self.repo.calls("validator")), 1, self.explain(result))
+        report = self.repo.output("FINDINGS.md")
+        self.assertIn(f"{FINDING_TITLE} (UNVALIDATED)", report, "a rate-limited run keeps its findings")
+        self.assertIn("Claude rate or usage limit hit during the validation phase", report, self.explain(result))
+        self.assertEqual(report.count("Claude rate or usage limit reached before validation"), 2, report)
+        self.assertEqual(result.returncode, 1, self.explain(result))
+
     def test_scanner_findings_reach_the_report(self):
         """A gosec hit in a touched file is listed in FINDINGS.md and the SARIF."""
         self.repo.plant_feature()

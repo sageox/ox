@@ -1,0 +1,16 @@
+{
+  "conversation_id": "conversation-1",
+  "generation_id": "generation-1",
+  "model": "grok-4.6",
+  "command": "printf 'FIXTURE_TOOL_OK_A\\n'",
+  "cwd": "",
+  "sandbox": true,
+  "session_id": "conversation-1",
+  "hook_event_name": "beforeShellExecution",
+  "cursor_version": "3.20.21",
+  "workspace_roots": [
+    "<WORKSPACE>/.context/cursor-adapter/evidence/fixture-control-project"
+  ],
+  "user_email": "<USER_EMAIL>",
+  "transcript_path": null
+}

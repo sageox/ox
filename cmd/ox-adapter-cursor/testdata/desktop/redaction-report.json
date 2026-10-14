@@ -1,0 +1,12 @@
+{
+  "source_file_count": 126,
+  "candidate_file_count": 126,
+  "aliases": {
+    "conversation": 3,
+    "generation": 5,
+    "tool_use": 3,
+    "markers": 4
+  },
+  "redaction_scan": "passed: no personal paths, authenticated email, or raw personal identifiers",
+  "reproducibility": "rerun this script; output is regenerated from immutable capture inputs"
+}
