@@ -713,7 +713,12 @@ func TestBrowser_ReviewClicksWaitForDiagrams(t *testing.T) {
 	if earlyNote {
 		t.Fatal("a click before the diagram drew opened a note: its mark would anchor on the diagram's source")
 	}
-	if err := chromedp.Run(ctx, chromedp.Poll(click, &lateNote, chromedp.WithPollingTimeout(10*time.Second))); err != nil || !lateNote {
+	// the diagram draws at 2 s, well before the 5 s fallback, so the click
+	// below proves the draw lifted the wait, not the fallback
+	if err := chromedp.Run(ctx, chromedp.WaitReady(".mermaid > svg", chromedp.ByQuery)); err != nil {
+		t.Fatalf("the diagram never drew: %v", err)
+	}
+	if err := chromedp.Run(ctx, chromedp.Poll(click, &lateNote, chromedp.WithPollingTimeout(2*time.Second))); err != nil || !lateNote {
 		t.Fatalf("a click after the diagram drew never opened a note: note=%v err=%v", lateNote, err)
 	}
 }
