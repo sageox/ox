@@ -386,9 +386,17 @@ func TestSave_ReadMergePreservesLifecycle(t *testing.T) {
 		t.Fatalf("Save v1: %v", err)
 	}
 
-	// human marks implemented; stop reconciles the session outcome.
-	if err := SetStatus("/g", "my-plan", PlanStatusImplemented); err != nil {
-		t.Fatalf("SetStatus: %v", err)
+	// a status written to meta.json alone (as releases before the event log
+	// did); stop reconciles the session outcome.
+	dir, err := resolvePlanDirForSlug("/g", "my-plan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := MutatePlanMeta(context.Background(), dir, func(m *Meta) (*Meta, error) {
+		m.Status = PlanStatusImplemented
+		return m, nil
+	}); err != nil {
+		t.Fatalf("mark implemented: %v", err)
 	}
 	if err := ReconcileSessionOutcome("/g", "my-plan", "ses_abc", SessionOutcomeStopped); err != nil {
 		t.Fatalf("ReconcileSessionOutcome: %v", err)
@@ -531,10 +539,13 @@ func TestSave_ExplicitSlugAndSupersededAreRespected(t *testing.T) {
 	gitRoot := "/g"
 	src := "/tmp/page.html"
 
-	dead := Meta{Topic: "Old", Slug: "old-plan", SourcePlanPath: src,
-		Status: PlanStatusSuperseded}
-	if _, _, err := Save(gitRoot, Input{}, Result{}, nil, dead); err != nil {
-		t.Fatalf("save superseded: %v", err)
+	dead := Meta{Topic: "Old", Slug: "old-plan", SourcePlanPath: src}
+	deadDir, _, err := Save(gitRoot, Input{}, Result{}, nil, dead)
+	if err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if _, err := AppendPlanEvent(context.Background(), deadDir, EventSuperseded, PlanEventFields{SupersededBy: "new-take"}); err != nil {
+		t.Fatalf("supersede: %v", err)
 	}
 	fresh := Meta{Topic: "New take", SourcePlanPath: src}
 	if _, _, err := Save(gitRoot, Input{}, Result{}, nil, fresh); err != nil {
@@ -543,6 +554,37 @@ func TestSave_ExplicitSlugAndSupersededAreRespected(t *testing.T) {
 	infos, _ := List(gitRoot)
 	if len(infos) != 2 {
 		t.Fatalf("a superseded plan was revived: got %d plans, want 2", len(infos))
+	}
+}
+
+// TestSave_ResaveSkipsAPlanItsHistoryCloses: a plan its event log says is
+// abandoned, whose meta.json snapshot still says draft (a snapshot left
+// behind after two clones raced), is not revised by a re-save from the same
+// source. Failure prevented: a deliberately closed plan is silently reopened
+// because the re-save trusted the snapshot over the plan's history.
+func TestSave_ResaveSkipsAPlanItsHistoryCloses(t *testing.T) {
+	withLedger(t, t.TempDir())
+	ctx := context.Background()
+	gitRoot := "/g"
+	src := "/tmp/dropped.html"
+	dir, _, err := Save(gitRoot, Input{}, Result{}, nil, Meta{Topic: "Dropped", SourcePlanPath: src})
+	if err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if _, err := AppendPlanEvent(ctx, dir, EventAbandoned, PlanEventFields{Reason: "dropped"}); err != nil {
+		t.Fatalf("abandon: %v", err)
+	}
+	if err := MutatePlanMeta(ctx, dir, func(m *Meta) (*Meta, error) {
+		m.Status = PlanStatusDraft
+		return m, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Save(gitRoot, Input{}, Result{}, nil, Meta{Topic: "Next take", SourcePlanPath: src}); err != nil {
+		t.Fatalf("re-save: %v", err)
+	}
+	if infos, _ := List(gitRoot); len(infos) != 2 {
+		t.Fatalf("the abandoned plan was reopened: got %d plans, want 2", len(infos))
 	}
 }
 

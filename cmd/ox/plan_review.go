@@ -560,8 +560,7 @@ func liveReviewHandlerWithActivity(gitRoot, slug, planDir, base, token string, b
 		// changed is only used to gate the best-effort activity notify below;
 		// the response here always reports success regardless of its value —
 		// an already-approved plan re-approving via a stale/duplicate click
-		// must still report success, matching SetStatus's prior
-		// always-succeeds contract.
+		// must still report success.
 		changed, st, err := approvePlanForReview(ctx, gitRoot, planDir, planEventFieldsFromProvenance(gitRoot))
 		if errors.Is(err, errLedgerNotSafe) {
 			return nil, http.StatusServiceUnavailable, err

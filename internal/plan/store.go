@@ -278,7 +278,9 @@ func priorSaveOfSource(ledger, sourcePath string) (string, Meta, bool) {
 		if err != nil || m.SourcePlanPath != sourcePath {
 			continue
 		}
-		if isClosedStatus(m.Status) {
+		// the folded status, as every closed-plan check here: meta.json's
+		// snapshot can lag the event log after two clones race
+		if isClosedStatus(CurrentStatus(dir)) {
 			continue
 		}
 		// Most recent wins when a source path has been saved more than once.
@@ -846,22 +848,6 @@ func MutatePlanMeta(ctx context.Context, planDir string, mutate func(*Meta) (*Me
 			return fmt.Errorf("marshal plan meta: %w", err)
 		}
 		return fileutil.AtomicWriteBytes(metaPath, data, 0o644)
-	})
-}
-
-// SetStatus updates a saved plan's lifecycle status (by slug) under the meta
-// flock. No-op if the plan dir has no meta.json. Use the PlanStatus* constants.
-func SetStatus(gitRoot, slug string, status PlanStatus) error {
-	dir, err := resolvePlanDirForSlug(gitRoot, slug)
-	if err != nil {
-		return err
-	}
-	return MutatePlanMeta(context.Background(), dir, func(m *Meta) (*Meta, error) {
-		if m == nil {
-			return nil, nil
-		}
-		m.Status = status
-		return m, nil
 	})
 }
 
