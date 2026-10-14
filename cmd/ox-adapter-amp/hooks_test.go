@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,41 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// TestMain points the home directory at a throwaway sandbox for the whole
+// package. handleInstallHooks writes the bridge plugin user-globally, so a test
+// that forgets t.Setenv("HOME", ...) would otherwise overwrite the developer's
+// real ox-bridge.ts in Amp's plugin dir with whatever branch is under test.
+// Failure prevented: `make test` silently replacing a working Amp install.
+func TestMain(m *testing.M) {
+	sandbox, err := os.MkdirTemp("", "ox-adapter-amp-home-")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ox-adapter-amp tests: cannot create home sandbox: %v\n", err)
+		os.Exit(1)
+	}
+	// USERPROFILE is what os.UserHomeDir reads on Windows.
+	_ = os.Setenv("HOME", sandbox)
+	_ = os.Setenv("USERPROFILE", sandbox)
+	// The plugin follows XDG_CONFIG_HOME ahead of HOME. Unset rather than point
+	// into the sandbox, so each test's t.Setenv("HOME", ...) still gives it a
+	// plugin dir of its own; tests that need XDG_CONFIG_HOME set it themselves.
+	_ = os.Unsetenv("XDG_CONFIG_HOME")
+
+	// Fail fast, before any test runs, if the redirect did not take on this
+	// platform: the bridge plugin must resolve inside the sandbox.
+	bridge, err := userBridgePluginPath()
+	if err != nil || !strings.HasPrefix(bridge, sandbox+string(filepath.Separator)) {
+		fmt.Fprintf(os.Stderr,
+			"ox-adapter-amp tests: bridge plugin resolves to %q (err=%v), outside home sandbox %s; refusing to run\n",
+			bridge, err, sandbox)
+		_ = os.RemoveAll(sandbox)
+		os.Exit(1)
+	}
+
+	code := m.Run()
+	_ = os.RemoveAll(sandbox)
+	os.Exit(code)
+}
 
 // TestAmpMarkers_AreUniqueToAmp guards the #527 fix: Amp must not share
 // marker strings with Pi (both write AGENTS.md). A shared marker causes
@@ -28,6 +64,8 @@ func TestAmpMarkers_AreUniqueToAmp(t *testing.T) {
 
 func TestAmpInstall_IdempotentForCurrentMarker(t *testing.T) {
 	dir := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+
 	_, err := handleInstallHooks(adapterprotocol.HookParams{RepoRoot: dir, Scope: "project"})
 	require.NoError(t, err)
 	_, err = handleInstallHooks(adapterprotocol.HookParams{RepoRoot: dir, Scope: "project"})
@@ -43,6 +81,7 @@ func TestAmpInstall_IdempotentForCurrentMarker(t *testing.T) {
 // block alongside the legacy one.
 func TestAmpInstall_IdempotentForLegacyMarker(t *testing.T) {
 	dir := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
 	agentsPath := filepath.Join(dir, "AGENTS.md")
 
 	seed := ampLegacyPrimeMarkerStart + "\nold block\n" + ampLegacyPrimeMarkerEnd + "\n"

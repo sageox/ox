@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -23,6 +24,13 @@ import (
 // writeRawHeader writes the metadata header line to raw.jsonl so that
 // incremental hooks can append entries after it. Called at session start.
 func writeRawHeader(projectRoot string, state *session.RecordingState) error {
+	return writeRawHeaderWithAttribution(projectRoot, state, nil)
+}
+
+// Cursor prepares attribution before prompt admission's lock: resolving the
+// local Git identity can run a subprocess, while header publication must stay
+// within the native prompt hook's short deadline.
+func writeRawHeaderWithAttribution(projectRoot string, state *session.RecordingState, attribution *identity.Attribution) error {
 	if state.SessionPath == "" {
 		return fmt.Errorf("session path is empty")
 	}
@@ -31,6 +39,12 @@ func writeRawHeader(projectRoot string, state *session.RecordingState) error {
 
 	projectEndpoint := endpoint.GetForProject(projectRoot)
 	repoID := getRepoIDOrDefault(projectRoot)
+	username := ""
+	if attribution != nil {
+		username = attribution.DisplayName
+	} else {
+		username = identity.AttributionDisplayName(projectEndpoint, config.GetDisplayName())
+	}
 
 	agentTypeForMeta := adapters.CanonicalAdapterName(state.AgentType)
 	if agentTypeForMeta == "" {
@@ -45,15 +59,18 @@ func writeRawHeader(projectRoot string, state *session.RecordingState) error {
 		ContinuedFromSessionID: state.ContinuedFromSessionID,
 		AgentType:              agentTypeForMeta,
 		Model:                  state.Model,
-		Username:               identity.AttributionDisplayName(projectEndpoint, config.GetDisplayName()),
+		Username:               username,
 		RepoID:                 repoID,
 		OxVersion:              version.Version,
 		NativeSessions:         state.NativeSessions,
 		TraceCapture:           state.Trace,
 	}
 
-	// enrich with adapter metadata if available
-	if state.SessionFile != "" {
+	// Cursor's supported JSONL export has no model/version metadata. Its
+	// external ReadMetadata only parses the source and returns empty fields;
+	// spawning it here can exceed prompt admission's deadline for no metadata.
+	// Cursor startup already validates its native source before publication.
+	if state.SessionFile != "" && adapters.CanonicalAdapterName(state.AdapterName) != "cursor" {
 		adapter, err := adapters.GetAdapter(state.AdapterName)
 		if err == nil {
 			if sessionMeta, _ := adapter.ReadMetadata(state.SessionFile); sessionMeta != nil {
@@ -97,8 +114,31 @@ func writeRawHeader(projectRoot string, state *session.RecordingState) error {
 // by hooks. Does a final drain from the source file, then generates events,
 // and summary artifacts from the already-written raw.jsonl.
 func finalizeIncrementalSession(projectRoot string, state *session.RecordingState, rawPath string, adapter adapters.Adapter, result *agentSessionResult) (*agentSessionResult, error) {
+	if state.AdapterName == "cursor" {
+		reader, ok := adapter.(adapters.IncrementalReader)
+		if !ok {
+			return nil, fmt.Errorf("adapter-missing: Cursor incremental reader is unavailable")
+		}
+		// The stop path owns these in-memory values. Its best-effort marker
+		// checkpoint may have failed, while FinalizeCursorCapture necessarily
+		// reloads the older marker to advance Cursor's durable source cursor.
+		// Keep the authoritative stop boundary across that refresh.
+		stopTrace := state.Trace
+		stopRequestedAt := state.StoppedAt
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil, err
+		}
+		latest, err := session.FinalizeCursorCapture(context.Background(), projectRoot, state.SessionPath, home, reader)
+		if err != nil {
+			return nil, err
+		}
+		latest.Trace = stopTrace
+		latest.StoppedAt = stopRequestedAt
+		state = latest
+	}
 	// final drain: read any remaining entries since last hook
-	if reader, ok := adapter.(adapters.IncrementalReader); ok && state.SessionFile != "" {
+	if reader, ok := adapter.(adapters.IncrementalReader); ok && state.SessionFile != "" && state.AdapterName != "cursor" {
 		// use StartOffset as minimum read position to skip pre-session content
 		readOffset := state.SourceOffset
 		if state.StartOffset > 0 && readOffset < state.StartOffset {

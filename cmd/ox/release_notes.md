@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### New
+
+- **Read a Visual walkthrough as joined moments** — `ox walkthrough` pairs each click, selection and pause with what was said and what happened next, shows zoomed pictures on request, and splits long recordings into chapters you can read one at a time. Recordings without this data read as before.
+
 ### Fixed
 
 - **Plan review feedback reaches your team without taking anything else along** — each round, Accept, Reopen, or `ox plan feedback resolve` is committed on its own, so a plan someone is still editing never ships with it. A failed push is retried for exactly that feedback until the team's Ledger holds it, and "synced" now means the team's copy was checked. Sending the same feedback twice stores it once; reusing its id for different marks is refused instead of reported as saved.

@@ -12,7 +12,6 @@ You are orchestrating a [Synthesia-style 6-phase security review](https://www.sy
 - `/security-review` (no args) — review the diff vs `origin/main`. Default.
 - `/security-review --scope=<path-glob>` — narrow to a specific path.
 - `/security-review --hunter=<name>` — run only one hunter (debug). Valid names: `cli-input`, `secrets-redaction`, `daemon-ipc`, `supply-chain`, `llm-trust`.
-- `/security-review --rerun` — re-run on the same diff, dedupe against the previous run's findings.
 - `/security-review --cap=<usd>` — raise the per-run cost cap (default $8; persisted in `security/config.yml`).
 
 ## What you do
@@ -44,7 +43,7 @@ Show the user, coverage first:
 4. The path to the full report: `security/.output/FINDINGS.md`.
 5. The cost: the SUMMARY block's `cost:` line.
 
-Exit codes: `0` every stage that ran completed · `1` a stage failed · `2` the cost cap stopped the AI phases · `3` NO COVERAGE.
+Exit codes: `0` every stage that ran completed · `1` a stage failed, or a Claude rate or usage limit stopped the AI phases · `2` the cost cap stopped the AI phases · `3` NO COVERAGE.
 
 Do not paste the full FINDINGS.md into the chat — it can be hundreds of lines. Summarize, link. Keep the summary under 120 words.
 
@@ -53,6 +52,7 @@ Do not paste the full FINDINGS.md into the chat — it can be hundreds of lines.
 - On-demand runs (this skill) via Claude Code subsidized tokens are effectively $0 marginal. The cost cap still applies as a budget signal, not a billing limit: spend is the `total_cost_usd` each subagent call reports, including calls stopped at the cap. `CC_SUBSIDIZED=1` keeps the tally but stops enforcing the cap.
 - If `ANTHROPIC_API_KEY` is unset and `CC_SUBSIDIZED` is not set, the AI tier won't run. Surface this with: "AI tier disabled (no `ANTHROPIC_API_KEY` and not running under Claude Code). Run `make sec-fast` for the deterministic-only pass."
 - If a run hits the cap mid-pipeline, the remaining AI calls are skipped, findings not yet validated are kept and marked `UNVALIDATED`, and `FINDINGS.md` names the phase that paused (exit 2). Re-run with `--cap=<higher>`, or accept the partial report.
+- If a subagent call ends on a Claude rate or usage limit, the CLI has already retried it with backoff, so the pipeline sends no more AI calls: the rest are skipped the same way, findings stay `UNVALIDATED`, and `FINDINGS.md` names the phase (exit 1). Re-run once the limit resets.
 
 ## Sensitive paths (auto-elevate severity, always in scope)
 

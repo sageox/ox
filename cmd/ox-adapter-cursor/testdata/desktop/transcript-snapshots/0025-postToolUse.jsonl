@@ -1,0 +1,1 @@
+{"role":"user","message":{"content":[{"type":"text","text":"<timestamp>Monday, Sep 14, 2026, 11:55 AM (UTC-7)</timestamp>\n<user_query>\nThis is CHAT-DELAY.\n\nRun only this shell command:\nsh -c 'sleep 3; printf FIXTURE_DELAYED_OK'\n\nThen reply exactly FINAL_DELAY_NO_TOOL without another tool call.\n</user_query>"}]}}

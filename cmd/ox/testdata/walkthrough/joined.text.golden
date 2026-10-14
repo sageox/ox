@@ -1,0 +1,38 @@
+Settings walkthrough
+window: Google Chrome · Pricing · Acme (1543x1049)
+screen data: 4 keyframes (4 described, 0 downloaded), pointer layer, ax-tree layer, video 00:04:12.000, cleaned narration audio, camera track (not offered)
+[1] 00:00:00.000 Welcome to the pricing page review.
+[2] 00:00:05.000 First the layout.
+[3] 00:00:10.000 Then the plan names.
+[4] 00:00:15.000 Then the footer.
+[5] 00:00:20.000 Now a few details.
+[6] 00:00:30.000 Starting with the header.
+[7] 00:00:39.500 So when I land here, make this bigger.
+[8] 00:01:34.000 And this line should say billing instead.
+[9] 00:01:59.000 Look at how crowded this table is.
+[10] 00:02:30.000 Searching for a plan.
+[11] 00:03:19.000 These two plans should match.
+── Pricing  00:00:00  acme.example/pricing
+00:00:01  page  "Pricing · Acme" https://acme.example/pricing
+00:00:41  [7]  click  button "Start free trial"   cursor: pointing-hand
+      said:   "So when I land here, make this bigger."
+      focus:  ox walkthrough cnv_019ffe10-0000-7000-8000-000000000011 --from 00:00:41.000 --to 00:00:41.000 --fetch
+      then:   sheet "Start your trial" 0.4 s later
+── Checkout  00:00:41  acme.example/checkout
+00:00:41  page  "Checkout · Acme" https://acme.example/checkout
+00:00:52–00:01:30  quiet   38 s, nothing said, pointer still
+00:01:01  shortcut  ⌘K ×2
+00:01:35  [8]  selection  "Annual billing saves 20%"
+      said:   "And this line should say billing instead."
+      focus:  ox walkthrough cnv_019ffe10-0000-7000-8000-000000000011 --from 00:01:35.210 --to 00:01:35.210 --fetch
+── Plan comparison  00:02:00
+00:02:00  [9]  dwell  in "Plan comparison"   cursor: arrow
+      said:   "Look at how crowded this table is."
+      focus:  ox walkthrough cnv_019ffe10-0000-7000-8000-000000000011 --from 00:02:00.000 --to 00:02:00.000 --fetch
+00:02:05  shortcut  Esc
+00:02:10–00:02:24  typing  14 s, typing in text field "Search plans"
+00:02:30  focus-change  text field "Search plans"
+00:03:20  [11]  click  "Pro plan", "Team plan" +1   cursor: pointing-hand
+      said:   "These two plans should match."
+      focus:  ox walkthrough cnv_019ffe10-0000-7000-8000-000000000011 --from 00:03:20.000 --to 00:03:20.000 --fetch
+      then:   screen changed (top-right) 0.7 s later

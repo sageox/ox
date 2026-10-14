@@ -29,9 +29,21 @@ task. --cues N-M works even if that window has no frames or semantic points.
 Use --revision to pin immutable images and source words; an unavailable pin
 fails instead of returning newer text.
 
+Visual walkthroughs recorded with SageOx Desktop also return joined moments:
+what was said, the element under the pointer, what the screen did next, and a
+focus image, a zoomed crop around that element with the element outlined.
+Quiet and typing stretches come back as spans, navigations as pages, keyboard
+shortcuts the narrator chose to show as shortcuts, and chapters (one per page
+or topic) as chapters; --chapter "<title>" reads one chapter. When the
+recording has no such data, the standard evidence index is returned with a note
+saying so. A camera track, if the recording has one, is reported but never
+offered.
+
 --prepare explicitly creates immutable evidence for a legacy recording before
 its first pinned read. It returns a job receipt and spends server compute.
---fetch downloads only registered image references in the selected window.
+--fetch downloads only registered image references in the selected window:
+focus images for joined moments, keyframes otherwise. --overview also
+downloads each joined moment's whole-frame overview image (implies --fetch).
 --extract explicitly requests bounded server decoding with --revision and a
 cue/time window. It does not invoke a semantic model. Read its job receipt
 using --job; no raw video or local decoder is needed.
@@ -55,7 +67,9 @@ type conversationWalkthroughFlags struct {
 	Revision   string
 	Cursor     string
 	Transcript bool
+	Chapter    string
 	Fetch      bool
+	Overview   bool
 	Extract    bool
 	Prepare    bool
 	Retry      bool
@@ -84,10 +98,12 @@ func registerConversationWalkthroughFlags(cmd *cobra.Command, f *conversationWal
 	cmd.Flags().StringVar(&f.Cues, "cues", "", "only moments in this inclusive 1-based cue range, N-M (or a single cue N)")
 	cmd.Flags().StringVar(&f.From, "from", "", "window start on the media clock (hh:mm:ss[.mmm] or a duration like 3m12s)")
 	cmd.Flags().StringVar(&f.To, "to", "", "window end on the media clock (same forms as --from)")
+	cmd.Flags().StringVar(&f.Chapter, "chapter", "", "only this chapter of a Visual walkthrough, by title (see data.chapters); not with --cues/--from/--to")
 	cmd.Flags().StringVar(&f.Revision, "revision", "", "read this exact immutable evidence revision; never substitute current text")
 	cmd.Flags().StringVar(&f.Cursor, "cursor", "", "continue a revision-bound transcript page")
 	cmd.Flags().BoolVar(&f.Transcript, "transcript", false, "read source transcript cues, including cues with no images")
-	cmd.Flags().BoolVar(&f.Fetch, "fetch", false, "download only image references in the returned evidence window")
+	cmd.Flags().BoolVar(&f.Fetch, "fetch", false, "download only image references in the returned evidence window (focus images for joined moments)")
+	cmd.Flags().BoolVar(&f.Overview, "overview", false, "also download each joined moment's whole-frame overview image (implies --fetch)")
 	cmd.Flags().BoolVar(&f.Retry, "retry", false, "explicitly retry a failed prepare/extract job within the server retry budget")
 	cmd.Flags().BoolVar(&f.Prepare, "prepare", false, "explicitly prepare an immutable evidence revision for a legacy recording (bounded server work)")
 	cmd.Flags().BoolVar(&f.Extract, "extract", false, "request bounded server frame extraction (no semantic model call)")
@@ -118,6 +134,9 @@ func runConversationWalkthrough(cmd *cobra.Command, args []string) error {
 	if selErr != nil {
 		return conversationUsageExit(cmd.OutOrStdout(), format, read.ErrCodeInvalidSelector, selErr.Error())
 	}
+	if flags.Chapter != "" && (sel.CueFirst != 0 || sel.HasWindow) {
+		return conversationUsageExit(cmd.OutOrStdout(), format, read.ErrCodeInvalidSelector, "--chapter is its own window; do not combine it with --cues, --from or --to")
+	}
 	opts := read.WalkthroughOptions{
 		CueFirst: sel.CueFirst, CueLast: sel.CueLast,
 		FromOffset: sel.FromOffset, ToOffset: sel.ToOffset, HasWindow: sel.HasWindow,
@@ -133,7 +152,7 @@ func runConversationWalkthrough(cmd *cobra.Command, args []string) error {
 		return finishConversationEnvelope(cmd.OutOrStdout(), format, read.ErrorEnvelope(shareErr), nil)
 	}
 	if flags.Extract || flags.Prepare || flags.Job != "" {
-		if flags.Fetch || flags.Transcript || flags.Cursor != "" || flags.Extract && flags.Job != "" || flags.Prepare && (flags.Extract || flags.Job != "" || flags.Revision != "" || opts.CueFirst != 0 || opts.HasWindow) {
+		if flags.Fetch || flags.Overview || flags.Chapter != "" || flags.Transcript || flags.Cursor != "" || flags.Extract && flags.Job != "" || flags.Prepare && (flags.Extract || flags.Job != "" || flags.Revision != "" || opts.CueFirst != 0 || opts.HasWindow) {
 			return conversationUsageExit(cmd.OutOrStdout(), format, read.ErrCodeInvalidSelector, "--prepare, --extract and --job are separate operations; prepare takes no revision/window and none accepts read/fetch modes")
 		}
 		if flags.Extract && (flags.Revision == "" || flags.MaxFrames < 1 || flags.MaxFrames > 8 || flags.MaxWidth < 320 || flags.MaxWidth > 4096 || opts.CueFirst == 0 && !opts.HasWindow) {
@@ -141,10 +160,46 @@ func runConversationWalkthrough(cmd *cobra.Command, args []string) error {
 		}
 		return finishConversationEnvelope(cmd.OutOrStdout(), format, walkthroughRecovery(cmd, idArg, flags, opts), renderWalkthroughJob)
 	}
-	env := reader.Walkthrough(idArg, opts)
-	if flags.Fetch && env.Success {
+	// The first read checks that the checkout can serve this id, before any
+	// network call. A transcript cursor is bound to its window, and a chapter
+	// only sets that window after the playback lookup below, so with --chapter
+	// the first read leaves the cursor out; the read after the lookup checks it
+	// against the chapter's window.
+	probe := opts
+	if flags.Chapter != "" {
+		probe.Cursor = ""
+	}
+	env := reader.Walkthrough(idArg, probe)
+	// Transcript pages are source words only, so they skip the playback lookup,
+	// except that a chapter is looked up in the playback data and so needs it
+	// even on a transcript page.
+	if env.Success && (flags.Chapter != "" || !flags.Transcript && flags.Cursor == "") {
+		playback, note := loadWalkthroughPlayback(conversationContext(cmd), idArg)
+		reread := false
+		if flags.Chapter != "" {
+			from, to, chapterErr := resolveWalkthroughChapter(playback, note, flags.Chapter)
+			if chapterErr != nil {
+				return finishConversationEnvelope(cmd.OutOrStdout(), format, read.ErrorEnvelope(chapterErr), nil)
+			}
+			opts.FromOffset, opts.ToOffset, opts.HasWindow = from, to, true
+			opts.Chapter = flags.Chapter
+			reread = true
+		}
+		if !flags.Transcript && flags.Cursor == "" && (playback != nil || note != "") {
+			opts.Playback, opts.PlaybackNote = playback, note
+			reread = true
+		}
+		if reread {
+			env = reader.Walkthrough(idArg, opts)
+		}
+	}
+	if (flags.Fetch || flags.Overview) && env.Success {
 		if data, ok := env.Data.(*read.WalkthroughData); ok {
-			warnings := fetchWalkthroughImages(conversationContext(cmd), data)
+			ctx := conversationContext(cmd)
+			// Joined moments carry no keyframe refs, so exactly one of these
+			// two does any work and the shared budget holds.
+			warnings := fetchWalkthroughImages(ctx, data)
+			warnings = append(warnings, fetchPlaybackImages(ctx, data, flags.Overview)...)
 			env = reader.Walkthrough(idArg, opts)
 			env.Warnings = append(env.Warnings, warnings...)
 		}
@@ -197,7 +252,14 @@ func renderConversationWalkthroughText(w io.Writer, env *read.Envelope) {
 	if len(d.Moments) == 0 {
 		fmt.Fprintln(w, "(no moments in the requested window)")
 	}
-	for _, m := range d.Moments {
+	legacy := d.Moments
+	if d.Joined {
+		// Joined moments print as one timeline with the spans and pages around
+		// them, not in the keyframe/pointer line format below.
+		renderWalkthroughTimeline(w, d, true)
+		legacy = nil
+	}
+	for _, m := range legacy {
 		locator := m.At
 		if m.Cue > 0 {
 			locator += fmt.Sprintf(" [%d]", m.Cue)
@@ -211,6 +273,11 @@ func renderConversationWalkthroughText(w io.Writer, env *read.Envelope) {
 				fmt.Fprintf(w, "%s%s %s\n", strings.Repeat(" ", 30), cli.StyleDim.Render("fetch:"), f.FetchCommand)
 			}
 		}
+	}
+	if !d.Joined {
+		// Spans and pages exist only with playback data; a recording whose
+		// playback joined no moments still has them.
+		renderWalkthroughTimeline(w, d, false)
 	}
 	outside := "window"
 	if d.Target != nil && d.Target.Kind == "area" {
@@ -235,6 +302,12 @@ func walkthroughSourcesLine(d *read.WalkthroughData) string {
 	}
 	if d.Duration != "" {
 		parts = append(parts, "video "+d.Duration)
+	}
+	if d.Sources.Audio {
+		parts = append(parts, "cleaned narration audio")
+	}
+	if d.Sources.Camera {
+		parts = append(parts, "camera track (not offered)")
 	}
 	if len(parts) == 0 {
 		return "screen data: none"

@@ -1,0 +1,3 @@
+{"role":"user","message":{"content":[{"type":"text","text":"<timestamp>Monday, Sep 14, 2026, 11:50 AM (UTC-7)</timestamp>\n<user_query>\nThis is CHAT-B.\n\nWithout using tools or reading files, report the exact OX_CURSOR_START_CONTEXT value already in your context. If absent, say absent; do not infer it.\n\nEnd your reply with FINAL_B_NO_TOOL.\n</user_query>"}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"OX_CURSOR_START_CONTEXT=FIXTURE_MARKER_1\nFINAL_B_NO_TOOL"}]}}
+{"type":"turn_ended","status":"success"}

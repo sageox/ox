@@ -103,6 +103,16 @@ adapters:
     capabilities: [session_reader, hook_installer, skills_installer, incremental_reader, serve_mode, session_importer, capture_prior]
     detect_commands: [goose]
 
+  - name: cursor
+    display_name: Cursor Agents Window
+    description: Reads Cursor Agents Window JSONL sessions and installs native hooks
+    type: session
+    bundled: true
+    binary: ox-adapter-cursor
+    repo: sageox/ox
+    capabilities: [session_reader, hook_installer, incremental_reader, serve_mode]
+    detect_commands: [cursor]
+
   # --- External (non-bundled) adapters ---
   #
   # SECURITY (ADR-022, ox-5ihl): the short-name install path treats SageOx as the
@@ -121,16 +131,6 @@ adapters:
   # `ox adapter install <name>` for these FAILS CLOSED and requires
   # --allow-unverified. This is the intended, documented transition — populating
   # tag + checksums here restores frictionless install.
-  - name: cursor
-    display_name: Cursor
-    description: Reads Cursor sessions
-    type: session
-    bundled: false
-    binary: ox-adapter-cursor
-    repo: sageox/ox-adapters
-    capabilities: [session_reader, incremental_reader]
-    detect_commands: [cursor]
-
   - name: windsurf
     display_name: Windsurf
     description: Reads Windsurf sessions

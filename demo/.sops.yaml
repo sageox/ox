@@ -1,14 +1,13 @@
 # SOPS configuration for demo secrets
 #
-# Same recipients as sageox-monorepo (its ADR-217): the everyday SageOx KMS key,
-# two offline break-glass keys, and the old shared age key until it is retired.
+# Same recipients as sageox-monorepo (its ADR-217): the everyday SageOx KMS key
+# and two offline break-glass keys. The old shared age key is retired.
 #
 # Setup: log in with your SageOx AWS profile (AdministratorAccess on account
 # 824122457598) and select it for sops:
 #   aws sso login --profile <your sageox profile>
 #   export AWS_PROFILE=<your sageox profile>
-# Encrypting a new file always needs that KMS access. Decrypting still works with
-# the old age key (~/.config/sops/age/keys.txt) until it is retired.
+# Encrypting and decrypting both need that KMS access.
 #
 # Usage:
 #   Encrypt: sops -e --filename-override credentials.sops.yaml credentials.yaml > credentials.sops.yaml
@@ -18,4 +17,4 @@
 creation_rules:
   - path_regex: .*\.sops\.yaml$
     kms: arn:aws:kms:us-west-2:824122457598:key/9cba0596-0c4f-4a04-b32a-44352ca7f3ab
-    age: age1wuz203ect95vc29wrt8myk90qwljkt9vga7kg9j2tjhstmk5quzsyyrx58,age16kjzfgzf5ujandrjqfd6ngld7mjn9jyyqen4g9fx26ncj48tas9qau92pw,age178wh4th3zfavgttz84ufxx2dyqh8ttuq4umru7z9nkntzy37a5psajyeg6
+    age: age16kjzfgzf5ujandrjqfd6ngld7mjn9jyyqen4g9fx26ncj48tas9qau92pw,age178wh4th3zfavgttz84ufxx2dyqh8ttuq4umru7z9nkntzy37a5psajyeg6

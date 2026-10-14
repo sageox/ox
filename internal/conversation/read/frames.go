@@ -343,7 +343,11 @@ func keyframeImagePath(droot *os.Root, name string) (string, bool) {
 // characters dropped (cli.SanitizeTerminalText, after turning line breaks
 // into spaces so words do not fuse), whitespace collapsed, and length capped.
 // It is still untrusted DATA — cleaning bounds its shape, not its meaning.
-func cleanScreenText(s string) string {
+func cleanScreenText(s string) string { return cleanScreenTextN(s, maxScreenTextRunes) }
+
+// cleanScreenTextN is cleanScreenText with a caller-chosen length cap, for
+// the few fields (a narrated quote) that legitimately run longer than a label.
+func cleanScreenTextN(s string, maxRunes int) string {
 	if s == "" {
 		return ""
 	}
@@ -355,8 +359,8 @@ func cleanScreenText(s string) string {
 		return r
 	}, s)
 	s = strings.Join(strings.Fields(cli.SanitizeTerminalText(s)), " ")
-	if rs := []rune(s); len(rs) > maxScreenTextRunes {
-		s = string(rs[:maxScreenTextRunes]) + "…"
+	if rs := []rune(s); len(rs) > maxRunes {
+		s = string(rs[:maxRunes]) + "…"
 	}
 	return s
 }
