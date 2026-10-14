@@ -1,0 +1,6 @@
+{
+  "name": "ox-cli-pets",
+  "description": "SageOx pets for Claude Code, installed by `ox pet enable`.",
+  "owner": { "name": "SageOx" },
+  "plugins": [{ "name": "ox-cli-oxy", "source": "./" }]
+}
