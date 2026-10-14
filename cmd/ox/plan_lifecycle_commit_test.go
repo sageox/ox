@@ -104,6 +104,32 @@ func TestPlanCommits_FinishASaveLeftOwed(t *testing.T) {
 	}
 }
 
+// TestPlanCommits_AnOwedSaveThatCannotCommitNeverBlocksTheApprove: the owed
+// save still cannot be committed (its plan.md holds conflict markers, which
+// the Ledger refuses). Failure prevented: the reviewer's Approve fails with
+// it, or the save loses its retry marker.
+func TestPlanCommits_AnOwedSaveThatCannotCommitNeverBlocksTheApprove(t *testing.T) {
+	f := lifecycleFixture(t)
+	conflicted := "# Durable\n<<<<<<< HEAD\nmine\n=======\ntheirs\n>>>>>>> origin/main\n"
+	if err := os.WriteFile(filepath.Join(f.planDir, "plan.md"), []byte(conflicted), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	recordPlanPushOutcome(context.Background(), f.ledger, f.planDir, errors.New("index.lock exists"))
+
+	if code, body := reviewPOSTBody(t, f.srv.URL+"/approve", "secret", "{}"); code != http.StatusOK {
+		t.Fatalf("approve: %d %s", code, body)
+	}
+
+	want := []string{"data/plans/2026-10-01-durable/events.jsonl", "data/plans/2026-10-01-durable/meta.json"}
+	if got := strings.Fields(runGitInDir(t, f.origin, "show", "--name-only", "--format=", "main")); !slices.Equal(got, want) {
+		t.Fatalf("the remote tip's commit carries %v, want only the approval's %v", got, want)
+	}
+	pending, err := listPlanPushPending(f.ledger)
+	if err != nil || len(pending) != 1 || len(pending[0].Files) != 0 {
+		t.Fatalf("the save must stay owed for the whole dir, got %+v (err %v)", pending, err)
+	}
+}
+
 // TestPlanLifecycle_RefusesWhileTheLedgerNeedsRepair: while the Ledger holds
 // an unrelated conflict, a rebase left in progress, or a git lock, an Approve
 // records nothing and says the Ledger needs repair. Failure prevented: the
