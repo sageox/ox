@@ -288,17 +288,19 @@ func conversationURLForState(projectCfg *config.ProjectConfig, attributionOn boo
 // recording row, so `ox session status` reads each config file once rather than
 // once per active agent.
 type draftStatusContext struct {
-	resolved      *config.ResolvedSessionDraft
-	projectCfg    *config.ProjectConfig
-	attributionOn bool
+	resolved         *config.ResolvedSessionDraft
+	projectCfg       *config.ProjectConfig
+	attributionOn    bool
+	manualPublishing bool
 }
 
 func newDraftStatusContext(projectRoot string) draftStatusContext {
-	projectCfg, _ := config.LoadProjectConfig("")
+	projectCfg, _ := config.LoadProjectConfig(projectRoot)
 	return draftStatusContext{
-		resolved:      repoDraftPolicy(projectRoot),
-		projectCfg:    projectCfg,
-		attributionOn: loadResolvedAttributionFor(projectRoot).Session != "",
+		resolved:         repoDraftPolicy(projectRoot),
+		projectCfg:       projectCfg,
+		attributionOn:    loadResolvedAttributionFor(projectRoot).Session != "",
+		manualPublishing: config.GetSessionPublishing(projectRoot) == config.SessionPublishingManual,
 	}
 }
 
@@ -312,7 +314,12 @@ func (c draftStatusContext) applyTo(s *session.RecordingState, turnCount *int, s
 	if s.DraftPublishedAt != nil {
 		*publishedAt = s.DraftPublishedAt.Format("2006-01-02T15:04:05Z07:00")
 	}
-	*url = conversationURLForState(c.projectCfg, c.attributionOn, s)
+	// A session held on this machine is never registered with the server, so
+	// its /c/ link would 404. Same rule as notifySessionStartedAsync: the mode
+	// saved at start or the setting now.
+	if !c.manualPublishing && !s.RecordedManualPublishing() {
+		*url = conversationURLForState(c.projectCfg, c.attributionOn, s)
+	}
 }
 
 func init() {

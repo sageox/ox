@@ -24,7 +24,9 @@ import (
 // hook will never draft, so a coworker asking "why doesn't my /c/ link
 // resolve?" waits on a placeholder that cannot arrive. Seen on 0.23.0: a
 // recording started with OX_SESSION_PUBLISHING=manual reported "pending" once
-// the env var was gone.
+// the env var was gone. The same cases decide conversation_url: status must
+// print the /c/ link when it can resolve, and never for a session held on this
+// machine (a dead link) or with session attribution off.
 func TestRunSessionStatus_DraftStateFollowsTheDraftGate(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -37,6 +39,7 @@ func TestRunSessionStatus_DraftStateFollowsTheDraftGate(t *testing.T) {
 		// attribution, while OX_PROJECT_ROOT selects the recording's repo.
 		runFromOtherRepo bool
 		want             string
+		wantURL          bool
 	}{
 		{
 			name:         "started manual, setting now resolves to auto",
@@ -63,6 +66,7 @@ func TestRunSessionStatus_DraftStateFollowsTheDraftGate(t *testing.T) {
 			modeAtStatus:     config.SessionPublishingAuto,
 			runFromOtherRepo: true,
 			want:             "pending",
+			wantURL:          true,
 		},
 		{
 			name:             "attribution off, run from a repo with it on",
@@ -79,6 +83,7 @@ func TestRunSessionStatus_DraftStateFollowsTheDraftGate(t *testing.T) {
 			modeAtStart:  config.SessionPublishingAuto,
 			modeAtStatus: config.SessionPublishingAuto,
 			want:         "pending",
+			wantURL:      true,
 		},
 	}
 
@@ -101,6 +106,7 @@ func TestRunSessionStatus_DraftStateFollowsTheDraftGate(t *testing.T) {
 			t.Setenv("SAGEOX_AGENT_ID", agentID)
 			out := runSessionStatusJSON(t)
 			assert.Equal(t, tc.want, out["draft_state"])
+			assertConversationURL(t, tc.wantURL, out["conversation_url"])
 		})
 	}
 }
@@ -110,8 +116,8 @@ func TestRunSessionStatus_DraftStateFollowsTheDraftGate(t *testing.T) {
 // recording's saved publishing mode.
 //
 // Failure prevented: with two AI coworkers recording, the one held on this
-// machine reports "pending" (or the other one reports "disabled") because the
-// rows were decided from the repo setting alone.
+// machine reports "pending" or prints a dead /c/ link (or the other one loses
+// its link) because the rows were decided from the repo setting alone.
 func TestRunSessionStatus_DraftStatePerRecording(t *testing.T) {
 	projectRoot := pauseResumeProject(t)
 	t.Chdir(projectRoot)
@@ -125,13 +131,30 @@ func TestRunSessionStatus_DraftStatePerRecording(t *testing.T) {
 
 	rows, ok := out["sessions"].([]any)
 	require.True(t, ok, "two recordings must produce the multi-row shape: %v", out)
-	byAgent := map[string]any{}
+	byAgent := map[string]map[string]any{}
 	for _, r := range rows {
 		row := r.(map[string]any)
-		byAgent[row["agent_id"].(string)] = row["draft_state"]
+		byAgent[row["agent_id"].(string)] = row
 	}
-	assert.Equal(t, "disabled", byAgent["OxDrHeld"], "the recording held on this machine")
-	assert.Equal(t, "pending", byAgent["OxDrAuto"], "the auto recording beside it")
+	require.Contains(t, byAgent, "OxDrHeld")
+	require.Contains(t, byAgent, "OxDrAuto")
+	assert.Equal(t, "disabled", byAgent["OxDrHeld"]["draft_state"], "the recording held on this machine")
+	assertConversationURL(t, false, byAgent["OxDrHeld"]["conversation_url"])
+	assert.Equal(t, "pending", byAgent["OxDrAuto"]["draft_state"], "the auto recording beside it")
+	assertConversationURL(t, true, byAgent["OxDrAuto"]["conversation_url"])
+}
+
+// assertConversationURL checks a status row's conversation_url: a /c/ link
+// when want is set, otherwise absent.
+func assertConversationURL(t *testing.T, want bool, got any) {
+	t.Helper()
+	if !want {
+		assert.Nil(t, got, "no /c/ link may be printed here")
+		return
+	}
+	url, ok := got.(string)
+	require.True(t, ok, "status must print the /c/ link, got %v", got)
+	assert.Contains(t, url, "/c/ses_")
 }
 
 // startDraftStatusRecording starts a real recording under mode and checks
