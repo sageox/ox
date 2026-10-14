@@ -37,14 +37,15 @@ func handleDetect() (*adapterprotocol.DetectResponse, error) {
 func handleDiagnose(p adapterprotocol.DiagnoseParams) (*adapterprotocol.DiagnoseResult, error) {
 	var issues []adapterprotocol.DiagnoseIssue
 
-	home, _ := os.UserHomeDir()
-	ampDir := filepath.Join(home, ".amp")
-	if _, err := os.Stat(ampDir); os.IsNotExist(err) {
+	// ox doctor drops every finding from an adapter that reports
+	// not-installed, so this must agree with detect: an Amp found only on
+	// PATH has no ~/.amp/ and still needs its plugin checked.
+	if detected, _ := handleDetect(); !detected.Detected {
 		issues = append(issues, adapterprotocol.DiagnoseIssue{
 			Slug:     "amp:not-installed",
 			Severity: "warning",
 			Title:    "Amp CLI not detected",
-			Detail:   "~/.amp directory not found.",
+			Detail:   detected.Reason + ".",
 		})
 	}
 

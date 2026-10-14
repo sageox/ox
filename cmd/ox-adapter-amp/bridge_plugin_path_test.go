@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -377,6 +378,74 @@ func TestFileBlockingPluginDir(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			path, want := tt.setup(t, t.TempDir())
 			assert.Equal(t, want, fileBlockingPluginDir(path))
+		})
+	}
+}
+
+// TestDiagnose_NotInstalledFollowsDetection keeps diagnose's "not installed"
+// in step with detect. ox doctor drops every finding from an adapter that
+// reports not-installed, so an Amp found only on PATH (npm, Homebrew, an orb)
+// with no ~/.amp/ would have its missing or misplaced plugin hidden.
+// Failure prevented: a capture-less Amp setup that ox doctor calls clean.
+func TestDiagnose_NotInstalledFollowsDetection(t *testing.T) {
+	tests := []struct {
+		name          string
+		setup         func(t *testing.T, home, bin string)
+		wantInstalled bool
+	}{
+		{
+			name: "amp on PATH, no ~/.amp",
+			setup: func(t *testing.T, _, bin string) {
+				name := "amp"
+				if runtime.GOOS == "windows" {
+					name = "amp.exe"
+				}
+				require.NoError(t, os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\n"), 0o755))
+			},
+			wantInstalled: true,
+		},
+		{
+			name:          "AGENT_ENV=amp, no ~/.amp",
+			setup:         func(t *testing.T, _, _ string) { t.Setenv("AGENT_ENV", "amp") },
+			wantInstalled: true,
+		},
+		{
+			name: "~/.amp exists",
+			setup: func(t *testing.T, home, _ string) {
+				require.NoError(t, os.MkdirAll(filepath.Join(home, ".amp"), 0o755))
+			},
+			wantInstalled: true,
+		},
+		{
+			name:  "no signal at all",
+			setup: func(t *testing.T, _, _ string) {},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			home, bin := t.TempDir(), t.TempDir()
+			setHome(t, home)
+			unsetEnv(t, "XDG_CONFIG_HOME")
+			unsetEnv(t, "AGENT_ENV")
+			t.Setenv("PATH", bin) // only the fake amp, if any
+			tt.setup(t, home, bin)
+
+			res, err := handleDiagnose(adapterprotocol.DiagnoseParams{RepoRoot: t.TempDir(), Scope: "project"})
+			require.NoError(t, err)
+
+			var notInstalled bool
+			for _, issue := range res.Issues {
+				if issue.Slug == "amp:not-installed" {
+					notInstalled = true
+				}
+			}
+			assert.Equal(t, !tt.wantInstalled, notInstalled,
+				"amp:not-installed must match detection, or ox doctor hides the rest: %+v", res.Issues)
+			// the finding the suppression used to hide is still reported
+			issue := bridgeIssue(t, res.Issues)
+			require.NotNil(t, issue)
+			assert.Equal(t, "amp:bridge-plugin-missing", issue.Slug)
 		})
 	}
 }
