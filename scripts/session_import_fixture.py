@@ -5,6 +5,7 @@ Standard library only, Python 3.9 compatible.
 """
 
 import hashlib
+import http.client
 import io
 import json
 import os
@@ -23,10 +24,13 @@ FILE_LIMIT = 128
 
 
 class FixtureError(Exception):
+    """A recoverable fixture setup failure reported without a Python traceback."""
+
     pass
 
 
 def default_cache():
+    """Use an absolute XDG cache directory, falling back to the home cache."""
     base = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
     if not base.is_absolute():  # XDG requires absolute paths; never cache relative to a checkout.
         base = Path.home() / ".cache"
@@ -108,7 +112,7 @@ def resolve_fixture(cache_dir=None, pin_path=PIN):
         try:
             with urllib.request.urlopen(request, timeout=20) as response:
                 data = response.read(ARCHIVE_LIMIT + 1)
-        except (urllib.error.URLError, TimeoutError, OSError) as err:
+        except (urllib.error.URLError, http.client.HTTPException, TimeoutError, OSError) as err:
             raise FixtureError("cannot download session-import fixture from %s: %s; retry when available" % (pin["url"], err)) from err
         if len(data) > ARCHIVE_LIMIT:
             raise FixtureError("session-import fixture exceeds download limit")

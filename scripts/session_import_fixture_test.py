@@ -1,6 +1,7 @@
 """Integrity and cache tests for the public session-import fixture loader."""
 
 import hashlib
+import http.client
 import io
 import json
 import tarfile
@@ -15,6 +16,7 @@ import session_import_fixture as fixture
 
 
 def archive(extra=None):
+    """Build a minimal corpus so archive failure tests need no release download."""
     data = io.BytesIO()
     with tarfile.open(fileobj=data, mode="w:gz") as out:
         for name, content in {
@@ -31,6 +33,8 @@ def archive(extra=None):
 
 
 class FixtureLoader(unittest.TestCase):
+    """Exercise download integrity, extraction safety, and cache lifecycles."""
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -95,6 +99,18 @@ class FixtureLoader(unittest.TestCase):
         with mock.patch.object(fixture.urllib.request, "urlopen", side_effect=urllib.error.URLError("unavailable")):
             with self.assertRaisesRegex(fixture.FixtureError, "cannot download.*retry when available"):
                 self.resolve()
+
+    def test_failed_response_reads_report_a_controlled_failure(self):
+        failures = [http.client.IncompleteRead(b"partial", 100), http.client.HTTPException("invalid response")]
+        for failure in failures:
+            with self.subTest(failure=type(failure).__name__):
+                response = mock.MagicMock()
+                response.__enter__.return_value = response
+                response.read.side_effect = failure
+                with mock.patch.object(fixture.urllib.request, "urlopen", return_value=response):
+                    with self.assertRaisesRegex(fixture.FixtureError, "cannot download.*https://example.com/fixture.tar.gz.*retry when available"):
+                        self.resolve()
+                self.assertEqual([], list(self.cache.iterdir()))
 
     def test_changed_or_extra_cached_files_are_refused(self):
         with mock.patch.object(fixture.urllib.request, "urlopen", return_value=io.BytesIO(self.data)):

@@ -29,10 +29,86 @@ var capturedFixture struct {
 
 // Preserve the invocation's cache location before individual tests sandbox HOME
 // and XDG paths. The downloaded artifact is test data, never a personal session store.
-var capturedFixtureEnv = testguard.MinimalEnv([]string{
-	"PYTHONDONTWRITEBYTECODE=1",
-	"XDG_CACHE_HOME=" + os.Getenv("XDG_CACHE_HOME"),
-})
+var capturedFixtureEnv = fixtureDownloadEnv()
+
+func fixtureDownloadEnv() []string {
+	env := testguard.MinimalEnv([]string{
+		"PYTHONDONTWRITEBYTECODE=1",
+		"XDG_CACHE_HOME=" + os.Getenv("XDG_CACHE_HOME"),
+	})
+	// urllib needs these transport settings on networks using a proxy or a
+	// private CA. Keep the allowlist narrow; never inherit auth or product config.
+	for _, key := range []string{
+		"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "NO_PROXY", "no_proxy",
+		"SSL_CERT_FILE", "SSL_CERT_DIR",
+	} {
+		if value := os.Getenv(key); value != "" {
+			env = append(env, key+"="+value)
+		}
+	}
+	return env
+}
+
+// A corporate proxy or custom trust root must work for the Python downloader,
+// while unrelated credentials stay outside the subprocess environment.
+func TestImportFixtureDownloadEnvPreservesNetworkSettings(t *testing.T) {
+	for _, lower := range []bool{false, true} {
+		name := "uppercase proxy variables"
+		if lower {
+			name = "lowercase proxy variables"
+		}
+		t.Run(name, func(t *testing.T) {
+			for _, key := range []string{"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"} {
+				t.Setenv(key, "")
+			}
+			for key, value := range map[string]string{
+				"HTTP_PROXY":  "http://proxy.test:3128",
+				"HTTPS_PROXY": "http://proxy.test:3128",
+				"NO_PROXY":    "localhost,.example.com",
+			} {
+				if lower {
+					key = strings.ToLower(key)
+				}
+				t.Setenv(key, value)
+			}
+			certFile := filepath.Join(t.TempDir(), "ca.pem")
+			require.NoError(t, os.WriteFile(certFile, nil, 0o600))
+			certDir := t.TempDir()
+			t.Setenv("SSL_CERT_FILE", certFile)
+			t.Setenv("SSL_CERT_DIR", certDir)
+			for _, key := range []string{"GITHUB_TOKEN", "AWS_SECRET_ACCESS_KEY", "SAGEOX_ENDPOINT"} {
+				t.Setenv(key, "must-not-inherit")
+			}
+			env := fixtureDownloadEnv()
+			// Later per-test environment changes must not alter the saved snapshot.
+			t.Setenv("HTTPS_PROXY", "http://changed.test:9999")
+			t.Setenv("SSL_CERT_FILE", "changed-after-capture")
+			cmd := exec.Command("python3", "-c", `
+import json, os, ssl, urllib.request
+trust = ssl.get_default_verify_paths()
+print(json.dumps({"proxies": urllib.request.getproxies(), "cafile": trust.cafile,
+    "capath": trust.capath, "unrelated": [key for key in
+        ("GITHUB_TOKEN", "AWS_SECRET_ACCESS_KEY", "SAGEOX_ENDPOINT") if key in os.environ]}))
+`)
+			cmd.Env = env
+			output, err := cmd.CombinedOutput()
+			require.NoError(t, err, string(output))
+			var result struct {
+				Proxies   map[string]string
+				CAFile    string
+				CAPath    string
+				Unrelated []string
+			}
+			require.NoError(t, json.Unmarshal(output, &result))
+			assert.Equal(t, "http://proxy.test:3128", result.Proxies["http"])
+			assert.Equal(t, "http://proxy.test:3128", result.Proxies["https"])
+			assert.Equal(t, "localhost,.example.com", result.Proxies["no"])
+			assert.Equal(t, certFile, result.CAFile)
+			assert.Equal(t, certDir, result.CAPath)
+			assert.Empty(t, result.Unrelated)
+		})
+	}
+}
 
 // Resolve real recordings once through the same verified loader as manual tests.
 // Missing assets fail the corpus tests; they must never silently lose coverage.
