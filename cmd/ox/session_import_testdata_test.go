@@ -2,10 +2,13 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,7 +17,117 @@ import (
 
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/session/nativeimport"
+	"github.com/sageox/ox/internal/testguard"
 )
+
+var capturedFixture struct {
+	sync.Once
+	path string
+	err  error
+	text string
+}
+
+// Preserve the invocation's cache location before individual tests sandbox HOME
+// and XDG paths. The downloaded artifact is test data, never a personal session store.
+var capturedFixtureEnv = fixtureDownloadEnv()
+
+func fixtureDownloadEnv() []string {
+	env := testguard.MinimalEnv([]string{
+		"PYTHONDONTWRITEBYTECODE=1",
+		"XDG_CACHE_HOME=" + os.Getenv("XDG_CACHE_HOME"),
+	})
+	// urllib needs these transport settings on networks using a proxy or a
+	// private CA. Keep the allowlist narrow; never inherit auth or product config.
+	for _, key := range []string{
+		"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "NO_PROXY", "no_proxy",
+		"SSL_CERT_FILE", "SSL_CERT_DIR",
+	} {
+		if value := os.Getenv(key); value != "" {
+			env = append(env, key+"="+value)
+		}
+	}
+	return env
+}
+
+// A corporate proxy or custom trust root must work for the Python downloader,
+// while unrelated credentials stay outside the subprocess environment.
+func TestImportFixtureDownloadEnvPreservesNetworkSettings(t *testing.T) {
+	for _, lower := range []bool{false, true} {
+		name := "uppercase proxy variables"
+		if lower {
+			name = "lowercase proxy variables"
+		}
+		t.Run(name, func(t *testing.T) {
+			for _, key := range []string{"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"} {
+				t.Setenv(key, "")
+			}
+			for key, value := range map[string]string{
+				"HTTP_PROXY":  "http://proxy.test:3128",
+				"HTTPS_PROXY": "http://proxy.test:3128",
+				"NO_PROXY":    "localhost,.example.com",
+			} {
+				if lower {
+					key = strings.ToLower(key)
+				}
+				t.Setenv(key, value)
+			}
+			certFile := filepath.Join(t.TempDir(), "ca.pem")
+			require.NoError(t, os.WriteFile(certFile, nil, 0o600))
+			certDir := t.TempDir()
+			t.Setenv("SSL_CERT_FILE", certFile)
+			t.Setenv("SSL_CERT_DIR", certDir)
+			for _, key := range []string{"GITHUB_TOKEN", "AWS_SECRET_ACCESS_KEY", "SAGEOX_ENDPOINT"} {
+				t.Setenv(key, "must-not-inherit")
+			}
+			env := fixtureDownloadEnv()
+			// Later per-test environment changes must not alter the saved snapshot.
+			t.Setenv("HTTPS_PROXY", "http://changed.test:9999")
+			t.Setenv("SSL_CERT_FILE", "changed-after-capture")
+			cmd := exec.Command("python3", "-c", `
+import json, os, ssl, urllib.request
+trust = ssl.get_default_verify_paths()
+print(json.dumps({"proxies": urllib.request.getproxies(), "cafile": trust.cafile,
+    "capath": trust.capath, "unrelated": [key for key in
+        ("GITHUB_TOKEN", "AWS_SECRET_ACCESS_KEY", "SAGEOX_ENDPOINT") if key in os.environ]}))
+`)
+			cmd.Env = env
+			output, err := cmd.CombinedOutput()
+			require.NoError(t, err, string(output))
+			var result struct {
+				Proxies   map[string]string
+				CAFile    string
+				CAPath    string
+				Unrelated []string
+			}
+			require.NoError(t, json.Unmarshal(output, &result))
+			assert.Equal(t, "http://proxy.test:3128", result.Proxies["http"])
+			assert.Equal(t, "http://proxy.test:3128", result.Proxies["https"])
+			assert.Equal(t, "localhost,.example.com", result.Proxies["no"])
+			assert.Equal(t, certFile, result.CAFile)
+			assert.Equal(t, certDir, result.CAPath)
+			assert.Empty(t, result.Unrelated)
+		})
+	}
+}
+
+// Resolve real recordings once through the same verified loader as manual tests.
+// Missing assets fail the corpus tests; they must never silently lose coverage.
+func capturedSessionFixture(t *testing.T) string {
+	t.Helper()
+	capturedFixture.Do(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "python3", repoPath("..", "..", "scripts", "session_import_testbed.py"), "fixture")
+		cmd.Env = capturedFixtureEnv
+		output, err := cmd.CombinedOutput()
+		capturedFixture.err = err
+		capturedFixture.text = string(output)
+		capturedFixture.path = strings.TrimSpace(string(output))
+	})
+	require.NoError(t, capturedFixture.err, "resolve session-import artifact: %s", capturedFixture.text)
+	require.DirExists(t, capturedFixture.path)
+	return capturedFixture.path
+}
 
 // --from-test-data lets a test run import sessions seeded into a directory
 // that stands in for this machine's stores: <dir>/claude for ~/.claude and
@@ -73,8 +186,11 @@ func TestImportE2E_FromTestDataSurvivesThePrintedCommand(t *testing.T) {
 // Failure prevented: a change in either app's file format, or in ox's reading
 // of it, silently dropping real sessions from an import.
 func TestImportE2E_CapturedDesktopSessions(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: captured-session corpus uses a public fixture artifact")
+	}
 	f := newImportFixture(t)
-	testData := seedCapturedSessions(t, repoPath("testdata", "session-import", "math-blitz"), f.projectRoot)
+	testData := seedCapturedSessions(t, capturedSessionFixture(t), f.projectRoot)
 
 	r := f.run(t, importOptions{jsonOut: true, testData: testData})
 	require.NoError(t, r.err, r.out)

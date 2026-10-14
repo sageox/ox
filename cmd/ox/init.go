@@ -133,6 +133,9 @@ This command will:
 
 Use --team to specify a team by name, slug, or ID, or let ox init prompt you.
 
+After setup and sync, run 'ox session import' to preview and choose
+past Claude Code or Codex sessions from this repo for your team's Ledger.
+
 After init, run 'ox guide getting-started' for a five-minute walkthrough,
 or 'ox guide team-rules' to learn how to share AI coworker conventions
 across your whole team (Claude, Codex, Amp, etc.).`,
@@ -305,6 +308,8 @@ func checkRemoteSageoxExists(gitRoot string) (found bool, stale bool, err error)
 	return false, false, nil
 }
 
+// runInit configures AI coworker integrations and registers the authenticated
+// repository, then prints setup guidance when human-readable output is enabled.
 func runInit() error {
 	// warn if using non-default endpoint (subtle, informational)
 	if endpoint.Get() != endpoint.Default {
@@ -1080,6 +1085,13 @@ func runInit() error {
 
 		// step N: start Claude Code (ox will auto-prime and surface team context)
 		fmt.Printf("  %d. Start Claude Code in this repo — ox will auto-prime and surface your team context\n", step)
+		step++
+
+		// Old IDs can survive skipped or partial registration and later reinit.
+		// Only a freshly confirmed repo and team qualify for the import step.
+		if resp != nil && resp.RepoID != "" && resp.TeamID != "" {
+			printInitSessionImportStep(gitRoot, cfg, step)
+		}
 
 		// show team context sync status so user knows what's happening in the background
 		if cfg.TeamID != "" {
@@ -1099,6 +1111,19 @@ func runInit() error {
 	}
 
 	return nil
+}
+
+// printInitSessionImportStep is deterministic setup help, independent of tips.
+// Sync requests do not establish import readiness; the importer owns preflight.
+func printInitSessionImportStep(gitRoot string, projectCfg *config.ProjectConfig, step int) {
+	if initQuiet || (cfg != nil && (cfg.JSON || cfg.Quiet)) || projectCfg == nil ||
+		projectCfg.RepoID == "" || projectCfg.TeamID == "" ||
+		!config.ResolveSessionRecording(gitRoot).ShouldRecord() {
+		return
+	}
+
+	fmt.Printf("  %d. Bring past Claude and Codex sessions into your team's Ledger:\n", step)
+	fmt.Printf("     Run %s\n", cli.StyleCommand.Render("ox session import"))
 }
 
 // fetchGitCredentials fetches git credentials from GET /api/v1/cli/repos (team context repos only).

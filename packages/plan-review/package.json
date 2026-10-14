@@ -1,6 +1,6 @@
 {
   "name": "@sageox/plan-review",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Plan review in the browser: document tools that run inside a SageOx plan, and the message protocol a trusted host drives them with.",
   "license": "MIT",
   "type": "module",
@@ -24,6 +24,10 @@
     "./document-tools-script": {
       "types": "./dist/document-tools-script.d.ts",
       "default": "./dist/document-tools-script.js"
+    },
+    "./frame-plan": {
+      "types": "./dist/frame-plan.d.ts",
+      "default": "./dist/frame-plan.js"
     },
     "./document-tools.iife.js": "./dist/document-tools.iife.js",
     "./document-tools.css": "./dist/document-tools.css",

@@ -247,10 +247,16 @@ jobs:
       - name: Prune superseded build caches
         env:
           GH_TOKEN: ${{ github.token }}
+        # A cache listed here can be gone by the time it is deleted (GitHub
+        # evicts caches on its own): gone is the goal, so only another error
+        # fails the step.
         run: |
           gh cache list --repo "$GITHUB_REPOSITORY" --ref refs/heads/main --key "go-${RUNNER_OS}-" \
             --sort created_at --order desc --limit 100 --json id --jq '.[1:][].id' \
-            | xargs -r -n1 gh cache delete --repo "$GITHUB_REPOSITORY"
+            | while read -r id; do
+                out=$(gh cache delete --repo "$GITHUB_REPOSITORY" "$id" 2>&1) && continue
+                case "$out" in *"Could not find a cache"*) ;; *) echo "$out" >&2; exit 1 ;; esac
+              done
 
   # Compiled-binary acceptance journeys through a coverage-instrumented ox.
   acceptance:
@@ -488,6 +494,22 @@ jobs:
 
       - name: Check, test and pack the package
         run: make plan-review-check
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+
+      # The built document tools in real Chrome, against the anchors Go
+      # computes for the same pages (pkg/planreview/testdata/anchors.json).
+      # These tests skip without Chrome or dist/, so a skip has to fail here.
+      - name: Document tools anchor what Go anchors
+        shell: bash
+        env:
+          # no session bus on the runner: Chrome fails fast instead of waiting on one
+          DBUS_SESSION_BUS_ADDRESS: /dev/null
+        run: |
+          go test -tags=browser -count=1 -v -run 'TestBrowser_(DocumentToolsMatchSharedPageVectors|DocumentToolsAnchorADiagramOnceItDraws|ReviewClicksWaitForDiagrams)$' ./cmd/ox/ | tee browser.log
+          test "$(grep -c -E '^--- PASS: TestBrowser_(DocumentTools|ReviewClicksWaitForDiagrams)' browser.log)" -eq 3
 
   # The skill installer is the one subsystem where Windows is a first-class
   # target rather than an aspiration: copy materialization IS what Windows gets,

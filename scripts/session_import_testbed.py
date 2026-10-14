@@ -4,18 +4,20 @@
 Usage:
   scripts/session_import_testbed.py capture <source-repo> --out <fixture-dir> --identity <text> ...
   scripts/session_import_testbed.py create <target-dir> [--fixture <fixture-dir>]
+  scripts/session_import_testbed.py fixture [--cache-dir <dir>]
 
 capture copies the sessions a coworker ran in <source-repo> out of this machine's
 stores (~/.claude, ~/.codex, or CLAUDE_CONFIG_DIR / CODEX_HOME) into a fixture that
-is safe to commit: only the fields ox reads are kept, vendor-internal data and
+is safe to publish: only the fields ox reads are kept, vendor-internal data and
 SageOx context blocks are dropped, tool payloads are capped, paths are templated,
 and every --identity string (plus $USER, the host name and the git identity) is
 replaced with a test persona. It refuses to write anything that still names you,
 holds an email that is not a known placeholder, or would exceed the repo's file
-size limit. Review the result before committing it.
+size limit. Review the result before publishing it.
 
-create builds a fresh repo from a fixture: the fixture's code in one commit, and its
-sessions in <target>/.git/ox-test-data, laid out like ~/.claude and ~/.codex, pointed
+create downloads and verifies the pinned public fixture (cached for later offline
+runs), or uses an explicit --fixture directory. It builds a fresh repo: the code
+in one commit, and sessions in <target>/.git/ox-test-data, laid out like ~/.claude and ~/.codex, pointed
 at the new repo and dated yesterday. Then, inside the repo:
 
   ox init --endpoint <url>
@@ -36,7 +38,7 @@ import sys
 import time
 from pathlib import Path
 
-DEFAULT_FIXTURE = Path(__file__).resolve().parent.parent / "cmd" / "ox" / "testdata" / "session-import" / "math-blitz"
+from session_import_fixture import FixtureError, resolve_fixture
 
 PAYLOAD_CAP = 4096            # bytes of any one tool input or output kept
 FILE_CAP = 450 * 1024         # the repo rejects files over 500 KB
@@ -304,7 +306,7 @@ def capture(args):
         target.write_bytes(data)
         os.chmod(target, mode)
     write_provenance(out, source, cleaned)
-    print("Captured %d sessions into %s. Review them and PROVENANCE.md before committing." % (len(cleaned), out))
+    print("Captured %d sessions into %s. Review them and PROVENANCE.md before publishing." % (len(cleaned), out))
     return 0
 
 
@@ -399,10 +401,10 @@ def slug(path):
 
 
 def create(args):
-    fixture = Path(args.fixture).resolve()
     target = Path(args.target).expanduser()
     if target.exists():
         raise Refused("%s already exists" % target)
+    fixture = Path(args.fixture).resolve() if args.fixture else resolve_fixture()
     if not (fixture / "code").is_dir():
         raise Refused("%s is not a fixture (no code/ directory)" % fixture)
     if re.search(r"[\s\"'\\]", str(target.resolve().parent / target.name)):
@@ -458,11 +460,16 @@ def main(argv=None):
     cap_cmd.add_argument("--allow-active", action="store_true")
     new_cmd = sub.add_parser("create", help="build a fresh repo seeded with a fixture's sessions")
     new_cmd.add_argument("target")
-    new_cmd.add_argument("--fixture", default=str(DEFAULT_FIXTURE))
+    new_cmd.add_argument("--fixture", help="use a local fixture instead of the pinned public artifact")
+    fixture_cmd = sub.add_parser("fixture", help="download/cache the pinned fixture and print its directory")
+    fixture_cmd.add_argument("--cache-dir", help="override the test fixture cache directory")
     args = parser.parse_args(argv)
     try:
+        if args.command == "fixture":
+            print(resolve_fixture(cache_dir=args.cache_dir))
+            return 0
         return capture(args) if args.command == "capture" else create(args)
-    except Refused as err:
+    except (Refused, FixtureError) as err:
         print("refused: %s" % err, file=sys.stderr)
         return 1
 

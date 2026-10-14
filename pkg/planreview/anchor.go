@@ -219,6 +219,11 @@ func textContent(n *html.Node) string {
 	var b strings.Builder
 	var walk func(*html.Node)
 	walk = func(m *html.Node) {
+		// anchor.ts drops <style> and <script> (HTML or SVG) from an element's
+		// text: Mermaid repeats a per-render id in each diagram's <style>
+		if m.Type == html.ElementNode && (m.Data == "style" || m.Data == "script") {
+			return
+		}
 		if m.Type == html.TextNode {
 			b.WriteString(m.Data)
 		}

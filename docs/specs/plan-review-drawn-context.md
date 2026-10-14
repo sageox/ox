@@ -97,7 +97,8 @@ and fonts as `expect.json`'s `environment`.
   containing a rendered diagram changes on every render. Two loads of
   revision a gave different `textContent` for the diagram; with `<style>`
   removed they matched. Two of revision a's 28 markable elements contain a
-  diagram, and today's review.js anchors for those two change on every load.
+  diagram, and review.js anchors for those two changed on every load until
+  the package dropped `<style>` and `<script>` from anchor text (#1324).
   For all 28, ox's Go `AnchorFor` over the same heading and text gives the
   prototype's anchor. Mermaid's HTML labels are `<p>` elements, so a stroke
   around two nodes targets their labels, plus an edge label it mostly
@@ -379,8 +380,6 @@ outside this repository is private-owner follow-up.
 - **Writers, the toolbar and the outbox:** #1291, #1293. `draw.js` is a
   prototype: it sits in the module's testdata for hosts to qualify with, and
   no ox binary or module code runs it.
-- **The Mermaid anchor instability in today's review.js** (section 1): it
-  affects existing marks on diagrams and needs its own fix.
 - **Other engines and inputs:** only Chrome on macOS and mouse input were
   exercised. `checkVisibility()` exists in current Firefox and Safari; Safari's
   canvas rules for `foreignObject` were not tested.

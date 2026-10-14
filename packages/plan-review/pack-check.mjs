@@ -30,6 +30,7 @@ import { createRequire } from 'node:module';
 import { PROTOCOL, connectFrame, parseDocumentMessage } from '@sageox/plan-review';
 import { localPorts, startDocumentTools } from '@sageox/plan-review/document-tools';
 import script from '@sageox/plan-review/document-tools-script';
+import { framePlan } from '@sageox/plan-review/frame-plan';
 import manifest from '@sageox/plan-review/manifest.json' with { type: 'json' };
 
 const require = createRequire(import.meta.url);
@@ -40,6 +41,14 @@ assert.equal(parseDocumentMessage({ ox: 'review', v: PROTOCOL, instance: 'i-0000
 assert.ok(localPorts().host);
 assert.equal(script, readFileSync(require.resolve('@sageox/plan-review/document-tools.iife.js'), 'utf8'));
 require.resolve('@sageox/plan-review/document-tools.css');
+// the real build and script: an ES-module page keeps the tools before its own
+// </body>, ahead of the appended build, whose text has a </body> of its own
+const page = "<body><pre class='mermaid'>graph TD; A--&gt;B</pre><script type='module'>import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';</script></body></html>";
+const framed = framePlan(page, { documentTools: true });
+assert.ok(framed.includes('<script>' + script + '</script></body></html><script>'));
+assert.ok(framed.includes('version:"11.6.0"'));
+assert.ok(!framed.includes('cdn.jsdelivr.net'));
+assert.equal(framePlan('<p>no diagram</p>'), '<p>no diagram</p>');
 const dist = require.resolve('@sageox/plan-review/manifest.json').replace(/manifest\\.json$/, '');
 for (const [f, sum] of Object.entries(manifest.files)) {
   assert.equal(createHash('sha256').update(readFileSync(dist + f)).digest('hex'), sum, f);
@@ -50,6 +59,7 @@ const consumerTS = `
 import { PROTOCOL, connectFrame, type DocumentMessage, type HostMessage } from '@sageox/plan-review';
 import { localPorts, startDocumentTools } from '@sageox/plan-review/document-tools';
 import script from '@sageox/plan-review/document-tools-script';
+import { framePlan, type FramePlanOptions } from '@sageox/plan-review/frame-plan';
 
 const port = connectFrame(document.createElement('iframe'), 'instance-1');
 port.listen((m: DocumentMessage) => {
@@ -59,7 +69,8 @@ const mode: HostMessage = { type: 'mode', on: true, open: false };
 port.send(mode);
 port.close();
 startDocumentTools(localPorts().document, { forwardKeys: false });
-const n: number = PROTOCOL + script.length;
+const opts: FramePlanOptions = { documentTools: true, instance: 'instance-1' };
+const n: number = PROTOCOL + script.length + framePlan('<p>x</p>', opts).length;
 console.log(n);
 `;
 
