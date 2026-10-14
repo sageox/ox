@@ -63,6 +63,18 @@ type WalkthroughOptions struct {
 	// PlaybackNote explains, in the data's notes, why Playback is absent when
 	// the command layer tried to get it and could not.
 	PlaybackNote string
+	// Chapter is the --chapter selector that produced the time window. It
+	// selects nothing here; it keeps the next-page guidance on the same chapter.
+	Chapter string
+}
+
+// chapterFlag is the --chapter argument to repeat in a follow-up command, or
+// nothing when the window did not come from a chapter.
+func (o WalkthroughOptions) chapterFlag() string {
+	if o.Chapter == "" {
+		return ""
+	}
+	return " --chapter " + shellQuoteIfNeeded(cleanScreenText(o.Chapter))
 }
 
 // WalkthroughData is the walkthrough envelope payload: what was recorded,
@@ -411,7 +423,7 @@ func (r *Reader) Walkthrough(rawID string, opts WalkthroughOptions) *Envelope {
 		guidance += fmt.Sprintf(" Legacy evidence has no immutable image revision. If this is a video and you need pinned evidence or recovery, explicitly run ox walkthrough %s --prepare --json, read its job receipt, sync, then pin the returned revision. Preparation spends bounded server compute; do not retry or poll without a budget.", id.ConversationID)
 	}
 	if data.Transcript != nil && data.Transcript.NextCursor != "" {
-		guidance += fmt.Sprintf(" Next source page: ox walkthrough %s --transcript --cursor %s.", id.ConversationID, data.Transcript.NextCursor)
+		guidance += fmt.Sprintf(" Next source page: ox walkthrough %s%s --transcript --cursor %s.", id.ConversationID, opts.chapterFlag(), data.Transcript.NextCursor)
 	}
 	return r.finishSuccess(start, data, guidance, warnings)
 }

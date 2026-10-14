@@ -160,23 +160,36 @@ func runConversationWalkthrough(cmd *cobra.Command, args []string) error {
 		}
 		return finishConversationEnvelope(cmd.OutOrStdout(), format, walkthroughRecovery(cmd, idArg, flags, opts), renderWalkthroughJob)
 	}
-	env := reader.Walkthrough(idArg, opts)
-	// Transcript pages are source words only, so they skip the playback lookup.
-	// The first read gates the lookup: an id the checkout cannot serve fails
-	// before any network call.
-	// A chapter is looked up in the playback data, so --chapter needs it even
-	// on a transcript page.
+	// The first read checks that the checkout can serve this id, before any
+	// network call. A transcript cursor is bound to its window, and a chapter
+	// only sets that window after the playback lookup below, so with --chapter
+	// the first read leaves the cursor out; the read after the lookup checks it
+	// against the chapter's window.
+	probe := opts
+	if flags.Chapter != "" {
+		probe.Cursor = ""
+	}
+	env := reader.Walkthrough(idArg, probe)
+	// Transcript pages are source words only, so they skip the playback lookup,
+	// except that a chapter is looked up in the playback data and so needs it
+	// even on a transcript page.
 	if env.Success && (flags.Chapter != "" || !flags.Transcript && flags.Cursor == "") {
 		playback, note := loadWalkthroughPlayback(conversationContext(cmd), idArg)
+		reread := false
 		if flags.Chapter != "" {
 			from, to, chapterErr := resolveWalkthroughChapter(playback, note, flags.Chapter)
 			if chapterErr != nil {
 				return finishConversationEnvelope(cmd.OutOrStdout(), format, read.ErrorEnvelope(chapterErr), nil)
 			}
 			opts.FromOffset, opts.ToOffset, opts.HasWindow = from, to, true
+			opts.Chapter = flags.Chapter
+			reread = true
 		}
-		if playback != nil || note != "" {
+		if !flags.Transcript && flags.Cursor == "" && (playback != nil || note != "") {
 			opts.Playback, opts.PlaybackNote = playback, note
+			reread = true
+		}
+		if reread {
 			env = reader.Walkthrough(idArg, opts)
 		}
 	}

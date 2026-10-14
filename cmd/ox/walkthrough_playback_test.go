@@ -134,6 +134,25 @@ func (s *playbackServer) playbackRequests() int {
 	return s.playbackCalls
 }
 
+// truncatedPlaybackJPEG is a JPEG with an intact header and cut-off picture
+// data: DecodeConfig accepts it, a full decode does not.
+func truncatedPlaybackJPEG(t *testing.T) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, 64, 64))
+	for i := range img.Pix {
+		img.Pix[i] = byte(i*7 + i/13)
+	}
+	var buf bytes.Buffer
+	require.NoError(t, jpeg.Encode(&buf, img, nil))
+	full := buf.Bytes()
+	cut := full[:bytes.Index(full, []byte{0xFF, 0xDA})+40]
+	_, err := jpeg.DecodeConfig(bytes.NewReader(cut))
+	require.NoError(t, err, "the header is valid")
+	_, err = jpeg.Decode(bytes.NewReader(cut))
+	require.Error(t, err, "the picture data is not")
+	return cut
+}
+
 func playbackJPEG(t *testing.T) []byte {
 	t.Helper()
 	var buf bytes.Buffer
@@ -723,4 +742,107 @@ func TestPlaybackTextCannotForgeChapterOrShortcutLines(t *testing.T) {
 		require.False(t, strings.HasPrefix(line, "── Admin"), line)
 	}
 	require.NotContains(t, out, "\x1b[2J")
+}
+
+// TestWalkthroughFetchRefusesAndHealsTruncatedImages: a picture cut off after a
+// valid header is neither stored when downloaded nor trusted when cached; the
+// next --fetch replaces it.
+// Failure prevented: a half-written picture is marked local, handed to a vision
+// model, and skipped by every later fetch until someone deletes it by hand.
+func TestWalkthroughFetchRefusesAndHealsTruncatedImages(t *testing.T) {
+	srv := startPlaybackServer(t, "")
+	srv.setImageBody("/objects/focus/m2.jpg", truncatedPlaybackJPEG(t))
+	root := usePlaybackProject(t, srv)
+
+	_, data, env := runWalkthrough(t, "--fetch")
+	require.Equal(t, "local", data.Moments[0].Focus.Availability)
+	require.Equal(t, "unfetched", data.Moments[1].Focus.Availability, "the cut-off download is refused")
+	require.Contains(t, strings.Join(env.Warnings, "\n"), "focus image at 00:01:35.210 unavailable: the download is not a readable JPEG")
+	cache := filepath.Join(filepath.Dir(root), ".sageox", "cache", "walkthrough-playback")
+	var stored []string
+	require.NoError(t, filepath.WalkDir(cache, func(path string, d os.DirEntry, err error) error {
+		if err == nil && !d.IsDir() {
+			stored = append(stored, filepath.Base(path))
+		}
+		return err
+	}))
+	require.NotContains(t, stored, "m2.jpg", "a refused download leaves no file behind")
+
+	// A cut-off file already in the cache (an interrupted write, a bad copy) is
+	// not local, and the next fetch replaces it with the real picture.
+	cached := filepath.Join(cache, strings.TrimPrefix(data.Moments[0].Focus.LocalImage, cache+string(filepath.Separator)))
+	require.NoError(t, os.WriteFile(cached, truncatedPlaybackJPEG(t), 0o644))
+	srv.setImageBody("/objects/focus/m2.jpg", playbackJPEG(t))
+	before := len(srv.images())
+	_, data, _ = runWalkthrough(t, "--fetch")
+	require.Equal(t, "local", data.Moments[0].Focus.Availability)
+	require.Equal(t, "local", data.Moments[1].Focus.Availability)
+	require.Greater(t, len(srv.images()), before, "the damaged file was fetched again")
+	healed, err := os.ReadFile(data.Moments[0].Focus.LocalImage)
+	require.NoError(t, err)
+	_, err = jpeg.Decode(bytes.NewReader(healed))
+	require.NoError(t, err, "the replacement is a whole picture")
+}
+
+// TestWalkthroughChapterTranscriptPagesContinue: --chapter keeps working across
+// transcript pages. The cursor is bound to the chapter's window, so the window
+// has to exist before the cursor is checked.
+// Failure prevented: a chapter longer than one page can never be read past its
+// first page through the chapter selector.
+func TestWalkthroughChapterTranscriptPagesContinue(t *testing.T) {
+	srv := startPlaybackServer(t, "")
+	root := usePlaybackProject(t, srv)
+	var long strings.Builder
+	long.WriteString("WEBVTT\n\n")
+	for i := 0; i < 250; i++ {
+		clock := func(sec int) string { return fmt.Sprintf("%02d:%02d:%02d.000", sec/3600, sec/60%60, sec%60) }
+		fmt.Fprintf(&long, "%s --> %s\ncue number %d\n\n", clock(i), clock(i+1), i+1)
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(root, "2026-08-18-01-00-walkthrough", "transcript.vtt"), []byte(long.String()), 0o644))
+
+	type page struct {
+		Transcript struct {
+			Cues       []struct{ N int } `json:"cues"`
+			NextCursor string            `json:"next_cursor"`
+		} `json:"transcript"`
+	}
+	read1 := func(args ...string) (page, string) {
+		out, _, err := runConversationInProc(t, "walkthrough", append([]string{shareTestWalkthroughRec, "--chapter", "Plan comparison", "--transcript"}, args...)...)
+		require.NoError(t, err, out)
+		env := decodeConvEnvelope(t, out)
+		require.True(t, env.Success, out)
+		var p page
+		require.NoError(t, json.Unmarshal(env.Data, &p))
+		return p, env.Guidance
+	}
+
+	first, guidance := read1()
+	require.Len(t, first.Transcript.Cues, 100)
+	require.NotEmpty(t, first.Transcript.NextCursor)
+	// The command the guidance offers is the one that works.
+	next := "ox walkthrough cnv_019ffe10-0000-7000-8000-000000000011 --chapter 'Plan comparison' --transcript --cursor " + first.Transcript.NextCursor
+	require.Contains(t, guidance, next)
+
+	seen := map[int]bool{}
+	for _, c := range first.Transcript.Cues {
+		seen[c.N] = true
+	}
+	cursor := first.Transcript.NextCursor
+	for pages := 0; cursor != "" && pages < 5; pages++ {
+		p, _ := read1("--cursor", cursor)
+		for _, c := range p.Transcript.Cues {
+			require.False(t, seen[c.N], "cue %d served twice", c.N)
+			seen[c.N] = true
+		}
+		cursor = p.Transcript.NextCursor
+	}
+	require.Empty(t, cursor, "the chapter's words end")
+	// Plan comparison runs from 120 s to the end: cues 120-250 overlap it.
+	require.Len(t, seen, 131)
+	require.True(t, seen[120] && seen[250] && !seen[119])
+
+	// A cursor from another window is still refused, with the chapter set.
+	out, _, err := runConversationInProc(t, "walkthrough", shareTestWalkthroughRec, "--chapter", "Pricing", "--transcript", "--cursor", first.Transcript.NextCursor)
+	require.Error(t, err)
+	require.Contains(t, decodeConvEnvelope(t, out).Error.Message, "cursor does not match")
 }

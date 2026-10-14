@@ -54,6 +54,18 @@ Feature: Reading a Visual Walkthrough as Joined Moments
       Then Avery gets that chapter's moments, pauses and shortcuts
       And Avery gets nothing from the chapters before or after it
 
+    Scenario: Avery reads a long chapter's words page by page
+      Given Devon's chapter "Plan comparison" has more words than fit on one page
+      When Avery reads the chapter's words and follows the continuation ox offers
+      Then every following page continues inside the same chapter
+      And no line of speech is served twice or skipped
+
+    Scenario: Avery limits the read and is told chapters were left out
+      Given Devon's walkthrough has three chapters
+      When Avery limits the read to two entries
+      Then Avery sees two chapters
+      And ox says one more chapter exists and how to read it
+
     Scenario: Avery names a chapter that is not there
       Given Devon's walkthrough has chapters titled "Pricing", "Checkout" and "Plan comparison"
       When Avery reads only the chapter "Settings"
@@ -127,6 +139,12 @@ Feature: Reading a Visual Walkthrough as Joined Moments
       When Avery reads all of it asking for the pictures
       Then ox fetches a bounded number of pictures
       And ox tells Avery to narrow the window for the rest
+
+    Scenario: A picture that was cut short is fetched again
+      Given a saved picture on Avery's machine that was cut off part way
+      When Avery reads the walkthrough asking for the pictures
+      Then ox does not treat the damaged file as a picture
+      And ox fetches it again and replaces it with the whole picture
 
     Scenario: One picture cannot be fetched
       Given the place the pictures are kept refuses one of them

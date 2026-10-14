@@ -669,8 +669,9 @@ func (r *Reader) joinPlayback(data *WalkthroughData, id *ID, cues []vtt.Cue, opt
 		}
 		data.Shortcuts = append(data.Shortcuts, sc)
 	}
-	if len(data.Chapters) > limit {
+	if total := len(data.Chapters); total > limit {
 		data.Chapters = data.Chapters[:limit]
+		data.Notes = append(data.Notes, fmt.Sprintf("Chapters are capped at %d of %d; read the rest with --chapter, or narrow with --cues N-M or --from/--to.", limit, total))
 	}
 	if len(data.Shortcuts) > limit {
 		data.Shortcuts = data.Shortcuts[:limit]
@@ -744,19 +745,21 @@ func (r *Reader) playbackImagePath(p *Playback, id *ID, kind, momentID string) (
 		id.RecordingID, p.generation, kind, momentID+".jpg"), true
 }
 
-// cachedJPEG reports whether path holds a complete-looking JPEG. The decode
-// reads only the header, so a truncated or substituted file fails here instead
-// of being offered to a reader as evidence.
+// cachedJPEG reports whether path holds a complete JPEG, so a truncated or
+// substituted file fails here instead of being offered to a reader as evidence.
 func cachedJPEG(path string) bool {
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Size() == 0 || info.Size() > PlaybackImageMaxBytes {
 		return false
 	}
-	f, err := os.Open(path)
-	if err != nil {
-		return false
-	}
-	defer f.Close()
-	_, err = jpeg.DecodeConfig(f)
-	return err == nil
+	b, err := os.ReadFile(path)
+	return err == nil && CheckPlaybackJPEG(b) == nil
+}
+
+// CheckPlaybackJPEG decodes every pixel of b. Reading only the header would
+// pass a file cut off after it, and such a file would then be offered as
+// evidence and skipped by every later download.
+func CheckPlaybackJPEG(b []byte) error {
+	_, err := jpeg.Decode(bytes.NewReader(b))
+	return err
 }

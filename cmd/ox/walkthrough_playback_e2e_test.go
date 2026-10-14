@@ -13,6 +13,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"image/jpeg"
@@ -214,6 +215,57 @@ func TestWalkthroughJoinedMomentsE2E(t *testing.T) {
 		require.Len(t, data.Shortcuts, 1)
 	})
 
+	t.Run("Avery reads a long chapter's words page by page", func(t *testing.T) {
+		e2e, _ := start(t, "")
+		var long strings.Builder
+		long.WriteString("WEBVTT\n\n")
+		clock := func(sec int) string { return fmt.Sprintf("%02d:%02d:%02d.000", sec/3600, sec/60%60, sec%60) }
+		for i := 0; i < 250; i++ {
+			fmt.Fprintf(&long, "%s --> %s\ncue number %d\n\n", clock(i), clock(i+1), i+1)
+		}
+		require.NoError(t, os.WriteFile(filepath.Join(e2e.teamPath, "discussions", "2026-08-18-01-00-walkthrough", "transcript.vtt"), []byte(long.String()), 0o644))
+
+		seen := map[int]int{}
+		cursor, pages := "", 0
+		for {
+			args := []string{"--chapter", "Plan comparison", "--transcript"}
+			if cursor != "" {
+				args = append(args, "--cursor", cursor)
+			}
+			env, _ := decodeConversationEnvelope(t, e2e.run(t, args...))
+			require.True(t, env.Success)
+			var page struct {
+				Transcript struct {
+					Cues       []struct{ N int } `json:"cues"`
+					NextCursor string            `json:"next_cursor"`
+				} `json:"transcript"`
+			}
+			decodeConversationData(t, env, &page)
+			for _, c := range page.Transcript.Cues {
+				seen[c.N]++
+			}
+			pages++
+			cursor = page.Transcript.NextCursor
+			if cursor == "" {
+				break
+			}
+			require.Contains(t, env.Guidance, "--chapter 'Plan comparison' --transcript --cursor "+cursor, "the offered continuation stays in the chapter")
+			require.Less(t, pages, 6)
+		}
+		require.Equal(t, 2, pages)
+		require.Len(t, seen, 131, "cues 120-250 overlap the chapter")
+		for n, count := range seen {
+			require.Equal(t, 1, count, "cue %d served %d times", n, count)
+		}
+	})
+
+	t.Run("Avery limits the read and is told chapters were left out", func(t *testing.T) {
+		e2e, _ := start(t, "")
+		_, data, _ := e2e.runJSON(t, "--limit", "2")
+		require.Len(t, data.Chapters, 2)
+		require.Contains(t, strings.Join(data.Notes, "\n"), "Chapters are capped at 2 of 3; read the rest with --chapter")
+	})
+
 	t.Run("Avery names a chapter that is not there", func(t *testing.T) {
 		e2e, _ := start(t, "")
 		out, exit, _ := testguard.RunOx(t, e2e.oxBin, e2e.workspace, e2e.env, "walkthrough", shareTestWalkthroughRec, "--chapter", "Settings")
@@ -322,6 +374,22 @@ func TestWalkthroughJoinedMomentsE2E(t *testing.T) {
 		require.Len(t, srv.images(), 4, "the second run is served from disk")
 		cache := filepath.Join(e2e.teamPath, ".sageox", "cache", "walkthrough-playback")
 		require.Contains(t, e2e.run(t, "--text"), "      focus:  "+cache)
+	})
+
+	t.Run("A picture that was cut short is fetched again", func(t *testing.T) {
+		e2e, srv := start(t, "")
+		_, data, _ := e2e.runJSON(t, "--fetch")
+		damaged := data.Moments[0].Focus.LocalImage
+		require.NoError(t, os.WriteFile(damaged, truncatedPlaybackJPEG(t), 0o644))
+		before := len(srv.images())
+
+		_, data, _ = e2e.runJSON(t, "--fetch")
+		require.Len(t, srv.images(), before+1, "only the damaged picture is fetched again")
+		require.Equal(t, damaged, data.Moments[0].Focus.LocalImage)
+		whole, err := os.ReadFile(damaged)
+		require.NoError(t, err)
+		_, err = jpeg.Decode(bytes.NewReader(whole))
+		require.NoError(t, err, "the replacement is a whole picture")
 	})
 
 	t.Run("Avery asks for the whole-frame picture as well", func(t *testing.T) {

@@ -52,6 +52,25 @@ func tinyJPEG(t *testing.T) []byte {
 	return buf.Bytes()
 }
 
+// truncatedJPEG is a JPEG whose header is intact and whose picture data is cut
+// off: DecodeConfig accepts it, a full decode does not.
+func truncatedJPEG(t *testing.T) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, 64, 64))
+	for i := range img.Pix {
+		img.Pix[i] = byte(i*7 + i/13)
+	}
+	var buf bytes.Buffer
+	require.NoError(t, jpeg.Encode(&buf, img, nil))
+	full := buf.Bytes()
+	cut := full[:bytes.Index(full, []byte{0xFF, 0xDA})+40]
+	_, err := jpeg.DecodeConfig(bytes.NewReader(cut))
+	require.NoError(t, err, "the header is valid")
+	_, err = jpeg.Decode(bytes.NewReader(cut))
+	require.Error(t, err, "the picture data is not")
+	return cut
+}
+
 type playbackView struct {
 	Target    *WalkthroughTarget    `json:"target"`
 	Duration  string                `json:"duration"`
@@ -209,6 +228,15 @@ func TestPlaybackImageStates(t *testing.T) {
 	require.NoError(t, os.WriteFile(m1.Focus.CachePath, []byte("<html>error page</html>"), 0o644))
 	_, d = readPlayback(t, root, WalkthroughOptions{})
 	require.Equal(t, "unfetched", d.Moments[0].Focus.Availability, "a non-JPEG in the cache is not evidence")
+
+	// A file cut off after a valid header is not a picture either; the next
+	// --fetch has to replace it, so it must not read as local.
+	require.NoError(t, os.WriteFile(m1.Focus.CachePath, truncatedJPEG(t), 0o644))
+	_, d = readPlayback(t, root, WalkthroughOptions{})
+	require.Equal(t, "unfetched", d.Moments[0].Focus.Availability, "a truncated picture is not evidence")
+	require.NotEmpty(t, d.Moments[0].Focus.FetchCommand)
+	require.Error(t, CheckPlaybackJPEG(truncatedJPEG(t)))
+	require.NoError(t, CheckPlaybackJPEG(tinyJPEG(t)))
 
 	require.NoError(t, os.WriteFile(m1.Focus.CachePath, tinyJPEG(t), 0o644))
 	_, d = readPlayback(t, root, WalkthroughOptions{})
@@ -494,4 +522,45 @@ func TestParsePlaybackBoundsChaptersShortcutsAndOutcomeBoxes(t *testing.T) {
 	require.Equal(t, 1, d.Shortcuts[1].Count, "a missing count means once")
 	require.Nil(t, d.Moments[0].Then.Box, "a box that leaves the frame is dropped, the outcome stays")
 	require.Equal(t, "screen changed", d.Moments[0].Then.Label)
+}
+
+// TestPlaybackChapterListIsCappedWithANote: when --limit cuts the chapter list
+// the read says so, as it does for shortcuts, spans and pages.
+// Failure prevented: a reader takes a cut list of chapters for the whole
+// recording, because the moments were not truncated and nothing else says
+// otherwise.
+func TestPlaybackChapterListIsCappedWithANote(t *testing.T) {
+	root := stagePlaybackWalkthrough(t)
+	_, d := readPlayback(t, root, WalkthroughOptions{Limit: 2})
+	require.Len(t, d.Chapters, 2)
+	require.Equal(t, "Checkout", d.Chapters[1].Title)
+	require.Contains(t, strings.Join(d.Notes, "\n"), "Chapters are capped at 2 of 3")
+	require.Contains(t, strings.Join(d.Notes, "\n"), "--chapter")
+
+	_, d = readPlayback(t, root, WalkthroughOptions{Limit: 3})
+	require.Len(t, d.Chapters, 3)
+	require.NotContains(t, strings.Join(d.Notes, "\n"), "Chapters are capped")
+}
+
+// TestWalkthroughGuidanceKeepsTheChapterOnTheNextTranscriptPage: the cursor is
+// bound to the window, and the chapter is what makes the window.
+func TestWalkthroughGuidanceKeepsTheChapterOnTheNextTranscriptPage(t *testing.T) {
+	root := stagePlaybackWalkthrough(t)
+	var long strings.Builder
+	long.WriteString("WEBVTT\n\n")
+	for i := 0; i < 240; i++ {
+		long.WriteString(formatVTTTimestamp(time.Duration(i)*time.Second) + " --> " + formatVTTTimestamp(time.Duration(i+1)*time.Second) + "\nword\n\n")
+	}
+	writeWalkthroughFile(t, root, "transcript.vtt", long.String())
+	p := loadPlaybackFixture(t)
+	from, to, err := p.ChapterWindow("Plan comparison")
+	require.Nil(t, err)
+
+	env := New(root, time.Time{}).Walkthrough(walkthroughCnv, WalkthroughOptions{HasWindow: true, FromOffset: from, ToOffset: to, Chapter: "Plan comparison", Transcript: true})
+	d := walkthroughData(t, env)
+	require.NotEmpty(t, d.Transcript.NextCursor)
+	require.Contains(t, env.Guidance, "Next source page: ox walkthrough "+walkthroughCnv+" --chapter 'Plan comparison' --transcript --cursor "+d.Transcript.NextCursor)
+
+	plain := New(root, time.Time{}).Walkthrough(walkthroughCnv, WalkthroughOptions{HasWindow: true, FromOffset: from, ToOffset: to, Transcript: true})
+	require.NotContains(t, plain.Guidance, "--chapter", "a window that is not a chapter does not invent one")
 }

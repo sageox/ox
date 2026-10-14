@@ -1,11 +1,9 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"image/jpeg"
 	"io"
 	"log/slog"
 	"os"
@@ -136,7 +134,7 @@ func downloadPlaybackImage(ctx context.Context, ref *read.PlaybackImage) error {
 	if err != nil {
 		return err
 	}
-	if _, err := jpeg.DecodeConfig(bytes.NewReader(body)); err != nil {
+	if err := read.CheckPlaybackJPEG(body); err != nil {
 		return fmt.Errorf("the download is not a readable JPEG")
 	}
 	if err := os.MkdirAll(filepath.Dir(ref.CachePath), 0o700); err != nil {

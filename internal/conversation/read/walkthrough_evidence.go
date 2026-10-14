@@ -194,7 +194,7 @@ func (r *Reader) walkthroughEvidence(start time.Time, id *ID, rw row, root *os.R
 	}
 	guidance := walkthroughGuidance(id.ConversationID, data) + fmt.Sprintf(" Pin subsequent reads with --revision %s. Read source words: ox walkthrough %s --transcript --revision %s.", index.Revision, id.ConversationID, index.Revision)
 	if transcript.NextCursor != "" {
-		guidance += fmt.Sprintf(" Next transcript page: ox walkthrough %s --transcript --revision %s --cursor %s.", id.ConversationID, index.Revision, transcript.NextCursor)
+		guidance += fmt.Sprintf(" Next transcript page: ox walkthrough %s%s --transcript --revision %s --cursor %s.", id.ConversationID, opts.chapterFlag(), index.Revision, transcript.NextCursor)
 	}
 	guidance += fmt.Sprintf(" For a named visual deficiency, request bounded server decoding: ox walkthrough %s --revision %s --extract --cues N-M --max-frames 5. For temporal ambiguity widen the window; for a transient state request a denser short window; for unreadable detail use --max-width 4096. This spends server compute, uses no semantic LLM pass, and must not be retried without a budget or new evidence need.", id.ConversationID, index.Revision)
 	return r.finishSuccess(start, data, guidance, warnings), true
