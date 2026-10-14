@@ -575,7 +575,7 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 	// command output. This is opportunistic — the primary channel is
 	// handlePrompt (UserPromptSubmit hook) and the active pull is
 	// `ox agent <id> whisper`.
-	emitWhispers(cmd.OutOrStdout(), agentID)
+	deliverPendingWhispers(cmd, agentID)
 
 	subcommand := args[0]
 
@@ -1173,6 +1173,20 @@ func runAgentWhisper(w io.Writer, inst *agentinstance.Instance) error {
 	formatWhispers(w, entries)
 	traceWhisperDelivery(projectRoot, inst.AgentID, entries)
 	return nil
+}
+
+// emitWhispersFn is emitWhispers, swapped by tests.
+var emitWhispersFn = emitWhispers
+
+// deliverPendingWhispers emits pending whispers on an `ox agent <id> <cmd>`
+// invocation, except a `session stop --agent-ended`: the SessionEnd hook runs
+// that stop with no agent left to read its output (session_end_sync.go), and
+// reading whispers marks them delivered, so they would be lost.
+func deliverPendingWhispers(cmd *cobra.Command, agentID string) {
+	if agentEnded, _ := cmd.Flags().GetBool("agent-ended"); agentEnded {
+		return
+	}
+	emitWhispersFn(cmd.OutOrStdout(), agentID)
 }
 
 // emitWhispers checks daemon for pending whisper entries and writes them to stdout.

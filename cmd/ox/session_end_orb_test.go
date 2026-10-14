@@ -1,12 +1,12 @@
 package main
 
 import (
-	"bufio"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -22,6 +22,7 @@ import (
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
+	"github.com/sageox/ox/internal/testguard"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -32,10 +33,12 @@ import (
 // reaches the team's Ledger before the orb pauses. No daemon has to outlive
 // the agent, and no claude/codex/gemini CLI has to be logged in.
 //
-// Red-first (verified while authoring): drop `!runtime.Caps().HostEndsWithAgent`
-// from daemonOutlivesSession → the orb case fails on "the session must reach
-// the Ledger before the orb pauses", because SessionEnd hands the recording to
-// a daemon that is frozen with the orb.
+// Red-first (verified while authoring), each failing on "the session must reach
+// the Ledger before the orb pauses":
+//   - drop `!runtime.Caps().HostEndsWithAgent` from daemonOutlivesSession, and
+//     SessionEnd hands the recording to a daemon that is frozen with the orb;
+//   - drop the thread-URL reduction in ox-adapter-amp's findAmpSession, and the
+//     stop cannot find the bridge's sidecar for a recording keyed by the URL.
 
 const (
 	orbThreadURL = "https://ampcode.com/threads/T-5f0c2a71-3b9e-4d1a-8c6f-2e7d9b4a1c03"
@@ -43,56 +46,9 @@ const (
 	orbReply     = "Renamed retryWithBackoff to retryIdempotent and updated the four callers."
 )
 
-// testAmpBridgeAdapter reads the ox-bridge sidecar format (one JSON object per
-// line, see cmd/ox-adapter-amp/plugin/ox-bridge.ts) the way ox-adapter-amp
-// does for the lines this test writes. The real adapter is an external
-// binary, so it is not available in-process.
-type testAmpBridgeAdapter struct{ sidecar string }
-
-func (a *testAmpBridgeAdapter) Name() string { return "amp" }
-func (a *testAmpBridgeAdapter) Detect() bool { return false }
-func (a *testAmpBridgeAdapter) FindSessionFile(_ adapters.SessionLookup) (string, error) {
-	return a.sidecar, nil
-}
-func (a *testAmpBridgeAdapter) ReadMetadata(_ string) (*adapters.SessionMetadata, error) {
-	return nil, nil
-}
-func (a *testAmpBridgeAdapter) Watch(_ context.Context, _ string) (<-chan adapters.RawEntry, error) {
-	return nil, adapters.ErrWatchNotSupported
-}
-func (a *testAmpBridgeAdapter) Read(path string) ([]adapters.RawEntry, error) {
-	entries, _, err := a.ReadFromOffset(path, 0)
-	return entries, err
-}
-func (a *testAmpBridgeAdapter) ReadFromOffset(path string, offset int64) ([]adapters.RawEntry, int64, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, offset, err
-	}
-	defer f.Close()
-	if _, err := f.Seek(offset, 0); err != nil {
-		return nil, offset, err
-	}
-	var entries []adapters.RawEntry
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		var line struct {
-			Type      string `json:"type"`
-			Content   string `json:"content"`
-			Timestamp string `json:"timestamp"`
-		}
-		if json.Unmarshal(scanner.Bytes(), &line) != nil || (line.Type != "user" && line.Type != "assistant") {
-			continue
-		}
-		ts, _ := time.Parse(time.RFC3339Nano, line.Timestamp)
-		entries = append(entries, adapters.RawEntry{Timestamp: ts, Role: line.Type, Content: line.Content})
-	}
-	end, _ := f.Seek(0, 2)
-	return entries, end, scanner.Err()
-}
-
 // orbSessionFixture is a project with a real Ledger clone of a bare remote,
-// a fake LFS store, and a live Amp recording whose sidecar holds one turn.
+// a fake LFS store, the real ox-adapter-amp binary, and a live Amp recording
+// whose bridge sidecar holds one turn.
 type orbSessionFixture struct {
 	*draftLedgerFixture
 	store   *fakeLFSStore
@@ -127,21 +83,32 @@ func newOrbSessionFixture(t *testing.T) *orbSessionFixture {
 	runGit(t, base.ledgerPath, "remote", "set-url", "--push", "origin", base.barePath)
 	t.Chdir(base.projectRoot)
 
-	// what `ox agent prime` leaves behind in the orb: a live recording keyed
-	// by the thread URL Amp exported as AMP_THREAD_URL
-	const agentID = "OxOrb1"
-	sidecar := filepath.Join(t.TempDir(), "T-5f0c2a71.jsonl")
-	adapters.Register(&testAmpBridgeAdapter{sidecar: sidecar})
+	// The real adapter, so the stop's sidecar lookup is the one that ships.
+	adapterBin := filepath.Join(t.TempDir(), "ox-adapter-amp")
+	build := exec.Command("go", "build", "-o", adapterBin, "./cmd/ox-adapter-amp")
+	build.Dir = filepath.Join(packageDir, "..", "..") // the repository root
+	build.Env = testguard.MinimalEnv(nil)
+	out, err := build.CombinedOutput()
+	require.NoError(t, err, "build ox-adapter-amp: %s", out)
+	ampAdapter, err := adapters.NewExternalAdapter(adapterBin)
+	require.NoError(t, err)
+	adapters.Register(ampAdapter)
 	t.Cleanup(func() { adapters.Unregister("amp") })
+
+	// what `ox agent prime` leaves behind in the orb: a live recording keyed
+	// by the thread URL Amp exported as AMP_THREAD_URL, with no sidecar path
+	// (Amp records in hook mode, so the stop looks the sidecar up)
+	const agentID = "OxOrb1"
 	state, err := session.StartRecording(base.projectRoot, session.StartRecordingOptions{
 		AgentID: agentID, AdapterName: "amp", Username: "amp",
 		AgentSessionID: orbThreadURL, WorkspacePath: base.projectRoot,
 	})
 	require.NoError(t, err)
+	require.Empty(t, state.SessionFile, "precondition: the stop must find the sidecar itself")
 	require.NoError(t, writeRawHeader(base.projectRoot, state))
-	require.NoError(t, session.UpdateRecordingStateForAgent(base.projectRoot, agentID, func(s *session.RecordingState) {
-		s.SessionFile = sidecar
-	}))
+	// ox-bridge.ts writes ~/.cache/amp/ox-sessions/<thread id>.jsonl
+	sidecar := filepath.Join(os.Getenv("HOME"), ".cache", "amp", "ox-sessions", nativeThreadKey(orbThreadURL)+".jsonl")
+	require.NoError(t, os.MkdirAll(filepath.Dir(sidecar), 0o755))
 
 	// what ox-bridge.ts appends for one Amp turn after that
 	at := state.StartedAt.UTC()
@@ -544,4 +511,28 @@ func TestStopDiagnosticsTail(t *testing.T) {
 	long := stopDiagnosticsTail([]byte(strings.Repeat("x", 1000) + " the end"))
 	assert.LessOrEqual(t, len(long), stopDiagnosticsMax+len("…"))
 	assert.True(t, strings.HasSuffix(long, "the end"), "keep the end, where the error is")
+}
+
+// TestDeliverPendingWhispers_SkipsTheSessionEndStop: whispers that arrive
+// while an orb thread is idle must still reach the agent on its next command.
+// The SessionEnd stop writes its output to a file nobody shows the agent, so
+// it must not read them (reading marks them delivered).
+func TestDeliverPendingWhispers_SkipsTheSessionEndStop(t *testing.T) {
+	prior := emitWhispersFn
+	t.Cleanup(func() { emitWhispersFn = prior })
+	for _, tc := range []struct {
+		name       string
+		agentEnded bool
+		want       int
+	}{
+		{"an agent's own command delivers them", false, 1},
+		{"the SessionEnd stop leaves them pending", true, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			emitWhispersFn = func(io.Writer, string) { calls++ }
+			deliverPendingWhispers(stopCommandFlags(tc.agentEnded), "OxOrb1")
+			assert.Equal(t, tc.want, calls)
+		})
+	}
 }
