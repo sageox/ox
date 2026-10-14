@@ -42,11 +42,11 @@
     const ds = sec.getAttribute("data-ox-section");
     if (ds) return ds;
     const h = sec.querySelector("h2, h3");
-    return h ? h.textContent || "" : sec.id || "";
+    return h ? anchorText(h) : sec.id || "";
   }
   function anchorText(el) {
     const clone = el.cloneNode(true);
-    clone.querySelectorAll(".rev-glyph").forEach((g) => g.remove());
+    clone.querySelectorAll(".rev-glyph, style, script").forEach((g) => g.remove());
     return clone.textContent || "";
   }
   function anchorFor(el) {
@@ -365,7 +365,16 @@
           break;
       }
     });
-    port.send({ type: "ready" });
+    whenDiagramsDrawn(() => port.send({ type: "ready" }));
+  }
+  function whenDiagramsDrawn(go) {
+    const deadline = Date.now() + 5e3;
+    const check = () => {
+      const pending = Array.prototype.some.call(document.querySelectorAll(".mermaid"), (el) => !el.querySelector("svg"));
+      if (!pending || Date.now() >= deadline) go();
+      else setTimeout(check, 100);
+    };
+    check();
   }
 
   // src/state.ts

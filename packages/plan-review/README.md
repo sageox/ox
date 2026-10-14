@@ -21,6 +21,7 @@ The ox CLI does not install this package. It builds the same source into
 | `@sageox/plan-review` | `PROTOCOL`, the message types, `parseDocumentMessage`, `parseHostMessage`, and `connectFrame`, the host's end of a framed plan |
 | `@sageox/plan-review/document-tools-script` | The document tools for a framed plan, as a string to inline (default export) |
 | `@sageox/plan-review/document-tools.iife.js` | The same script, as a file |
+| `@sageox/plan-review/frame-plan` | `framePlan`: a stored plan, ready to frame, with the document tools and, for a plan with a diagram, ox's vendored Mermaid build inlined |
 | `@sageox/plan-review/document-tools` | `startDocumentTools` and `localPorts`, for a plan in the host's own window |
 | `@sageox/plan-review/document-tools.css` | The marks' styles for that same-window case; the framed script carries its own |
 | `@sageox/plan-review/manifest.json` | Version, protocol, a digest of the source, and the SHA-256 of every other file in `dist/` |
@@ -60,29 +61,29 @@ protocol a build speaks.
 
    ```js
    import { connectFrame } from '@sageox/plan-review';
-   import documentTools from '@sageox/plan-review/document-tools-script';
 
    const instance = crypto.randomUUID();
    const port = connectFrame(iframe, instance);
    port.listen(onDocumentMessage);
    ```
 
-3. **Inject the script before the plan's last `</body>`** and frame it with
-   `sandbox="allow-scripts"` only. Splice the text rather than call `replace`
-   with a string: the script contains `$&`, which a replacement string expands,
-   and an earlier `</body>` can sit inside the plan's own scripts.
+3. **Prepare the page with `framePlan`** and frame it with
+   `sandbox="allow-scripts"` only. It splices the document tools in before the
+   plan's last `</body>`. When the plan has a Mermaid diagram, it also swaps the
+   jsDelivr Mermaid script, which the policy below blocks, for ox's vendored
+   build inlined, the same one `ox plan render --artifact` uses.
 
    ```js
-   const tag = `<script data-instance="${instance}">${documentTools}</script>`;
-   const last = [...planHTML.matchAll(/<\/body>/gi)].pop();
-   const html = last ? planHTML.slice(0, last.index) + tag + planHTML.slice(last.index) : planHTML + tag;
+   import { framePlan } from '@sageox/plan-review/frame-plan';
+
    iframe.setAttribute('sandbox', 'allow-scripts');
-   iframe.srcdoc = html;
+   iframe.srcdoc = framePlan(planHTML, { documentTools: true, instance });
    ```
 
-   The script contains no `</script` and no `<!--` (the build refuses either),
-   so it inlines as is. A document served from a URL may carry the id in the
-   frame URL's fragment, `#i=<instance>`, instead of the attribute.
+   A document served from a URL can carry the id in the frame URL's fragment,
+   `#i=<instance>`: prepare it with `framePlan(planHTML, { documentTools: true })`
+   where it is served. `frame-plan` carries the 2.7 MB build, so import it
+   there, not in the host page's bundle.
 
 4. **Keep the frame opaque.** The script runs under this policy, which is the
    one to serve a framed plan with:

@@ -3,7 +3,7 @@
 import { buildSync } from 'esbuild';
 import { fileURLToPath } from 'node:url';
 
-export function load(name) {
-  const out = buildSync({ entryPoints: [fileURLToPath(new URL('../src/' + name, import.meta.url))], bundle: true, format: 'esm', write: false });
+export function load(name, define) {
+  const out = buildSync({ entryPoints: [fileURLToPath(new URL('../src/' + name, import.meta.url))], bundle: true, format: 'esm', write: false, define });
   return import('data:text/javascript;base64,' + Buffer.from(out.outputFiles[0].text).toString('base64'));
 }

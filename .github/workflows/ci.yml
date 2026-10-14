@@ -489,6 +489,19 @@ jobs:
       - name: Check, test and pack the package
         run: make plan-review-check
 
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+
+      # The built document tools in real Chrome, against the anchors Go
+      # computes for the same pages (pkg/planreview/testdata/anchors.json).
+      # These tests skip without Chrome or dist/, so a skip has to fail here.
+      - name: Document tools anchor what Go anchors
+        shell: bash
+        run: |
+          go test -tags=browser -count=1 -v -run 'TestBrowser_DocumentTools(MatchSharedPageVectors|AnchorADiagramOnceItDraws)$' ./cmd/ox/ | tee browser.log
+          test "$(grep -c '^--- PASS: TestBrowser_DocumentTools' browser.log)" -eq 2
+
   # The skill installer is the one subsystem where Windows is a first-class
   # target rather than an aspiration: copy materialization IS what Windows gets,
   # because the symlink helper elsewhere in ox silently no-ops there. The

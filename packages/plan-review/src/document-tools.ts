@@ -373,5 +373,20 @@ export function startDocumentTools(port: DocumentPort, opts: DocumentToolsOption
         break;
     }
   });
-  port.send({ type: 'ready' });
+  // An anchor hashes a diagram's drawn text, and Mermaid draws after load: a
+  // host that painted before then would look marks up by the diagram's source.
+  // Clicks make no target until the host turns review on, which it does only
+  // after ready, so holding ready back covers them too.
+  whenDiagramsDrawn(() => port.send({ type: 'ready' }));
+}
+
+/** whenDiagramsDrawn calls go once every Mermaid diagram holds its <svg>, or after 5 s for one that never draws. */
+function whenDiagramsDrawn(go: () => void): void {
+  const deadline = Date.now() + 5000;
+  const check = () => {
+    const pending = Array.prototype.some.call(document.querySelectorAll('.mermaid'), (el: Element) => !el.querySelector('svg'));
+    if (!pending || Date.now() >= deadline) go();
+    else setTimeout(check, 100);
+  };
+  check();
 }

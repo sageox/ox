@@ -310,6 +310,31 @@ func TestBrowser_DocumentToolsMatchSharedPageVectors(t *testing.T) {
 	}
 }
 
+// Failure prevented: a mark on a Mermaid diagram never paints, because the
+// host painted before the diagram drew and looked it up by its source, or the
+// drawn diagram's anchor changed with the per-render id in its <style>.
+func TestBrowser_DocumentToolsAnchorADiagramOnceItDraws(t *testing.T) {
+	ctx := frameBrowser(t)
+	// the plan draws its diagram after load, as Mermaid does
+	doc := `<!doctype html><html><head><meta charset="utf-8"></head><body>` +
+		`<section data-ox-section="Flow"><pre class="mermaid">graph TD; A--&gt;B</pre></section>` +
+		`<script>setTimeout(function(){document.querySelector('.mermaid').innerHTML=` +
+		`'<svg><style>#mermaid-1760000000000{}</style><g><text>A</text><text>B</text></g></svg>'},400)</script></body></html>`
+	base := serveFramedPlan(t, []byte(doc))
+	if err := chromedp.Run(ctx, chromedp.Navigate(base)); err != nil {
+		t.Fatalf("load the framed diagram page: %v", err)
+	}
+	var none struct{}
+	n := frameMessage(t, ctx, 0, "ready", &none)
+	drawn := planreview.AnchorFor("Flow", "AB")
+	frameSend(t, ctx, `{type:'paint', items:[{anchor:'`+drawn+`', kind:'committed', status:'comment', state:'open', glyph:'◌', tint:'amber'}]}`)
+	var placed struct{ Items []struct{ Anchor string } }
+	frameMessage(t, ctx, n, "placed", &placed)
+	if len(placed.Items) == 0 || placed.Items[0].Anchor != drawn {
+		t.Fatalf("placed %+v, want the drawn diagram's anchor %s", placed.Items, drawn)
+	}
+}
+
 // TestBrowser_NavigatedFrameIsNotHeard: a hostile plan navigates its frame,
 // after the document tools said ready, to a page it controls that knows the
 // instance. The host hears none of that page's messages and sends it nothing.

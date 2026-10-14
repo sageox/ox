@@ -15,7 +15,7 @@ function pins(file, want) {
 // Failure prevented: re-clicking a marked item computes a different anchor and
 // creates an unreachable duplicate mark instead of editing the existing one.
 test('an anchor ignores the glyph painted into its element', () => {
-  pins('anchor.ts', ["clone.querySelectorAll('.rev-glyph')", 'contentAnchor(headingOf(el), anchorText(el))']);
+  pins('anchor.ts', ["clone.querySelectorAll('.rev-glyph, style, script')", 'contentAnchor(headingOf(el), anchorText(el))']);
 });
 
 // Failure prevented: a reviewer keeps marking up a dead page believing their

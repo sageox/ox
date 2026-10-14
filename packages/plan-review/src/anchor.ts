@@ -63,14 +63,16 @@ export function headingOf(el: Element): string {
   const ds = sec.getAttribute('data-ox-section');
   if (ds) return ds;
   const h = sec.querySelector('h2, h3');
-  return h ? h.textContent || '' : sec.id || '';
+  return h ? anchorText(h) : sec.id || '';
 }
 
 // anchorText is the element's text without the glyphs the review layer
-// painted into it, so a marked element keeps its anchor and its label.
+// painted into it, so a marked element keeps its anchor and its label, and
+// without <style> and <script>: Mermaid writes a per-render id into each
+// diagram's <style>, which would give a drawn diagram a new anchor every load.
 export function anchorText(el: Element): string {
   const clone = el.cloneNode(true) as Element;
-  clone.querySelectorAll('.rev-glyph').forEach((g) => g.remove());
+  clone.querySelectorAll('.rev-glyph, style, script').forEach((g) => g.remove());
   return clone.textContent || '';
 }
 
