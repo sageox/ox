@@ -305,8 +305,12 @@ func TestAppendBackfillRevisedEvent_FirstEventKeepsTheLegacyStatus(t *testing.T)
 	if _, err := appendBackfillRevisedEvent(context.Background(), dir, "Old plan"); err != nil {
 		t.Fatal(err)
 	}
-	if got := CurrentStatus(dir); got != PlanStatusApproved {
-		t.Fatalf("status after backfill = %q, want approved", got)
+	events, err := LoadEvents(dir)
+	if err != nil || len(events) != 1 || events[0].Kind != EventCreated {
+		t.Fatalf("want one created event, got %+v (err %v)", events, err)
+	}
+	if got := Fold(events).Status; got != PlanStatusApproved {
+		t.Fatalf("folded status after backfill = %q, want approved", got)
 	}
 }
 
