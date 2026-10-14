@@ -149,7 +149,8 @@ The CLI reads and writes review records only through `pkg/planreview`.
   mid-rebase, locked, or holds unmerged entries they record nothing, and
   `/approve` answers 503. A failed commit or push, from the browser or a CLI
   verb, leaves a plan-dir marker owing only those files (`files`); a
-  lifecycle push never clears a marker owed for the whole dir. With no Ledger checkout the event is recorded and reported not
+  lifecycle push never clears a marker owed for the whole dir, and no success
+  clears a failure recorded after its own attempt began. With no Ledger checkout the event is recorded and reported not
   committed, and no git command runs.
 - **Saves** (`sharePlanDir`): a save checks the Ledger, and runs the
   `.gitignore` guard, under the repo lock, so a sync in progress is waited out
