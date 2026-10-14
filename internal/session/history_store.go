@@ -48,6 +48,19 @@ func StoreCapturedHistory(history *CapturedHistory, agentID string, activeRecord
 	if !result.Valid {
 		return "", fmt.Errorf("%w: %v", ErrHistoryStorageFailed, result.Errors)
 	}
+	if activeRecording {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("%w: workspace unavailable", ErrHistoryStorageFailed)
+		}
+		state, err := LoadRecordingStateForAgent(cwd, agentID)
+		if err != nil {
+			return "", fmt.Errorf("%w: recording state unavailable", ErrHistoryStorageFailed)
+		}
+		if state != nil && state.AdapterName == "cursor" {
+			return "", fmt.Errorf("%w: unsupported-scope: capture-prior cannot merge into a native Cursor recording", ErrHistoryStorageFailed)
+		}
+	}
 
 	storagePath = GetHistoryStoragePath(agentID, activeRecording)
 	if storagePath == "" {

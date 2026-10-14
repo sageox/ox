@@ -1,0 +1,27 @@
+{
+  "conversation_id": "conversation-2",
+  "generation_id": "generation-3",
+  "model": "cursor-grok-4.6-medium",
+  "model_id": "grok-4.6",
+  "model_params": [
+    {
+      "id": "effort",
+      "value": "medium"
+    },
+    {
+      "id": "fast",
+      "value": "false"
+    }
+  ],
+  "composer_mode": "agent",
+  "prompt": "This is CHAT-B.\n\nWithout using tools or reading files, report the exact OX_CURSOR_START_CONTEXT value already in your context. If absent, say absent; do not infer it.\n\nEnd your reply with FINAL_B_NO_TOOL.",
+  "attachments": [],
+  "session_id": "conversation-2",
+  "hook_event_name": "beforeSubmitPrompt",
+  "cursor_version": "3.20.21",
+  "workspace_roots": [
+    "<WORKSPACE>/.context/cursor-adapter/evidence/fixture-control-project"
+  ],
+  "user_email": "<USER_EMAIL>",
+  "transcript_path": null
+}

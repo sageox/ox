@@ -57,15 +57,27 @@ type Data struct {
 	LastNaggedAt time.Time `json:"last_nagged_at,omitzero"`
 }
 
-// Path is the version cache file. A var so tests redirect it to a temp dir
-// rather than writing to the real ~/.cache/sageox/.
-var Path = filepath.Join(paths.CacheDir(), "version-check.json")
+// Path overrides the version cache file; empty means version-check.json under
+// paths.CacheDir(). A var so tests redirect it to a temp dir rather than
+// writing to the real ~/.cache/sageox/.
+//
+// The default is resolved on use, never at package init: internal/paths caches
+// the home directory on first use, so an init-time lookup would pin the real
+// home before a test binary's TestMain could sandbox it.
+var Path string
+
+func cacheFile() string {
+	if Path != "" {
+		return Path
+	}
+	return filepath.Join(paths.CacheDir(), "version-check.json")
+}
 
 // Read returns the cache, or nil when it is missing or unreadable. A corrupt
 // cache is treated as absent: printing one extra notice is cheaper than
 // failing a command over a cache file.
 func Read() *Data {
-	raw, err := os.ReadFile(Path)
+	raw, err := os.ReadFile(cacheFile())
 	if err != nil {
 		return nil
 	}
@@ -85,14 +97,15 @@ func Write(d *Data) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(Path), 0700); err != nil {
+	path := cacheFile()
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
 	}
-	tmp := Path + ".tmp"
+	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, raw, 0600); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, Path); err != nil {
+	if err := os.Rename(tmp, path); err != nil {
 		os.Remove(tmp)
 		return err
 	}
@@ -105,7 +118,7 @@ func Write(d *Data) error {
 // surviving ledger would then suppress the FIRST notice about the next release
 // line, which is the one notice that matters most.
 func Reset() {
-	_ = os.Remove(Path)
+	_ = os.Remove(cacheFile())
 }
 
 // CarryLedger copies the notice ledger from src into dst, leaving dst's version

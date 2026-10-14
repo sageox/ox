@@ -91,6 +91,15 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
+	// The same reasoning applies to the developer's home directory: move it into
+	// the sandbox before any test runs, rather than trusting every test to.
+	if err := isolateHome(sandbox); err != nil {
+		fmt.Fprintf(os.Stderr, "cmd/ox tests: cannot isolate the home directory: %v\n", err)
+		_ = os.Chdir(packageDir)
+		_ = os.RemoveAll(sandbox)
+		os.Exit(1)
+	}
+
 	code := m.Run()
 
 	// Leave the sandbox before removing it; some platforms refuse to unlink the

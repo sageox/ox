@@ -38,6 +38,9 @@ func runSessionForceStop(cmd *cobra.Command, args []string) error {
 		if agentID != "" {
 			return fmt.Errorf("--current and --agent-id are mutually exclusive")
 		}
+		if cursorRequiresExplicitAgentID() {
+			return fmt.Errorf("missing-native-identity: Cursor requires an explicit AI coworker ID: ox session stop --agent-id <id>")
+		}
 		agentID = os.Getenv("SAGEOX_AGENT_ID")
 		if agentID == "" {
 			return fmt.Errorf("--current requires SAGEOX_AGENT_ID environment variable (set by 'ox agent prime')")
@@ -60,6 +63,9 @@ func runSessionForceStop(cmd *cobra.Command, args []string) error {
 	}
 	if state == nil {
 		return fmt.Errorf("no active recording found for agent %q\nRun 'ox session status' to see active recordings", agentID)
+	}
+	if currentOnly && state.AdapterName == "cursor" {
+		return fmt.Errorf("missing-native-identity: Cursor requires an explicit AI coworker ID: ox session stop --agent-id <id>")
 	}
 
 	// runAgentSessionStop only uses inst.AgentID
