@@ -21,7 +21,7 @@ are mocked in `demo/mock/` for reproducible, offline recording.
 
 ```bash
 brew install vhs
-brew install sops yq
+brew install sops yq awscli
 node --version  # 18+
 ```
 
@@ -31,16 +31,18 @@ The demo uses a dedicated demo account (`you@yourcompany.com`).
 
 **Option 1: SOPS-encrypted credentials (recommended)**
 
-1. Get SOPS age key from 1Password (search "SageOx SOPS Age Key")
-2. Save to `~/.config/sops/age/keys.txt` with `chmod 600`
-3. Create `demo/credentials.sops.yaml`:
+1. Log in with your SageOx AWS profile (AdministratorAccess on account 824122457598) and select it for sops:
+   `aws sso login --profile <your sageox profile>` then `export AWS_PROFILE=<your sageox profile>`
+2. Create `demo/credentials.sops.yaml`:
 
 ```bash
 cp demo/credentials.example.yaml demo/credentials.yaml
 vim demo/credentials.yaml
-cd demo && sops -e credentials.yaml > credentials.sops.yaml
-rm credentials.yaml
+cd demo && sops -e --filename-override credentials.sops.yaml credentials.yaml > credentials.sops.yaml.tmp \
+  && mv credentials.sops.yaml.tmp credentials.sops.yaml && rm credentials.yaml
 ```
+
+`--filename-override` makes sops apply the `credentials.sops.yaml` rule in `demo/.sops.yaml`, so the file gets the KMS and break-glass recipients.
 
 **Option 2: Environment variables**
 

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,10 +13,12 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/sageox/ox/internal/agenttask"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/plan"
+	"github.com/sageox/ox/pkg/planreview"
 	"github.com/spf13/cobra"
 )
 
@@ -30,6 +33,66 @@ func newTestReviewServer(t *testing.T, planDir string) (*httptest.Server, chan i
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
 	return srv, rounds, approved
+}
+
+// reviewTestLedger makes a Ledger with a bare origin that planLedgerPathFor
+// resolves for the rest of the test, so review writes commit and push for
+// real. Tests using it must not run in parallel.
+func reviewTestLedger(t *testing.T) string {
+	t.Helper()
+	ledger := t.TempDir()
+	initGitLedgerWithOrigin(t, ledger)
+	prev := planLedgerPathFor
+	planLedgerPathFor = func(string) (string, error) { return ledger, nil }
+	t.Cleanup(func() { planLedgerPathFor = prev })
+	return ledger
+}
+
+// reviewTestPlanDir is a plan dir inside a reviewTestLedger.
+func reviewTestPlanDir(t *testing.T) string {
+	t.Helper()
+	dir := filepath.Join(reviewTestLedger(t), "data", "plans", "2026-10-01-p")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// resolveForTest records a resolution in dir as `ox plan feedback resolve`
+// stores it, without committing it.
+func resolveForTest(t *testing.T, dir, anchor string, state planreview.State, note string) {
+	t.Helper()
+	rec, err := newResolutionRecord(anchor, state, "", note, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := planreview.Publish(dir, rec); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// roundForTest records a round in dir as the review server stores it,
+// accepted at at, without committing it.
+func roundForTest(t *testing.T, dir string, at time.Time, items ...planreview.Item) {
+	t.Helper()
+	frozen, err := json.Marshal(struct {
+		ID    string            `json:"id"`
+		Items []planreview.Item `json:"items"`
+	}{fmt.Sprintf("r%d", at.UnixNano()), items})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q, err := planreview.ParseRoundRequest(frozen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err := q.Record("p", "", at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := planreview.Publish(dir, rec); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func reviewPOST(t *testing.T, url, token, body string) int {
@@ -69,7 +132,7 @@ func TestRenderSavedReviewPage_PreservesLegacyAuthoredHTML(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out, err := renderSavedReviewPage("", "attest-map", dir, plan.Parse("# Attest map\n\nprose fallback"), plan.Result{}, nil, plan.RenderOptions{})
+	out, err := renderSavedReviewPage("", "attest-map", dir, plan.Parse("# Attest map\n\nprose fallback"), plan.Result{}, plan.Review{}, plan.RenderOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +154,7 @@ func TestRenderSavedReviewPage_RegeneratesKnownMarkdownProjection(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	out, err := renderSavedReviewPage("", "quick-plan", dir, plan.Parse("# Quick plan\n\n## Current\nFresh markdown projection."), plan.Result{}, nil, plan.RenderOptions{})
+	out, err := renderSavedReviewPage("", "quick-plan", dir, plan.Parse("# Quick plan\n\n## Current\nFresh markdown projection."), plan.Result{}, plan.Review{}, plan.RenderOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +185,7 @@ func TestRenderSavedReviewPage_PreservesProvenanceSessionLink(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(dir, "meta.json"), []byte(meta), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			out, err := renderSavedReviewPage(projectRoot, "saved", dir, plan.Parse("# Saved\n\nFallback plan."), plan.Result{}, nil, plan.RenderOptions{})
+			out, err := renderSavedReviewPage(projectRoot, "saved", dir, plan.Parse("# Saved\n\nFallback plan."), plan.Result{}, plan.Review{}, plan.RenderOptions{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -207,14 +270,14 @@ func TestReviewLoop_ServesAllowlistedCompanions(t *testing.T) {
 // persisted, and signaled. Failure prevented: any local process posting feedback,
 // or a submit lost instead of reaching the agent.
 func TestReviewLoop_FeedbackEndpointTokenGated(t *testing.T) {
-	dir := t.TempDir()
+	dir := reviewTestPlanDir(t)
 	srv, rounds, _ := newTestReviewServer(t, dir)
 	payload := `{"items":[{"anchor":"h1","status":"request-change","note":"bound it"}]}`
 
 	if code := reviewPOST(t, srv.URL+"/feedback", "", payload); code != http.StatusForbidden {
 		t.Errorf("missing token should be 403, got %d", code)
 	}
-	if sets, _ := plan.LoadAllFeedback(dir); len(sets) != 0 {
+	if sets := plan.ReadReview(dir).Rounds; len(sets) != 0 {
 		t.Error("a forbidden submit must not write feedback")
 	}
 	if code := reviewPOST(t, srv.URL+"/feedback", "secret", payload); code != http.StatusOK {
@@ -228,7 +291,7 @@ func TestReviewLoop_FeedbackEndpointTokenGated(t *testing.T) {
 	default:
 		t.Error("valid submit must signal a round")
 	}
-	if sets, _ := plan.LoadAllFeedback(dir); len(sets) != 1 {
+	if sets := plan.ReadReview(dir).Rounds; len(sets) != 1 {
 		t.Errorf("valid submit must persist one round, got %d", len(sets))
 	}
 }
@@ -237,15 +300,19 @@ func TestReviewLoop_FeedbackEndpointTokenGated(t *testing.T) {
 // Accept writes a verified resolution; Reopen raises a new round that reopens the
 // item. Failure prevented: the human can't close or re-raise an addressed item.
 func TestReviewLoop_AcceptAndReopen(t *testing.T) {
-	dir := t.TempDir()
+	dir := reviewTestPlanDir(t)
 	srv, rounds, _ := newTestReviewServer(t, dir)
 
 	if code := reviewPOST(t, srv.URL+"/accept", "secret", `{"anchor":"h1"}`); code != http.StatusOK {
 		t.Fatalf("accept should be 200, got %d", code)
 	}
-	res, _ := plan.LoadResolutions(dir)
-	if len(res) != 1 || res[0].State != plan.ResolutionVerified || res[0].Anchor != "h1" {
-		t.Errorf("accept must append a verified resolution, got %+v", res)
+	files, _ := filepath.Glob(filepath.Join(dir, "feedback", "resolutions", "*.json"))
+	var res planreview.Resolution
+	if len(files) != 1 {
+		t.Fatalf("accept must store one resolution record, got %v", files)
+	}
+	if b, err := os.ReadFile(files[0]); err != nil || json.Unmarshal(b, &res) != nil || res.State != planreview.StateVerified || res.Anchor != "h1" {
+		t.Errorf("accept must store a verified resolution, got %+v (err %v)", res, err)
 	}
 
 	if code := reviewPOST(t, srv.URL+"/reopen", "secret", `{"anchor":"h1","note":"still broken"}`); code != http.StatusOK {
@@ -256,13 +323,12 @@ func TestReviewLoop_AcceptAndReopen(t *testing.T) {
 	default:
 		t.Error("reopen must signal a round")
 	}
-	sets, _ := plan.LoadAllFeedback(dir)
-	if len(sets) != 1 || sets[0].Items[0].Status != plan.FeedbackRequestChange {
-		t.Errorf("reopen must raise a request-change round, got %+v", sets)
+	rev := plan.ReadReview(dir)
+	if len(rev.Rounds) != 1 || rev.Rounds[0].Items[0].Status != planreview.StatusRequestChange {
+		t.Errorf("reopen must raise a request-change round, got %+v", rev.Rounds)
 	}
 	// merged view: the item is open again (re-raised after the resolution)
-	items, _ := plan.AssembleReview(dir)
-	if len(items) != 1 || !items[0].Open {
+	if items := rev.Items; len(items) != 1 || !items[0].Open {
 		t.Errorf("re-raised item must be open, got %+v", items)
 	}
 }
@@ -349,38 +415,30 @@ func TestReviewLoop_MissingAnchorIsBadRequest(t *testing.T) {
 	}
 }
 
-// TestReviewLoop_FeedbackAndReopenSurfaceSaveFailure verifies /feedback and
-// /reopen both report 500 — not a false 200 — when the underlying
-// plan.SaveFeedback write fails, so a human is never told a round was saved
-// when it wasn't.
-func TestReviewLoop_FeedbackAndReopenSurfaceSaveFailure(t *testing.T) {
-	dir := t.TempDir()
-	// A regular file where SaveFeedback expects to MkdirAll a "feedback"
-	// subdirectory fails deterministically on every platform (unlike chmod,
-	// which no-ops on Windows).
+// TestReviewLoop_WritesSurfaceSaveFailure verifies /feedback, /reopen and
+// /accept report 500 — not a false 200 — when the record cannot be written,
+// and leave no recovery entry behind, so a human is never told a review was
+// saved when it wasn't.
+func TestReviewLoop_WritesSurfaceSaveFailure(t *testing.T) {
+	dir := reviewTestPlanDir(t)
+	// A regular file where the record's "feedback" directory belongs fails
+	// deterministically on every platform (unlike chmod, which no-ops on
+	// Windows).
 	if err := os.WriteFile(filepath.Join(dir, "feedback"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	srv, _, _ := newTestReviewServer(t, dir)
-	if code := reviewPOST(t, srv.URL+"/feedback", "secret", `{"items":[{"anchor":"h1","status":"comment"}]}`); code != http.StatusInternalServerError {
-		t.Errorf("/feedback with a blocked feedback dir should be 500, got %d", code)
+	for path, body := range map[string]string{
+		"/feedback": `{"id":"round-0001","items":[{"anchor":"h1","status":"comment"}]}`,
+		"/reopen":   `{"anchor":"h1"}`,
+		"/accept":   `{"anchor":"h1"}`,
+	} {
+		if code := reviewPOST(t, srv.URL+path, "secret", body); code != http.StatusInternalServerError {
+			t.Errorf("%s with a blocked feedback dir should be 500, got %d", path, code)
+		}
 	}
-	if code := reviewPOST(t, srv.URL+"/reopen", "secret", `{"anchor":"h1"}`); code != http.StatusInternalServerError {
-		t.Errorf("/reopen with a blocked feedback dir should be 500, got %d", code)
-	}
-}
-
-// TestReviewLoop_AcceptSurfacesAppendResolutionFailure mirrors the above for
-// /accept's plan.AppendResolution write, which MkdirAlls the same "feedback"
-// subdirectory.
-func TestReviewLoop_AcceptSurfacesAppendResolutionFailure(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "feedback"), []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	srv, _, _ := newTestReviewServer(t, dir)
-	if code := reviewPOST(t, srv.URL+"/accept", "secret", `{"anchor":"h1"}`); code != http.StatusInternalServerError {
-		t.Errorf("/accept with a blocked feedback dir should be 500, got %d", code)
+	if left, err := listReviewPending(filepath.Dir(filepath.Dir(filepath.Dir(dir)))); err != nil || len(left) != 0 {
+		t.Errorf("an unsaved write must leave no recovery entry, got %+v (err %v)", left, err)
 	}
 }
 
@@ -423,7 +481,7 @@ func TestBroadcaster_FansOut(t *testing.T) {
 // the notify path can enqueue) and a plan dir stamped with an authoring agent.
 func newNotifyingReviewServer(t *testing.T) (srv *httptest.Server, gitRoot, planDir string) {
 	t.Helper()
-	gitRoot = t.TempDir()
+	gitRoot = reviewTestLedger(t)
 	planDir = filepath.Join(gitRoot, "plandir")
 	if err := os.MkdirAll(planDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -465,7 +523,7 @@ func TestReviewLoop_ReopenEnqueuesAuthorTask(t *testing.T) {
 // signaled even when there's no authoring coworker to notify (an unlinked plan):
 // the ledger write (step N-1) survives the notify (step N) being a no-op.
 func TestReviewLoop_FeedbackPersistsWhenNotifyIsNoop(t *testing.T) {
-	gitRoot := t.TempDir()
+	gitRoot := reviewTestLedger(t)
 	planDir := filepath.Join(gitRoot, "plandir")
 	if err := os.MkdirAll(planDir, 0o755); err != nil { // NO meta.json → unlinked
 		t.Fatal(err)
@@ -478,7 +536,7 @@ func TestReviewLoop_FeedbackPersistsWhenNotifyIsNoop(t *testing.T) {
 	if code := reviewPOST(t, srv.URL+"/feedback", "secret", `{"items":[{"anchor":"h1","status":"flag","note":"y"}]}`); code != http.StatusOK {
 		t.Fatalf("submit: %d", code)
 	}
-	if sets, _ := plan.LoadAllFeedback(planDir); len(sets) != 1 {
+	if sets := plan.ReadReview(planDir).Rounds; len(sets) != 1 {
 		t.Errorf("round must persist even with no agent to notify, got %d", len(sets))
 	}
 	select {
@@ -513,7 +571,7 @@ func TestReviewLoop_FeedbackReportsNotifiedTrueOnSuccess(t *testing.T) {
 // browser shows success, and the human never learns the coworker was never
 // told — which is exactly what ox#968 reported (silently swallowed at Debug).
 func TestReviewLoop_FeedbackReportsNotifiedFalseOnEnqueueFailure(t *testing.T) {
-	gitRoot := t.TempDir()
+	gitRoot := reviewTestLedger(t)
 	planDir := filepath.Join(gitRoot, "plandir")
 	if err := os.MkdirAll(planDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -536,7 +594,7 @@ func TestReviewLoop_FeedbackReportsNotifiedFalseOnEnqueueFailure(t *testing.T) {
 	if !strings.Contains(body, `"notified":false`) {
 		t.Errorf("response must report notified:false when enqueue fails, got %q", body)
 	}
-	if sets, _ := plan.LoadAllFeedback(planDir); len(sets) != 1 {
+	if sets := plan.ReadReview(planDir).Rounds; len(sets) != 1 {
 		t.Errorf("the round must still persist even though notify failed, got %d", len(sets))
 	}
 
@@ -571,7 +629,23 @@ func TestReviewLoop_ConcurrentFeedbackDedupes(t *testing.T) {
 	if n := len(activeTasks(t, gitRoot)); n != 1 {
 		t.Errorf("concurrent submits must dedup to one task, got %d", n)
 	}
-	if sets, _ := plan.LoadAllFeedback(planDir); len(sets) < 1 {
+	if sets := plan.ReadReview(planDir).Rounds; len(sets) < 1 {
 		t.Errorf("submits must persist their rounds, got %d", len(sets))
+	}
+}
+
+// TestAwaitTimeout_HandsOverFeedbackThatArrivedAtTheEnd verifies a wait that
+// ends (its timeout, or Ctrl-C) hands over open feedback a last read finds,
+// and otherwise reports "timeout" with that read's completeness. Failure
+// prevented: a round submitted in the wait's last instant is reported as a
+// timeout with nothing open.
+func TestAwaitTimeout_HandsOverFeedbackThatArrivedAtTheEnd(t *testing.T) {
+	dir := t.TempDir()
+	if res := awaitTimeout(dir); res.Status != "timeout" || !res.Complete || len(res.Open) != 0 {
+		t.Fatalf("a wait with nothing to hand over must time out, got %+v", res)
+	}
+	roundForTest(t, dir, time.Now(), planreview.Item{Anchor: "h1", Status: planreview.StatusFlag})
+	if res := awaitTimeout(dir); res.Status != "feedback" || len(res.Open) != 1 {
+		t.Fatalf("feedback found at the end must be handed over, got %+v", res)
 	}
 }

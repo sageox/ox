@@ -10,7 +10,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Hedvig+Letters+Serif:opsz@12..24&family=Inter:wght@400;500;600&family=Spline+Sans+Mono:wght@400;500;600&display=swap" rel="stylesheet"/>
 {{end}}<style>{{.CSS}}</style>
 </head>
-<body data-slug="{{.Slug}}" data-review-endpoint="{{.ReviewEndpoint}}" data-review-token="{{.ReviewToken}}">
+<body data-slug="{{.Slug}}" data-review-endpoint="{{.ReviewEndpoint}}" data-review-token="{{.ReviewToken}}"{{if .ReviewProblems}} data-review-problems="{{.ReviewProblems}}"{{end}}>
 <!-- SageOx OX icon, two-tone outlined. Defined once; markers <use> it
      so the page stays lean and self-contained. Dark/light variants toggle via CSS. -->
 <svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
@@ -45,7 +45,7 @@
       {{if .ContextItems}}<div class="ox-ctx"><span class="ox-ctx-cap">Context surfaced</span>{{range .ContextItems}}<span class="ox-ctx-item"><span class="ox-ctx-kind">{{.Kind}}</span> {{.Title}}</span>{{end}}</div>{{end}}
     </div>
   </div>{{end}}
-  {{if .Review.HasReview}}<div class="rev-status"><span class="rev-status-tag">Review</span> <strong>{{.Review.Open}}</strong> open · {{.Review.Addressed}} addressed · {{.Review.Verified}} verified{{if .Review.Wontfix}} · {{.Review.Wontfix}} won't-fix{{end}}</div>{{end}}
+  {{if or .Review.HasReview .ReviewProblems}}<div class="rev-status"><span class="rev-status-tag">Review</span> <strong>{{.Review.Open}}</strong> open · {{.Review.Addressed}} addressed · {{.Review.Verified}} verified{{if .Review.Wontfix}} · {{.Review.Wontfix}} won't-fix{{end}}{{if .ReviewProblems}} · <strong>{{.ReviewProblems}} problem(s) reading it: may be incomplete</strong>{{end}}</div>{{end}}
   {{if .TLDR}}<div class="tldr"><span class="tldr-tag">TL;DR</span>{{.TLDR}}</div>{{end}}
   {{if .Stats}}<div class="hero-stats">{{range .Stats}}<span class="hstat hstat-{{.Class}}"><span class="hstat-v">{{.Value}}</span><span class="hstat-l">{{.Label}}</span></span>{{end}}</div>{{end}}
   {{if .Preamble}}<section id="preamble">{{.Preamble}}</section>{{end}}

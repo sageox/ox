@@ -71,6 +71,30 @@ func TestCommitLedgerSnapshot_CommitsStagedBlobNotWorktree(t *testing.T) {
 	assert.Equal(t, "finalize session example", gitInRepo(t, repo, "log", "-1", "--format=%s"))
 }
 
+// TestStageLedgerBlob_CommitsTheFrozenBytes: a writer that froze a record's
+// bytes stages exactly those, whatever the worktree file holds, and a path
+// git refuses is an error, not a silent no-op. Failure prevented: a commit of
+// a record publishes bytes edited after they were frozen.
+func TestStageLedgerBlob_CommitsTheFrozenBytes(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git repository")
+	}
+	repo := newSnapshotRepo(t)
+	const path = "data/plans/p/feedback/round-x.json"
+	writeGitutilFixture(t, repo, path, "edited after it was frozen\n")
+
+	oid, err := StageLedgerBlob(context.Background(), repo, path, []byte(cleanMeta))
+	require.NoError(t, err)
+	committed, err := CommitLedgerSnapshot(context.Background(), repo, "plan review: p", path)
+	require.NoError(t, err)
+	require.True(t, committed)
+	assert.Equal(t, cleanMeta, headBlob(t, repo, path), "the commit must carry the frozen bytes")
+	assert.Equal(t, oid, gitInRepo(t, repo, "rev-parse", "HEAD:"+path))
+
+	_, err = StageLedgerBlob(context.Background(), repo, "../outside.json", []byte(cleanMeta))
+	assert.Error(t, err, "git refuses a path outside the repository")
+}
+
 // TestCommitLedgerSnapshot_PathScopeLeavesOtherStagedEntries protects the
 // isolation callers rely on: a session finalize must not sweep another
 // session's staged files into its own commit, and must leave them staged.

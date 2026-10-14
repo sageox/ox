@@ -13,6 +13,7 @@ import (
 
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/plan"
+	"github.com/sageox/ox/pkg/planreview"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -33,10 +34,7 @@ func TestPlanReview_ReportsHowTheSessionEnded(t *testing.T) {
 		plan.Result{}, nil, plan.Meta{Topic: "Outcome", Slug: "outcome"})
 	require.NoError(t, err)
 	// submitted before any session below: never counted
-	_, err = plan.SaveFeedback(dir, plan.FeedbackSet{Slug: "outcome", Items: []plan.FeedbackItem{
-		{Anchor: "hearlier1", Label: "earlier", Status: plan.FeedbackComment},
-	}}, time.Now().Add(-time.Hour))
-	require.NoError(t, err)
+	roundForTest(t, dir, time.Now().Add(-time.Hour), planreview.Item{Anchor: "hearlier1", Label: "earlier", Status: planreview.StatusComment})
 
 	t.Chdir(gitRoot)
 	t.Setenv("SKIP_BROWSER", "1")
@@ -123,10 +121,7 @@ func TestPlanReviewAwait_ReportsWhatItReturned(t *testing.T) {
 	}
 
 	assert.Equal(t, "timeout", await())
-	_, err = plan.SaveFeedback(dir, plan.FeedbackSet{Slug: "await-outcome", Items: []plan.FeedbackItem{
-		{Anchor: "hrisk0001", Label: "retry", Status: plan.FeedbackRequestChange},
-	}}, time.Now())
-	require.NoError(t, err)
+	roundForTest(t, dir, time.Now(), planreview.Item{Anchor: "hrisk0001", Label: "retry", Status: planreview.StatusRequestChange})
 	assert.Equal(t, "feedback", await())
 }
 

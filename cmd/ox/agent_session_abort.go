@@ -167,6 +167,11 @@ func runAgentSessionAbortByName(inst *agentinstance.Instance, cmd *cobra.Command
 	info := buildSessionInfo(sessionName, sessionPath)
 	isUploaded := isSessionInLedger(sessionName)
 	status := session.ClassifySession(info, isUploaded)
+	// A hold never shields a published copy: the Ledger copy is what the team
+	// sees, so removing the session by name removes that copy too.
+	if status == session.StatusHeld && isUploaded {
+		status = session.StatusUploaded
+	}
 
 	switch status {
 	case session.StatusOrphan, session.StatusGhost, session.StatusLocal:
@@ -190,8 +195,9 @@ func runAgentSessionAbortByName(inst *agentinstance.Instance, cmd *cobra.Command
 			return err
 		}
 		return killFinalizedSession(inst, cmd, projectRoot, sessionName)
-	case session.StatusPaused:
-		// paused = stopped but not uploaded; safe to discard locally
+	case session.StatusPaused, session.StatusHeld:
+		// stopped but not uploaded (held: kept on this machine by choice);
+		// discarding by name is the coworker's explicit call
 	case session.StatusCanceled:
 		// already canceled — just clean up if folder somehow remains
 	default:
@@ -262,6 +268,7 @@ func buildSessionInfo(sessionName, sessionPath string) session.SessionInfo {
 
 	// check for raw.jsonl data
 	info.HasRawData = session.RawJSONLHasData(sessionPath)
+	info.Held = session.IsHeld(sessionPath)
 
 	return info
 }
@@ -300,7 +307,8 @@ func isSessionInLedger(sessionName string) bool {
 //
 // Search order, most-authoritative-first:
 //  1. XDG cache (active/recent recordings)
-//  2. Ledger cache (in-progress sessions before upload)
+//  2. Ledger cache (in-progress sessions before upload), then the other
+//     caches session.HeldSessionDirs lists (held sessions)
 //  3. Ledger sessions directory (uploaded sessions)
 //
 // The ledger cache is searched BEFORE the git-tracked ledger sessions dir
@@ -313,25 +321,30 @@ func isSessionInLedger(sessionName string) bool {
 func resolveSessionForAbort(projectRoot, nameArg string) (string, string, error) {
 	// build list of stores to search, in priority order
 	var stores []*session.Store
-
-	// 1. XDG cache (primary location for active recordings)
-	repoID := getRepoIDOrDefault(projectRoot)
-	if contextPath := session.GetContextPath(repoID); contextPath != "" {
-		if s, err := session.NewStore(contextPath); err == nil {
+	seen := map[string]bool{}
+	addStore := func(base string) {
+		if base == "" || seen[filepath.Clean(base)] {
+			return
+		}
+		seen[filepath.Clean(base)] = true
+		if s, err := session.NewStore(base); err == nil {
 			stores = append(stores, s)
 		}
 	}
 
-	// 2. Ledger cache, then 3. Ledger sessions
+	// 1. XDG cache (primary location for active recordings)
+	repoID := getRepoIDOrDefault(projectRoot)
+	addStore(session.GetContextPath(repoID))
+
+	// 2. Ledger cache, then the other caches a held session can live in
+	// (anything 'ox session list' shows as held can be aborted by name),
+	// then 3. Ledger sessions
 	ledgerPath, ledgerErr := resolveLedgerPath()
 	if ledgerErr == nil {
-		ledgerCachePath := filepath.Join(ledgerPath, ".sageox", "cache")
-		if s, err := session.NewStore(ledgerCachePath); err == nil {
-			stores = append(stores, s)
+		for _, dir := range session.HeldSessionDirs(ledgerPath) {
+			addStore(filepath.Dir(dir))
 		}
-		if s, err := session.NewStore(ledgerPath); err == nil {
-			stores = append(stores, s)
-		}
+		addStore(ledgerPath)
 	}
 
 	draftOnlyName := ""

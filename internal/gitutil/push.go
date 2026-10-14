@@ -577,6 +577,14 @@ func fetchUpstream(ctx context.Context, repoPath string) (target, out string, er
 	}
 }
 
+// UpstreamTrackingRef is the remote-tracking ref for HEAD's branch, resolved
+// as PushWithRetry's fetch resolves it: @{u} when the branch tracks one, else
+// refs/remotes/origin/<branch>, which a push to origin updates.
+func UpstreamTrackingRef(ctx context.Context, repoPath string) (string, error) {
+	_, _, target, err := upstreamRefs(ctx, repoPath)
+	return target, err
+}
+
 // upstreamRefs resolves the remote, the remote ref to fetch (branch.<b>.merge)
 // and the remote-tracking ref holding it (@{u}) for HEAD. Without an upstream
 // it falls back to origin and the current branch.

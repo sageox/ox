@@ -211,6 +211,22 @@ func TestPushWithRetry_NoUpstreamFallsBackToOriginBranch(t *testing.T) {
 	assert.FileExists(t, filepath.Join(repo, "b.txt"))
 }
 
+// TestUpstreamTrackingRef_FallsBackWithoutUpstream: a branch that tracks no
+// upstream still names the ref a push to origin updates, so callers verifying
+// a push read the same ref the push wrote.
+func TestUpstreamTrackingRef_FallsBackWithoutUpstream(t *testing.T) {
+	repo, _ := initBareRemoteRepo(t)
+	branch, err := RunGit(context.Background(), repo, "symbolic-ref", "--short", "HEAD")
+	require.NoError(t, err)
+	tracked, err := UpstreamTrackingRef(context.Background(), repo)
+	require.NoError(t, err)
+	run(t, repo, "git", "branch", "--unset-upstream")
+	untracked, err := UpstreamTrackingRef(context.Background(), repo)
+	require.NoError(t, err)
+	assert.Equal(t, "refs/remotes/origin/"+branch, tracked)
+	assert.Equal(t, tracked, untracked)
+}
+
 func TestUpstreamRefs_DetachedHeadErrors(t *testing.T) {
 	repo, _ := initBareRemoteRepo(t)
 	run(t, repo, "git", "checkout", "--quiet", "--detach")

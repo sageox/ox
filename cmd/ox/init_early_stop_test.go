@@ -106,7 +106,7 @@ func isolateInitFromLogin(t *testing.T, ep string) {
 func repoATeammateAlreadyInitialized(t *testing.T) string {
 	t.Helper()
 	remote := filepath.Join(t.TempDir(), "remote.git")
-	runGit(t, t.TempDir(), "init", "-q", "--bare", remote)
+	initBareRemote(t, remote)
 
 	teammate := t.TempDir()
 	initGitRepo(t, teammate)

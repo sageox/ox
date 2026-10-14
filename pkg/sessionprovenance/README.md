@@ -21,6 +21,6 @@ projections, survive JSON round trips. Consumers must mutate decoded structs
 rather than reconstructing receipts from known fields. Use `Projections` for
 processing receipts; `Extra` retains unknown future properties.
 
-Run `go test -race ./...` in this directory or `make test-sessionprovenance` at
+Run `go test -race ./...` in this directory or `make test-public-modules` at
 the repository root. Root `go test ./...` does not discover this nested module.
 The fixtures cover live capture, historical import and pre-capture exclusion.

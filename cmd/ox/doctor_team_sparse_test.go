@@ -36,7 +36,7 @@ func TestMissingSparseTopLevelDirs_CatchesTheManifestOmission(t *testing.T) {
 	}
 
 	origin := t.TempDir()
-	run(origin, "init", "--bare", "--initial-branch=main")
+	initBareRemote(t, origin, "--initial-branch=main")
 
 	seed := t.TempDir()
 	run(seed, "init", "--initial-branch=main")
@@ -128,7 +128,7 @@ func TestMissingSparseTopLevelDirs_UntrackedContentDoesNotMaskTheOmission(t *tes
 	}
 
 	origin := t.TempDir()
-	run(origin, "init", "--bare", "--initial-branch=main")
+	initBareRemote(t, origin, "--initial-branch=main")
 	seed := t.TempDir()
 	run(seed, "init", "--initial-branch=main")
 	run(seed, "config", "user.email", "t@example.com")

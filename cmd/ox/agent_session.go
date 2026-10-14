@@ -135,8 +135,44 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 	adapterName := ""          // canonical adapter name for GetAdapter() lookup
 	agentTypeName := agentType // original type for metadata
 	sessionFile := ""
+	var startOffset int64
+	var startOffsetKnown bool
+	var sourcePrefixSHA256 string
 
-	if isManualSessionAgent(agentType) {
+	if agentType == string(agentx.AgentTypeCursor) {
+		// Cursor does not expose its native conversation ID through environment
+		// variables. Resolve only the marker belonging to this exact AI coworker;
+		// never infer a chat from Cursor's shared desktop PID.
+		marker := FindUnambiguousSessionMarkerByAgentID(inst.AgentID)
+		if marker == nil || marker.AgentSessionID == "" {
+			return fmt.Errorf("missing-native-identity: Cursor manual recording requires a completed Cursor prime for this AI coworker")
+		}
+		if marker.CursorSourceBoundary == nil {
+			return session.ErrCursorBoundaryUnavailable
+		}
+		workspace, workspaceErr := canonicalCursorWorkspace(projectRoot)
+		if workspaceErr != nil {
+			return workspaceErr
+		}
+		markerWorkspace, workspaceErr := canonicalCursorWorkspace(marker.CursorSourceBoundary.WorkspacePath)
+		if workspaceErr != nil || markerWorkspace != workspace {
+			return fmt.Errorf("workspace-mismatch: Cursor conversation is bound to another workspace")
+		}
+		agentSessionID = marker.AgentSessionID
+		if _, adapterErr := adapters.GetAdapter(string(agentx.AgentTypeCursor)); adapterErr != nil {
+			return fmt.Errorf("adapter-missing: Cursor adapter unavailable: %w", adapterErr)
+		}
+		var boundaryErr error
+		sessionFile, startOffset, sourcePrefixSHA256, boundaryErr = cursorManualStartBoundary(projectRoot, agentSessionID)
+		if boundaryErr != nil {
+			return boundaryErr
+		}
+		if marker.CursorSourceBoundary.SourcePath != sessionFile {
+			return fmt.Errorf("invalid-source-path: Cursor marker does not match the conversation export")
+		}
+		startOffsetKnown = true
+		adapterName = string(agentx.AgentTypeCursor)
+	} else if isManualSessionAgent(agentType) {
 		// Codex: use the codex adapter to find its session file.
 		// Codex stores plans inline in session files (no separate plan.md).
 		adapterName = string(agentx.AgentTypeCodex)
@@ -202,6 +238,10 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 		}
 		sessionsBase := filepath.Join(contextPath, "sessions")
 		sessionPath := filepath.Join(sessionsBase, sessionName)
+		// never write into, or clean up, a held session's folder
+		if session.IsHeld(sessionPath) {
+			return fmt.Errorf("%w: %s", session.ErrHeldSessionPath, sessionPath)
+		}
 
 		if err := os.MkdirAll(sessionPath, 0755); err != nil {
 			return fmt.Errorf("create session dir: %w", err)
@@ -218,40 +258,64 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 
 	// capture file size before recording starts — entries before this offset are pre-session
 	// (e.g., buffered messages from before ox agent session start was called)
-	var startOffset int64
-	if sessionFile != "" {
+	if sessionFile != "" && !startOffsetKnown {
 		if fi, err := os.Stat(sessionFile); err == nil {
 			startOffset = fi.Size()
+			startOffsetKnown = true
 		}
 	}
 
 	// determine parent PID for liveness detection.
 	// prefer OX_PARENT_PID env (set by prime, stable) over FindAgentAncestorPID()
 	// which can return a transient shell PID if the process tree walk fails.
-	parentPID := proc.FindAgentAncestorPID()
-	if envPID := os.Getenv("OX_PARENT_PID"); envPID != "" {
-		if parsed, parseErr := strconv.Atoi(envPID); parseErr == nil && parsed > 0 {
-			parentPID = parsed
+	parentPID := 0
+	if agentType != "cursor" {
+		parentPID = proc.FindAgentAncestorPID()
+		if envPID := os.Getenv("OX_PARENT_PID"); envPID != "" {
+			if parsed, parseErr := strconv.Atoi(envPID); parseErr == nil && parsed > 0 {
+				parentPID = parsed
+			}
 		}
 	}
 
 	// start recording with agent ID from session
+	attribution := identity.ResolveAttribution(endpoint.GetForProject(projectRoot), config.GetDisplayName())
 	opts := session.StartRecordingOptions{
-		AgentID:        inst.AgentID,
-		AgentSessionID: agentSessionID,
-		AdapterName:    adapterName,
-		AgentType:      agentTypeName,
-		SessionFile:    sessionFile,
-		Title:          title,
-		Username:       identity.AttributionUsername(endpoint.GetForProject(projectRoot), config.GetDisplayName()),
-		WorkspacePath:  projectRoot,
-		Branch:         repotools.GetCurrentBranch(projectRoot),
-		ParentPID:      parentPID,
-		StartOffset:    startOffset,
-		WatchMode:      sessionWatchMode(adapterName),
+		AgentID:            inst.AgentID,
+		AgentSessionID:     agentSessionID,
+		AdapterName:        adapterName,
+		AgentType:          agentTypeName,
+		SessionFile:        sessionFile,
+		Title:              title,
+		Username:           attribution.Username,
+		WorkspacePath:      projectRoot,
+		Branch:             repotools.GetCurrentBranch(projectRoot),
+		ParentPID:          parentPID,
+		StartOffset:        startOffset,
+		StartOffsetKnown:   startOffsetKnown,
+		SourcePrefixSHA256: sourcePrefixSHA256,
+		WatchMode:          sessionWatchMode(adapterName),
 	}
 
-	state, err := session.StartRecording(projectRoot, opts)
+	var state *session.RecordingState
+	if adapterName == "cursor" {
+		opts.PreparedIdentity, err = session.PrepareRecordingIdentity(projectRoot)
+		if err != nil {
+			return fmt.Errorf("prepare Cursor recording identity: %w", err)
+		}
+		opts.BeforePublish = func(s *session.RecordingState) error {
+			return writeRawHeaderWithAttribution(projectRoot, s, &attribution)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		err = fileutil.WithFileLock(ctx, markerPath(agentSessionID)+".recording-start", func() error {
+			var startErr error
+			state, startErr = session.StartRecording(projectRoot, opts)
+			return startErr
+		})
+	} else {
+		state, err = session.StartRecording(projectRoot, opts)
+	}
 	if err != nil {
 		if errors.Is(err, session.ErrAlreadyRecording) {
 			return fmt.Errorf("a session is already being recorded\nRun 'ox agent %s session stop' first, then start a new session", inst.AgentID)
@@ -262,9 +326,11 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 		return fmt.Errorf("failed to start recording: %w", err)
 	}
 	// write raw.jsonl header immediately so incremental hooks can append entries
-	if writeErr := writeRawHeader(projectRoot, state); writeErr != nil {
-		slog.Warn("failed to write raw.jsonl header at start", "error", writeErr)
-		// non-fatal: processAgentSession will write header at stop time as fallback
+	if adapterName != "cursor" {
+		if writeErr := writeRawHeader(projectRoot, state); writeErr != nil {
+			slog.Warn("failed to write raw.jsonl header at start", "error", writeErr)
+			// non-fatal: processAgentSession will write header at stop time as fallback
+		}
 	}
 
 	// register-at-start so /c/<session_id> resolves from t=0 (fire-and-forget)
@@ -337,7 +403,8 @@ func printSessionStartText(agentID, adapterName, title, notice string, startedAt
 // isManualSessionAgent returns true for agent types that require explicit
 // adapter selection instead of generic/deep autodetection.
 func isManualSessionAgent(agentType string) bool {
-	return canonicalAgentType(agentType) == string(agentx.AgentTypeCodex)
+	canonical := canonicalAgentType(agentType)
+	return canonical == string(agentx.AgentTypeCodex) || canonical == string(agentx.AgentTypeCursor)
 }
 
 // ensurePrimeBeforeSession checks if `ox agent prime` has run for the current
@@ -482,6 +549,21 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 		}
 	}
 	traceAtStop := state.Trace
+	if state.AdapterName == "cursor" {
+		held := stopHoldsSession(projectRoot, state)
+		now := time.Now().UTC()
+		if err := session.UpdateRecordingStateForAgent(projectRoot, inst.AgentID, func(current *session.RecordingState) {
+			if current.StoppedAt == nil {
+				current.StoppedAt = &now
+			}
+			current.CursorFinalDrainPending = true
+			if held {
+				current.PublishingMode = config.SessionPublishingManual
+			}
+		}); err != nil {
+			return fmt.Errorf("preserve pending Cursor final drain: %w", err)
+		}
+	}
 	if err := session.MarkExplicitStop(projectRoot, inst.AgentID); err != nil {
 		return fmt.Errorf("mark session stopped: %w", err)
 	}
@@ -499,7 +581,7 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 
 	// re-discover session file if it was empty at start time
 	// (Claude Code session JSONL may not have existed yet when recording started)
-	if state.SessionFile == "" && state.AdapterName != "" && state.AdapterName != "generic" {
+	if state.SessionFile == "" && state.AdapterName != "" && state.AdapterName != "generic" && state.AdapterName != "cursor" {
 		if adapter, adapterErr := adapters.GetAdapter(state.AdapterName); adapterErr == nil {
 			// use state.WorkspacePath (persisted at start) as the single source of truth
 			// for repoRoot -- never derive from ambient cwd/env at stop time
@@ -556,7 +638,7 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 
 	// process session: read, redact secrets, extract events, save
 	var processResult *agentSessionResult
-	if state.SessionFile != "" {
+	if state.SessionFile != "" || state.AdapterName == "cursor" {
 		processStart := time.Now()
 		// Serialize with the raw.jsonl writer's file lock so processAgentSession
 		// (RecoverRawAppend + drain) never runs concurrently with a hook or
@@ -711,6 +793,9 @@ func recordSessionObservation(projectRoot string, result *agentSessionResult, du
 	if result == nil || result.EntryCount == 0 {
 		return // nothing interesting to record
 	}
+	if result.Held {
+		return // a held session leaves nothing on the team's side, not even a snippet
+	}
 
 	tc := config.FindRepoTeamContext(projectRoot)
 	if tc == nil {
@@ -751,6 +836,9 @@ func outputTextSummary(projectRoot string, state *session.RecordingState, durati
 	if processResult != nil {
 		if processResult.Model != "" {
 			fmt.Printf("  Model: %s\n", processResult.Model)
+		}
+		if processResult.Held {
+			fmt.Printf("  %s\n", processResult.UploadWarning)
 		}
 
 		// show generated files with descriptions
@@ -874,6 +962,10 @@ func outputSessionStopJSON(projectRoot string, inst *agentinstance.Instance, sta
 		if processResult.SummaryPrompt == "" {
 			output.Guidance = "Session stopped and saved. Upload and summary generation happen automatically in the background."
 		}
+		output.Held = processResult.Held
+		if processResult.Held {
+			output.Guidance = heldSessionGuidance
+		}
 	} else {
 		output.UploadWarning = "no session file found — session data was not uploaded to ledger"
 		output.Guidance = "Session stopped but no conversation data was found. The session recording may be empty. Run 'ox doctor' to check for recoverable sessions."
@@ -968,6 +1060,12 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	adapter, err := adapters.GetAdapter(state.AdapterName)
 	if err != nil {
 		return nil, fmt.Errorf("adapter not found: %w", err)
+	}
+	if state.AdapterName == "cursor" {
+		// Even a header-only pending session uses its saved byte boundary.
+		// Full Read plus timestamp filtering would replay old JSONL and drop
+		// Cursor's entries, whose timestamps are explicitly unknown.
+		return finalizeIncrementalSession(projectRoot, state, filepath.Join(state.SessionPath, "raw.jsonl"), adapter, result)
 	}
 
 	// read session metadata (agent version, model)
@@ -1203,6 +1301,16 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	summarizerMode := config.GetAgentSummarizer(projectRoot)
 	summarizerOff := summarizerMode == config.AgentSummarizerOff
 
+	// A held session gets its hold before anything the daemon reacts to, and
+	// no summary prompt: push-summary publishes (GH #1093). If the hold cannot
+	// be recorded, the stop fails and the recording state is kept.
+	held := stopHoldsSession(projectRoot, state)
+	if held {
+		if err := holdStoppedSession(result, state, filepath.Dir(result.RawPath), "session_stop"); err != nil {
+			return nil, err
+		}
+	}
+
 	// Compress raw.jsonl into the ledger cache (.sageox/cache/summary-input/)
 	// before the summarizer reads it. ConversationOnly mode keeps user+assistant
 	// turns verbatim, tool entries become compact markers, system entries are
@@ -1212,7 +1320,7 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	//
 	// Skip compression entirely when summarizer is off — no summarizer will
 	// ever read the optimized file, so the work is pure waste.
-	if !summarizerOff {
+	if !summarizerOff && !held {
 		summaryInputPath := writeOptimizedJSONLForSummary(result.RawPath, ledgerPath, sessionName)
 		if summaryInputPath == "" {
 			summaryInputPath = result.RawPath
@@ -1254,13 +1362,10 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 		}
 	}
 
-	// check session publishing mode before attempting upload
-	publishMode := config.GetSessionPublishing(projectRoot)
-	if publishMode == config.SessionPublishingManual {
-		// manual mode: save locally, skip upload
-		slog.Info("session publishing mode is manual, skipping upload", "session", sessionName)
+	if held {
+		slog.Info("session held on this machine, skipping upload", "session", sessionName)
 		result.LedgerSessionDir = ""
-		result.UploadWarning = "Session saved locally (publishing mode: manual). Use 'ox session upload' to publish."
+		result.UploadWarning = heldSessionWarning(sessionName)
 		return result, nil
 	}
 
@@ -2339,6 +2444,9 @@ func parseRecordEntries(args []string) ([]sessionRecordInput, error) {
 func recordEntriesToSession(projectRoot string, state *session.RecordingState, entries []sessionRecordInput) (int, error) {
 	if state == nil || state.SessionPath == "" {
 		return 0, fmt.Errorf("invalid recording state")
+	}
+	if state.AdapterName == "cursor" {
+		return 0, fmt.Errorf("unsupported-scope: session record cannot add entries to a native Cursor recording")
 	}
 
 	rawPath := filepath.Join(state.SessionPath, ledgerFileRaw)

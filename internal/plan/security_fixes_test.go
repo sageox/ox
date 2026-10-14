@@ -66,41 +66,6 @@ func TestMarkdownLinkDest_SyntaxHardening(t *testing.T) {
 	}
 }
 
-// TestExtractReviewTargets_DataOxSectionRoundTrip: review.js headingOf() was
-// extended to closest('section[id], [data-ox-section]') + h3 fallback, but the
-// server-side anchor extraction wasn't — a browser mark inside an authored
-// [data-ox-section] container (or an h3-titled section) hashed a different
-// heading server-side and never resolved in the ledger.
-func TestExtractReviewTargets_DataOxSectionRoundTrip(t *testing.T) {
-	page := []byte(`<html><body>
-<div data-ox-section="Design decisions"><ul><li>use the layer model</li></ul></div>
-<section id="sec-9"><h3>Rollout notes</h3><ul><li>stage first</li></ul></section>
-</body></html>`)
-	targets, err := extractReviewTargets(page)
-	if err != nil {
-		t.Fatalf("extractReviewTargets: %v", err)
-	}
-	byAnchor := map[string]reviewTarget{}
-	for _, tg := range targets {
-		byAnchor[tg.Anchor] = tg
-	}
-	// the page side computes anchorFor(li) = hash(heading + text); the server
-	// must land on the identical anchor for both authored-page shapes
-	liInDS := AnchorFor("Design decisions", "use the layer model")
-	if _, ok := byAnchor[liInDS]; !ok {
-		t.Errorf("mark on li inside [data-ox-section] does not round-trip: server never computed %s (targets: %+v)", liInDS, targets)
-	}
-	liInH3 := AnchorFor("Rollout notes", "stage first")
-	if _, ok := byAnchor[liInH3]; !ok {
-		t.Errorf("mark inside an h3-titled section does not round-trip: server used a different heading (targets: %+v)", targets)
-	}
-	// the [data-ox-section] container itself is markable on authored pages
-	dsSelf := AnchorFor("Design decisions", "use the layer model")
-	if _, ok := byAnchor[dsSelf]; !ok {
-		t.Errorf("[data-ox-section] container itself is not a server-side target")
-	}
-}
-
 // chrome.js's escape + URL-allowlist contract is pinned by
 // TestChromeJS_EscapesAttributesAndFiltersLinks in inject_test.go.
 

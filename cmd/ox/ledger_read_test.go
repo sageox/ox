@@ -159,7 +159,7 @@ func serveHostedLedger(t *testing.T) *hostedReaderFixture {
 	hostedTestGit(t, source, "commit", "-m", "ledger")
 
 	bare := filepath.Join(root, "ledger.git")
-	hostedTestGit(t, root, "clone", "--bare", source, bare)
+	cloneBareRemote(t, source, bare)
 	hostedTestGit(t, bare, "config", "uploadpack.allowFilter", "true")
 	hostedTestGit(t, bare, "config", "uploadpack.allowAnySHA1InWant", "true")
 

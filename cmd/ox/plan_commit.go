@@ -1,20 +1,26 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/plan"
+	"github.com/sageox/ox/pkg/planreview"
 )
 
 // errBackfillCommitFailed marks a commitPlanBackfillToLedger failure at or
@@ -32,10 +38,11 @@ var errBackfillCommitFailed = errors.New("backfill commit failed before landing 
 // so a caller that answers a human (the review page) can say "saved locally,
 // not yet shared" instead of a blanket success.
 //
-// Committed means the plan dir's staged state is in a local Ledger commit —
-// including the idempotent case where nothing changed since the last commit.
-// Pushed means pushLedger returned nil, i.e. that commit is on the remote.
-// Err carries the first failure (sanitized) when either is false.
+// Committed means the write is in a local Ledger commit — including the
+// idempotent case where nothing changed since the last commit. Pushed means it
+// is on the remote: for a plan dir, pushLedger returned nil; for a review
+// record, the remote tip was checked to hold its exact bytes. Err carries the
+// first failure (sanitized) when either is false.
 type planCommitStatus struct {
 	Committed bool
 	Pushed    bool
@@ -134,6 +141,311 @@ func commitAndPushPlanDir(ctx context.Context, ledgerPath, planDir string) (plan
 	}
 	st.Pushed = true
 	return st, nil
+}
+
+// errReviewConflict: the operation is already stored with other content or
+// under another reviewer. Nothing was written, so the client keeps its draft.
+var errReviewConflict = errors.New("this review operation is already stored with different content; nothing was saved")
+
+// publishReviewRecord is the one write path for a review operation (a round
+// or a resolution): saveReviewRecord makes it durable in the Ledger clone,
+// then landReviewRecord commits exactly its record and publishes it. An error
+// means nothing was saved. Otherwise the receipt names the record holding the
+// operation, ReceiptAlreadyPublished when an earlier attempt stored it, and
+// the status says how far that record got toward the remote.
+func publishReviewRecord(ctx context.Context, gitRoot, planDir string, rec planreview.File) (planCommitStatus, planreview.Receipt, error) {
+	ledgerPath, err := planLedgerPathFor(gitRoot)
+	if err != nil {
+		return planCommitStatus{}, planreview.Receipt{}, err
+	}
+	rel, err := ledgerRelPath(ledgerPath, planDir)
+	if err != nil {
+		return planCommitStatus{}, planreview.Receipt{}, err
+	}
+	e, duplicate, err := saveReviewRecord(ctx, ledgerPath, rel, planDir, rec)
+	if err != nil {
+		return planCommitStatus{}, planreview.Receipt{}, err
+	}
+	r := planreview.Receipt{State: planreview.ReceiptCreated, Path: e.Path}
+	if duplicate {
+		r.State = planreview.ReceiptAlreadyPublished
+	}
+	return landReviewRecord(ctx, ledgerPath, e), r, nil
+}
+
+// newResolutionRecord freezes a resolution the CLI originates (the reviewer's
+// Accept, the agent's resolve) under a fresh operation id and returns its
+// record, accepted at now.
+func newResolutionRecord(anchor string, state planreview.State, commit, note string, now time.Time) (planreview.File, error) {
+	id, err := randomToken()
+	if err != nil {
+		return planreview.File{}, err
+	}
+	frozen, err := json.Marshal(struct {
+		ID     string           `json:"id"`
+		Anchor string           `json:"anchor"`
+		State  planreview.State `json:"state"`
+		Commit string           `json:"commit,omitempty"`
+		Note   string           `json:"note,omitempty"`
+	}{id, anchor, state, commit, note})
+	if err != nil {
+		return planreview.File{}, err
+	}
+	q, err := planreview.ParseResolutionRequest(frozen)
+	if err != nil {
+		return planreview.File{}, err
+	}
+	return q.Record("", now)
+}
+
+// saveReviewRecord makes one review operation durable in the clone: its
+// recovery entry first, then its record, written create-only. Only then may
+// the reviewer be told it is saved: a crash between the two leaves an entry
+// whose retry writes the record, never a record nothing will publish.
+//
+// A retry on this clone never adds a copy: its own entry for the operation
+// answers first, else a stored copy found in the worktree. Either way the
+// same payload from the same reviewer reuses that record (duplicate, unless
+// the attempt that froze it stopped before writing it, and so before telling
+// anyone it was saved), and anything else is errReviewConflict.
+func saveReviewRecord(ctx context.Context, ledgerPath, rel, planDir string, rec planreview.File) (reviewPending, bool, error) {
+	var op struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Data, &op); err != nil || op.ID == "" {
+		return reviewPending{}, false, fmt.Errorf("review record %s carries no operation id", rec.Path)
+	}
+	kind := "round"
+	if strings.HasPrefix(rec.Path, "feedback/resolutions/") {
+		kind = "resolution"
+	}
+	planKey := planIDForDir(planDir)
+	if planKey == "" {
+		planKey = filepath.Base(planDir)
+	}
+	entryPath := reviewPendingPath(ledgerPath, planKey, kind, op.ID)
+	entryFor := func(f planreview.File) reviewPending {
+		return reviewPending{PlanDir: rel, Plan: planKey, Kind: kind, ID: op.ID, Path: f.Path, SHA256: sha256Hex(f.Data), Data: f.Data}
+	}
+
+	var e reviewPending
+	duplicate := false
+	err := fileutil.WithFileLock(ctx, entryPath, func() error {
+		prev, err := readReviewPending(entryPath)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			// it may hold the only copy of a review: never write over it
+			return fmt.Errorf("read this review operation's recovery entry: %w", err)
+		}
+		if err == nil {
+			stored := planreview.File{Path: prev.Path, Data: prev.Data}
+			if r, _ := planreview.Prior(planreview.Inventory{Files: []planreview.File{stored}}, rec); r.State != planreview.ReceiptAlreadyPublished {
+				return errReviewConflict
+			}
+			e = prev
+			if e.PlanDir != rel {
+				// found by the plan's id after `ox plan backfill` renamed its
+				// dir: the record lands where the plan is now
+				e.PlanDir = rel
+				if err := writeReviewPending(entryPath, e); err != nil {
+					return err
+				}
+			}
+			if _, err := os.Lstat(filepath.Join(planDir, filepath.FromSlash(prev.Path))); err == nil {
+				duplicate = true
+				return nil
+			}
+			// the attempt that froze it never wrote it; on failure the entry
+			// stays, since it holds the only copy
+			return gitutil.WithRepoLock(ctx, ledgerPath, func() error {
+				if err := gitutil.IsSafeForGitOps(ledgerPath); err != nil {
+					return fmt.Errorf("ledger not safe for restoring a review record (%s): %w", ledgerPath, err)
+				}
+				return restoreReviewRecord(ledgerPath, e)
+			})
+		}
+		inv := plan.CaptureReview(planDir, "")
+		if r, ok := planreview.Prior(inv, rec); ok {
+			if r.State == planreview.ReceiptConflict {
+				return errReviewConflict
+			}
+			stored, err := storedRecord(ctx, ledgerPath, rel, inv, r.Path)
+			if err != nil {
+				return err
+			}
+			duplicate = true
+			e = entryFor(stored)
+			return writeReviewPending(entryPath, e)
+		}
+		e = entryFor(rec)
+		if err := writeReviewPending(entryPath, e); err != nil {
+			return err
+		}
+		if err := publishRecord(planDir, rec); err != nil {
+			// Publish can fail after the record exists (its directory sync);
+			// then the entry stays so the retry lands it. With no record on
+			// disk, nothing was saved and the client keeps its draft.
+			if _, lerr := os.Lstat(filepath.Join(planDir, filepath.FromSlash(rec.Path))); lerr != nil {
+				_ = os.Remove(entryPath)
+			}
+			return err
+		}
+		return nil
+	})
+	return e, duplicate, err
+}
+
+// storedRecord is the stored copy of an operation as it must be published: the
+// bytes HEAD holds when the record is committed (the worktree copy may carry a
+// clone's line-ending conversion or a later edit), else the worktree bytes,
+// which must still hash to the digest the name pins.
+func storedRecord(ctx context.Context, ledgerPath, rel string, inv planreview.Inventory, path string) (planreview.File, error) {
+	if gitutil.IsGitRepo(ledgerPath) {
+		if b, err := gitStdout(ctx, ledgerPath, nil, "cat-file", "blob", "HEAD:"+rel+"/"+path); err == nil {
+			return planreview.File{Path: path, Data: b}, nil
+		}
+	}
+	i := slices.IndexFunc(inv.Files, func(f planreview.File) bool { return f.Path == path })
+	if i < 0 || !plan.RecordIntact(inv.Files[i]) {
+		return planreview.File{}, fmt.Errorf("the stored copy of this review operation, %s, no longer matches its name", path)
+	}
+	return inv.Files[i], nil
+}
+
+// publishReviewFile is planreview.Publish, a variable so a test can fail it
+// after the record is written.
+var publishReviewFile = planreview.Publish
+
+// publishRecord writes rec into the plan's worktree create-only.
+func publishRecord(planDir string, rec planreview.File) error {
+	r, err := publishReviewFile(planDir, rec)
+	if err == nil && r.State == planreview.ReceiptConflict {
+		err = fmt.Errorf("another file holds the name %s", rec.Path)
+	}
+	if err != nil {
+		return fmt.Errorf("write review record: %w", err)
+	}
+	return nil
+}
+
+// landReviewRecord commits exactly e's record, pushes, and clears e's entry
+// only once the remote tip holds the record's exact bytes; on any failure the
+// entry stays for the next `ox plan flush-pending`. Pushed reports that
+// verified publication, not merely a push that returned success.
+func landReviewRecord(ctx context.Context, ledgerPath string, e reviewPending) planCommitStatus {
+	planCommitMu.Lock()
+	defer planCommitMu.Unlock()
+
+	path := e.PlanDir + "/" + e.Path
+	fail := func(st planCommitStatus, err error) planCommitStatus {
+		st.Err = gitutil.SanitizeOutput(err.Error())
+		slog.WarnContext(ctx, "plan review record pending: will retry on next `ox agent prime`", "record", path, "error", st.Err)
+		return st
+	}
+	oid, err := commitReviewRecord(ctx, ledgerPath, e, "plan review: "+filepath.Base(e.PlanDir))
+	if err != nil {
+		return fail(planCommitStatus{}, err)
+	}
+	st := planCommitStatus{Committed: true}
+	if err := pushLedger(ctx, ledgerPath); err != nil {
+		return fail(st, fmt.Errorf("push %s: %w", path, err))
+	}
+	// the remote-tracking ref is the remote tip the push just updated
+	if ref, err := gitutil.UpstreamTrackingRef(ctx, ledgerPath); err != nil || blobAt(ctx, ledgerPath, ref, path) != oid {
+		return fail(st, fmt.Errorf("pushed, but the remote tip does not hold %s as recorded", path))
+	}
+	st.Pushed = true
+	clearReviewPending(ctx, ledgerPath, e)
+	return st
+}
+
+// commitReviewRecord commits exactly e's record and returns its blob id. The
+// entry's bytes are staged as a blob and CommitLedgerSnapshot commits HEAD plus
+// that one index entry, so nothing else in the index or the worktree — an
+// author's half-written plan.md, a staged session — reaches the commit, and
+// the worktree file is never read. A record HEAD already holds is not
+// committed again, and one that fails to commit is unstaged, so no other
+// commit can carry bytes this one refused.
+func commitReviewRecord(ctx context.Context, ledgerPath string, e reviewPending, msg string) (string, error) {
+	path := e.PlanDir + "/" + e.Path
+	var oid string
+	err := gitutil.WithRepoLock(ctx, ledgerPath, func() error {
+		// git run in a directory that is not a checkout finds any enclosing
+		// repository and would stage the record there
+		if !gitutil.IsGitRepo(ledgerPath) {
+			return fmt.Errorf("ledger %s is not a git checkout", ledgerPath)
+		}
+		if err := gitutil.IsSafeForGitOps(ledgerPath); err != nil {
+			return fmt.Errorf("ledger not safe for a review commit (%s): %w", ledgerPath, err)
+		}
+		// a commit the worktree cannot match would leave HEAD holding a file
+		// where the worktree has none
+		if err := restoreReviewRecord(ledgerPath, e); err != nil {
+			return fmt.Errorf("restore %s: %w", path, err)
+		}
+		var err error
+		if oid, err = gitutil.StageLedgerBlob(ctx, ledgerPath, path, e.Data); err != nil {
+			return err
+		}
+		if _, err = gitutil.CommitLedgerSnapshot(ctx, ledgerPath, msg, path); err == nil && blobAt(ctx, ledgerPath, "HEAD", path) != oid {
+			err = errors.New("HEAD does not hold the record's bytes")
+		}
+		if err != nil {
+			_, _ = gitutil.RunGit(ctx, ledgerPath, "reset", "-q", "--", path)
+			return fmt.Errorf("commit %s: %w", path, err)
+		}
+		return nil
+	})
+	return oid, err
+}
+
+// restoreReviewRecord writes e's record back into its plan dir when the
+// worktree lacks it, so local reads see it. The caller holds the repo lock and
+// has run IsSafeForGitOps: a rebase replaying the record's commit has it off
+// disk, and a copy written then stops the replay for good (--continue, --skip
+// and --abort all refuse to overwrite it).
+func restoreReviewRecord(ledgerPath string, e reviewPending) error {
+	planDir := filepath.Join(ledgerPath, filepath.FromSlash(e.PlanDir))
+	if _, err := os.Lstat(filepath.Join(planDir, filepath.FromSlash(e.Path))); err == nil {
+		return nil
+	}
+	return publishRecord(planDir, planreview.File{Path: e.Path, Data: e.Data})
+}
+
+// gitStdout runs git in repo and returns its stdout alone: an answer compared
+// byte for byte must not pick up a warning git prints on stderr.
+func gitStdout(ctx context.Context, repo string, stdin []byte, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", repo}, args...)...)
+	if stdin != nil {
+		cmd.Stdin = bytes.NewReader(stdin)
+	}
+	return cmd.Output()
+}
+
+// blobAt is the id of the blob at rev:path, or "" when there is none.
+func blobAt(ctx context.Context, repo, rev, path string) string {
+	out, err := gitStdout(ctx, repo, nil, "rev-parse", "--verify", "-q", rev+":"+path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// remoteHoldsBlob reports whether the remote tip holds data as a blob anywhere
+// under dir (relative to the Ledger root).
+func remoteHoldsBlob(ctx context.Context, ledgerPath, dir string, data []byte) bool {
+	if !gitutil.IsGitRepo(ledgerPath) {
+		return false
+	}
+	oid, err := gitStdout(ctx, ledgerPath, data, "hash-object", "--stdin")
+	if err != nil {
+		return false
+	}
+	ref, err := gitutil.UpstreamTrackingRef(ctx, ledgerPath)
+	if err != nil {
+		return false
+	}
+	tree, err := gitStdout(ctx, ledgerPath, nil, "ls-tree", "-r", ref, "--", dir)
+	return err == nil && bytes.Contains(tree, []byte(" "+strings.TrimSpace(string(oid))+"\t"))
 }
 
 // ledgerRelPath returns planDir relative to the Ledger root as a slash path,

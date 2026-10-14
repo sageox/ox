@@ -14,6 +14,7 @@ import (
 	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/doctor"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/fileutil"
@@ -162,6 +163,36 @@ func recoverAgentSession(inst *agentinstance.Instance, releaseQuarantine bool) e
 // recoverRecording recovers one recording, named by its state rather than
 // looked up by agent.
 func recoverRecording(inst *agentinstance.Instance, projectRoot string, state *session.RecordingState) error {
+	// Cursor caches may still contain paused rows and pending native turns.
+	// Its finalizer must prove the drain and mask before any recovery publishes
+	// or clears the marker, including when the native file has not appeared.
+	if state.AdapterName == "cursor" {
+		// The PIDless watcher can still own raw.jsonl. Stop this exact recording
+		// before waiting for ownership; its poll observes the durable marker
+		// even when daemon IPC is unavailable. Pending sources stay recoverable.
+		held := stopHoldsSession(projectRoot, state)
+		now := time.Now().UTC()
+		if err := session.UpdateRecordingStateAt(state.SessionPath, state.SessionID, func(current *session.RecordingState) {
+			if current.StoppedAt == nil {
+				current.StoppedAt = &now
+			}
+			current.CursorFinalDrainPending = true
+			if held {
+				current.PublishingMode = config.SessionPublishingManual
+			}
+		}); err != nil {
+			return fmt.Errorf("preserve pending Cursor recovery: %w", err)
+		}
+		if err := session.MarkExplicitStop(projectRoot, state.AgentID); err != nil {
+			return fmt.Errorf("mark Cursor recovery stopped: %w", err)
+		}
+		if state.WatchMode == "tail" {
+			if client := daemon.TryConnect(); client != nil {
+				_ = client.SessionWatchStop(daemon.SessionWatchStopPayload{SessionName: filepath.Base(state.SessionPath)})
+			}
+		}
+		return recoverViaNormalStop(inst, projectRoot, state)
+	}
 	// An undiscovered source does not prove a header-only recording empty, so it
 	// waits for retry. A cache that already holds captured turns is another
 	// matter: each batch was ownership-checked as it was appended, so it
@@ -202,7 +233,7 @@ func recoverRecording(inst *agentinstance.Instance, projectRoot string, state *s
 	return outputRecoverJSON(output)
 }
 
-// recoverViaNormalStop uses the normal session stop flow when the adapter file exists.
+// recoverViaNormalStop uses the adapter's normal finalization and session stop flow.
 func recoverViaNormalStop(inst *agentinstance.Instance, projectRoot string, state *session.RecordingState) error {
 	// process session through the normal pipeline. Hold the raw.jsonl writer's
 	// file lock so this never races a hook or watcher still appending a batch
@@ -285,6 +316,10 @@ func withCachedRecordingForRecovery(projectRoot string, state *session.Recording
 	})
 }
 
+// clearRecoveredRecording clears a held recovery's recording state. A variable
+// so tests can make it fail.
+var clearRecoveredRecording = session.ClearRecordingStateAt
+
 // recoverFromCache uploads raw.jsonl from cache when the adapter file is gone.
 // raw.jsonl is the source of truth -- all other artifacts (events, summary)
 // can be regenerated from it. This ensures no session data is lost even when
@@ -305,16 +340,55 @@ func recoverFromCache(inst *agentinstance.Instance, projectRoot string, state *s
 	// minutes and a live hook gives up on the lock after seconds. So this first
 	// pass only sizes the prompt; publishing re-takes the lock and re-reads.
 	var entryCount int
+	var held bool
 	err := withCachedRecordingForRecovery(projectRoot, state, rawPath, func(latest *session.RecordingState) error {
 		stored, readErr := session.ReadSessionFromPath(rawPath)
 		if readErr != nil {
 			return unreadableCachedSessionError(projectRoot, latest, readErr)
 		}
 		entryCount = len(stored.Entries)
+		// Held on this machine (session_publishing: manual, now or at start):
+		// recovered locally, never uploaded. The hold goes on before the
+		// recording is cleared, and both happen under the capture lock, so a
+		// queued hook never sees a finalized recording as live (GH #1093).
+		if !stopHoldsSession(projectRoot, latest) {
+			return nil
+		}
+		name := session.GetSessionName(latest.SessionPath)
+		// 'ox session upload' later publishes from raw.jsonl alone, so the
+		// native session IDs and trace boundaries the recording collected
+		// after start go onto it before the recording state is cleared.
+		if err := session.StampRawCarrier(rawPath, session.CarrierStamp{
+			NativeSessions: latest.NativeSessions,
+			StoppedAt:      session.ResolveStoppedAt(latest.StoppedAt, rawPath, time.Now()),
+			TraceCapture:   latest.Trace,
+		}); err != nil {
+			return fmt.Errorf("record recovered session %s details before holding it: %w", name, err)
+		}
+		if err := session.WriteHoldMarker(latest.SessionPath, session.HoldManualPublishing, "recover"); err != nil {
+			return fmt.Errorf("hold recovered session %s: %w", name, err)
+		}
+		held = true
+		if err := clearRecoveredRecording(latest.SessionPath, latest.SessionID); err != nil {
+			return fmt.Errorf("held recovered session %s, but could not clear its recording state: %w", name, err)
+		}
 		return nil
 	})
 	if err != nil {
 		return err
+	}
+
+	if held {
+		name := session.GetSessionName(state.SessionPath)
+		return outputRecoverJSON(&sessionRecoverOutput{
+			Success:     true,
+			Type:        "session_recover",
+			AgentID:     inst.AgentID,
+			RawPath:     rawPath,
+			EntryCount:  entryCount,
+			SessionName: name,
+			Message:     heldSessionWarning(name),
+		})
 	}
 
 	// interactive confirmation: prompt human users before uploading orphaned sessions

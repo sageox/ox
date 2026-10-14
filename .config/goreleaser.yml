@@ -290,6 +290,24 @@ builds:
     ldflags:
       - -s -w
 
+  - id: ox-adapter-cursor
+    main: ./cmd/ox-adapter-cursor
+    binary: ox-adapter-cursor
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - freebsd
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: freebsd
+        goarch: arm64
+    ldflags:
+      - -s -w
+
 archives:
   - id: ox-archive
     formats:
@@ -328,7 +346,7 @@ release:
 
     Pre-compiled binaries for Linux, macOS (Intel & Apple Silicon), and FreeBSD.
 
-    Each tarball includes ox and bundled adapters (claude-code, gemini, codex, amp, opencode, pi, omp, aider, droid, goose).
+    Each tarball includes ox and bundled adapters (claude-code, gemini, codex, amp, opencode, pi, omp, aider, droid, goose, cursor).
 
     ### Installation
 
@@ -363,6 +381,7 @@ brews:
       bin.install "ox-adapter-aider"
       bin.install "ox-adapter-droid"
       bin.install "ox-adapter-goose"
+      bin.install "ox-adapter-cursor"
 
 announce:
   skip: true

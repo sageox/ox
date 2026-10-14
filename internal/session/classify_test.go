@@ -30,6 +30,23 @@ func TestClassifySession(t *testing.T) {
 			isUploaded: true,
 			want:       StatusUploaded,
 		},
+		// GH #1093: held on this machine, never shown as stranded or uploaded
+		{
+			name: "held → held",
+			info: SessionInfo{Held: true},
+			want: StatusHeld,
+		},
+		{
+			name:       "held with a draft placeholder in the ledger → held, not draft or uploaded",
+			info:       SessionInfo{Held: true, Draft: true},
+			isUploaded: true,
+			want:       StatusHeld,
+		},
+		{
+			name: "held but canceled → canceled",
+			info: SessionInfo{Held: true, StopReason: StopReasonCanceled},
+			want: StatusCanceled,
+		},
 		{
 			name: "recording, live process → recording",
 			info: SessionInfo{
@@ -37,6 +54,19 @@ func TestClassifySession(t *testing.T) {
 				ParentPID: os.Getpid(), // current process is alive
 			},
 			want: StatusRecording,
+		},
+		// A held folder that kept its recording marker (recovery holds before
+		// it clears, and a failed clear leaves both) is held, never the
+		// orphan or ghost that 'prune --all' deletes.
+		{
+			name: "held, dead process, has raw data → held, not orphan",
+			info: SessionInfo{Recording: true, ParentPID: 99999999, HasRawData: true, Held: true},
+			want: StatusHeld,
+		},
+		{
+			name: "held, dead process, no data → held, not ghost",
+			info: SessionInfo{Recording: true, ParentPID: 99999999, Held: true},
+			want: StatusHeld,
 		},
 		{
 			name: "recording, dead process, no data → ghost",

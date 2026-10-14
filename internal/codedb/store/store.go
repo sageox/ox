@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,10 +20,9 @@ import (
 	"github.com/gofrs/flock"
 	lru "github.com/hashicorp/golang-lru/v2"
 	codedbsqlc "github.com/sageox/ox/internal/codedb/sqlc"
+	"github.com/sageox/ox/internal/sqliteerr"
 	"go.etcd.io/bbolt"
 	bbolterrors "go.etcd.io/bbolt/errors"
-	"modernc.org/sqlite"
-	sqlite3 "modernc.org/sqlite/lib"
 )
 
 // ErrCorrupt indicates the index is corrupted and needs re-indexing.
@@ -814,7 +812,7 @@ func runSQLiteCheck(ctx context.Context, db *sql.DB, pragma string, accept func(
 			}
 			return fmt.Errorf("%w: %s returned: %s", ErrCorrupt, pragma, result)
 		}
-		if ctx.Err() != nil || !isSQLiteCode(lastErr, sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED) {
+		if ctx.Err() != nil || !IsSQLiteBusy(lastErr) {
 			break
 		}
 		if attempt < integrityBusyAttempts-1 {
@@ -847,34 +845,16 @@ func sleepContext(ctx context.Context, d time.Duration) error {
 	}
 }
 
-// IsSQLiteDamage reports whether err carries SQLITE_CORRUPT or SQLITE_NOTADB —
-// the result codes SQLite returns when a statement runs into a damaged database
-// image. It is the evidence that licenses discarding an index: a real statement
-// failing this way is as conclusive as a scan finding the same fault, and a
-// fraction of the cost. Every other failure (I/O, ENFILE, out of memory,
-// BUSY, a canceled context) names a condition of this process or this moment,
-// not of the index, and must never be treated as damage (#875).
+// IsSQLiteDamage reports whether err carries SQLITE_CORRUPT or SQLITE_NOTADB,
+// the evidence that licenses discarding an index (see sqliteerr.IsDamage).
 func IsSQLiteDamage(err error) bool {
-	return isSQLiteCode(err, sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB)
+	return sqliteerr.IsDamage(err)
 }
 
 // IsSQLiteBusy reports whether err is SQLITE_BUSY or SQLITE_LOCKED: another
-// connection holds the lock right now. It says nothing about the database's
-// health, so callers retry rather than discard (see IsSQLiteDamage).
+// connection holds the lock right now (see sqliteerr.IsBusy).
 func IsSQLiteBusy(err error) bool {
-	return isSQLiteCode(err, sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
-}
-
-// isSQLiteCode reports whether err is a SQLite error whose primary result code
-// is one of want. Extended codes carry the primary in the low byte
-// (SQLITE_BUSY_SNAPSHOT is SQLITE_BUSY | 2<<8), so the comparison masks it off
-// rather than matching the code exactly.
-func isSQLiteCode(err error, want ...int) bool {
-	var sqErr *sqlite.Error
-	if !errors.As(err, &sqErr) {
-		return false
-	}
-	return slices.Contains(want, sqErr.Code()&0xff)
+	return sqliteerr.IsBusy(err)
 }
 
 // removeSQLiteFiles removes the database file, its WAL/SHM sidecars, and the

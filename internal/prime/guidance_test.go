@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/sageox/ox/internal/claude"
+	"github.com/sageox/ox/internal/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -231,6 +232,31 @@ func TestBuildCapturePriorGuidance(t *testing.T) {
 		}
 	}
 	assert.True(t, found, "instructions should contain agent ID")
+}
+
+// TestBuildCapturePriorGuidance_ExampleIsAccepted pipes the example's JSONL through the validator
+// capture-prior runs, and checks the instructions name every header field it requires.
+// Failure prevented: an AI coworker copies the example from prime verbatim and capture-prior
+// rejects it, as it did when the header lacked source and agent_id (ox-os6n).
+func TestBuildCapturePriorGuidance_ExampleIsAccepted(t *testing.T) {
+	const agentID = "Oxa7b3"
+	g := BuildCapturePriorGuidance(agentID)
+
+	lines := strings.Split(g.Example, "\n")
+	require.GreaterOrEqual(t, len(lines), 3)
+	assert.Equal(t, "ox agent "+agentID+" session capture-prior << 'EOF'", lines[0])
+	assert.Equal(t, "EOF", lines[len(lines)-1])
+	body := strings.Join(lines[1:len(lines)-1], "\n")
+
+	history, err := session.ValidateCapturePriorInput(strings.NewReader(body))
+	require.NoError(t, err, "the example prime prints must pass capture-prior validation as written")
+	assert.Equal(t, agentID, history.Meta.AgentID)
+	assert.Len(t, history.Entries, 2)
+
+	instructions := strings.Join(g.Instructions, "\n")
+	for _, field := range []string{"schema_version", "source", "agent_id"} {
+		assert.Contains(t, instructions, field, "instructions must name required _meta field %q", field)
+	}
 }
 
 // TestBuildGuidance_BulletinRowGatedOnHint verifies the bulletin-board row

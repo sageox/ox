@@ -1,0 +1,11 @@
+{
+  "summary": "Run with record_bytes 2048: r-big-0002 (an older writer stored it without a bound) is over the limit, so it is reported and never read, and the review is incomplete rather than silently shorter.",
+  "limits": {"record_bytes": 2048},
+  "items": [
+    {"anchor": "h1", "reviewer": "Ana", "status": "comment", "label": "Item 1", "note": "Short.", "open": true},
+    {"anchor": "h3", "reviewer": "Cy", "status": "comment", "label": "Item 3", "note": "Short too.", "open": true}
+  ],
+  "failures": [
+    {"path": "feedback/round-20261001-020000.000000000-r-big-0002.json", "reason": "too_large"}
+  ]
+}

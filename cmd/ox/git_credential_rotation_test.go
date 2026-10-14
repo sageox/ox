@@ -238,7 +238,7 @@ func TestStatusRepairsRejectedPATs(t *testing.T) {
 				t.Chdir(root)
 				t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 				t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
-				hostedTestGit(t, root, "init", "--bare", filepath.Join(root, "ledger.git"))
+				initBareRemote(t, filepath.Join(root, "ledger.git"))
 				backend := &cgi.Handler{Path: filepath.Join(hostedTestGit(t, root, "--exec-path"), "git-http-backend"), Env: []string{"GIT_PROJECT_ROOT=" + root, "GIT_HTTP_EXPORT_ALL=1"}}
 				var refreshes, oldProbes, freshProbes atomic.Int32
 				var srv *httptest.Server

@@ -2,11 +2,17 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -21,12 +27,15 @@ import (
 
 var sessionUploadCmd = &cobra.Command{
 	Use:   "upload <session-name>",
-	Short: "Upload session content to the ledger",
-	Long: `Upload session content to the ledger.
+	Short: "Publish a held or unuploaded session to the ledger",
+	Long: `Publish a session to the ledger.
 
-When a session stop fails during the network phase (content upload or git push),
-the content files are saved locally but never uploaded. This command retries
-the upload: content upload, meta.json write, git commit, and push.
+This is how a session held on this machine (session_publishing: manual) is
+published: nothing else uploads it. It also publishes a session whose content
+was left in the local cache (an interrupted stop or an orphaned recording), and
+retries one whose stop failed during the network phase. Publishing uploads the
+content, writes meta.json, commits, and pushes; the summary is generated
+afterward in the background.
 
 The session-name can be the full directory name or just the agent ID suffix.
 
@@ -43,6 +52,30 @@ Example:
 		ledgerPath, err := resolveLedgerPath()
 		if err != nil {
 			return err
+		}
+
+		// A held or cache-only session is published from its cache copy
+		// (GH #1019, #1077); anything else keeps the Ledger-folder path below.
+		name, cacheDir, ok, findErr := findPublishableCacheSession(ledgerPath, args[0])
+		if findErr != nil {
+			return findErr
+		}
+		if ok {
+			fmt.Printf("Publishing session %s...\n", name)
+			if err := publishCachedSession(projectRoot, ledgerPath, name, cacheDir); err != nil {
+				if errors.Is(err, api.ErrReadOnly) {
+					fmt.Println("\nUpload skipped — you have read-only access to this public repo.")
+					fmt.Println("To upload sessions, request team membership from an admin.")
+					return nil
+				}
+				return fmt.Errorf("publish %s: %w", name, err)
+			}
+			if config.GetAgentSummarizer(projectRoot) == config.AgentSummarizerOff {
+				fmt.Printf("Session %s published to the ledger; no summary is generated (agent.summarizer: off)\n", name)
+				return nil
+			}
+			fmt.Printf("Session %s published to the ledger; its summary is generated in the background\n", name)
+			return nil
 		}
 
 		sessionsDir := filepath.Join(ledgerPath, "sessions")
@@ -104,7 +137,7 @@ Example:
 
 		// upload content files to LFS
 		fmt.Printf("Uploading session %s...\n", sessionName)
-		fileRefs, err := uploadSessionLFSContext(cmd.Context(), projectRoot, sessionPath)
+		fileRefs, err := publishSessionLFSContext(cmd.Context(), projectRoot, sessionPath)
 		if err != nil {
 			if errors.Is(err, api.ErrReadOnly) {
 				fmt.Println("\nUpload skipped — you have read-only access to this public repo.")
@@ -268,4 +301,216 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// findPublishableCacheSession resolves arg against every local cache location
+// and returns a session whose content is there and is not yet published: it is
+// held, the Ledger has no entry or only a draft placeholder for it, or an
+// earlier publish left a pending retry. An already-published session is never
+// returned, so publishing cannot replay it. A candidate that must not be
+// published from (cachePublishBlocker) is an error, not a fallthrough.
+func findPublishableCacheSession(ledgerPath, arg string) (name, cacheDir string, ok bool, err error) {
+	resolved, err := resolvePublishName(ledgerPath, arg)
+	if err != nil || resolved == "" {
+		return "", "", false, err
+	}
+	for _, dir := range session.HeldSessionDirs(ledgerPath) {
+		candidate := filepath.Join(dir, resolved)
+		if session.ClassifyRawFile(filepath.Join(candidate, ledgerFileRaw)) != session.RawSubstantive {
+			continue
+		}
+		if !cacheSessionUnpublished(ledgerPath, resolved, candidate) {
+			continue
+		}
+		if blockErr := cachePublishBlocker(candidate); blockErr != nil {
+			return "", "", false, blockErr
+		}
+		return resolved, candidate, true, nil
+	}
+	return "", "", false, nil
+}
+
+// resolvePublishName resolves arg to one session name across every cache
+// location and the Ledger's sessions/, or "" when nothing matches. A suffix
+// that matches more than one session is an error, never a guess: a /clear
+// starts a new session under the same agent ID, so the same suffix routinely
+// names several sessions, and guessing publishes one the coworker did not name.
+func resolvePublishName(ledgerPath, arg string) (string, error) {
+	found := map[string]bool{}
+	for _, dir := range append(session.HeldSessionDirs(ledgerPath), filepath.Join(ledgerPath, "sessions")) {
+		resolved, err := resolveSessionInDir(dir, arg)
+		if err != nil {
+			return "", err
+		}
+		if _, statErr := os.Stat(filepath.Join(dir, resolved)); statErr == nil {
+			found[resolved] = true
+		}
+	}
+	names := make([]string, 0, len(found))
+	for name := range found {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	switch len(names) {
+	case 0:
+		return "", nil
+	case 1:
+		return names[0], nil
+	default:
+		return "", fmt.Errorf("ambiguous session name %q matches %d sessions: %s; pass the full name",
+			arg, len(names), strings.Join(names, ", "))
+	}
+}
+
+// cacheSessionUnpublished reports whether the cache copy at candidate is work
+// still waiting to be published: held, left with a pending retry, or with no
+// Ledger entry beyond a draft placeholder.
+func cacheSessionUnpublished(ledgerPath, name, candidate string) bool {
+	if session.IsHeld(candidate) {
+		return true
+	}
+	if _, err := os.Stat(filepath.Join(candidate, sessionUploadRetryPendingFile)); err == nil {
+		return true
+	}
+	ledgerMeta, err := lfs.ReadSessionMeta(filepath.Join(ledgerPath, "sessions", name))
+	return errors.Is(err, os.ErrNotExist) || (err == nil && ledgerMeta.IsDraft())
+}
+
+// cachePublishBlocker reports why the cache folder at dir must not be
+// published from. It reads the folder the transcript is copied from, never
+// the Ledger copy, which has no .recording.json: a recording still owns the
+// folder (live, or quarantined for an ownership review, #1065), or it is a
+// read-only copy downloaded from the Ledger, which may be a teammate's.
+func cachePublishBlocker(dir string) error {
+	name := filepath.Base(dir)
+	if lfs.HasDownloadedMarker(dir) {
+		return fmt.Errorf("session %s is a copy downloaded from the ledger, not a session recorded on this machine; there is nothing to publish", name)
+	}
+	state, err := session.ReadRecordingStateFile(dir)
+	if err != nil {
+		return fmt.Errorf("session %s has a recording state that cannot be read; run 'ox doctor' before publishing: %w", name, err)
+	}
+	if state == nil {
+		return nil
+	}
+	if state.SourceRejected {
+		return fmt.Errorf("session %s is held back for ownership review and was not uploaded; run 'ox agent %s session recover --release-quarantine' to re-check it", name, state.AgentID)
+	}
+	return fmt.Errorf("session %s is still recording; stop it first with 'ox agent %s session stop'", name, state.AgentID)
+}
+
+// filesNotPublished lists what in the cache folder the Ledger holds no
+// identical copy of. A file counts as published when the manifest entry for it
+// has the same hash and size (LFS), or the Ledger file has the same bytes
+// (git-stored, like summary.json); a copy the retry broke off partway matches
+// neither. Dotfiles are local state, never content. A directory, an unreadable
+// file, and every file when the manifest cannot be read count as unpublished.
+func filesNotPublished(cacheDir, ledgerSessionDir string) []string {
+	entries, err := os.ReadDir(cacheDir)
+	if err != nil {
+		return []string{cacheDir}
+	}
+	meta, metaErr := lfs.ReadSessionMeta(ledgerSessionDir)
+	var missing []string
+	for _, e := range entries {
+		name := e.Name()
+		if strings.HasPrefix(name, ".") {
+			continue
+		}
+		if e.IsDir() || metaErr != nil || !sameAsPublished(filepath.Join(cacheDir, name), filepath.Join(ledgerSessionDir, name), meta.Files[name]) {
+			missing = append(missing, name)
+		}
+	}
+	return missing
+}
+
+// sameAsPublished reports whether the content at cachePath is what the Ledger
+// published under that name: ref's hash and size for an LFS file, otherwise
+// the same bytes in the Ledger folder.
+func sameAsPublished(cachePath, ledgerPath string, ref lfs.FileRef) bool {
+	if ref.IsLFS() && ref.OID != "" {
+		sum, size, err := sha256OfFile(cachePath)
+		return err == nil && size == ref.Size && sum == ref.BareOID()
+	}
+	cached, err := os.ReadFile(cachePath)
+	if err != nil {
+		return false
+	}
+	published, err := os.ReadFile(ledgerPath)
+	return err == nil && bytes.Equal(cached, published)
+}
+
+// sha256OfFile streams a file's sha256, as a bare hex digest, and its size.
+func sha256OfFile(path string) (string, int64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", 0, err
+	}
+	defer f.Close()
+	h := sha256.New()
+	size, err := io.Copy(h, f)
+	if err != nil {
+		return "", 0, err
+	}
+	return hex.EncodeToString(h.Sum(nil)), size, nil
+}
+
+// publishCachedSession publishes a session from its cache copy through the
+// same upload path doctor's retry uses, synchronously. The hold is released
+// only after the commit lands. With a summarizer, .needs-summary is written
+// first so the daemon summarizes the published session instead of mistaking
+// the cache copy for a read-only download; with agent.summarizer=off the cache
+// copy is removed once the commit lands, so the daemon never sees it.
+func publishCachedSession(projectRoot, ledgerPath, sessionName, cacheDir string) error {
+	// re-checked here: the folder can change between lookup and publish
+	if err := cachePublishBlocker(cacheDir); err != nil {
+		return err
+	}
+	rawPath := filepath.Join(cacheDir, ledgerFileRaw)
+	meta, entryCount, err := readCacheSessionMeta(rawPath)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", ledgerFileRaw, err)
+	}
+	if entryCount == 0 {
+		return fmt.Errorf("session %s holds no conversation entries — nothing to publish", sessionName)
+	}
+	// Names have minute precision, so a different session can already be in
+	// the Ledger under this one. Publishing would replace its transcript under
+	// its session ID, and its links would show this session instead.
+	if err := checkRecoveryDestination(filepath.Join(ledgerPath, "sessions", sessionName), sessionName, meta.SessionID); err != nil {
+		return err
+	}
+	summarize := config.GetAgentSummarizer(projectRoot) != config.AgentSummarizerOff
+	if summarize {
+		if err := session.WriteNeedsSummaryMarker(cacheDir, rawPath, filepath.Join(ledgerPath, "sessions", sessionName)); err != nil {
+			return fmt.Errorf("request summary: %w", err)
+		}
+	}
+
+	effects := productionSessionUploadEffects()
+	effects.uploadLFS = publishSessionLFS // the explicit publish releases the hold
+	orphan := orphanedSession{SessionName: sessionName, CachePath: cacheDir, Meta: meta, EntryCount: entryCount}
+	if err := retrySessionUploadWithEffects(projectRoot, ledgerPath, orphan, effects); err != nil {
+		return err
+	}
+
+	if !summarize {
+		// The commit landed. Left in place, this copy would be summarized by
+		// the daemon, which never reads agent.summarizer. It is removed only
+		// when every file in it reached the Ledger: anything else would be
+		// lost with it, and a copy kept is worth more than a summary skipped.
+		ledgerSessionDir := filepath.Join(ledgerPath, "sessions", sessionName)
+		if missing := filesNotPublished(cacheDir, ledgerSessionDir); len(missing) > 0 {
+			slog.Warn("published session cache copy kept: some files did not reach the ledger", "session", sessionName, "files", missing)
+		} else if err := os.RemoveAll(cacheDir); err != nil {
+			slog.Warn("published session cache copy not removed", "session", sessionName, "dir", cacheDir, "error", err)
+		}
+	}
+	for _, dir := range session.HeldSessionDirs(ledgerPath) {
+		if err := session.ClearHoldMarker(filepath.Join(dir, sessionName)); err != nil {
+			slog.Warn("published session still marked held", "session", sessionName, "dir", dir, "error", err)
+		}
+	}
+	_ = os.Remove(filepath.Join(cacheDir, sessionUploadRetryPendingFile))
+	return nil
 }

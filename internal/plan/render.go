@@ -54,6 +54,10 @@ type RenderOptions struct {
 	// the render can show each item's open/addressed state inline and in a
 	// summary. Empty for a plan with no review yet.
 	Review []MergedItem
+	// ReviewProblems counts what reading the review could not use and the
+	// operations stored with differing content (Review.Problems); when it is
+	// not 0 the page warns that Review may be incomplete or misleading.
+	ReviewProblems int
 	// ReviewEndpoint + ReviewToken are set ONLY when the page is served by the
 	// ephemeral `ox plan review` server: the page POSTs marks to the endpoint
 	// with the token. Empty for a static file:// render (clipboard fallback).
@@ -186,6 +190,7 @@ type renderData struct {
 	ReviewJSON     template.JS // JSON island: merged review state for the page
 	ReviewEndpoint string      // set only when served by `ox plan review`
 	ReviewToken    string
+	ReviewProblems int
 	Review         reviewSummary
 	TOC            []tocEntry
 	TLDR           template.HTML
@@ -238,6 +243,10 @@ func RenderHTMLOpts(in Input, res Result, opts RenderOptions) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read review.js: %w", err)
 	}
+	pageCSS := string(css)
+	if !opts.Artifact { // the template carries review.js only then
+		pageCSS += string(mustChromeAsset("assets/review.css"))
+	}
 	tmplBytes, err := renderAssets.ReadFile("assets/plan.html.tmpl")
 	if err != nil {
 		return nil, fmt.Errorf("read plan.html.tmpl: %w", err)
@@ -260,11 +269,12 @@ func RenderHTMLOpts(in Input, res Result, opts RenderOptions) ([]byte, error) {
 	data := renderData{
 		Title:          Title(in),
 		Slug:           opts.Slug,
-		CSS:            template.CSS(string(css) + highlightCSS()),
+		CSS:            template.CSS(pageCSS + highlightCSS()),
 		JS:             template.JS(js),
 		ReviewJS:       template.JS(reviewJS),
 		ReviewEndpoint: opts.ReviewEndpoint,
 		ReviewToken:    opts.ReviewToken,
+		ReviewProblems: opts.ReviewProblems,
 		FooterCredit:   len(res.Annotations) > 0 || len(res.Context) > 0,
 		SessionURL:     opts.SessionURL,
 		Artifact:       opts.Artifact,

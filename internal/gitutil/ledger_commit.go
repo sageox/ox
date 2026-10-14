@@ -119,6 +119,23 @@ func CommitLedgerSnapshotPreserving(ctx context.Context, repoPath, message strin
 	return true, nil
 }
 
+// StageLedgerBlob writes data as a blob and stages it at path (slash-separated,
+// relative to the repository root, mode 100644), returning the blob id. The
+// worktree is never read, so a commit of path through CommitLedgerSnapshot
+// carries exactly data whatever happens to the file on disk. The caller must
+// hold WithRepoLock.
+func StageLedgerBlob(ctx context.Context, repoPath, path string, data []byte) (string, error) {
+	out, err := runPlumbing(ctx, repoPath, data, nil, "hash-object", "-w", "--stdin")
+	if err != nil {
+		return "", fmt.Errorf("store blob for %s: %w", path, err)
+	}
+	oid := strings.TrimSpace(string(out))
+	if _, err := runPlumbing(ctx, repoPath, nil, nil, "update-index", "--add", "--cacheinfo", "100644,"+oid+","+path); err != nil {
+		return "", fmt.Errorf("stage %s: %w", path, err)
+	}
+	return oid, nil
+}
+
 // writeScopedIndexTree builds a temporary index holding parent's tree with the
 // repository index's entries under pathspecs layered on top — additions,
 // modifications, and deletions alike — and returns the tree it snapshots to.

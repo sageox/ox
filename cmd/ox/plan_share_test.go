@@ -85,7 +85,7 @@ func newSharedLedger(t *testing.T, root string, remoteOK bool) (ledger, remote s
 			t.Fatalf("git %v: %v\n%s", args, err, out)
 		}
 	}
-	run(filepath.Dir(remote), "init", "-q", "--bare", "-b", "main", remote)
+	initBareRemote(t, remote, "-b", "main")
 	if err := os.MkdirAll(filepath.Dir(ledger), 0o755); err != nil {
 		t.Fatal(err)
 	}

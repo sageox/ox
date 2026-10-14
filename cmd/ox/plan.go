@@ -1296,13 +1296,13 @@ func runPlanRenderSaved(cmd *cobra.Command, slug, outPath string, open, artifact
 		}
 	}
 	in := plan.Parse(planMD)
-	review, _ := plan.AssembleReview(info.Dir)
+	rev := plan.ReadReview(info.Dir)
 	companions := savedCompanionFiles(info.Dir)
 	var companionNames []string
 	for _, c := range companions {
 		companionNames = append(companionNames, c.Name)
 	}
-	htmlBytes, err := plan.RenderHTMLOpts(in, res, plan.RenderOptions{Slug: slug, Review: review, PriorArtURL: priorArtURLResolver(gitRoot), Artifact: artifact, Companions: plan.CompanionRefs(companionNames)})
+	htmlBytes, err := plan.RenderHTMLOpts(in, res, plan.RenderOptions{Slug: slug, Review: rev.Items, ReviewProblems: rev.Problems(), PriorArtURL: priorArtURLResolver(gitRoot), Artifact: artifact, Companions: plan.CompanionRefs(companionNames)})
 	if err != nil {
 		return fmt.Errorf("render plan: %w", err)
 	}
@@ -1342,11 +1342,12 @@ func runPlanRenderSavedHTML(cmd *cobra.Command, gitRoot, slug string, info plan.
 		emitRenderedHTML(cmd, authored, "", outPath, open, slug, nil)
 		return nil
 	}
-	review, _ := plan.AssembleReview(info.Dir)
+	rev := plan.ReadReview(info.Dir)
 	opts := plan.RenderOptions{
-		Slug:        slug,
-		Review:      review,
-		PriorArtURL: priorArtURLResolver(gitRoot),
+		Slug:           slug,
+		Review:         rev.Items,
+		ReviewProblems: rev.Problems(),
+		PriorArtURL:    priorArtURLResolver(gitRoot),
 	}
 	if meta.Provenance != nil && meta.Provenance.SessionID != "" {
 		cfg, _ := config.LoadProjectConfig(gitRoot)
@@ -1480,19 +1481,19 @@ func runPlanList(cmd *cobra.Command, jsonOut bool) error {
 
 	tw := tabwriter.NewWriter(out, 0, 2, 2, ' ', 0)
 	fmt.Fprintln(tw, cli.StyleDim.Render("SLUG\tDATE\tKIND\tSTATUS\tHTML\tREVIEW\tAUTHORS\tTOPIC"))
-	anyOpen := false
+	anyOpen, anyIncomplete := false, false
 	for _, p := range plans {
-		open := openReviewCount(p.Dir)
-		if open > 0 {
-			anyOpen = true
-		}
+		rev := plan.ReadReview(p.Dir)
+		open := rev.OpenCount()
+		anyOpen = anyOpen || open > 0
+		anyIncomplete = anyIncomplete || rev.Problems() > 0
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			p.Slug,
 			planDate(p.CreatedAt),
 			string(plan.KindOrDefault(p.Kind)),
 			statusMark(p.Status),
 			htmlMark(p.HasHTML),
-			reviewMark(open),
+			reviewMark(open, rev.Problems() == 0),
 			authorsLabel(p.Authors),
 			truncate(p.Topic, 60),
 		)
@@ -1502,6 +1503,9 @@ func runPlanList(cmd *cobra.Command, jsonOut bool) error {
 	}
 	if anyOpen {
 		cli.PrintHint("Plans with open review items — `ox plan feedback show <slug>`, address, then `ox plan feedback resolve`.")
+	}
+	if anyIncomplete {
+		cli.PrintHint("An incomplete review could not be fully read or holds conflicting copies — `ox plan feedback show <slug>` lists them.")
 	}
 	printUnsavedArtifactHint(gitRoot)
 	return nil
@@ -1525,17 +1529,11 @@ func printUnsavedArtifactHint(gitRoot string) {
 		len(arts), filepath.Base(arts[0]), plan.KindsHint()))
 }
 
-// openReviewCount returns the number of OPEN, actionable review items for a plan
-// dir (approvals don't count). Thin delegate to the ledger-side counter so the
-// list table and the discovery aggregator can't drift.
-func openReviewCount(planDir string) int {
-	return plan.CountOpenFeedback(planDir)
-}
-
 // countOpenPlanFeedback returns how many saved plans have open human review
-// feedback — the count `ox agent prime` surfaces so a NEW session (any agent)
-// discovers waiting feedback even when the push task missed. Best-effort: 0 on
-// any error (outside a project, no ledger, unreadable plans).
+// feedback, or a review that may be incomplete — the count `ox agent
+// prime` surfaces so a NEW session (any agent) discovers waiting feedback even
+// when the push task missed. Best-effort: 0 when the plans cannot be listed
+// (outside a project, no ledger).
 func countOpenPlanFeedback(gitRoot string) int {
 	if gitRoot == "" {
 		return 0
@@ -1547,9 +1545,16 @@ func countOpenPlanFeedback(gitRoot string) int {
 	return len(plans)
 }
 
-// reviewMark renders the open-review count for the list table.
-func reviewMark(open int) string {
-	if open == 0 {
+// reviewMark renders a plan's review for the list table. A review that is not
+// complete (a record it could not read, or an operation stored with differing
+// content) is never shown as "—": what it does not show may hold open feedback.
+func reviewMark(open int, complete bool) string {
+	switch {
+	case !complete && open > 0:
+		return fmt.Sprintf("%d open, incomplete", open)
+	case !complete:
+		return "incomplete"
+	case open == 0:
 		return "—"
 	}
 	return fmt.Sprintf("%d open", open)

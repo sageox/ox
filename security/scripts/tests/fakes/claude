@@ -20,6 +20,10 @@ Knobs (env):
   FAKE_PLANT            the line a cli-input hunter reports when it sees it
   FAKE_DAEMON_FINDING   "1": the daemon IPC hunter also reports the daemon change
                         (class daemon-ipc, a hard class) when it sees it
+  FAKE_RATE_LIMIT_ROLE  a role (cartographer, hunter, dedup, validator) whose every
+                        call fails the way the real CLI does once its own retries
+                        are spent on a rate limit (exit 1, is_error, a 429 result)
+  FAKE_RATE_LIMIT_NO_SUBTYPE  "1": that failure envelope carries no subtype
 """
 import json
 import os
@@ -130,6 +134,13 @@ def main():
     if budget is not None and os.environ.get("FAKE_HONOR_BUDGET", "1") == "1" and cost > float(budget):
         print(json.dumps({"type": "result", "subtype": "error_max_budget_usd", "is_error": True,
                           "result": None, "total_cost_usd": round(float(budget) + 0.001, 6)}))
+        return 1
+    if os.environ.get("FAKE_RATE_LIMIT_ROLE") == role:
+        failure = {"type": "result", "subtype": "error_during_execution", "is_error": True,
+                   "result": "API Error: Request rejected (429)", "total_cost_usd": 0}
+        if os.environ.get("FAKE_RATE_LIMIT_NO_SUBTYPE") == "1":
+            del failure["subtype"]
+        print(json.dumps(failure))
         return 1
     payload = respond(role, playbook, stdin, schema is not None)
     envelope = {"type": "result", "subtype": "success", "is_error": False, "total_cost_usd": cost,

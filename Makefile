@@ -2,7 +2,7 @@
 
 .PHONY: check-no-git-lfs-shell check-raw-writer-chokepoint check-session-meta-rmw check-codedb-guarded-open check-test-tiers test-tiers
 .PHONY: test-all-split test-split-slots test-split-slot coverage-merge-unit warm-test-cache coverage-integration-profile coverage-merge
-.PHONY: help build build-ox build-adapters build-acceptance install install-adapters clean dev run test test-cover test-timings test-all test-slow test-fuzz test-browser test-integration test-acceptance test-acceptance-cover test-acceptance-run test-release test-release-coverage release-stages test-agents test-preflight test-digital-twin test-digital-twin-cover test-cloud-api-twin test-ledger-twin eval eval-smoke eval-no-bash eval-scaffold-check test-sequential test-profile test-watch coverage coverage-report coverage-func coverage-baseline coverage-diff coverage-check coverage-ratchet coverage-ratchet-diff coverage-ratchet-test build-cover coverage-integration smoke-test lint lint-test-env format release release-snapshot dist install-hooks docs docs-check docs-publish refresh-friction-catalog bump-version verify-version check-release-drift beads-setup
+.PHONY: help build build-ox build-adapters build-acceptance install install-adapters uninstall uninstall-ox uninstall-adapters clean dev run test test-cover test-timings test-all test-slow test-fuzz test-browser test-integration test-acceptance test-acceptance-cover test-acceptance-run test-release test-release-coverage release-stages test-agents test-preflight test-digital-twin test-digital-twin-cover test-cloud-api-twin test-ledger-twin eval eval-smoke eval-no-bash eval-scaffold-check test-sequential test-profile test-watch coverage coverage-report coverage-func coverage-baseline coverage-diff coverage-check coverage-ratchet coverage-ratchet-diff coverage-ratchet-test build-cover coverage-integration smoke-test lint lint-test-env format release release-snapshot dist install-hooks docs docs-check docs-publish plan-review plan-review-check refresh-friction-catalog bump-version verify-version check-release-drift beads-setup
 
 # Variables
 GO := go
@@ -12,14 +12,25 @@ VERSION := $(shell grep 'Version.*=' internal/version/version.go | head -1 | sed
 BUILD_TIME := $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 GIT_COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 GOPATH := $(shell go env GOPATH)
+# sq: $(1) with each ' written as '\'' so it can sit inside single quotes in
+# a recipe and reach the shell as plain text, never as code.
+sq = $(subst ','\'',$(1))
 # go install writes to GOBIN when set, overriding GOPATH/bin — resolve the
 # same way here so PATH guidance and the `ox doctor` hint below point at
 # where the binary actually landed, not always GOPATH/bin.
 GOBIN := $(shell go env GOBIN)
-INSTALL_BIN := $(if $(strip $(GOBIN)),$(GOBIN),$(GOPATH)/bin)
-# sq: $(1) with each ' written as '\'' so it can sit inside single quotes in
-# a recipe and reach the shell as plain text, never as code.
-sq = $(subst ','\'',$(1))
+GOPATH_FIRST := $(shell ox_gopath='$(call sq,$(GOPATH))'; printf '%s' "$${ox_gopath%%:*}")
+INSTALL_BIN := $(if $(strip $(GOBIN)),$(GOBIN),$(GOPATH_FIRST)/bin)
+# Canonicalize once per recipe and use that exact directory for all writes.
+# Uninstalling a directory that no longer exists is an idempotent no-op.
+define resolve-install-bin
+ox_bin='$(call sq,$(INSTALL_BIN))'; \
+test -n "$$ox_bin" || { echo "Refusing empty install directory" >&2; exit 1; }; \
+$(if $(filter install,$(1)),mkdir -p -- "$$ox_bin" || exit $$?;,if [ ! -e "$$ox_bin" ] && [ ! -L "$$ox_bin" ]; then exit 0; fi;) \
+ox_bin=$$(CDPATH= cd -- "$$ox_bin" && pwd -P) || exit $$?; \
+while [ "$${ox_bin#//}" != "$$ox_bin" ]; do ox_bin=$${ox_bin#/}; done; \
+case "$$ox_bin" in /|/bin|/sbin|/usr/bin|/usr/sbin) echo "Refusing unsafe install directory: $$ox_bin" >&2; exit 1;; esac
+endef
 LDFLAGS := -ldflags "-X github.com/sageox/ox/internal/version.Version=$(VERSION) -X github.com/sageox/ox/internal/version.BuildDate=$(BUILD_TIME) -X github.com/sageox/ox/internal/version.GitCommit=$(GIT_COMMIT)"
 ADAPTER_LDFLAGS := -ldflags "-s -w"
 
@@ -41,7 +52,7 @@ GOTESTSUM_LEAN = $(if $(filter 1,$(V)),,--hide-summary skipped --format-hide-emp
 TIME_CMD = $(if $(filter 1,$(V)),time,)
 
 # Bundled adapters (shipped in release tarballs alongside ox)
-ADAPTERS := ox-adapter-claude-code ox-adapter-gemini ox-adapter-codex ox-adapter-amp ox-adapter-opencode ox-adapter-pi ox-adapter-omp ox-adapter-aider ox-adapter-droid ox-adapter-goose
+ADAPTERS := ox-adapter-claude-code ox-adapter-gemini ox-adapter-codex ox-adapter-amp ox-adapter-opencode ox-adapter-pi ox-adapter-omp ox-adapter-aider ox-adapter-droid ox-adapter-goose ox-adapter-cursor
 empty :=
 space := $(empty) $(empty)
 comma := ,
@@ -105,10 +116,10 @@ install: install-ox install-adapters ## Install ox and adapters to $GOPATH/bin
 	@echo "    brew install sageox/tap/ox        # recommended"
 	@echo "    Versioned downloads: https://github.com/sageox/ox/releases/latest"
 	@echo ""
-	@echo "  Releases self-update via \`ox upgrade\` and keep ox and its 10 adapter"
+	@echo "  Releases self-update via \`ox upgrade\` and keep ox and its 11 adapter"
 	@echo "  binaries together on PATH."
 	@echo "─────────────────────────────────────────────────────────────────────"
-	@ox_bin='$(call sq,$(INSTALL_BIN))'; \
+	@$(call resolve-install-bin); \
 	case ":$$PATH:" in \
 		*":$$ox_bin:"*) ;; \
 		*) \
@@ -135,15 +146,29 @@ install: install-ox install-adapters ## Install ox and adapters to $GOPATH/bin
 	printf 'Next: run `%s doctor` to confirm your AI coworker can actually see this install.\n' "$$ox_cmd"
 
 install-ox: ## Install ox to $GOPATH/bin
-	@echo 'Installing $(BINARY_NAME) to $(call sq,$(GOPATH))/bin...'
-	$(GO) install $(LDFLAGS) ./cmd/ox
-	@echo 'Installed $(BINARY_NAME) to $(call sq,$(GOPATH))/bin/$(BINARY_NAME)'
+	@$(call resolve-install-bin,install); \
+	echo "Installing $(BINARY_NAME) to $$ox_bin..."; \
+	GOBIN="$$ox_bin" $(GO) install $(LDFLAGS) ./cmd/ox || exit $$?; \
+	echo "Installed $(BINARY_NAME) to $$ox_bin/$(BINARY_NAME)"
 
 install-adapters: ## Install bundled adapters to $GOPATH/bin
-	@echo 'Installing adapters to $(call sq,$(GOPATH))/bin...'
-	@for adapter in $(ADAPTERS); do \
-		$(GO) install $(ADAPTER_LDFLAGS) ./cmd/$$adapter; \
+	@$(call resolve-install-bin,install); \
+	echo "Installing adapters to $$ox_bin..."; \
+	for adapter in $(ADAPTERS); do \
+		GOBIN="$$ox_bin" $(GO) install $(ADAPTER_LDFLAGS) ./cmd/$$adapter || exit $$?; \
 		echo "  Installed $$adapter"; \
+	done
+
+uninstall: uninstall-ox uninstall-adapters ## Remove ox-owned binaries from the install directory
+
+uninstall-ox:
+	@$(call resolve-install-bin); \
+	rm -f "$$ox_bin/$(BINARY_NAME)"
+
+uninstall-adapters:
+	@$(call resolve-install-bin); \
+	for adapter in $(ADAPTERS); do \
+		rm -f "$$ox_bin/$$adapter" || exit $$?; \
 	done
 
 clean: ## Remove build artifacts
@@ -247,6 +272,13 @@ GOTESTSUM_TIMINGS = $(if $(strip $(TEST_TIMINGS)),--jsonfile-timing-events "$(TE
 # all four — collapsing this back to just gc.auto=0 quietly reopens the
 # fork-and-return race for any path that doesn't honor gc.auto.
 #
+# None of these reach a bare origin's receive-pack. For a push to a local
+# path, git starts receive-pack with GIT_CONFIG_COUNT and
+# GIT_CONFIG_PARAMETERS removed from its environment, so receive-pack runs
+# with git's defaults and forks a detached `git maintenance run --auto` into
+# the origin. A test origin must carry these settings in its own config — in
+# cmd/ox, create it with initBareRemote (cmd/ox/test_helpers_test.go).
+#
 # Known, acceptable interaction: a handful of tests build their own
 # GIT_CONFIG_COUNT env for a specific git invocation (e.g.
 # cmd/ox/doctor_ledger_git_test.go, internal/kb/multiwriter_test.go,
@@ -275,17 +307,22 @@ check-test-tiers: ## Validate the machine-readable test-tier contract
 test-tiers: check-test-tiers ## Print the executable test-tier contract
 	@for tier in fast full slow acceptance digital_twin integration release; do $(TEST_TIER_TOOL) describe $$tier; echo; done
 
-# Root ./... deliberately excludes nested public modules, so the contract's
-# coverage is collected here and appended into coverage.out by each coverage
-# tier below before the ratchet reads it. Otherwise every change to the
-# contract fails the changed-line gate as "no coverage data".
-SESSIONPROVENANCE_COVER := tmp/sessionprovenance-coverage.out
-.PHONY: test-sessionprovenance
-test-sessionprovenance: ## Validate the public native-session contract
+# Root ./... deliberately excludes nested public modules, so their coverage is
+# collected here and appended into coverage.out by each coverage tier below
+# before the ratchet reads it. Otherwise every change to a public module fails
+# the changed-line gate as "no coverage data".
+PUBLIC_MODULES := pkg/sessionprovenance pkg/planreview
+PUBLIC_MODULES_COVER := tmp/public-modules-coverage.out
+.PHONY: test-public-modules
+test-public-modules: ## Validate the public contract modules under pkg/
 	@mkdir -p tmp
-	@$(GO) -C pkg/sessionprovenance test -race -coverprofile=$(CURDIR)/$(SESSIONPROVENANCE_COVER) -covermode=atomic ./...
+	@echo "mode: atomic" > $(PUBLIC_MODULES_COVER)
+	@for m in $(PUBLIC_MODULES); do \
+	  $(GO) -C $$m test -race -coverprofile=$(CURDIR)/tmp/public-module-coverage.out -covermode=atomic ./... || exit 1; \
+	  tail -n +2 tmp/public-module-coverage.out >> $(PUBLIC_MODULES_COVER); \
+	done
 
-test: check-test-tiers test-sessionprovenance ## Run fast tests — unit tests <500ms, race detection, no coverage (every commit)
+test: check-test-tiers test-public-modules ## Run fast tests — unit tests <500ms, race detection, no coverage (every commit)
 	$(call say,"Running fast tests (skipping >500ms, no coverage)...")
 	@timings='$(TEST_TIMINGS)'; \
 	if [ -z "$$timings" ]; then mkdir -p tmp; timings=$$(mktemp -p tmp test-timings.XXXXXX); else mkdir -p "$$(dirname "$$timings")"; fi; \
@@ -297,10 +334,10 @@ test: check-test-tiers test-sessionprovenance ## Run fast tests — unit tests <
 	if [ "$$test_status" -ne 0 ]; then exit "$$test_status"; fi; \
 	exit "$$metrics_status"
 
-test-cover: check-test-tiers test-sessionprovenance ## Run fast tests with coverage collection (~15-20% slower than `make test`)
+test-cover: check-test-tiers test-public-modules ## Run fast tests with coverage collection (~15-20% slower than `make test`)
 	$(call say,"Running fast tests with coverage...")
 	@$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) $(GOTESTSUM_JUNIT) $(GOTESTSUM_TIMINGS) -- $(FAST_TEST_FLAGS) -coverprofile=coverage.out -covermode=atomic ./...
-	@tail -n +2 $(SESSIONPROVENANCE_COVER) >> coverage.out
+	@tail -n +2 $(PUBLIC_MODULES_COVER) >> coverage.out
 	@python3 scripts/coverage_ratchet.py coverage.out --write-provenance coverage.out.provenance.json
 
 test-timings: ## Reprint metrics from the latest fast-test timing artifact
@@ -308,10 +345,10 @@ test-timings: ## Reprint metrics from the latest fast-test timing artifact
 	@test -f $(TEST_TIMINGS) || (echo "No fast-test timing artifact at $(TEST_TIMINGS)." && exit 1)
 	@python3 $(TEST_METRICS) $(TEST_TIMINGS)
 
-test-all: check-test-tiers test-sessionprovenance ## Run all unit tests including expensive ones (git clone, SQLite, LFS) with coverage
+test-all: check-test-tiers test-public-modules ## Run all unit tests including expensive ones (git clone, SQLite, LFS) with coverage
 	$(call say,"Running all tests including expensive tests...")
 	@$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) $(GOTESTSUM_JUNIT) $(GOTESTSUM_TIMINGS) -- $(FULL_TEST_FLAGS) -coverprofile=coverage.out -covermode=atomic ./...
-	@tail -n +2 $(SESSIONPROVENANCE_COVER) >> coverage.out
+	@tail -n +2 $(PUBLIC_MODULES_COVER) >> coverage.out
 	@python3 scripts/coverage_ratchet.py coverage.out --write-provenance coverage.out.provenance.json
 
 # Same tests, flags, and coverage as test-all, cut into slots
@@ -334,11 +371,11 @@ TEST_SPLIT_RUN = python3 scripts/test_split.py run $(TEST_SPLIT_LAYOUT) \
 		$(if $(strip $(TEST_JUNIT)),--junit "$(TEST_JUNIT)",) \
 		$(if $(strip $(TEST_TIMINGS)),--timings "$(TEST_TIMINGS)",)
 
-test-all-split: check-test-tiers test-sessionprovenance ## Full tier (same as test-all) with every split slot running at once
+test-all-split: check-test-tiers test-public-modules ## Full tier (same as test-all) with every split slot running at once
 	$(call say,"Running all tests split into slots...")
 	@$(TEST_GIT_ISOLATION) $(TIME_CMD) $(TEST_SPLIT_RUN) --work-dir tmp/test-split --coverprofile coverage.out \
 		-- $(FULL_TEST_FLAGS) -covermode=atomic
-	@tail -n +2 $(SESSIONPROVENANCE_COVER) >> coverage.out
+	@tail -n +2 $(PUBLIC_MODULES_COVER) >> coverage.out
 	@python3 scripts/coverage_ratchet.py coverage.out --write-provenance coverage.out.provenance.json
 
 test-split-slots: ## Print the full tier's slots as a JSON array (the CI unit matrix)
@@ -349,10 +386,10 @@ test-split-slot: check-test-tiers ## Run one slot of the full tier: make test-sp
 	@$(TEST_GIT_ISOLATION) $(TIME_CMD) $(TEST_SPLIT_RUN) --only "$(TEST_SPLIT_ONLY)" --work-dir tmp/test-split \
 		--coverprofile $(TEST_SPLIT_PARTS)/coverage-$(TEST_SPLIT_ONLY).out \
 		-- $(FULL_TEST_FLAGS) -covermode=atomic
-	@# The nested public-contract module rides with `rest`, as it does in test-all.
+	@# The nested public modules ride with `rest`, as they do in test-all.
 	@if [ "$(TEST_SPLIT_ONLY)" = rest ]; then \
-	  $(MAKE) --no-print-directory test-sessionprovenance && \
-	  tail -n +2 $(SESSIONPROVENANCE_COVER) >> $(TEST_SPLIT_PARTS)/coverage-rest.out; \
+	  $(MAKE) --no-print-directory test-public-modules && \
+	  tail -n +2 $(PUBLIC_MODULES_COVER) >> $(TEST_SPLIT_PARTS)/coverage-rest.out; \
 	 fi
 
 coverage-merge-unit: ## Merge one coverage part per slot ($(TEST_SPLIT_PARTS)) into coverage.out; fails if a slot is missing
@@ -370,7 +407,7 @@ warm-test-cache: build-cover ## Compile the full, acceptance, and twin test bina
 	@$(GO) test -tags=ledger_twin -run '^$$' ./tests/ledger_twin/... >/dev/null
 	@$(GO) test -tags=kb_twin -run '^$$' ./tests/kb_twin/... >/dev/null
 
-test-calm: check-test-tiers test-sessionprovenance ## Run the full test tier at reduced concurrency (shared or already-loaded machine)
+test-calm: check-test-tiers test-public-modules ## Run the full test tier at reduced concurrency (shared or already-loaded machine)
 	@# The tier contract's -p 8 -parallel 32 assumes the runner owns the machine.
 	@# Locally it runs once per agent session per worktree: two concurrent
 	@# `make test-all` runs on an 18-core workstation measured load average 37
@@ -379,7 +416,7 @@ test-calm: check-test-tiers test-sessionprovenance ## Run the full test tier at 
 	$(call say,"Running full tests at reduced concurrency (-p $(CALM_P) -parallel $(CALM_PARALLEL))...")
 	@calm_flags="$$(OX_TEST_P=$(CALM_P) OX_TEST_PARALLEL=$(CALM_PARALLEL) $(TEST_TIER_TOOL) flags full)" || exit $$?; \
 		$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) $(GOTESTSUM_JUNIT) $(GOTESTSUM_TIMINGS) -- $$calm_flags -coverprofile=coverage.out -covermode=atomic ./...
-	@tail -n +2 $(SESSIONPROVENANCE_COVER) >> coverage.out
+	@tail -n +2 $(PUBLIC_MODULES_COVER) >> coverage.out
 	@python3 scripts/coverage_ratchet.py coverage.out --write-provenance coverage.out.provenance.json
 
 test-slow: check-test-tiers ## Run slow tests (build tag: slow) — requires real ox binary, no Claude needed
@@ -739,7 +776,7 @@ coverage-ratchet-diff: test-all ## Enforce package + changed-line coverage vs CO
 	@python3 scripts/coverage_ratchet.py coverage.out --require-provenance coverage.out.provenance.json --diff-base $(COVERAGE_BASE)
 
 coverage-ratchet-test: ## Test the coverage ratchet parser and failure semantics
-	@cd scripts && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v coverage_ratchet_test.py test_tiers_test.py test_metrics_test.py test_split_test.py session_import_testbed_test.py
+	@cd scripts && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v coverage_ratchet_test.py test_tiers_test.py test_metrics_test.py test_split_test.py session_import_testbed_test.py make_install_test.py
 
 # The instrumented binary lands in its OWN directory, not shared bin/, because
 # ox discovers adapters as siblings of the running binary. In bin/ it saw every
@@ -799,7 +836,7 @@ smoke-test: build ## Run smoke tests against SageOx cloud (requires SAGEOX_CI_PA
 
 # Code quality
 # Targets below are agent-friendly by default (quiet). V=1 for verbose.
-lint: lint-test-env lint-sessionprovenance ## Run golangci-lint
+lint: lint-test-env lint-public-modules ## Run golangci-lint
 	@which golangci-lint > /dev/null || (echo "golangci-lint not found. Install from https://golangci-lint.run/docs/welcome/install/" && exit 1)
 	@# --allow-parallel-runners: multiple AI coding agent sessions routinely run
 	@# `make lint` at the same time in this repo. golangci-lint's default file
@@ -809,11 +846,11 @@ lint: lint-test-env lint-sessionprovenance ## Run golangci-lint
 	@golangci-lint run -c .config/golangci.yml --allow-parallel-runners ./...
 
 # Root ./... cannot reach a nested module: golangci-lint resolves packages
-# against the main module, so pkg/sessionprovenance would ship unlinted.
-.PHONY: lint-sessionprovenance
-lint-sessionprovenance: ## Lint the public native-session contract
+# against the main module, so a public module would ship unlinted.
+.PHONY: lint-public-modules
+lint-public-modules: ## Lint the public contract modules under pkg/
 	@which golangci-lint > /dev/null || (echo "golangci-lint not found. Install from https://golangci-lint.run/docs/welcome/install/" && exit 1)
-	@cd pkg/sessionprovenance && golangci-lint run -c $(CURDIR)/.config/golangci.yml --allow-parallel-runners ./...
+	@for m in $(PUBLIC_MODULES); do (cd $$m && golangci-lint run -c $(CURDIR)/.config/golangci.yml --allow-parallel-runners ./...) || exit 1; done
 
 lint-test-env: ## Check that test files use testguard instead of os.Environ()
 	$(call say,"Checking for os.Environ() in test files...")
@@ -885,6 +922,15 @@ docs-check: ## Fail when committed CLI reference docs differ from Cobra
 			echo "docs/package.json is stale. Run 'make docs' and commit the result."; \
 			exit 1; \
 		fi
+
+# @sageox/plan-review (packages/plan-review) builds the review page's
+# internal/plan/assets/review.{js,css} from its TypeScript source. The built
+# assets are committed so that building ox never needs node.
+plan-review: ## Build packages/plan-review and regenerate internal/plan/assets/review.*
+	cd packages/plan-review && npm ci --ignore-scripts && npm run build
+
+plan-review-check: ## Fail when internal/plan/assets/review.* is stale; test and clean-install the package
+	cd packages/plan-review && npm ci --ignore-scripts && npm run check && npm run build && npm test && node pack-check.mjs
 
 docs-publish: docs ## Publish docs to GitHub Packages
 	@echo "Publishing docs to GitHub Packages..."

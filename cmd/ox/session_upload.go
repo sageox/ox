@@ -138,8 +138,26 @@ func uploadSessionLFS(projectRoot, sessionPath string) (map[string]lfs.FileRef, 
 }
 
 func uploadSessionLFSContext(ctx context.Context, projectRoot, sessionPath string) (map[string]lfs.FileRef, error) {
-	// Every caller (upload, regenerate, migrate, retry) ends here, so this is the
-	// one place that keeps a quarantined recording's content out of the Ledger.
+	// Every automatic caller (regenerate, migrate, recover, retry) ends here, so
+	// this is the one place that keeps a held session's content out of the
+	// Ledger (GH #1093). The explicit publish goes through publishSessionLFS.
+	if sessionHeldByName(sessionPath) {
+		name := filepath.Base(sessionPath)
+		return nil, fmt.Errorf("session %s is held on this machine (session_publishing: manual) and was not uploaded; publish it with 'ox session upload %s'", name, name)
+	}
+	return publishSessionLFSContext(ctx, projectRoot, sessionPath)
+}
+
+// publishSessionLFS uploads session content for an explicit publish. It honors
+// the quarantine but not the hold: 'ox session upload' is how a coworker
+// releases a hold.
+func publishSessionLFS(projectRoot, sessionPath string) (map[string]lfs.FileRef, error) {
+	return publishSessionLFSContext(context.Background(), projectRoot, sessionPath)
+}
+
+func publishSessionLFSContext(ctx context.Context, projectRoot, sessionPath string) (map[string]lfs.FileRef, error) {
+	// Every caller ends here, so this is the one place that keeps a
+	// quarantined recording's content out of the Ledger.
 	if recording, readErr := session.ReadRecordingStateFile(sessionPath); readErr == nil && recording != nil && recording.SourceRejected {
 		return nil, fmt.Errorf("session %s is held back for ownership review and was not uploaded; run 'ox agent %s session recover --release-quarantine' to re-check it", filepath.Base(sessionPath), recording.AgentID)
 	}

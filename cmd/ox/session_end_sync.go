@@ -46,6 +46,10 @@ var (
 	// errSessionUploadFailed: the stop finished but the upload did not. The
 	// stop keeps the session in its cache and flags it for `ox doctor`.
 	errSessionUploadFailed = errors.New("session upload failed")
+
+	// errSessionHeld: the stop finished and, as session_publishing: manual
+	// asks, kept the session on this machine instead of uploading it.
+	errSessionHeld = errors.New("session held on this machine")
 )
 
 // sessionEndStopWait bounds how long SessionEnd waits for the upload. The
@@ -178,9 +182,10 @@ func waitForSessionStop(cmd *exec.Cmd, wait time.Duration) error {
 }
 
 // sessionStopOutcome reads the JSON `session stop` printed. Stop exits 0
-// when the upload fails (it keeps the session and flags it for `ox doctor`)
-// and says so in upload_warning. Whispers may be printed ahead of the JSON,
-// which always starts on a line of its own.
+// when the upload fails (it keeps the session, flags it for `ox doctor`, and
+// says so in upload_warning) and when the session is held (it stays on this
+// machine, as session_publishing: manual asks). Whispers may be printed ahead
+// of the JSON, which always starts on a line of its own.
 func sessionStopOutcome(printed []byte) error {
 	// the child runs with color off; strip any that a forced profile let through
 	printed = ansiEscape.ReplaceAll(printed, nil)
@@ -194,6 +199,10 @@ func sessionStopOutcome(printed []byte) error {
 	var result pipeline.StopOutput
 	if err := json.NewDecoder(bytes.NewReader(printed[start:])).Decode(&result); err != nil {
 		return fmt.Errorf("parse session stop result: %w", err)
+	}
+	// a held stop also names the session in upload_warning, for `ox session upload`
+	if result.Held {
+		return errSessionHeld
 	}
 	if result.UploadWarning != "" {
 		return fmt.Errorf("%w: %s", errSessionUploadFailed, result.UploadWarning)

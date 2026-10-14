@@ -1,0 +1,40 @@
+{
+  "summary": "120 rounds in every round layout a release wrote: round-<time>.json without reviewer or id (rounds 1-30), round-<time>-<rand8>.json (31-60), round-<time>-<id>.json (61-90) and immutable records (91-120); three reviewers over twelve anchors. Resolutions in all three layouts, one carried forward from the legacy array into a per-entry file (counted once); a legacy remap chain h12 -> h13 -> h14. Two retries accepted later (r-many-0065, in an older layout, and r-many-0100) assemble once: neither reopens h02 nor replaces a later mark; r-many-0110 re-sent with different words is a conflict. The CLI's v1 reader assembles the same items.",
+  "items": [
+    {"anchor": "h06", "reviewer": "", "status": "flag", "label": "Item 06", "note": "Round 25 on h06.", "open": false, "resolution": "wontfix"},
+    {"anchor": "h08", "reviewer": "", "status": "comment", "label": "Item 08", "note": "Round 25 on h08.", "open": false, "resolution": "addressed"},
+    {"anchor": "h11", "reviewer": "", "status": "comment", "label": "Item 11", "note": "Round 26 on h11.", "open": true},
+    {"anchor": "h03", "reviewer": "", "status": "approve", "label": "Item 03", "note": "Round 26 on h03.", "open": false, "resolution": "verified"},
+    {"anchor": "h04", "reviewer": "", "status": "approve", "label": "Item 04", "note": "Round 27 on h04.", "open": false, "resolution": "addressed"},
+    {"anchor": "h10", "reviewer": "", "status": "request-change", "label": "Item 10", "note": "Round 27 on h10.", "open": true},
+    {"anchor": "h09", "reviewer": "", "status": "request-change", "label": "Item 09", "note": "Round 28 on h09.", "open": true},
+    {"anchor": "h05", "reviewer": "", "status": "flag", "label": "Item 05", "note": "Round 28 on h05.", "open": false, "resolution": "addressed"},
+    {"anchor": "h02", "reviewer": "", "status": "flag", "label": "Item 02", "note": "Round 29 on h02.", "open": false, "resolution": "addressed"},
+    {"anchor": "h14", "reviewer": "", "status": "comment", "label": "Item 12", "note": "Round 29 on h12.", "open": true, "remapped_from": "h12"},
+    {"anchor": "h07", "reviewer": "", "status": "comment", "label": "Item 07", "note": "Round 30 on h07.", "open": false, "resolution": "verified"},
+    {"anchor": "h01", "reviewer": "", "status": "request-change", "label": "Item 01", "note": "Round 24 on h01.", "open": false, "resolution": "addressed"},
+    {"anchor": "h14", "reviewer": "Ben", "status": "approve", "label": "Item 12", "note": "Round 115 on h12.", "open": true, "remapped_from": "h12"},
+    {"anchor": "h02", "reviewer": "Ben", "status": "request-change", "label": "Item 02", "note": "Round 115 on h02.", "open": false, "resolution": "addressed"},
+    {"anchor": "h05", "reviewer": "Cy", "status": "request-change", "label": "Item 05", "note": "Round 116 on h05.", "open": true, "resolution": "addressed"},
+    {"anchor": "h09", "reviewer": "Cy", "status": "flag", "label": "Item 09", "note": "Round 116 on h09.", "open": true},
+    {"anchor": "h10", "reviewer": "Ana", "status": "flag", "label": "Item 10", "note": "Round 117 on h10.", "open": true},
+    {"anchor": "h04", "reviewer": "Ana", "status": "comment", "label": "Item 04", "note": "Round 117 on h04.", "open": true, "resolution": "addressed"},
+    {"anchor": "h03", "reviewer": "Ben", "status": "comment", "label": "Item 03", "note": "Round 118 on h03.", "open": true, "resolution": "verified"},
+    {"anchor": "h11", "reviewer": "Ben", "status": "approve", "label": "Item 11", "note": "Round 118 on h11.", "open": true},
+    {"anchor": "h08", "reviewer": "Cy", "status": "approve", "label": "Item 08", "note": "Round 119 on h08.", "open": false, "resolution": "addressed"},
+    {"anchor": "h06", "reviewer": "Cy", "status": "request-change", "label": "Item 06", "note": "Round 119 on h06.", "open": false, "resolution": "wontfix"},
+    {"anchor": "h01", "reviewer": "Ana", "status": "request-change", "label": "Item 01", "note": "Round 120 on h01.", "open": true, "resolution": "addressed"},
+    {"anchor": "h06", "reviewer": "Ben", "status": "flag", "label": "Item 06", "note": "Round 109 on h06.", "open": false, "resolution": "wontfix"},
+    {"anchor": "h08", "reviewer": "Ben", "status": "comment", "label": "Item 08", "note": "Round 109 on h08.", "open": false, "resolution": "addressed"},
+    {"anchor": "h11", "reviewer": "Cy", "status": "comment", "label": "Item 11", "note": "Round 110 on h11.", "open": true},
+    {"anchor": "h03", "reviewer": "Cy", "status": "approve", "label": "Item 03", "note": "Round 110 on h03.", "open": true, "resolution": "verified"},
+    {"anchor": "h09", "reviewer": "Ben", "status": "request-change", "label": "Item 09", "note": "Round 112 on h09.", "open": true},
+    {"anchor": "h05", "reviewer": "Ben", "status": "flag", "label": "Item 05", "note": "Round 112 on h05.", "open": true, "resolution": "addressed"},
+    {"anchor": "h02", "reviewer": "Cy", "status": "flag", "label": "Item 02", "note": "Round 113 on h02.", "open": false, "resolution": "addressed"},
+    {"anchor": "h14", "reviewer": "Cy", "status": "comment", "label": "Item 12", "note": "Round 113 on h12.", "open": true, "remapped_from": "h12"},
+    {"anchor": "h07", "reviewer": "Ana", "status": "comment", "label": "Item 07", "note": "Round 114 on h07.", "open": false, "resolution": "verified"}
+  ],
+  "conflicts": [
+    {"kind": "round", "id": "r-many-0110", "paths": ["feedback/round-20260905-140000.000000000-r-many-0110.9a6987d751c37696.json", "feedback/round-20260906-070000.000000000-r-many-0110.56537faeb96980b1.json"]}
+  ]
+}

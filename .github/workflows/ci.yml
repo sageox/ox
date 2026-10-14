@@ -455,6 +455,14 @@ jobs:
       - name: Build
         run: go build -v ./...
 
+      # Match the FreeBSD release target and catch platform-specific imports.
+      - name: Cross-build FreeBSD CLI
+        env:
+          CGO_ENABLED: '0'
+          GOOS: freebsd
+          GOARCH: amd64
+        run: go build -v -o /dev/null ./cmd/ox
+
       - name: Check generated CLI docs
         run: make docs-check
 
@@ -462,6 +470,24 @@ jobs:
         with:
           version: v2.13.2   # security-review.yml installs the same version for gosec
           args: -c .config/golangci.yml
+
+  # @sageox/plan-review (packages/plan-review): the committed review assets in
+  # internal/plan/assets match their TypeScript source, the package's tests
+  # pass, and its tarball is reproducible, installs offline and type-checks.
+  # Node only here: building ox needs none.
+  plan-review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+
+      - name: Check, test and pack the package
+        run: make plan-review-check
 
   # The skill installer is the one subsystem where Windows is a first-class
   # target rather than an aspiration: copy materialization IS what Windows gets,

@@ -1,10 +1,14 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
+	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/runtime"
 	"github.com/sageox/ox/internal/session"
+	"github.com/stretchr/testify/require"
 )
 
 func clearFinalizeEnv(t *testing.T) {
@@ -21,6 +25,15 @@ func clearFinalizeEnv(t *testing.T) {
 		"OX_PERSIST_DISK",
 	} {
 		t.Setenv(key, "")
+	}
+	// cmd/ox's TestMain hands tests an empty HOME. The persistent-disk probe
+	// needs the config dir's parent to exist, as it does on any laptop;
+	// without it the daemon reads as unavailable and every case here
+	// collapses to sync, whichever order the tests run in.
+	for _, dir := range []string{paths.ConfigDir(), paths.SageoxDir()} {
+		if dir != "" {
+			require.NoError(t, os.MkdirAll(filepath.Dir(dir), 0o755))
+		}
 	}
 	runtime.Reset()
 	t.Cleanup(runtime.Reset)
@@ -58,6 +71,7 @@ func TestFinalizeModeForSessionStop_DefaultAsync(t *testing.T) {
 // prevented (sageox/ox#1314): delegated stop in an orb never reaches the Ledger.
 func TestFinalizeModeForSessionStop_AmpOrbUploadsBeforeReturning(t *testing.T) {
 	clearFinalizeEnv(t)
+	require.True(t, runtime.Probe().DaemonViable, "precondition: a laptop-like host, or sync proves nothing")
 	t.Setenv("AMP_ORB", "1")
 
 	got := finalizeModeForSessionStop(true)

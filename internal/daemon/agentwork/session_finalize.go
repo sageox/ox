@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -467,6 +468,7 @@ func (h *SessionFinalizeHandler) Detect(ledgerPath string) ([]*WorkItem, error) 
 		"ledger", ledgerPath,
 		"items", len(items),
 		"upload_only", uploadOnly,
+		"held", len(skips.held),
 		"skipped_with_content", skips.total(),
 	)
 	// A separate Warn rather than more keys on the line above: `items=0` is
@@ -499,6 +501,8 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 	}
 
 	var items []*WorkItem
+	heldDirs := session.HeldSessionDirs(ledgerPath)
+	manual := h.manualPublishing() // once per pass: it reads config files
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -656,6 +660,11 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 					if err != nil {
 						return err
 					}
+					// The recording's mode outlives .recording.json only as a hold;
+					// without one, keep the marker and retry on a later pass.
+					if err := holdIfRecordedManual(sessionDir); err != nil {
+						return err
+					}
 					// A queued watcher must observe the cleared marker before it
 					// acquires this lock and tries to resume the old cursor.
 					return os.Remove(recPath)
@@ -683,6 +692,14 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 			)
 		}
 
+		// Held on this machine (session_publishing: manual): never summarize,
+		// upload, or discard it. Checked by name, so an unheld copy in another
+		// cache location cannot be published in its place (GH #1093).
+		if session.HeldAnywhere(name, heldDirs...) {
+			skips.addHeld(name)
+			continue
+		}
+
 		if !hasRaw {
 			continue
 		}
@@ -699,6 +716,16 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 		// push a new title and summary over the team's (GH #1107).
 		if isDownloadedCopy(sessionDir, ledgerPath) {
 			h.logger.Debug("skipping downloaded session copy", "session", name)
+			continue
+		}
+
+		// Publishing is manual and this machine's session is not in the Ledger
+		// yet: held here like a manual stop, never summarized, uploaded, or
+		// discarded. It covers what no stop or recovery held: a cache-only
+		// session from a second recording (GH #1077), or one stopped before
+		// holds existed. After the download check: a download is not ours.
+		if manual && h.holdIfUnpublished(sessionDir, ledgerPath) {
+			skips.addHeld(name)
 			continue
 		}
 
@@ -826,6 +853,17 @@ type detectSkipStats struct {
 	// unreadableMeta: meta.json could not be parsed, so the fail-closed arm
 	// skipped rather than risk recovering onto a git-tracked raw.jsonl.
 	unreadableMeta map[string]bool
+	// held: the coworker keeps these on this machine (session_publishing:
+	// manual). Skipping them is the intended outcome, not an anomaly, so they
+	// are reported as a count and never in the Warn line.
+	held map[string]bool
+}
+
+func (s *detectSkipStats) addHeld(name string) {
+	if s.held == nil {
+		s.held = make(map[string]bool)
+	}
+	s.held[name] = true
 }
 
 func (s *detectSkipStats) addUnprovenDraft(name string) {
@@ -848,6 +886,9 @@ func (s *detectSkipStats) merge(other detectSkipStats) {
 	}
 	for name := range other.unreadableMeta {
 		s.addUnreadableMeta(name)
+	}
+	for name := range other.held {
+		s.addHeld(name)
 	}
 }
 
@@ -898,6 +939,7 @@ func (h *SessionFinalizeHandler) DetectOrphanedForAgent(ledgerPath, agentID stri
 
 	var items []*WorkItem
 	seen := make(map[string]bool)
+	manual := h.manualPublishing() // once per pass: it reads config files
 
 	scanDirs := []string{
 		filepath.Join(ledgerPath, ".sageox", "cache", "sessions"),
@@ -962,6 +1004,7 @@ func (h *SessionFinalizeHandler) DetectOrphanedForAgent(ledgerPath, agentID stri
 			}
 
 			var state struct {
+				AdapterName    string     `json:"adapter_name"`
 				AgentID        string     `json:"agent_id"`
 				ParentPID      int        `json:"parent_pid,omitempty"`
 				StoppedAt      *time.Time `json:"stopped_at,omitempty"`
@@ -971,6 +1014,12 @@ func (h *SessionFinalizeHandler) DetectOrphanedForAgent(ledgerPath, agentID stri
 				continue
 			}
 			if state.AgentID != agentID || state.SourceRejected {
+				continue
+			}
+			// Cursor hook processes are transient and the desktop PID is shared
+			// by many conversations. Ordinary detection applies its native-end
+			// or inactivity policy; a process exit cannot end a Cursor recording.
+			if state.AdapterName == "cursor" && state.StoppedAt == nil {
 				continue
 			}
 
@@ -1043,6 +1092,11 @@ func (h *SessionFinalizeHandler) DetectOrphanedForAgent(ledgerPath, agentID stri
 					if err != nil {
 						return err
 					}
+					// The recording's mode outlives .recording.json only as a hold;
+					// without one, keep the marker and retry on a later pass.
+					if err := holdIfRecordedManual(sessionDir); err != nil {
+						return err
+					}
 					return os.Remove(recPath)
 				})
 				if recoverErr != nil {
@@ -1065,6 +1119,12 @@ func (h *SessionFinalizeHandler) DetectOrphanedForAgent(ledgerPath, agentID stri
 			h.logger.Info("clearing orphaned recording for agent exit finalization",
 				"session", name, "agent_id", agentID,
 			)
+
+			// held on this machine: recovered locally, never finalized, and so
+			// is an unpublished session while publishing is manual (GH #1093)
+			if session.IsHeldInLedger(ledgerPath, name) || (manual && h.holdIfUnpublished(sessionDir, ledgerPath)) {
+				continue
+			}
 
 			if !session.HasSubstantiveEntries(rawPath) {
 				continue
@@ -1111,9 +1171,16 @@ func (h *SessionFinalizeHandler) BuildPrompt(item *WorkItem) (RunRequest, error)
 
 	payload.llmPaused = false
 
-	// Held for ownership review: do not spend an LLM run on it. ProcessResult
+	// Quarantined for ownership review: do not spend an LLM run on it. ProcessResult
 	// drops the item.
-	if sessionHeldForReview(payload.SessionDir) {
+	if sessionQuarantined(payload.SessionDir) {
+		return RunRequest{SkipLLM: true}, nil
+	}
+
+	// Held on this machine, or not yet published while publishing is manual:
+	// no LLM run, and ProcessResult drops it. Covers IPC-queued items, holds
+	// placed after the scan, and a switch to manual since then (GH #1093).
+	if h.keepLocal(payload) {
 		return RunRequest{SkipLLM: true}, nil
 	}
 
@@ -1269,8 +1336,17 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 	// sweep, a caller's IPC request) ends here, so this is the one place that
 	// keeps a quarantined recording's transcript out of the Ledger. Dropped, not
 	// failed: retrying cannot change the answer, only a coworker's release can.
-	if sessionHeldForReview(payload.SessionDir) {
-		h.logger.Info("session finalize dropped: recording is held for ownership review",
+	if sessionQuarantined(payload.SessionDir) {
+		h.logger.Info("session finalize dropped: recording is quarantined for ownership review",
+			"session", filepath.Base(payload.SessionDir))
+		return nil
+	}
+
+	// Held on this machine, or not yet published while publishing is manual:
+	// dropped before any LFS upload, commit, or discard. Only 'ox session
+	// upload' publishes it (GH #1093).
+	if h.keepLocal(payload) {
+		h.logger.Info("session finalize dropped: session is held on this machine",
 			"session", filepath.Base(payload.SessionDir))
 		return nil
 	}
@@ -2130,11 +2206,14 @@ func (h *SessionFinalizeHandler) stageSessionInLedger(payload *SessionFinalizePa
 	}
 
 	for _, entry := range entries {
-		if entry.IsDir() || pipeline.IsTraceFile(entry.Name()) || strings.HasPrefix(entry.Name(), ".trace-") {
+		if entry.IsDir() || pipeline.IsTraceFile(entry.Name()) {
 			continue
 		}
-		// Machine-local capture state never enters the shared Ledger.
-		if session.IsRawAppendJournal(entry.Name()) {
+		// Machine-local capture state never enters the shared Ledger. Every
+		// dotfile here is local state (.recording.json, .needs-summary, .held,
+		// .upload-retry-pending, .trace-*, .tmp-*); none is session content,
+		// and one committed .held would hold the session on every machine.
+		if strings.HasPrefix(entry.Name(), ".") || session.IsRawAppendJournal(entry.Name()) {
 			continue
 		}
 		src := filepath.Join(payload.SessionDir, entry.Name())
@@ -2633,9 +2712,12 @@ func isStaleRecording(recPath string, info os.FileInfo, pidLookup func(string) i
 	}
 
 	var state struct {
-		StartedAt time.Time `json:"started_at"`
-		AgentID   string    `json:"agent_id"`
-		ParentPID int       `json:"parent_pid"`
+		StartedAt   time.Time  `json:"started_at"`
+		AgentID     string     `json:"agent_id"`
+		ParentPID   int        `json:"parent_pid"`
+		AdapterName string     `json:"adapter_name"`
+		LastHookAt  *time.Time `json:"last_hook_at,omitempty"`
+		StoppedAt   *time.Time `json:"stopped_at,omitempty"`
 	}
 	if jsonErr := json.Unmarshal(data, &state); jsonErr != nil {
 		age = time.Since(info.ModTime())
@@ -2649,6 +2731,15 @@ func isStaleRecording(recPath string, info os.FileInfo, pidLookup func(string) i
 	age = time.Since(info.ModTime())
 	if !state.StartedAt.IsZero() {
 		age = time.Since(state.StartedAt)
+	}
+	if state.AdapterName == "cursor" {
+		if state.StoppedAt != nil {
+			return true, age, "native_end_pending"
+		}
+		if state.LastHookAt != nil {
+			age = time.Since(*state.LastHookAt)
+		}
+		return age > staleRecordingThreshold, age, "cursor_inactivity"
 	}
 
 	// try PID from .recording.json first, then fall back to daemon in-memory PID
@@ -2952,9 +3043,27 @@ func stampCarrierBeforeReclaim(logger *slog.Logger, sessionDir, rawPath string, 
 	}
 }
 
-// sessionHeldForReview reports whether the recording marker in sessionDir says
+// rawCarriesRecordingState reports whether the fields that disappear with the
+// recording marker are already durable in raw.jsonl. Cursor finalization is
+// retryable after its atomic rewrite, so the retry must not append the same
+// carrier footer again. A failed first stamp still returns false and retries it.
+func rawCarriesRecordingState(rawPath string, state *session.RecordingState) bool {
+	stored, err := session.ReadSessionFromPath(rawPath)
+	if err != nil || stored == nil || stored.Meta == nil || stored.Meta.StoppedAt == nil {
+		return false
+	}
+	if state.StoppedAt != nil && !stored.Meta.StoppedAt.Equal(state.StoppedAt.UTC()) {
+		return false
+	}
+	if len(state.NativeSessions) > 0 && !slices.Equal(stored.Meta.NativeSessions, state.NativeSessions) {
+		return false
+	}
+	return state.Trace == nil || reflect.DeepEqual(stored.Meta.TraceCapture, state.Trace)
+}
+
+// sessionQuarantined reports whether the recording marker in sessionDir says
 // its native source was quarantined. An unreadable marker is not a quarantine.
-func sessionHeldForReview(sessionDir string) bool {
+func sessionQuarantined(sessionDir string) bool {
 	state, err := session.ReadRecordingStateFile(sessionDir)
 	return err == nil && state != nil && state.SourceRejected
 }
@@ -2983,6 +3092,37 @@ func recoverRawFromSessionFile(logger *slog.Logger, recPath, sessionDir, rawPath
 	if state.SourceRejected {
 		return false, fmt.Errorf("native source quarantined for manual ownership review")
 	}
+	if state.AdapterName == "cursor" {
+		adapter, err := adapters.GetAdapter("cursor")
+		if err != nil {
+			return false, fmt.Errorf("adapter-missing: Cursor adapter is unavailable")
+		}
+		reader, ok := adapter.(adapters.IncrementalReader)
+		if !ok {
+			return false, fmt.Errorf("adapter-missing: Cursor incremental reader is unavailable")
+		}
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return false, fmt.Errorf("resolve Cursor source home: %w", err)
+		}
+		// Cursor controls do not take the lifetime raw owner lock. The shared
+		// capture transaction reloads the checkpoint, rechecks inactivity and
+		// validates replay before it can settle a journal under append + state
+		// locks. Never roll back using the pre-transaction state loaded above.
+		finalState, err := session.FinalizeInactiveCursorCapture(context.Background(), state.WorkspacePath, sessionDir, home, reader, time.Now().Add(-staleRecordingThreshold))
+		if err != nil {
+			return false, err // pending native writes retain raw and marker
+		}
+		hasRaw := session.HasSubstantiveEntries(rawPath)
+		if hasRaw && !rawCarriesRecordingState(rawPath, finalState) {
+			// Cursor's final rewrite owns its durable capture boundary. Carry
+			// the native IDs, stop time, and trace snapshot before the caller
+			// removes the recording marker.
+			stampCarrierBeforeReclaim(logger, sessionDir, rawPath, finalState)
+		}
+		return hasRaw, nil
+	}
+
 	// A capture that died mid-batch leaves raw.jsonl.append.json beside the
 	// transcript. Settle it against the persisted cursor before anything reads
 	// raw.jsonl, as the hook, stop, recover and watcher paths do: roll back an
@@ -3545,4 +3685,76 @@ func (h *SessionFinalizeHandler) mergeFileRefs(
 		merged[k] = v
 	}
 	return merged
+}
+
+// writeHoldMarker records a hold. A variable so tests can make it fail.
+var writeHoldMarker = session.WriteHoldMarker
+
+// holdIfRecordedManual holds a recovered session whose recording was started
+// under session_publishing: manual. Call it before .recording.json is removed,
+// and keep the marker if it returns an error, including when the recorded mode
+// cannot be read: after the marker goes, the hold is the only record of the
+// coworker's choice, and the daemon cannot see the CLI's environment to
+// re-derive it.
+func holdIfRecordedManual(sessionDir string) error {
+	state, err := session.ReadRecordingStateFile(sessionDir)
+	if err != nil {
+		return fmt.Errorf("read recorded publishing mode: %w", err)
+	}
+	if state == nil {
+		return fmt.Errorf("read recorded publishing mode: no recording state in %s", filepath.Base(sessionDir))
+	}
+	if !state.RecordedManualPublishing() {
+		return nil
+	}
+	if err := writeHoldMarker(sessionDir, session.HoldManualPublishing, "daemon_recovery"); err != nil {
+		return fmt.Errorf("hold recovered manual-mode session: %w", err)
+	}
+	return nil
+}
+
+// sessionHeldLocally reports whether a work item's session is held on this
+// machine, by name across every cache location: the payload may point at the
+// Ledger copy, which never carries the marker.
+func sessionHeldLocally(p *SessionFinalizePayload) bool {
+	// Clean first: Base of ".../<name>/." is ".", which names no session.
+	return session.IsHeldInLedger(p.LedgerPath, filepath.Base(filepath.Clean(p.SessionDir)))
+}
+
+// manualPublishing reports whether this project publishes sessions manually,
+// resolved as the CLI resolves it (env > user > project > team). The daemon
+// sees the saved config and its own environment, never the environment of a
+// CLI that ran with OX_SESSION_PUBLISHING; recorded modes and holds cover
+// those sessions.
+func (h *SessionFinalizeHandler) manualPublishing() bool {
+	return config.GetSessionPublishing(h.projectRoot) == config.SessionPublishingManual
+}
+
+// holdIfUnpublished holds a session that is not in the Ledger yet, for a
+// project that publishes manually, and reports whether the session must stay
+// on this machine. A session already in the Ledger (a coworker published it,
+// and it is waiting for its summary) is not held: summarizing it publishes
+// nothing new. An unreadable Ledger entry counts as not published. The hold is
+// written on the cache folder; if that fails, the session is still kept here,
+// and the next pass tries again (GH #1093).
+func (h *SessionFinalizeHandler) holdIfUnpublished(sessionDir, ledgerPath string) bool {
+	if isGitTrackedLedgerSession(sessionDir, ledgerPath) {
+		return false // the Ledger's shared tree: in the Ledger by definition
+	}
+	name := filepath.Base(filepath.Clean(sessionDir))
+	meta, err := lfs.ReadSessionMeta(filepath.Join(ledgerPath, "sessions", name))
+	if err == nil && !meta.IsDraft() {
+		return false
+	}
+	if err := writeHoldMarker(sessionDir, session.HoldManualPublishing, "daemon"); err != nil {
+		h.logger.Warn("session kept on this machine, but its hold could not be written", "session", name, "err", err)
+	}
+	return true
+}
+
+// keepLocal reports whether a work item's session stays on this machine: it
+// is held, or the project publishes manually and the session is not in the
+// Ledger yet. Every entry point (scan, IPC, prompt, result) asks it.
+func (h *SessionFinalizeHandler) keepLocal(p *SessionFinalizePayload) bool {
+	return sessionHeldLocally(p) || (h.manualPublishing() && h.holdIfUnpublished(p.SessionDir, p.LedgerPath))
 }

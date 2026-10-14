@@ -1,0 +1,221 @@
+{
+  "target": {
+    "kind": "window",
+    "app": "Google Chrome",
+    "title": "Pricing · Acme",
+    "width": 1543,
+    "height": 1049
+  },
+  "duration": "00:04:12.000",
+  "sources": {
+    "keyframes": {
+      "count": 4,
+      "described": 4,
+      "local": 0
+    },
+    "layers": [
+      {
+        "kind": "pointer",
+        "layer_id": "clyr_019ffe10-0000-7000-8000-0000000000a1",
+        "revision": 1
+      },
+      {
+        "kind": "ax-tree",
+        "layer_id": "clyr_019ffe10-0000-7000-8000-0000000000a2",
+        "revision": 1
+      }
+    ],
+    "camera": true,
+    "audio": true
+  },
+  "window": {
+    "total": 5,
+    "truncated": false
+  },
+  "chapters": [
+    {
+      "title": "Pricing",
+      "at": "00:00:00.000",
+      "url": "https://acme.example/pricing"
+    },
+    {
+      "title": "Checkout",
+      "at": "00:00:41.400",
+      "url": "https://acme.example/checkout"
+    },
+    {
+      "title": "Plan comparison",
+      "at": "00:02:00.000"
+    }
+  ],
+  "moments": [
+    {
+      "at": "00:00:41.000",
+      "cue": 7,
+      "kind": "click",
+      "element": {
+        "role": "AXButton",
+        "name": "Start free trial",
+        "dom_id": "cta-trial"
+      },
+      "said": "So when I land here, make this bigger.",
+      "deixis_word": "this",
+      "strength": "strong",
+      "cursor": "pointing-hand",
+      "then": {
+        "after_ms": 400,
+        "label": "sheet “Start your trial”"
+      },
+      "focus_image": {
+        "availability": "unfetched",
+        "fetch_command": "ox walkthrough cnv_019ffe10-0000-7000-8000-000000000011 --from 00:00:41.000 --to 00:00:41.000 --fetch"
+      },
+      "overview_image": {
+        "availability": "unfetched"
+      }
+    },
+    {
+      "at": "00:01:35.210",
+      "cue": 8,
+      "kind": "selection",
+      "element": {
+        "role": "AXTextArea",
+        "name": "Annual billing saves 20%"
+      },
+      "said": "And this line should say billing instead.",
+      "deixis_word": "this",
+      "strength": "strong",
+      "cursor": "ibeam",
+      "focus_image": {
+        "availability": "unfetched",
+        "fetch_command": "ox walkthrough cnv_019ffe10-0000-7000-8000-000000000011 --from 00:01:35.210 --to 00:01:35.210 --fetch"
+      },
+      "overview_image": {
+        "availability": "unfetched"
+      }
+    },
+    {
+      "at": "00:02:00.000",
+      "cue": 9,
+      "kind": "dwell",
+      "element": {
+        "role": "AXGroup",
+        "name": "Plan comparison",
+        "ancestor": true
+      },
+      "said": "Look at how crowded this table is.",
+      "deixis_word": "this",
+      "strength": "strong",
+      "cursor": "arrow",
+      "focus_image": {
+        "availability": "unfetched",
+        "fetch_command": "ox walkthrough cnv_019ffe10-0000-7000-8000-000000000011 --from 00:02:00.000 --to 00:02:00.000 --fetch"
+      },
+      "overview_image": {
+        "availability": "unfetched"
+      }
+    },
+    {
+      "at": "00:02:30.000",
+      "kind": "focus-change",
+      "element": {
+        "role": "AXTextField",
+        "name": "Search plans",
+        "dom_id": "plan-search"
+      },
+      "strength": "weak"
+    },
+    {
+      "at": "00:03:20.000",
+      "cue": 11,
+      "kind": "click",
+      "element": {
+        "role": "AXButton",
+        "name": "Pro plan",
+        "dom_id": "plan-pro"
+      },
+      "said": "These two plans should match.",
+      "deixis_word": "These",
+      "strength": "strong",
+      "cursor": "pointing-hand",
+      "elements": [
+        {
+          "role": "AXButton",
+          "name": "Pro plan",
+          "dom_id": "plan-pro"
+        },
+        {
+          "role": "AXButton",
+          "name": "Team plan",
+          "dom_id": "plan-team"
+        },
+        {
+          "role": "AXButton",
+          "name": "Enterprise plan",
+          "dom_id": "plan-ent"
+        }
+      ],
+      "then": {
+        "after_ms": 700,
+        "label": "screen changed",
+        "box": {
+          "x": 0.55,
+          "y": 0.05,
+          "w": 0.4,
+          "h": 0.3
+        }
+      },
+      "focus_image": {
+        "availability": "unfetched",
+        "fetch_command": "ox walkthrough cnv_019ffe10-0000-7000-8000-000000000011 --from 00:03:20.000 --to 00:03:20.000 --fetch"
+      },
+      "overview_image": {
+        "availability": "unfetched"
+      }
+    }
+  ],
+  "shortcuts": [
+    {
+      "at": "00:01:01.000",
+      "label": "⌘K",
+      "count": 2
+    },
+    {
+      "at": "00:02:05.000",
+      "label": "Esc",
+      "count": 1
+    }
+  ],
+  "spans": [
+    {
+      "kind": "quiet",
+      "from": "00:00:52.150",
+      "to": "00:01:29.850",
+      "label": "Skip 38 s",
+      "skip": true
+    },
+    {
+      "kind": "typing",
+      "from": "00:02:10.150",
+      "to": "00:02:23.850",
+      "label": "3× typing",
+      "speed": 3,
+      "element": {
+        "role": "AXTextField",
+        "name": "Search plans"
+      }
+    }
+  ],
+  "pages": [
+    {
+      "at": "00:00:00.500",
+      "title": "Pricing · Acme",
+      "url": "https://acme.example/pricing"
+    },
+    {
+      "at": "00:00:41.400",
+      "title": "Checkout · Acme",
+      "url": "https://acme.example/checkout"
+    }
+  ]
+}

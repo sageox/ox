@@ -109,6 +109,18 @@ func runSessionPushSummary(cmd *cobra.Command, args []string) error {
 func pushSummaryToLedger(filePath, sessionDir string) *pushSummaryOutput {
 	pushStart := time.Now()
 
+	// A held session is published only by 'ox session upload'. push-summary
+	// commits and pushes, and below the quality threshold it removes the
+	// cache copy; refuse before any of it, by name (GH #1093).
+	if sessionDir != "" && sessionHeldByName(sessionDir) {
+		name := filepath.Base(sessionDir)
+		return &pushSummaryOutput{
+			Success: false,
+			Type:    "push_summary",
+			Error:   fmt.Sprintf("session %s is held on this machine (session_publishing: manual); publish it with 'ox session upload %s'", name, name),
+		}
+	}
+
 	// capture meta.json mtime before we modify it — represents when session stop
 	// finished uploading initial artifacts. Used to compute stop-to-visible latency.
 	var stopUploadedAt time.Time

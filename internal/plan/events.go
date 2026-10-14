@@ -18,9 +18,9 @@ package plan
 // tolerant for everything except relying on file order for CreatedAt/
 // UpdatedAt, which matches how AppendEvent actually writes).
 //
-// Locking mirrors AppendResolution in feedback.go exactly: the file is a
-// shared resource across processes (CLI, daemon, a future reconciler), so
-// the read-modify-write that appends a line runs under fileutil.WithFileLock
+// Locking: the file is a shared resource across processes (CLI, daemon, a
+// future reconciler), so the read-modify-write that appends a line runs under
+// fileutil.WithFileLock
 // rather than a bare os.OpenFile(O_APPEND) — two concurrent appends without
 // a lock can both read the same "existing" bytes and each write back a
 // truncated file containing only their own line, silently dropping the
@@ -108,7 +108,7 @@ type Event struct {
 }
 
 // AppendEvent adds one line to a plan's events.jsonl under an advisory
-// flock — the exact locking idiom AppendResolution uses in feedback.go.
+// flock (fileutil.WithFileLock).
 // Multiple processes (the CLI, the daemon, a future reconciler) can record
 // events for the same plan concurrently; the flocked read-modify-write
 // ensures one append can never silently overwrite another.
@@ -160,9 +160,9 @@ func appendEventLocked(path string, ev Event) error {
 
 // LoadEvents reads a plan's events.jsonl, oldest first (append order). A
 // missing file is not an error — a plan with no lifecycle events recorded
-// yet simply has none. Unlike feedback.go's per-round LoadAllFeedback (which
-// skips a malformed round because rounds are browser-authored, untrusted
-// input), events.jsonl is written only by AppendEvent, so a line that fails
+// yet simply has none. Unlike review records (read around a malformed one,
+// which is reported, because rounds are browser-authored, untrusted input),
+// events.jsonl is written only by AppendEvent, so a line that fails
 // to parse indicates corruption worth surfacing rather than silently
 // dropping lifecycle history.
 func LoadEvents(planDir string) ([]Event, error) {

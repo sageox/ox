@@ -501,3 +501,54 @@ func inlineWrap(pre, s, suf string) string {
 func collapseSpace(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }
+
+// firstDescendant returns the first descendant with the given atom in
+// document order.
+func firstDescendant(n *html.Node, a atom.Atom) *html.Node {
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		if c.Type == html.ElementNode && c.DataAtom == a {
+			return c
+		}
+		if hit := firstDescendant(c, a); hit != nil {
+			return hit
+		}
+	}
+	return nil
+}
+
+// hasAttr reports attribute PRESENCE (the CSS [attr] selector semantics —
+// present-but-empty still matches).
+func hasAttr(n *html.Node, key string) bool {
+	for _, a := range n.Attr {
+		if a.Key == key {
+			return true
+		}
+	}
+	return false
+}
+
+// textContent mirrors DOM textContent: the concatenation of every text node in
+// tree order (entities already decoded by the parser).
+func textContent(n *html.Node) string {
+	var b strings.Builder
+	var walk func(*html.Node)
+	walk = func(m *html.Node) {
+		if m.Type == html.TextNode {
+			b.WriteString(m.Data)
+		}
+		for c := m.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
+		}
+	}
+	walk(n)
+	return b.String()
+}
+
+func attrVal(n *html.Node, key string) string {
+	for _, a := range n.Attr {
+		if a.Key == key {
+			return a.Val
+		}
+	}
+	return ""
+}

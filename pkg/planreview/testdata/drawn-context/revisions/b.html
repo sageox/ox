@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="ox-plan-slug" content="retry-budget-rollout">
+<title>Retry budget rollout</title>
+<style>
+:root{--bg:#0b0d0b;--panel:#111411;--panel2:#171b17;--hair:#212620;--ink:#f4f2ef;--dim:#b7b6a3;--faint:#8c8e7e;--sage:#99c693;--gold:#d9b654;--amber:#c6a23c;--red:#d77e6c;--teal:#97aebd}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.6 Inter,system-ui,sans-serif}
+main{max-width:760px;margin:0 auto;padding:32px 24px 96px}
+h1{font:400 34px/1.2 "Hedvig Letters Serif",Georgia,serif;margin:0 0 12px}
+h2{font:400 22px/1.3 "Hedvig Letters Serif",Georgia,serif;margin:40px 0 12px;border-top:1px solid var(--hair);padding-top:24px}
+.tldr{background:var(--panel);border-left:3px solid var(--gold);padding:12px 16px}
+table{width:100%;border-collapse:collapse}
+td,th{border-bottom:1px solid var(--hair);padding:6px 8px;text-align:left;vertical-align:top}
+.sev-high{color:var(--red)}
+.tabs input{position:absolute;opacity:0}
+.tabs label{display:inline-block;padding:6px 12px;border:1px solid var(--hair);cursor:pointer;color:var(--dim)}
+.tabs input:checked+label{color:var(--ink);border-color:var(--sage)}
+.panel{display:none;background:var(--panel2);padding:12px 16px;margin-top:8px}
+#tab-canary:checked~#panel-canary,#tab-full:checked~#panel-full{display:block}
+figure{margin:16px 0}
+figcaption{color:var(--faint);font-size:13px}
+pre.mermaid{background:var(--panel);padding:12px;text-align:center}
+details{background:var(--panel);padding:8px 16px;margin-top:40px}
+summary{cursor:pointer;color:var(--dim)}
+</style>
+</head>
+<body>
+<main>
+<h1>Retry budget rollout</h1>
+<p class="tldr"><strong>TL;DR</strong> Cap retries with a per-queue budget so a saturated queue sheds load instead of amplifying it. Ship behind a flag, canary one region, then roll out everywhere. Owners: queue team, with SRE on call for the canary.</p>
+
+<section data-ox-section="Flow">
+<h2>Flow</h2>
+<p>Failed work returns to the queue only while the budget has room.</p>
+<p>Work the budget refuses goes to the dead-letter queue with the refusal reason attached.</p>
+<pre class="mermaid">
+flowchart LR
+  C["Client"] --> Q["Queue"]
+  Q --> W["Worker"]
+  W -->|"fails"| R["Retry budget"]
+  R -->|"requeue"| Q
+</pre>
+</section>
+
+<section data-ox-section="Risks">
+<h2>Risks</h2>
+<p>Two tenants already run their own retry loops on top of ours.</p>
+<p id="double-fire">The retry path can double-fire under load when the queue is saturated.</p>
+<table>
+<tr><th>Risk</th><th>Severity</th><th>Mitigation</th></tr>
+<tr><td>Budget too small for bursty tenants</td><td class="sev-high">high</td><td>Per-tenant override in the flag payload</td></tr>
+<tr><td>Metrics lag the budget by one scrape</td><td>medium</td><td>Alert on the budget counter, not the dashboard</td></tr>
+</table>
+<ul>
+<li>Watch p99 enqueue latency during the canary.</li>
+<li>Abort if the dead-letter rate doubles.</li>
+</ul>
+</section>
+
+<section data-ox-section="Rollout">
+<h2>Rollout</h2>
+<div class="tabs">
+<input type="radio" name="rollout" id="tab-canary" checked><label for="tab-canary">Canary</label>
+<input type="radio" name="rollout" id="tab-full"><label for="tab-full">Full</label>
+<div class="panel" id="panel-canary"><p>Enable the flag for us-east-2 only and hold for 48 hours.</p></div>
+<div class="panel" id="panel-full"><p>Enable everywhere once the canary holds; keep the kill switch for a week.</p></div>
+</div>
+<figure>
+<svg width="320" height="96" viewBox="0 0 320 96" role="img" aria-label="Retries per minute before and after">
+<rect x="0" y="8" width="280" height="28" fill="#d77e6c"/><text x="8" y="27" fill="#0b0d0b" font-size="13">before: 2,800/min</text>
+<rect x="0" y="56" width="70" height="28" fill="#99c693"/><text x="78" y="75" fill="#f4f2ef" font-size="13">after: 700/min</text>
+</svg>
+<figcaption>Retries per minute in the load test.</figcaption>
+</figure>
+</section>
+
+<details>
+<summary>Implementation notes</summary>
+<ol>
+<li>Add the budget counter beside the queue depth gauge.</li>
+<li>Read the budget from the flag payload; default to 50 retries per minute.</li>
+<li>Emit one log line when the budget refuses a retry.</li>
+</ol>
+</details>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.6.0/dist/mermaid.min.js"></script>
+<script>
+mermaid.initialize({startOnLoad: false, theme: 'base', securityLevel: 'antiscript'});
+mermaid.run({querySelector: '.mermaid'});
+</script>
+</body>
+</html>

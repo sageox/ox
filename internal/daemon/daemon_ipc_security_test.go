@@ -415,3 +415,34 @@ func TestSessionFinalize_RejectsWhenAuthorityLedgerUnset(t *testing.T) {
 		})
 	})
 }
+
+// Failure prevented: a same-UID peer sends a finalize request whose cache
+// path ends in "/." (or names another folder). The hold and quarantine checks
+// key on the folder's last element, so they looked up "." or the wrong name,
+// and a held session was summarized.
+func TestFinalizeSessionDir_TrustsOnlyTheNamedSessionFolder(t *testing.T) {
+	ledger := t.TempDir()
+	const name = "2026-10-05T10-00-devon-OxNaMe"
+	cache := filepath.Join(ledger, ".sageox", "cache", "sessions", name)
+	fallback := filepath.Join(ledger, "sessions", name)
+	tests := []struct {
+		label     string
+		cachePath string
+		wantDir   string
+		trusted   bool
+	}{
+		{"no cache path", "", fallback, true},
+		{"the session's cache folder", cache, cache, true},
+		{"trailing /. is cleaned", cache + "/.", cache, true},
+		{"another session's folder", filepath.Join(ledger, ".sageox", "cache", "sessions", "2026-10-05T11-00-devon-OxOthr"), fallback, false},
+		{"the parent of the folder", filepath.Join(cache, ".."), fallback, false},
+		{"outside the ledger", filepath.Join(t.TempDir(), name), fallback, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.label, func(t *testing.T) {
+			dir, trusted := finalizeSessionDir(ledger, name, tt.cachePath)
+			assert.Equal(t, tt.wantDir, dir)
+			assert.Equal(t, tt.trusted, trusted)
+		})
+	}
+}

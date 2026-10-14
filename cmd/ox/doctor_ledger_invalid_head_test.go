@@ -49,7 +49,7 @@ func setupHealthyLedgerClone(t *testing.T) (bareDir, cloneDir string) {
 	root := t.TempDir()
 	bareDir = filepath.Join(root, "bare.git")
 	work := filepath.Join(root, "work")
-	runGitLedgerT(t, root, "init", "--bare", "--initial-branch=main", bareDir)
+	initBareRemote(t, bareDir, "--initial-branch=main")
 	runGitLedgerT(t, root, "clone", "--quiet", bareDir, work)
 	runGitLedgerT(t, work, "config", "user.email", "test@example.com")
 	runGitLedgerT(t, work, "config", "user.name", "Test User")

@@ -1,0 +1,8 @@
+{
+  "summary": "Two drawn regions around one paragraph, stored as round items beside an element mark on it. A reader that does not know regions shows each drawing as its own item by its legacy anchor (q-<id>), label and note, and a resolution closes only the drawing it names.",
+  "items": [
+    {"anchor": "h59e210da", "reviewer": "Devon", "status": "request-change", "label": "The retry path can double-fire under load when the queue is saturated.", "note": "Bound the retries.", "open": true},
+    {"anchor": "q-r1-double-fire", "reviewer": "Devon", "status": "request-change", "label": "Drawing: The retry path can double-fire under load when the queue is …", "note": "Both retries fire here.", "open": false, "resolution": "addressed"},
+    {"anchor": "q-r2-double-fire-again", "reviewer": "Devon", "status": "flag", "label": "Drawing: The retry path can double-fire under load when the queue is …", "note": "And again on requeue.", "open": true}
+  ]
+}

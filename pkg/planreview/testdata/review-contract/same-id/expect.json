@@ -1,0 +1,10 @@
+{
+  "summary": "Two round ids, each saved twice. r-0004-retry repeats the same payload after h1 was resolved: it assembles once and does not reopen h1. r-0005-conflict carries a different payload the second time: the earliest copy assembles, so its h3 mark is not shown, and the id is reported as a conflict naming both copies. The CLI's v1 reader hides h3 with only a log line.",
+  "items": [
+    {"anchor": "h1", "reviewer": "Ana", "status": "request-change", "label": "The first risk", "note": "Name the owner.", "open": false, "resolution": "addressed"},
+    {"anchor": "h2", "reviewer": "Ana", "status": "flag", "label": "The second risk", "note": "Is this still true?", "open": true}
+  ],
+  "conflicts": [
+    {"kind": "round", "id": "r-0005-conflict", "paths": ["feedback/round-20261001-010000.000000000-r-0005-conflict.json", "feedback/round-20261001-030000.000000000-r-0005-conflict.json"]}
+  ]
+}

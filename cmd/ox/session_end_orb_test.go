@@ -285,6 +285,9 @@ func TestHandleEnd_StopThatStartedOwnsTheRecording(t *testing.T) {
 			return fmt.Errorf("%w: ledger upload failed", errSessionUploadFailed)
 		}},
 		{"outcome unreadable", func(string, string) error { return errors.New("session stop printed no result") }},
+		// session_publishing: manual — the stop kept it local; the handoff must
+		// not stamp a stop onto it or hand it to the daemon to publish
+		{"held", func(string, string) error { return errSessionHeld }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			projectRoot, repoID := setupTestProject(t)
@@ -458,6 +461,8 @@ func TestSessionStopOutcome(t *testing.T) {
 		{"whispers first", "<whisper from=\"Avery\">{not json}</whisper>\n{\n  \"success\": true\n}\n", nil, false},
 		{"upload failed", "{\n  \"success\": true,\n  \"upload_warning\": \"Session saved locally but ledger upload failed.\"\n}\n", errSessionUploadFailed, true},
 		{"forced color", "\x1b[1m{\x1b[0m\n  \x1b[34m\"upload_warning\"\x1b[0m: \x1b[32m\"ledger upload failed\"\x1b[0m\n}\n", errSessionUploadFailed, true},
+		// a held stop names the session in upload_warning too; held wins
+		{"held", "{\n  \"success\": true,\n  \"held\": true,\n  \"upload_warning\": \"Session held on this machine: ox session upload 2026-10-14T09-00-amp-OxOrb1\"\n}\n", errSessionHeld, true},
 		{"nothing printed", "", nil, true},
 		{"truncated", "{\n  \"success\": tr", nil, true},
 	} {

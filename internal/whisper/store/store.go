@@ -22,6 +22,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/sageox/ox/internal/sqliteerr"
 	whisperdb "github.com/sageox/ox/internal/whisper/store/sqlc"
 	_ "modernc.org/sqlite"
 )
@@ -106,7 +107,9 @@ func (s *Store) queries() *whisperdb.Queries {
 
 // Open opens (or creates) a whisper store at the given path.
 // Auto-recovers from corruption by deleting and recreating the DB.
-// Callers never see corruption errors — the store silently rebuilds.
+// Callers never see corruption errors — the store silently rebuilds. Any
+// other failure is returned and the files are left alone: another connection
+// may be using them (#1339).
 func Open(dbPath string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0o700); err != nil {
 		return nil, fmt.Errorf("create whisper db dir: %w", err)
@@ -122,23 +125,24 @@ func Open(dbPath string) (*Store, error) {
 		}
 	}
 
-	if err := checkIntegrity(db); err != nil {
+	// The first statement opens a connection, which converts a new DB to WAL
+	// under a lock busy_timeout does not cover.
+	deadline := time.Now().Add(openRetryBudget)
+	err = prepare(db)
+	for err != nil && !isCorrupt(err) && time.Now().Before(deadline) {
+		time.Sleep(openRetryBackoff)
+		err = prepare(db)
+	}
+	if err != nil {
 		db.Close()
+		if !isCorrupt(err) {
+			return nil, fmt.Errorf("open whisper db: %w", err)
+		}
 		slog.Warn("whisper db corrupt, recreating", "path", dbPath, "err", err)
 		removeSQLiteFiles(dbPath)
 		db, err = openSQLite(dbPath)
 		if err != nil {
 			return nil, fmt.Errorf("open whisper db after corruption recovery: %w", err)
-		}
-	}
-
-	if err := CreateSchema(db); err != nil {
-		db.Close()
-		slog.Warn("whisper db schema failed, recreating", "path", dbPath, "err", err)
-		removeSQLiteFiles(dbPath)
-		db, err = openSQLite(dbPath)
-		if err != nil {
-			return nil, fmt.Errorf("open whisper db after schema recovery: %w", err)
 		}
 		if err := CreateSchema(db); err != nil {
 			db.Close()
@@ -163,13 +167,40 @@ func openSQLite(dbPath string) (*sql.DB, error) {
 	return sql.Open("sqlite", dsn)
 }
 
+// openRetryBudget bounds Open's retry of a failed first statement: openers
+// racing to create the DB contend for the WAL-conversion lock, whose
+// SQLITE_BUSY returns at once, and retries 20ms apart outlast the race; other
+// unsettled failures may clear the same way. A failure that already waited out
+// busy_timeout has spent the budget, so it is returned.
+const (
+	openRetryBudget  = time.Second
+	openRetryBackoff = 20 * time.Millisecond
+)
+
+// errCorrupt marks an integrity_check that ran and found damage.
+var errCorrupt = errors.New("whisper db corrupt")
+
+// isCorrupt reports whether a failed open is settled as damage. Every other
+// failure is retried, and never deletes the files.
+func isCorrupt(err error) bool {
+	return errors.Is(err, errCorrupt) || sqliteerr.IsDamage(err)
+}
+
+// prepare checks an opened DB's integrity and creates its schema.
+func prepare(db *sql.DB) error {
+	if err := checkIntegrity(db); err != nil {
+		return err
+	}
+	return CreateSchema(db)
+}
+
 func checkIntegrity(db *sql.DB) error {
 	var result string
 	if err := db.QueryRow("PRAGMA integrity_check").Scan(&result); err != nil {
 		return fmt.Errorf("integrity_check query: %w", err)
 	}
 	if result != "ok" {
-		return fmt.Errorf("integrity_check: %s", result)
+		return fmt.Errorf("%w: integrity_check: %s", errCorrupt, result)
 	}
 	return nil
 }

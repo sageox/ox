@@ -70,6 +70,7 @@ type Result struct {
 	SessionName      string   // ledger session folder name (e.g. 2026-02-06T14-32-ryan-Ox7f3a)
 	LedgerSessionDir string   // full path to session dir in ledger (empty if upload failed)
 	UploadWarning    string   // non-empty when ledger upload failed (explains recovery)
+	Held             bool     // held on this machine (session_publishing: manual): never summarized, uploaded, or deleted automatically
 	DataWarnings     []string // data quality warnings from validation (reported to agent)
 	PRLinkMisses     []string // server-reported repair tasks: linked PRs missing the SageOx-Session trailer, pre-formatted for the agent
 	UploadMs         int64    // time spent on LFS upload + git push (ms)
@@ -123,6 +124,7 @@ type StopOutput struct {
 	AgentVersion     string           `json:"agent_version,omitempty"`
 	LedgerSessionDir string           `json:"ledger_session_dir,omitempty"` // path to session dir in ledger
 	UploadWarning    string           `json:"upload_warning,omitempty"`     // set when ledger upload failed
+	Held             bool             `json:"held,omitempty"`               // held on this machine until 'ox session upload'
 	DataWarnings     []string         `json:"data_warnings,omitempty"`      // data quality warnings from validation
 	PRLinkMisses     []string         `json:"pr_link_misses,omitempty"`     // repair tasks: linked PRs missing the SageOx-Session trailer
 	Guidance         string           `json:"guidance,omitempty"`           // behavioral guidance for the agent

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -130,19 +131,38 @@ func TestFlushPendingPlanPushes_DropsMarkerForMissingPlanDir(t *testing.T) {
 	}
 }
 
-func TestFlushPendingPlanPushes_StillFailingKeepsMarkerAndCounts(t *testing.T) {
+// A retry that fails again must keep both kinds of entry — an author's
+// plan-dir marker, whose attempts it counts, and a review operation's record.
+func TestFlushPending_StillFailingKeepsEntriesAndCounts(t *testing.T) {
 	f := newDurableReviewFixture(t)
-	runGitInDir(t, f.ledger, "remote", "set-url", "origin", filepath.Join(t.TempDir(), "gone.git"))
+	// a live index.lock fails the review commit, at the write and at the retry
+	lock := filepath.Join(f.ledger, ".git", "index.lock")
+	if err := os.WriteFile(lock, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if code, body := reviewPOSTBody(t, f.srv.URL+"/feedback", "secret", roundBody("round-0001", "h1")); code != http.StatusOK {
 		t.Fatalf("status %d: %s", code, body)
 	}
-
-	ok, failed, err := flushPendingPlanPushes(context.Background(), f.ledger)
+	ok, failed, err := flushPendingReviewRecords(context.Background(), f.ledger)
 	if err != nil || ok != 0 || failed != 1 {
-		t.Fatalf("ok=%d failed=%d err=%v", ok, failed, err)
+		t.Fatalf("review flush: ok=%d failed=%d err=%v", ok, failed, err)
 	}
-	left, err := listPlanPushPending(f.ledger)
-	if err != nil || len(left) != 1 || left[0].FailedAttempts != 2 {
+	if left, err := listReviewPending(f.ledger); err != nil || len(left) != 1 {
+		t.Fatalf("a failed retry must keep the review entry: %+v (err %v)", left, err)
+	}
+	if err := os.Remove(lock); err != nil {
+		t.Fatal(err)
+	}
+
+	runGitInDir(t, f.ledger, "remote", "set-url", "origin", filepath.Join(t.TempDir(), "gone.git"))
+	if err := commitPlanToLedger("root", f.planDir); err == nil {
+		t.Fatal("an authoring push to a missing remote must fail")
+	}
+	ok, failed, err = flushPendingPlanPushes(context.Background(), f.ledger)
+	if err != nil || ok != 0 || failed != 1 {
+		t.Fatalf("plan-dir flush: ok=%d failed=%d err=%v", ok, failed, err)
+	}
+	if left, err := listPlanPushPending(f.ledger); err != nil || len(left) != 1 || left[0].FailedAttempts != 2 {
 		t.Fatalf("a failed retry must keep the marker and count it: %+v (err %v)", left, err)
 	}
 }
@@ -195,6 +215,41 @@ func TestPlanFlushPendingCmd_Errors(t *testing.T) {
 	})
 }
 
+// TestListReviewPending_TrustsOnlyIntactEntries verifies the retry reads only
+// entries it can trust: one whose bytes no longer hash to its recorded
+// SHA-256, one naming a record outside the Ledger, and one that is not an
+// entry at all are skipped, never published. Failure prevented: a retry
+// publishes changed bytes under the original operation, or writes outside the
+// plan (contract 3.4).
+func TestListReviewPending_TrustsOnlyIntactEntries(t *testing.T) {
+	ledger := t.TempDir()
+	good := reviewPending{PlanDir: "data/plans/p", Plan: "p", Kind: "round", ID: "round-0001",
+		Path: "feedback/round-x.json", Data: []byte(`{"id":"round-0001"}`)}
+	good.SHA256 = sha256Hex(good.Data)
+	if err := writeReviewPending(good.path(ledger), good); err != nil {
+		t.Fatal(err)
+	}
+	tampered, escaping := good, good
+	tampered.ID, tampered.Data = "round-0002", []byte(`{"id":"round-0002","edited":true}`)
+	escaping.ID, escaping.PlanDir = "round-0003", "../outside"
+	for _, e := range []reviewPending{tampered, escaping} {
+		if err := writeReviewPending(e.path(ledger), e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dir := filepath.Join(ledger, filepath.FromSlash(planReviewPendingDir))
+	for name, body := range map[string]string{"junk.json": "{not json", ".tmp-123": "{}", "notes.txt": "x"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := listReviewPending(ledger)
+	if err != nil || len(got) != 1 || got[0].ID != "round-0001" {
+		t.Fatalf("want only the intact entry, got %+v (err %v)", got, err)
+	}
+}
+
 // kickPendingPlanPushes runs inside every prime, so each early return must be
 // silent and leave markers untouched for the next attempt.
 func TestKickPendingPlanPushes_EarlyReturnsLeaveMarkers(t *testing.T) {
@@ -217,4 +272,53 @@ func TestKickPendingPlanPushes_EarlyReturnsLeaveMarkers(t *testing.T) {
 	if left, err := listPlanPushPending(ledger); err != nil || len(left) != 1 {
 		t.Fatalf("marker must survive a kick that could not start, %d left (err %v)", len(left), err)
 	}
+
+	// a review entry alone is pending work too, and survives the same way
+	reviewsOnly := t.TempDir()
+	e := reviewPending{PlanDir: "data/plans/p", Plan: "p", Kind: "round", ID: "round-0001", Path: "feedback/r.json", Data: []byte("{}")}
+	e.SHA256 = sha256Hex(e.Data)
+	if err := writeReviewPending(e.path(reviewsOnly), e); err != nil {
+		t.Fatal(err)
+	}
+	planLedgerPathFor = func(string) (string, error) { return reviewsOnly, nil }
+	kickPendingPlanPushes(t.TempDir())
+	if left, err := listReviewPending(reviewsOnly); err != nil || len(left) != 1 {
+		t.Fatalf("a review entry must survive a kick that could not start, %d left (err %v)", len(left), err)
+	}
+
+	// a temp file a crash left behind is not pending work, so no retry is
+	// attempted; the entry above is, so one is (the log is the only witness:
+	// the retry cannot start under go test)
+	var logs bytes.Buffer
+	prevLog := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prevLog) })
+	tmpOnly := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmpOnly, filepath.FromSlash(planReviewPendingDir)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpOnly, filepath.FromSlash(planReviewPendingDir), ".tmp-123"), []byte("{"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	planLedgerPathFor = func(string) (string, error) { return tmpOnly, nil }
+	kickPendingPlanPushes(t.TempDir())
+	if strings.Contains(logs.String(), "plan push retry") {
+		t.Fatalf("a temp file alone must not start a retry, logged:\n%s", logs.String())
+	}
+	planLedgerPathFor = func(string) (string, error) { return reviewsOnly, nil }
+	kickPendingPlanPushes(t.TempDir())
+	if !strings.Contains(logs.String(), "plan push retry not started") {
+		t.Fatalf("a review entry must attempt a retry, logged:\n%s", logs.String())
+	}
+
+	// an unreadable marker dir is an early return, not a crash
+	broken := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(broken, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(broken, filepath.FromSlash(planPushPendingDir)), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	planLedgerPathFor = func(string) (string, error) { return broken, nil }
+	kickPendingPlanPushes(t.TempDir())
 }

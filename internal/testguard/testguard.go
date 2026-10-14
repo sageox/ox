@@ -32,6 +32,9 @@ var allowedBaseEnv = []string{
 	// git needs these for commits
 	"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
 	"GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
+	// keeps ox's git credentials out of the OS keychain, which is not under HOME
+	// and so not isolated by a test's home sandbox
+	"OX_GIT_CREDENTIALS_FILE",
 }
 
 // TestOxBinaryEnv selects a prebuilt ox binary for compiled-binary tests.
