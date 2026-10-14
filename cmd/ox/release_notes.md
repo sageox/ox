@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A review that cannot be fully read says so** — `ox plan feedback show`, `ox plan review await`, `ox plan list`, `ox agent prime`, and the review page report damaged or unreadable review files, a review read mid-sync, and feedback stored twice with different content, instead of showing a partial review as complete. `--json` adds `complete`, `failures`, and `conflicts`.
 - **Approving a plan no longer publishes its unsaved edits** — the review page's Approve and `ox plan approve`, `realize`, `abandon` and `supersede` commit only the plan's history and status, never a half-written `plan.md`. While the Ledger needs repair they record nothing and say so, instead of leaving files that the next sync could conflict on.
 - **Approvals are no longer lost when two people act on one plan at once** — events recorded on two machines both reach the team, and `ox plan review await` reads the plan's status from them.
+- **A plan save that failed to reach your team is retried** — the next `ox agent prime` retries it, and an Approve or review round on that plan commits it first, instead of leaving its files uncommitted until you save the plan again.
+- **Saving to your Ledger no longer fails when background sync runs at the same moment** — the daemon now waits for ox to finish a commit before it refreshes which Ledger folders are on your disk. Before, that commit could fail and leave the change unshared.
 
 ## [0.23.0] - 2026-10-12
 

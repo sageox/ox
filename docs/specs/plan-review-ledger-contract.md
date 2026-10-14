@@ -151,6 +151,12 @@ The CLI reads and writes review records only through `pkg/planreview`.
   those files (`files`); a lifecycle push never clears a marker owed for the
   whole dir. With no Ledger checkout the event is recorded and reported not
   committed, and no git command runs.
+- **Failed saves** (`sharePlanDir`): a save whose commit or push fails writes
+  a whole-dir marker, which `ox plan flush-pending` retries. A lifecycle or
+  review commit on a plan dir with a whole-dir marker first commits that dir,
+  in the same hold of the repo lock (`commitOwedPlanSaveLocked`): the save's
+  files are already written, and its `meta.json` would otherwise ship in the
+  lifecycle commit without its `plan.md`.
 - **Event logs merge:** `data/plans/*/events.jsonl` is `merge=union` in each
   clone's `.git/info/attributes` (`kb.MergeUnionPaths`, rewritten before every
   push and pull), so two clones' appends merge, upstream's lines first, in a
@@ -175,6 +181,7 @@ The CLI reads and writes review records only through `pkg/planreview`.
 | H11 | Session-finalize and GitHub-sync pushes push whatever is unpushed | a review commit the CLI's pre-push gate refused can be published by the daemon | code: `session_finalize.go`, `github_sync.go` vs `.claude/rules/daemon-git.md` | Ledger (daemon) |
 | H12 | `SquashUnpushed` (over 100 unpushed commits) commits the whole index | staged-but-uncommitted review files join an unrelated squash commit | code: `internal/gitutil/squash.go` | Ledger |
 | H13 | `CommitLedgerSnapshot` refuses every commit while any index entry is unmerged | an exact-set review commit is still blocked by an unrelated conflict (relevant to H5's fix) | code: global check in `CommitLedgerSnapshotPreserving` | decided in #1289 (3.7); Ledger owns the refusal |
+| H14 | The daemon's sparse-checkout refresh (each sync cycle, daemon startup) and `ox doctor --fix`'s cone repair rewrite the index outside the repo lock | an ox commit holding the lock fails on `index.lock` and leaves its files uncommitted (16 of 60 lifecycle commits in a stress run) | stress run | Ledger (daemon) |
 
 **Since #1289** (§1.1): the CLI fixes H2–H4 and H6–H9, and H1 for review files,
 which it no longer writes to any shared file. `events.jsonl` stays shared but
@@ -182,13 +189,15 @@ merges (`merge=union`), so H1 no longer drops events, and its autostash
 re-apply no longer conflicts; this needs no per-entry layout, and a reader
 sees the same file format. Lifecycle writes commit under the repo lock and
 refuse while the Ledger needs repair, so they leave no plan file uncommitted
-for a pull to conflict on. Still open:
+for a pull to conflict on. H14 is fixed: all three refreshes take the repo
+lock (`ledger.RefreshSparseCheckout`). Still open:
 
 - `meta.json` stays keep-local on a rebase conflict, so its status can lag
   `events.jsonl`; readers fold the log (`plan.CurrentStatus`) instead of
   trusting it.
-- H5 remains for `meta.json` and the authoring files left uncommitted by a
-  failed save.
+- H5 remains for `meta.json`, and for a failed save's files until their
+  marker is retried or the next lifecycle or review commit on that clone
+  commits them.
 - An in-place rewrite of an `events.jsonl` line (`BackfillSessionID`) racing an
   append can keep both versions of that line.
 - H10–H12 are unchanged.

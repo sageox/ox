@@ -67,6 +67,43 @@ func TestPlanLifecycle_CommitsOnlyTheEventFiles(t *testing.T) {
 	}
 }
 
+// TestPlanCommits_FinishASaveLeftOwed: a save whose commit failed left its
+// files written and a whole-dir retry marker. The next Approve or review round
+// on that clone commits the save first. Failure prevented: the save's files
+// sit uncommitted under the daemon's autostash pulls until the next prime, and
+// an Approve ships the save's meta.json without its plan.md.
+func TestPlanCommits_FinishASaveLeftOwed(t *testing.T) {
+	for name, act := range map[string]func(t *testing.T, f *durableReviewFixture){
+		"browser approve": func(t *testing.T, f *durableReviewFixture) {
+			if code, body := reviewPOSTBody(t, f.srv.URL+"/approve", "secret", "{}"); code != http.StatusOK {
+				t.Fatalf("approve: %d %s", code, body)
+			}
+		},
+		"review round": func(t *testing.T, f *durableReviewFixture) {
+			if code, body := reviewPOSTBody(t, f.srv.URL+"/feedback", "secret", roundBody("round-000A", "hA")); code != http.StatusOK {
+				t.Fatalf("round: %d %s", code, body)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := lifecycleFixture(t)
+			if err := os.WriteFile(filepath.Join(f.planDir, "plan.md"), []byte("# Durable\n\nsaved revision\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			recordPlanPushOutcome(context.Background(), f.ledger, f.planDir, errors.New("index.lock exists"))
+
+			act(t, f)
+
+			if got := runGitInDir(t, f.origin, "show", "main:data/plans/2026-10-01-durable/plan.md"); !strings.Contains(got, "saved revision") {
+				t.Fatalf("the owed save did not reach the team; remote plan.md = %q", got)
+			}
+			if st := runGitInDir(t, f.ledger, "status", "--porcelain", "--", f.planDir); st != "" {
+				t.Fatalf("the save's files are still uncommitted: %q", st)
+			}
+		})
+	}
+}
+
 // TestPlanLifecycle_RefusesWhileTheLedgerNeedsRepair: while the Ledger holds
 // an unrelated conflict, a rebase left in progress, or a git lock, an Approve
 // records nothing and says the Ledger needs repair. Failure prevented: the

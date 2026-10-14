@@ -159,6 +159,63 @@ func TestSavePlanArtifacts_ShareReport(t *testing.T) {
 	}
 }
 
+// TestSavePlanArtifacts_AFailedCommitIsRetried: a save whose commit fails (a
+// git process holds the Ledger index) has already written its files. Failure
+// prevented: nothing retries it, so the plan never reaches the team and its
+// files sit uncommitted until the plan is saved again.
+func TestSavePlanArtifacts_AFailedCommitIsRetried(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git clone + push")
+	}
+	root := newPlanCaptureTestRepo(t)
+	ledger, remote := newSharedLedger(t, root, true)
+	lock := filepath.Join(ledger, ".git", "index.lock")
+	if err := os.WriteFile(lock, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var r planSaveReport
+	in := plan.Parse(plan.ExtractMarkdown([]byte(shareTestPage)))
+	dir := savePlanArtifacts(root, in, plan.Result{}, []byte(shareTestPage), plan.PrimaryHTML, withReport(&r))
+	if dir == "" || r.Share.Committed {
+		t.Fatalf("want the save written but not committed, got dir=%q %+v", dir, r.Share)
+	}
+	if err := os.Remove(lock); err != nil {
+		t.Fatal(err)
+	}
+
+	// the retry `ox agent prime` starts
+	if ok, failed, err := flushPendingPlanPushes(context.Background(), ledger); err != nil || ok != 1 || failed != 0 {
+		t.Fatalf("flush: ok=%d failed=%d err=%v", ok, failed, err)
+	}
+	rel, _ := filepath.Rel(ledger, dir)
+	if out := runGitInDir(t, remote, "log", "--oneline", "main", "--", filepath.ToSlash(rel)); out == "" {
+		t.Fatal("the retried save is not on the team's remote")
+	}
+}
+
+// TestSavePlanArtifacts_LedgerNotYetClonedGetsNoGitDir: a save before the
+// Ledger is cloned writes its files where the clone will go. Failure
+// prevented: the save's retry marker creates <ledger>/.git, and the daemon
+// moves the Ledger aside as a corrupt clone, the plan with it.
+func TestSavePlanArtifacts_LedgerNotYetClonedGetsNoGitDir(t *testing.T) {
+	root := newPlanCaptureTestRepo(t)
+	pctx, err := config.LoadProjectContext(root)
+	if err != nil || pctx == nil || pctx.DefaultLedgerPath() == "" {
+		t.Fatalf("no ledger path for test repo: %v", err)
+	}
+	ledger := pctx.DefaultLedgerPath()
+
+	var r planSaveReport
+	in := plan.Parse(plan.ExtractMarkdown([]byte(shareTestPage)))
+	if dir := savePlanArtifacts(root, in, plan.Result{}, []byte(shareTestPage), plan.PrimaryHTML, withReport(&r)); dir == "" || r.Share.Committed {
+		t.Fatalf("want the save written but not committed, got dir=%q %+v", dir, r.Share)
+	}
+	if _, err := os.Stat(filepath.Join(ledger, ".git")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the save created %s (stat err %v)", filepath.Join(ledger, ".git"), err)
+	}
+}
+
 // TestSavePlanArtifacts_RevisionKeepsUncommittedPriorInHistory verifies a
 // revision never overwrites a prior revision that exists only in the working
 // tree: it is committed first.

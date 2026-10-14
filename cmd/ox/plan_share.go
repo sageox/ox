@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -117,6 +118,13 @@ func sharePlanDir(gitRoot, planDir string) planShareStatus {
 		return classifyPlanShare(f)
 	}
 	f.LedgerPath = ctx.DefaultLedgerPath()
+	// git run in a directory that is not a checkout finds any enclosing
+	// repository and would commit the plan there, and a retry marker would
+	// create a .git dir the daemon reads as a corrupt clone
+	if !gitutil.IsGitRepo(f.LedgerPath) {
+		f.CommitErr = fmt.Errorf("ledger %s is not a git checkout", f.LedgerPath)
+		return classifyPlanShare(f)
+	}
 
 	if err := gitutil.IsSafeForGitOps(f.LedgerPath); err != nil {
 		f.UnsafeErr = err
@@ -125,6 +133,10 @@ func sharePlanDir(gitRoot, planDir string) planShareStatus {
 	} else if err := pushLedger(context.Background(), f.LedgerPath); err != nil {
 		f.PushErr = err
 	}
+	// The save's files are already written. A failed attempt leaves a marker
+	// for `ox agent prime` to retry, and for the next Approve or review round
+	// to commit first (commitOwedPlanSaveLocked).
+	recordPlanPushOutcome(context.Background(), f.LedgerPath, planDir, cmp.Or(f.UnsafeErr, f.CommitErr, f.PushErr))
 	f.Dirty = planDirDirty(f.LedgerPath, planDir)
 	f.Ahead, f.Behind, f.UpstreamKnown = gitAheadBehind(f.LedgerPath)
 	return classifyPlanShare(f)
