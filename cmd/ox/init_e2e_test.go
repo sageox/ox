@@ -466,7 +466,7 @@ func TestRunInit_SessionImportDiscovery(t *testing.T) {
 				return
 			}
 			require.Equal(t, 1, strings.Count(output, "ox session import"))
-			assert.Contains(t, output, "6. Bring past Claude and Codex sessions into your team's Ledger: ox session import")
+			assert.Contains(t, output, "6. Bring past Claude and Codex sessions into your team's Ledger:\n     Run ox session import")
 			assert.NotContains(t, output, "Optional:")
 			assert.Less(t, strings.Index(strings.ToLower(output), "next steps"), strings.Index(output, "ox session import"))
 			assert.Less(t, strings.Index(output, "Start Claude Code"), strings.Index(output, "ox session import"))
@@ -483,14 +483,16 @@ func TestRunInit_SessionImportDiscovery(t *testing.T) {
 // advertising import after skipped registration or unconfirmed team registration.
 func TestRunInit_RegistrationConfirmationGatesSessionImport(t *testing.T) {
 	for _, tc := range []struct {
-		name                                     string
-		rebind, skipped, confirmedTeam, wantHint bool
+		name                                                  string
+		rebind, skipped, confirmedTeam, missingRepo, wantHint bool
 	}{
 		{name: "existing binding, registration skipped", skipped: true},
 		{name: "endpoint rebind, registration skipped", rebind: true, skipped: true},
 		{name: "endpoint rebind, team unconfirmed", rebind: true},
 		{name: "existing binding, team unconfirmed"},
 		{name: "endpoint rebind, team confirmed", rebind: true, confirmedTeam: true, wantHint: true},
+		{name: "endpoint rebind, repository unconfirmed", rebind: true, confirmedTeam: true, missingRepo: true},
+		{name: "existing binding, repository unconfirmed", confirmedTeam: true, missingRepo: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env := newOxE2E(t)
@@ -510,7 +512,10 @@ func TestRunInit_RegistrationConfirmationGatesSessionImport(t *testing.T) {
 				if tc.skipped {
 					return 404, nil
 				}
-				response := api.RepoInitResponse{RepoID: env.RepoID}
+				response := api.RepoInitResponse{}
+				if !tc.missingRepo {
+					response.RepoID = env.RepoID
+				}
 				if tc.confirmedTeam {
 					response.TeamID = env.TeamID
 				}
@@ -527,7 +532,7 @@ func TestRunInit_RegistrationConfirmationGatesSessionImport(t *testing.T) {
 			if tc.wantHint {
 				assert.Contains(t, output, "ox session import", "a confirmed binding should advertise session import")
 			} else {
-				assert.NotContains(t, output, "ox session import", "old IDs do not establish fresh team confirmation")
+				assert.NotContains(t, output, "ox session import", "old IDs do not establish fresh repo and team confirmation")
 			}
 			projectCfg, err = config.LoadProjectConfig(env.Root)
 			require.NoError(t, err)

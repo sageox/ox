@@ -1088,8 +1088,8 @@ func runInit() error {
 		step++
 
 		// Old IDs can survive skipped or partial registration and later reinit.
-		// Only fresh team confirmation qualifies for the session-import step.
-		if resp != nil && resp.TeamID != "" {
+		// Only a freshly confirmed repo and team qualify for the import step.
+		if resp != nil && resp.RepoID != "" && resp.TeamID != "" {
 			printInitSessionImportStep(gitRoot, cfg, step)
 		}
 
@@ -1122,7 +1122,8 @@ func printInitSessionImportStep(gitRoot string, projectCfg *config.ProjectConfig
 		return
 	}
 
-	fmt.Printf("  %d. Bring past Claude and Codex sessions into your team's Ledger: %s\n", step, cli.StyleCommand.Render("ox session import"))
+	fmt.Printf("  %d. Bring past Claude and Codex sessions into your team's Ledger:\n", step)
+	fmt.Printf("     Run %s\n", cli.StyleCommand.Render("ox session import"))
 }
 
 // fetchGitCredentials fetches git credentials from GET /api/v1/cli/repos (team context repos only).
