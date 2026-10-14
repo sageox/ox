@@ -146,6 +146,10 @@ func commitAndPushPlanDir(ctx context.Context, ledgerPath, planDir string, files
 // conflicts, so a plan event was not recorded at all.
 var errLedgerNotSafe = errors.New("ledger needs repair before a plan event can be recorded")
 
+// errEventNotCommitted: the plan event is recorded but its commit failed; its
+// files are left unstaged for a retry.
+var errEventNotCommitted = errors.New("plan event recorded but not committed")
+
 // planEventFiles are the files plan.AppendPlanEvent writes in a plan dir.
 var planEventFiles = []string{"events.jsonl", "meta.json"}
 
@@ -155,8 +159,9 @@ var planEventFiles = []string{"events.jsonl", "meta.json"}
 // plan dir (an author's unsaved plan.md) rides along. While the Ledger is
 // mid-rebase, locked, or conflicted it records nothing (errLedgerNotSafe):
 // the files would stay uncommitted where the daemon's next autostash pull can
-// conflict on them. A commit that fails after the write returns changed with
-// the error, the event recorded and its files unstaged.
+// conflict on them. The files are committed even when the event changes
+// nothing, since an earlier attempt's event may still be waiting on a failed
+// commit; a commit that fails returns errEventNotCommitted.
 func commitPlanEvent(ctx context.Context, ledgerPath, planDir string, kind plan.EventKind, fields plan.PlanEventFields) (changed bool, err error) {
 	rel, err := ledgerRelPath(ledgerPath, planDir)
 	if err != nil {
@@ -180,10 +185,13 @@ func commitPlanEvent(ctx context.Context, ledgerPath, planDir string, kind plan.
 			return fmt.Errorf("%w: %w", errLedgerNotSafe, err)
 		}
 		var err error
-		if changed, err = plan.AppendPlanEvent(ctx, planDir, kind, fields); err != nil || !changed {
+		if changed, err = plan.AppendPlanEvent(ctx, planDir, kind, fields); err != nil {
 			return err
 		}
-		return commitPlanPathsLocked(ctx, ledgerPath, "plan: "+string(kind)+" "+filepath.Base(planDir), rel, planEventFiles)
+		if err := commitPlanPathsLocked(ctx, ledgerPath, "plan: "+string(kind)+" "+filepath.Base(planDir), rel, planEventFiles); err != nil {
+			return fmt.Errorf("%w: %w", errEventNotCommitted, err)
+		}
+		return nil
 	})
 	return changed, err
 }

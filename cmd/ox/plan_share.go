@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"path/filepath"
@@ -149,14 +150,15 @@ func sharePlanEvent(ctx context.Context, gitRoot, planDir string, kind plan.Even
 	f.LedgerPath = ledgerPath
 	changed, err := commitPlanEvent(ctx, ledgerPath, planDir, kind, fields)
 	switch {
-	case err != nil && !changed:
-		return false, planShareStatus{}, err
-	case err != nil:
+	case errors.Is(err, errEventNotCommitted):
 		f.CommitErr = err
-	case !changed:
-		return false, planShareStatus{}, nil
-	default:
+	case err != nil:
+		return false, planShareStatus{}, err
+	case changed:
 		f.PushErr = pushLedger(ctx, ledgerPath)
+	}
+	if !changed {
+		return false, planShareStatus{}, nil
 	}
 	var paths []string
 	for _, name := range planEventFiles {

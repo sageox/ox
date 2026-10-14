@@ -253,6 +253,20 @@ func recordPlanPushOutcome(ctx context.Context, ledgerPath, planDir string, push
 		return // not a Ledger plan dir — nothing a retry could push
 	}
 	path := planPushMarkerPath(ledgerPath, rel)
+	// read, merge and write as one step: two processes failing on one plan
+	// dir (an author's save, a reviewer's approval) must not drop what the
+	// other's marker owes
+	if lerr := fileutil.WithFileLock(ctx, path, func() error {
+		updatePlanPushMarker(ctx, path, rel, pushErr, files)
+		return nil
+	}); lerr != nil {
+		slog.WarnContext(ctx, "plan push marker not updated: lock unavailable", "plan_dir", rel, "error", lerr)
+	}
+}
+
+// updatePlanPushMarker is recordPlanPushOutcome's read-merge-write; the caller
+// holds the marker's lock.
+func updatePlanPushMarker(ctx context.Context, path, rel string, pushErr error, files []string) {
 	var prev planPushPending
 	b, rerr := os.ReadFile(path)
 	hasPrev := rerr == nil && json.Unmarshal(b, &prev) == nil
@@ -271,7 +285,7 @@ func recordPlanPushOutcome(ctx context.Context, ledgerPath, planDir string, push
 	}
 
 	now := time.Now().UTC()
-	m := planPushPending{PlanDir: rel, Files: files, FirstFailedAt: now}
+	m := planPushPending{PlanDir: rel, Files: slices.Clone(files), FirstFailedAt: now}
 	if hasPrev && !prev.FirstFailedAt.IsZero() {
 		m.FirstFailedAt = prev.FirstFailedAt
 		m.FailedAttempts = prev.FailedAttempts

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -184,6 +185,48 @@ func TestPlanLifecycle_RetryCommitsOnlyTheEventFiles(t *testing.T) {
 	}
 	if markers, err := listPlanPushPending(f.ledger); err != nil || len(markers) != 1 || len(markers[0].Files) != 0 {
 		t.Fatalf("the whole-dir marker must survive, got %+v (err %v)", markers, err)
+	}
+}
+
+// TestPlanLifecycle_ReapproveCommitsAnEarlierApprovalLeftUncommitted: an
+// approval whose commit failed is recorded but uncommitted, with a marker for
+// its retry; a second Approve, which records nothing new, commits and
+// publishes it. Failure prevented: the second Approve pushes the old tip,
+// reports it synced, clears the marker, and strands the approval uncommitted.
+func TestPlanLifecycle_ReapproveCommitsAnEarlierApprovalLeftUncommitted(t *testing.T) {
+	f := lifecycleFixture(t)
+	if _, err := plan.AppendPlanEvent(context.Background(), f.planDir, plan.EventApproved, plan.PlanEventFields{}); err != nil {
+		t.Fatal(err)
+	}
+	recordPlanPushOutcome(context.Background(), f.ledger, f.planDir, errors.New("commit failed"), planEventFiles...)
+
+	code, body := reviewPOSTBody(t, f.srv.URL+"/approve", "secret", "{}")
+	if r := decodeReviewResp(t, body); code != http.StatusOK || !r.Pushed {
+		t.Fatalf("re-approve: want pushed, got %d %s", code, body)
+	}
+	if !strings.Contains(runGitInDir(t, f.origin, "show", "main:data/plans/2026-10-01-durable/events.jsonl"), `"approved"`) {
+		t.Fatal("the earlier approval must reach the remote")
+	}
+	if markers, err := listPlanPushPending(f.ledger); err != nil || len(markers) != 0 {
+		t.Fatalf("the marker clears once the approval is published, got %+v (err %v)", markers, err)
+	}
+}
+
+// TestAwaitSnapshot_SeesALegacyApprovalAfterBackfill: a plan saved before
+// event logs existed keeps its approval in meta.json alone; once `ox plan
+// backfill` gives it a first event, the wait still ends as approved. Failure
+// prevented: the backfill's draft first event outranks the legacy approval,
+// and an AI coworker waits on an approved plan until its timeout.
+func TestAwaitSnapshot_SeesALegacyApprovalAfterBackfill(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "meta.json"), []byte(`{"topic":"Old","slug":"old","status":"approved"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := plan.ApplyBackfillMeta(context.Background(), dir, "Old plan", "old-plan"); err != nil {
+		t.Fatal(err)
+	}
+	if res, done := awaitSnapshot(dir); !done || res.Status != "approved" {
+		t.Fatalf("want the wait over as approved, got done=%v %+v", done, res)
 	}
 }
 

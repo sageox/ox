@@ -11,6 +11,9 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/sageox/ox/internal/fileutil"
 )
 
 // writePlanPushMarkerFile drops a raw marker file into a Ledger's pending dir.
@@ -22,6 +25,40 @@ func writePlanPushMarkerFile(t *testing.T, ledger, name, body string) {
 	}
 	if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A marker's read, merge and write wait for its lock, so two processes
+// failing on one plan dir cannot drop what the other's marker owes.
+func TestRecordPlanPushOutcome_HoldsTheMarkerLock(t *testing.T) {
+	ctx := context.Background()
+	ledger := t.TempDir()
+	planDir := filepath.Join(ledger, "data", "plans", "p")
+	if err := os.MkdirAll(planDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	held, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	go func() {
+		_ = fileutil.WithFileLock(ctx, planPushMarkerPath(ledger, "data/plans/p"), func() error {
+			close(held)
+			<-release
+			return nil
+		})
+	}()
+	<-held
+	go func() {
+		recordPlanPushOutcome(ctx, ledger, planDir, errors.New("offline"), "events.jsonl")
+		close(done)
+	}()
+	select {
+	case <-done:
+		t.Fatal("the marker was updated while its lock was held")
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(release)
+	<-done
+	if markers, err := listPlanPushPending(ledger); err != nil || len(markers) != 1 {
+		t.Fatalf("want the marker written once the lock is free, got %+v (err %v)", markers, err)
 	}
 }
 

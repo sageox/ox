@@ -661,12 +661,12 @@ func approvePlanForReview(ctx context.Context, gitRoot, planDir string, fields p
 		return changed, planCommitStatus{Err: err.Error()}, aerr
 	}
 	changed, err := commitPlanEvent(ctx, ledgerPath, planDir, plan.EventApproved, fields)
-	if err != nil {
-		if !changed {
-			return false, planCommitStatus{}, err
-		}
+	if errors.Is(err, errEventNotCommitted) {
 		recordPlanPushOutcome(ctx, ledgerPath, planDir, err, planEventFiles...)
-		return true, planCommitStatus{Err: gitutil.SanitizeOutput(err.Error())}, nil
+		return changed, planCommitStatus{Err: gitutil.SanitizeOutput(err.Error())}, nil
+	}
+	if err != nil {
+		return false, planCommitStatus{}, err
 	}
 	// pushed even when nothing changed: an earlier approve may be the commit
 	// still waiting on a failed push
