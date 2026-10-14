@@ -212,6 +212,25 @@ func TestPlanLifecycle_ReapproveCommitsAnEarlierApprovalLeftUncommitted(t *testi
 	}
 }
 
+// TestPlanLifecycle_ReRunSharesAnEventItsFirstRunCouldNotPush: `ox plan
+// abandon` whose push failed is reported not shared; running it again, which
+// records nothing new, pushes the event. Failure prevented: the natural retry
+// reports no change and the abandonment stays on one laptop.
+func TestPlanLifecycle_ReRunSharesAnEventItsFirstRunCouldNotPush(t *testing.T) {
+	f := lifecycleFixture(t)
+	runGitInDir(t, f.ledger, "remote", "set-url", "origin", filepath.Join(t.TempDir(), "gone.git"))
+	if _, err := runLifecycleVerbForTest(t, f.planDir, plan.EventAbandoned, true, lifecycleVerbFlags{Reason: "replaced"}); err != nil {
+		t.Fatal(err)
+	}
+	runGitInDir(t, f.ledger, "remote", "set-url", "origin", f.origin)
+	if _, err := runLifecycleVerbForTest(t, f.planDir, plan.EventAbandoned, true, lifecycleVerbFlags{Reason: "replaced"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(runGitInDir(t, f.origin, "show", "main:data/plans/2026-10-01-durable/events.jsonl"), `"abandoned"`) {
+		t.Fatal("the re-run must publish the abandonment")
+	}
+}
+
 // TestAwaitSnapshot_SeesALegacyApprovalAfterBackfill: a plan saved before
 // event logs existed keeps its approval in meta.json alone; once `ox plan
 // backfill` gives it a first event, the wait still ends as approved. Failure

@@ -137,11 +137,11 @@ The CLI reads and writes review records only through `pkg/planreview`.
   passed for the replay check, then `Assemble`. A clone with `core.autocrlf`
   checks records out with CRLF endings, so the worktree is not byte-exact
   there: a record whose name-pinned digest matches only its bytes with LF
-  endings is read with LF endings. `feedback show` (text and
-  `--json`), `review await`, the digest, `ox plan list`, prime's count and the
-  rendered page all report an incomplete read; the list and prime surface a
-  plan whose review is incomplete even with nothing open, and the page also
-  warns when an operation is stored with differing content.
+  endings is read with LF endings. `feedback show` (text and `--json`),
+  `review await`, the digest, `ox plan list`'s table, prime's count and the
+  rendered page all report an incomplete read and an operation stored with
+  differing content: the JSON `complete` is false for either, and the list
+  and prime surface such a plan even with nothing open.
 - **Lifecycle** (`commitPlanEvent`, `cmd/ox/plan_commit.go`): `/approve` and
   the lifecycle verbs append their event and commit only `events.jsonl` and
   `meta.json`, in one hold of the repo lock, so a pull never finds them half

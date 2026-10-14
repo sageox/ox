@@ -245,6 +245,48 @@ func TestRunPlanFeedbackShow_Empty(t *testing.T) {
 	}
 }
 
+// TestReviewJSON_ConflictingCopiesAreNotComplete: a round stored twice with
+// differing content makes `ox plan feedback show --json` and `ox plan review
+// await` report complete=false with the conflict listed. Failure prevented:
+// an AI coworker trusts complete=true and acts on one copy's items while the
+// other copy's are hidden.
+func TestReviewJSON_ConflictingCopiesAreNotComplete(t *testing.T) {
+	_, dir := saveFeedbackTestPlan(t, "twice-json")
+	for i, body := range []string{
+		`{"id":"round-dup2","items":[{"anchor":"h1","status":"approve"}]}`,
+		`{"id":"round-dup2","items":[{"anchor":"h1","status":"flag"}]}`,
+	} {
+		q, err := planreview.ParseRoundRequest([]byte(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec, err := q.Record("twice-json", "devon", time.Now().Add(time.Duration(i)*time.Second))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := planreview.Publish(dir, rec); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cmd := &cobra.Command{}
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	if err := runPlanFeedbackShow(cmd, "twice-json", true); err != nil {
+		t.Fatalf("show: %v", err)
+	}
+	var shown planFeedbackShowJSON
+	if err := json.Unmarshal(out.Bytes(), &shown); err != nil {
+		t.Fatal(err)
+	}
+	if shown.Complete || len(shown.Conflicts) != 1 {
+		t.Errorf("feedback show --json: want complete=false and one conflict, got complete=%v conflicts=%+v", shown.Complete, shown.Conflicts)
+	}
+	if res, _ := awaitSnapshot(dir); res.Complete || len(res.Conflicts) != 1 {
+		t.Errorf("await: want complete=false and one conflict, got complete=%v conflicts=%+v", res.Complete, res.Conflicts)
+	}
+}
+
 // writeTornRound leaves an undecodable round record in planDir.
 func writeTornRound(t *testing.T, planDir string) {
 	t.Helper()

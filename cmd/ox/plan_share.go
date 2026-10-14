@@ -154,7 +154,9 @@ func sharePlanEvent(ctx context.Context, gitRoot, planDir string, kind plan.Even
 		f.CommitErr = err
 	case err != nil:
 		return false, planShareStatus{}, err
-	case changed:
+	default:
+		// pushed even when nothing changed: re-running the verb is how a
+		// coworker retries an event an earlier run could not share
 		f.PushErr = pushLedger(ctx, ledgerPath)
 	}
 	if !changed {

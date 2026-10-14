@@ -215,6 +215,9 @@ func TestPushWithRetry_NoUpstreamFallsBackToOriginBranch(t *testing.T) {
 // upstream still names the ref a push to origin updates, so callers verifying
 // a push read the same ref the push wrote.
 func TestUpstreamTrackingRef_FallsBackWithoutUpstream(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git clone and push")
+	}
 	repo, _ := initBareRemoteRepo(t)
 	branch, err := RunGit(context.Background(), repo, "symbolic-ref", "--short", "HEAD")
 	require.NoError(t, err)

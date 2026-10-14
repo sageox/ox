@@ -271,7 +271,7 @@ func runPlanFeedbackShow(cmd *cobra.Command, slug string, jsonOut bool) error {
 	}
 	rev := plan.ReadReview(info.Dir)
 	if jsonOut {
-		out := planFeedbackShowJSON{Items: rev.Items, CorruptRounds: []string{}, Complete: rev.Complete(),
+		out := planFeedbackShowJSON{Items: rev.Items, CorruptRounds: []string{}, Complete: rev.Problems() == 0,
 			Failures: rev.Failures, Conflicts: rev.Conflicts}
 		if out.Items == nil {
 			out.Items = []plan.MergedItem{}

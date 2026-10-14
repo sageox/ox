@@ -45,7 +45,8 @@ Ask first, or pass a short --timeout and poll between other work.
 Emits immediately if feedback is already waiting (never strands a race). Exits with
 status "timeout" if nothing arrives within --timeout, or "approved" once a reviewer
 approves the plan (the loop is done). "complete" is false when the review could not be
-fully read; "failures" then says what, and the open items may be missing some.`,
+fully read or holds conflicting copies of an operation; "failures" and "conflicts" then
+say what, and the open items may be missing some.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		timeout, _ := cmd.Flags().GetDuration("timeout")
@@ -150,7 +151,7 @@ func runPlanReviewAwait(cmd *cobra.Command, slug string, timeout time.Duration) 
 // wait ends.
 func awaitSnapshot(planDir string) (awaitResult, bool) {
 	rev := plan.ReadReview(planDir)
-	res := awaitResult{Complete: rev.Complete(), Failures: rev.Failures, Conflicts: rev.Conflicts}
+	res := awaitResult{Complete: rev.Problems() == 0, Failures: rev.Failures, Conflicts: rev.Conflicts}
 	if plan.CurrentStatus(planDir) == plan.PlanStatusApproved {
 		res.Status = "approved"
 		return res, true
