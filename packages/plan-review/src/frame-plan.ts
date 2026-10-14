@@ -34,8 +34,10 @@ export interface FramePlanOptions {
 
 /** framePlan returns the stored plan html ready to frame. A page without Mermaid changes only by the document tools splice. */
 export function framePlan(html: string, opts: FramePlanOptions = {}): string {
-  let out = html;
-  if (DIAGRAM.test(out)) {
+  // Splice into the page as stored: the build this inlines or appends below
+  // carries a "</body>" of its own.
+  let out = opts.documentTools ? spliceTools(html, opts.instance) : html;
+  if (DIAGRAM.test(html)) {
     let inlined = false;
     let imported = false;
     out = out
@@ -52,11 +54,14 @@ export function framePlan(html: string, opts: FramePlanOptions = {}): string {
     // after the page: a classic script runs while the page parses, before any module script
     if (imported && !inlined) out += '<script>' + MERMAID + '</script>';
   }
-  if (!opts.documentTools) return out;
-  if (opts.instance !== undefined && !INSTANCE.test(opts.instance)) throw new Error('framePlan: instance must be 8-64 characters of [A-Za-z0-9_-]');
-  const tag = (opts.instance ? '<script data-instance="' + opts.instance + '">' : '<script>') + __OX_DOCUMENT_TOOLS__ + '</script>';
+  return out;
+}
+
+function spliceTools(html: string, instance: string | undefined): string {
+  if (instance !== undefined && !INSTANCE.test(instance)) throw new Error('framePlan: instance must be 8-64 characters of [A-Za-z0-9_-]');
+  const tag = (instance ? '<script data-instance="' + instance + '">' : '<script>') + __OX_DOCUMENT_TOOLS__ + '</script>';
   // Splice, never String.replace: the script contains "$&". The last </body>,
   // because an earlier one can sit inside the plan's own scripts.
-  const at = out.toLowerCase().lastIndexOf('</body>');
-  return at < 0 ? out + tag : out.slice(0, at) + tag + out.slice(at);
+  const at = html.toLowerCase().lastIndexOf('</body>');
+  return at < 0 ? html + tag : html.slice(0, at) + tag + html.slice(at);
 }

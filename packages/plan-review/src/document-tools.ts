@@ -52,6 +52,7 @@ export function startDocumentTools(port: DocumentPort, opts: DocumentToolsOption
   let spots: Spot[] = []; // every painted mark, in document order
   let picked: { a: string; range: Range } | null = null; // the words the last target named
   let focused: Range | null = null;
+  let started = false; // ready sent: before it, a target would anchor on a diagram's source
 
   function isRange(at: Element | Range): at is Range {
     return 'startContainer' in at;
@@ -306,6 +307,7 @@ export function startDocumentTools(port: DocumentPort, opts: DocumentToolsOption
   }
 
   function onClick(ev: MouseEvent) {
+    if (!started) return;
     const el0 = ev.target as Element;
     // the host's own controls, drawn into this document: the host handles them
     if (el0.closest && el0.closest(CHROME + ', .rev-pop')) return;
@@ -374,17 +376,25 @@ export function startDocumentTools(port: DocumentPort, opts: DocumentToolsOption
     }
   });
   // An anchor hashes a diagram's drawn text, and Mermaid draws after load: a
-  // host that painted before then would look marks up by the diagram's source.
-  // Clicks make no target until the host turns review on, which it does only
-  // after ready, so holding ready back covers them too.
-  whenDiagramsDrawn(() => port.send({ type: 'ready' }));
+  // host that painted, or a click that made a target, before then would use
+  // the diagram's source. The CLI's host can turn review on before ready, so
+  // clicks wait on `started` too.
+  whenDiagramsDrawn(() => {
+    started = true;
+    port.send({ type: 'ready' });
+  });
 }
 
-/** whenDiagramsDrawn calls go once every Mermaid diagram holds its <svg>, or after 5 s for one that never draws. */
+/**
+ * whenDiagramsDrawn calls go once every Mermaid diagram holds its final <svg>,
+ * or after 5 s for one that never draws. Mermaid renders into a temporary
+ * <div> inside the element and only then swaps the finished <svg> in as the
+ * element's child, so a nested <svg> is not yet a drawn diagram.
+ */
 function whenDiagramsDrawn(go: () => void): void {
   const deadline = Date.now() + 5000;
   const check = () => {
-    const pending = Array.prototype.some.call(document.querySelectorAll('.mermaid'), (el: Element) => !el.querySelector('svg'));
+    const pending = Array.prototype.some.call(document.querySelectorAll('.mermaid'), (el: Element) => !el.querySelector(':scope > svg'));
     if (!pending || Date.now() >= deadline) go();
     else setTimeout(check, 100);
   };

@@ -90,6 +90,7 @@
     let spots = [];
     let picked = null;
     let focused = null;
+    let started = false;
     function isRange(at) {
       return "startContainer" in at;
     }
@@ -301,6 +302,7 @@
       return ev.detail === 1 && !!downAt && Math.abs(ev.clientX - downAt.x) + Math.abs(ev.clientY - downAt.y) > 3;
     }
     function onClick(ev) {
+      if (!started) return;
       const el0 = ev.target;
       if (el0.closest && el0.closest(CHROME + ", .rev-pop")) return;
       if (!on) {
@@ -365,12 +367,15 @@
           break;
       }
     });
-    whenDiagramsDrawn(() => port.send({ type: "ready" }));
+    whenDiagramsDrawn(() => {
+      started = true;
+      port.send({ type: "ready" });
+    });
   }
   function whenDiagramsDrawn(go) {
     const deadline = Date.now() + 5e3;
     const check = () => {
-      const pending = Array.prototype.some.call(document.querySelectorAll(".mermaid"), (el) => !el.querySelector("svg"));
+      const pending = Array.prototype.some.call(document.querySelectorAll(".mermaid"), (el) => !el.querySelector(":scope > svg"));
       if (!pending || Date.now() >= deadline) go();
       else setTimeout(check, 100);
     };

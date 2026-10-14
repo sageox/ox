@@ -498,9 +498,12 @@ jobs:
       # These tests skip without Chrome or dist/, so a skip has to fail here.
       - name: Document tools anchor what Go anchors
         shell: bash
+        env:
+          # no session bus on the runner: Chrome fails fast instead of waiting on one
+          DBUS_SESSION_BUS_ADDRESS: /dev/null
         run: |
-          go test -tags=browser -count=1 -v -run 'TestBrowser_DocumentTools(MatchSharedPageVectors|AnchorADiagramOnceItDraws)$' ./cmd/ox/ | tee browser.log
-          test "$(grep -c '^--- PASS: TestBrowser_DocumentTools' browser.log)" -eq 2
+          go test -tags=browser -count=1 -v -run 'TestBrowser_(DocumentToolsMatchSharedPageVectors|DocumentToolsAnchorADiagramOnceItDraws|ReviewClicksWaitForDiagrams)$' ./cmd/ox/ | tee browser.log
+          test "$(grep -c -E '^--- PASS: TestBrowser_(DocumentTools|ReviewClicksWaitForDiagrams)' browser.log)" -eq 3
 
   # The skill installer is the one subsystem where Windows is a first-class
   # target rather than an aspiration: copy materialization IS what Windows gets,

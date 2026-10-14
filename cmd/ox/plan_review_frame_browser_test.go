@@ -114,12 +114,15 @@ func frameBrowser(t *testing.T) context.Context {
 	if chromePath == "" {
 		t.Skip("no Chrome/Chromium binary found — skipping real-browser E2E")
 	}
-	allocOpts := append(chromedp.DefaultExecAllocatorOptions[:], chromedp.ExecPath(chromePath), chromedp.WindowSize(1100, 1100))
+	// A cold Chrome on a CI runner took over chromedp's default 20 s to open
+	// its DevTools socket; a minute keeps a slow start from failing the test.
+	allocOpts := append(chromedp.DefaultExecAllocatorOptions[:], chromedp.ExecPath(chromePath), chromedp.WindowSize(1100, 1100),
+		chromedp.WSURLReadTimeout(time.Minute))
 	allocCtx, cancelAlloc := chromedp.NewExecAllocator(context.Background(), allocOpts...)
 	t.Cleanup(cancelAlloc)
 	ctx, cancelCtx := chromedp.NewContext(allocCtx)
 	t.Cleanup(cancelCtx)
-	ctx, cancelTimeout := context.WithTimeout(ctx, 45*time.Second)
+	ctx, cancelTimeout := context.WithTimeout(ctx, 2*time.Minute)
 	t.Cleanup(cancelTimeout)
 	return ctx
 }
@@ -311,15 +314,19 @@ func TestBrowser_DocumentToolsMatchSharedPageVectors(t *testing.T) {
 }
 
 // Failure prevented: a mark on a Mermaid diagram never paints, because the
-// host painted before the diagram drew and looked it up by its source, or the
-// drawn diagram's anchor changed with the per-render id in its <style>.
+// host painted before the diagram finished drawing and looked it up by its
+// source or a half-drawn copy, or the drawn diagram's anchor changed with the
+// per-render id in its <style>.
 func TestBrowser_DocumentToolsAnchorADiagramOnceItDraws(t *testing.T) {
 	ctx := frameBrowser(t)
-	// the plan draws its diagram after load, as Mermaid does
+	// the plan draws its diagram after load, as Mermaid does: first into a
+	// temporary <div>, half drawn, then the finished <svg>
 	doc := `<!doctype html><html><head><meta charset="utf-8"></head><body>` +
 		`<section data-ox-section="Flow"><pre class="mermaid">graph TD; A--&gt;B</pre></section>` +
-		`<script>setTimeout(function(){document.querySelector('.mermaid').innerHTML=` +
-		`'<svg><style>#mermaid-1760000000000{}</style><g><text>A</text><text>B</text></g></svg>'},400)</script></body></html>`
+		`<script>var d=document.querySelector('.mermaid');` +
+		`setTimeout(function(){d.innerHTML='<div id="dmermaid-1"><svg><g><text>A</text></g></svg></div>'},200);` +
+		`setTimeout(function(){d.innerHTML='<svg><style>#mermaid-1760000000000{}</style><g><text>A</text><text>B</text></g></svg>'},700)` +
+		`</script></body></html>`
 	base := serveFramedPlan(t, []byte(doc))
 	if err := chromedp.Run(ctx, chromedp.Navigate(base)); err != nil {
 		t.Fatalf("load the framed diagram page: %v", err)

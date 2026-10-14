@@ -4,10 +4,10 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { load } from './load.mjs';
 
-const MERMAID = 'globalThis.mermaid={};"<!--</script>"';
+const MERMAID = 'globalThis.mermaid={};"<!--</script></body>"';
 const TOOLS = 'tools("$&")';
 const { framePlan } = await load('frame-plan.ts', { __OX_MERMAID__: JSON.stringify(MERMAID), __OX_DOCUMENT_TOOLS__: JSON.stringify(TOOLS) });
-const ESCAPED = 'globalThis.mermaid={};"<\\!--<\\/script>"';
+const ESCAPED = 'globalThis.mermaid={};"<\\!--<\\/script></body>"';
 const DIAGRAM = '<pre class="mermaid">graph TD; A--&gt;B</pre>';
 const CDN = 'https://cdn.jsdelivr.net/npm/mermaid';
 
@@ -18,12 +18,16 @@ test('a CDN Mermaid tag becomes the escaped vendored build on a page with a diag
   assert.equal(framePlan(DIAGRAM + tag + '<script>mermaid.run()</script>'), DIAGRAM + '<script>' + ESCAPED + '</script><script>mermaid.run()</script>');
 });
 
-// Failure prevented: an ES-module page imports from a blocked CDN, or the same
-// import line shown as text in a code block is rewritten.
-test('an ES-module import reads the global, and the build follows the page', () => {
-  const page = `${DIAGRAM}<pre>&lt;script type="module"&gt;import mermaid from '${CDN}@11/dist/mermaid.esm.min.mjs'</pre>` +
-    `<script type="module">import mermaid from '${CDN}@11/dist/mermaid.esm.min.mjs';\nmermaid.run()</script></html>`;
-  assert.equal(framePlan(page), page.replace(`import mermaid from '${CDN}@11/dist/mermaid.esm.min.mjs';`, 'const mermaid = globalThis.mermaid;') + '<script>' + ESCAPED + '</script>');
+// Failure prevented: an ES-module page imports from a blocked CDN, the same
+// import line shown as text in a code block is rewritten, or the document
+// tools land inside the appended build, whose own "</body>" comes last.
+test('an ES-module import reads the global; the build follows the page and the tools stay in it', () => {
+  const page = `<body>${DIAGRAM}<pre>&lt;script type="module"&gt;import mermaid from '${CDN}@11/dist/mermaid.esm.min.mjs'</pre>` +
+    `<script type="module">import mermaid from '${CDN}@11/dist/mermaid.esm.min.mjs';\nmermaid.run()</script></body></html>`;
+  const want = page
+    .replace(`import mermaid from '${CDN}@11/dist/mermaid.esm.min.mjs';`, 'const mermaid = globalThis.mermaid;')
+    .replace('</body>', () => '<script>' + TOOLS + '</script></body>');
+  assert.equal(framePlan(page, { documentTools: true }), want + '<script>' + ESCAPED + '</script>');
 });
 
 // Failure prevented: every plan ox renders carries the 2.7 MB build, diagram or not.

@@ -665,6 +665,59 @@ func TestBrowser_ReviewKeysWorkOnAuthoredPlan(t *testing.T) {
 	}
 }
 
+// Failure prevented: on the CLI's review page a reviewer turns review on and
+// clicks a diagram before Mermaid has drawn it, and the mark anchors on the
+// diagram's source, lost once the diagram draws.
+func TestBrowser_ReviewClicksWaitForDiagrams(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: launches a real headless Chrome")
+	}
+	chromePath := findChromePath()
+	if chromePath == "" {
+		t.Skip("no Chrome/Chromium binary found — skipping real-browser E2E")
+	}
+	gitRoot := newPlanStatusTestRepo(t)
+	html := []byte(`<!doctype html><html><head><meta charset="utf-8"><title>Late Diagram</title>` +
+		`<meta name="ox-plan-slug" content="late-diagram"></head><body><h1>Late Diagram</h1>` +
+		`<section data-ox-section="Flow"><pre class="mermaid">graph TD; A--&gt;B</pre></section>` +
+		`<script>setTimeout(function(){document.querySelector('.mermaid').innerHTML='<svg><g><text>A</text><text>B</text></g></svg>'},2000)</script>` +
+		`</body></html>`)
+	dir := savePlanArtifacts(gitRoot, plan.Input{Raw: "# Late Diagram\n"}, plan.Result{}, html, plan.PrimaryHTML)
+	if dir == "" {
+		t.Fatal("savePlanArtifacts returned empty dir — the authored plan was not saved")
+	}
+	base, _, _ := serveSavedPlanReview(t, gitRoot, "late-diagram", dir)
+
+	allocOpts := append(chromedp.DefaultExecAllocatorOptions[:], chromedp.ExecPath(chromePath), chromedp.WSURLReadTimeout(time.Minute))
+	allocCtx, cancelAlloc := chromedp.NewExecAllocator(context.Background(), allocOpts...)
+	t.Cleanup(cancelAlloc)
+	ctx, cancelCtx := chromedp.NewContext(allocCtx)
+	t.Cleanup(cancelCtx)
+	ctx, cancelTimeout := context.WithTimeout(ctx, 2*time.Minute)
+	t.Cleanup(cancelTimeout)
+
+	const click = `(()=>{document.querySelector('.mermaid').dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true}));return !!document.querySelector('.rev-pop')})()`
+	var drawn, earlyNote, lateNote bool
+	if err := chromedp.Run(ctx,
+		chromedp.Navigate(base+"/"),
+		chromedp.WaitVisible(".rev-toggle", chromedp.ByQuery),
+		chromedp.KeyEvent("r"),
+		chromedp.Evaluate(`!!document.querySelector('.mermaid > svg')`, &drawn),
+		chromedp.Evaluate(click, &earlyNote),
+	); err != nil {
+		t.Fatalf("early click failed: %v", err)
+	}
+	if drawn {
+		t.Fatal("the diagram drew before the early click — this test would be proving nothing")
+	}
+	if earlyNote {
+		t.Fatal("a click before the diagram drew opened a note: its mark would anchor on the diagram's source")
+	}
+	if err := chromedp.Run(ctx, chromedp.Poll(click, &lateNote, chromedp.WithPollingTimeout(10*time.Second))); err != nil || !lateNote {
+		t.Fatalf("a click after the diagram drew never opened a note: note=%v err=%v", lateNote, err)
+	}
+}
+
 // TestBrowser_CommentsRailMinimizes proves a reviewer can get the comments rail
 // off the plan it floats over and bring it back: Hide shrinks it to a Show
 // button that still carries the count and uncovers the page beneath; a live
