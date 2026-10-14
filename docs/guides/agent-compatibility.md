@@ -101,10 +101,10 @@ ox init
 ox integrate install --amp
 ```
 Installs a user-scope plugin, `ox-bridge.ts`, in Amp's system plugin directory
-(`$XDG_CONFIG_HOME/amp/plugins/` when `XDG_CONFIG_HOME` is set, otherwise
-`~/.config/amp/plugins/`) that records the session, and an `AGENTS.md` marker that
-primes it. Amp does not persist
-transcripts itself, so the plugin is what makes recording possible.
+(`$XDG_CONFIG_HOME/amp/plugins/` when `XDG_CONFIG_HOME` is set to an absolute path,
+otherwise `~/.config/amp/plugins/`) that records the session, and an `AGENTS.md`
+marker that primes it. Amp does not persist transcripts itself, so the plugin is
+what makes recording possible.
 
 ### Pi
 ```bash

@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -269,4 +270,32 @@ func TestDiagnose_SafeFixesRunUnderDoctorFix(t *testing.T) {
 	require.NotNil(t, issue)
 	assert.Empty(t, issue.FixArgv)
 	assert.Equal(t, "ox integrate install --amp", issue.Fix)
+}
+
+// TestDiagnose_UnreadableBridgePathIsReported covers a plugin path that can't
+// be checked at all: a regular file named `plugins` where Amp expects a
+// directory. Amp loads nothing from there and install-hooks cannot write
+// there, so diagnose must say so rather than report nothing.
+// Failure prevented: "I could not look" reading as "all checks passed".
+func TestDiagnose_UnreadableBridgePathIsReported(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// stat through a file component reports "path not found" on Windows,
+		// which is ErrNotExist, so this setup reads as missing there
+		t.Skip("a file in place of a directory is not-exist on Windows, not ENOTDIR")
+	}
+	xdg := t.TempDir()
+	setHome(t, t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	pluginsDir := filepath.Dir(pluginUnder(xdg))
+	require.NoError(t, os.MkdirAll(filepath.Dir(pluginsDir), 0o755))
+	require.NoError(t, os.WriteFile(pluginsDir, []byte("not a directory"), 0o644))
+
+	res, err := handleDiagnose(adapterprotocol.DiagnoseParams{RepoRoot: t.TempDir(), Scope: "project"})
+	require.NoError(t, err)
+	issue := bridgeIssue(t, res.Issues)
+	require.NotNil(t, issue, "an unreadable plugin path must not read as healthy, got %+v", res.Issues)
+	assert.Equal(t, "amp:bridge-plugin-unreadable", issue.Slug)
+	assert.Contains(t, issue.Detail, pluginUnder(xdg), "the detail must name the path that could not be checked")
+	assert.False(t, issue.FixSafe, "install-hooks fails on the same path, so there is no automatic repair")
+	assert.Empty(t, issue.FixArgv)
 }

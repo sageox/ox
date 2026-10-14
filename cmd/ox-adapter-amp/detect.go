@@ -2,7 +2,9 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -85,15 +87,29 @@ var installFixArgv = []string{"ox", "integrate", "install", "--amp"}
 // Amp reads $XDG_CONFIG_HOME/amp/plugins/ instead. The second gets its own slug
 // so the coworker learns why an install that looked fine records nothing.
 //
-// An unresolvable home directory or an unreadable path reports nothing rather
-// than a misleading "missing"; install would fail the same way.
+// A path that can't be checked (a file where Amp expects the plugins
+// directory, a permission error) is reported as such, never as healthy and
+// never as "missing": install-hooks would fail on it the same way, so there is
+// no automatic repair to offer. An unresolvable home directory reports nothing;
+// with no path to name, there is nothing to tell the coworker to fix.
 func diagnoseBridgePlugin(repoRoot string) []adapterprotocol.DiagnoseIssue {
 	bridgePath, err := userBridgePluginPath()
 	if err != nil {
 		return nil
 	}
-	if _, statErr := os.Stat(bridgePath); !os.IsNotExist(statErr) {
+	_, statErr := os.Stat(bridgePath)
+	if statErr == nil {
 		return nil
+	}
+	if !errors.Is(statErr, fs.ErrNotExist) {
+		return []adapterprotocol.DiagnoseIssue{{
+			Slug:     "amp:bridge-plugin-unreadable",
+			Severity: "warning",
+			Title:    "Amp ox-bridge plugin could not be checked",
+			Detail: fmt.Sprintf("Cannot check %s: %v. Amp loads system plugins from %s; "+
+				"until that path is readable, Amp sessions may not be recorded.",
+				bridgePath, statErr, filepath.Dir(bridgePath)),
+		}}
 	}
 
 	// install-hooks needs a repository for its AGENTS.md half, and so does
