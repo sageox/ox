@@ -10,8 +10,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/plan"
 )
 
@@ -33,7 +35,6 @@ func TestClassifyPlanShare(t *testing.T) {
 	}{
 		{"clean push", planShareFacts{DaemonRunning: true, UpstreamKnown: true}, true, true, "", false},
 		{"no ledger", planShareFacts{NoLedger: true, DaemonRunning: true}, false, false, "no ledger", false},
-		{"mid-rebase", planShareFacts{UnsafeErr: boom, DaemonRunning: true}, false, false, "mid-rebase", false},
 		{"commit failed", planShareFacts{CommitErr: boom, DaemonRunning: true}, false, false, "commit failed", false},
 		{"push failed", planShareFacts{PushErr: boom, DaemonRunning: true}, false, true, "push failed", false},
 		{"push failed on a diverged ledger", planShareFacts{PushErr: boom, Ahead: 18, Behind: 3538, UpstreamKnown: true, DaemonRunning: true}, false, true, "18 ahead / 3538 behind", false},
@@ -191,6 +192,76 @@ func TestSavePlanArtifacts_AFailedCommitIsRetried(t *testing.T) {
 	rel, _ := filepath.Rel(ledger, dir)
 	if out := runGitInDir(t, remote, "log", "--oneline", "main", "--", filepath.ToSlash(rel)); out == "" {
 		t.Fatal("the retried save is not on the team's remote")
+	}
+}
+
+// TestSavePlanArtifacts_WaitsForASyncInProgress: a save while another ox
+// process holds the Ledger (the daemon mid-pull, git's index.lock present)
+// waits for it. Failure prevented: the save checks before taking the repo
+// lock, fails on the sync's index.lock, and leaves its files uncommitted.
+func TestSavePlanArtifacts_WaitsForASyncInProgress(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git clone + push")
+	}
+	root := newPlanCaptureTestRepo(t)
+	ledger, _ := newSharedLedger(t, root, true)
+	lock := filepath.Join(ledger, ".git", "index.lock")
+	held, release, syncDone := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	go func() {
+		syncDone <- gitutil.WithRepoLock(context.Background(), ledger, func() error {
+			if err := os.WriteFile(lock, nil, 0o644); err != nil {
+				return err
+			}
+			close(held)
+			<-release
+			return os.Remove(lock)
+		})
+	}()
+	<-held
+
+	saved := make(chan planSaveReport, 1)
+	go func() {
+		var r planSaveReport
+		in := plan.Parse(plan.ExtractMarkdown([]byte(shareTestPage)))
+		savePlanArtifacts(root, in, plan.Result{}, []byte(shareTestPage), plan.PrimaryHTML, withReport(&r))
+		saved <- r
+	}()
+	select {
+	case r := <-saved:
+		close(release)
+		t.Fatalf("the save returned while the sync held the Ledger: %+v", r.Share)
+	case <-time.After(500 * time.Millisecond):
+	}
+	close(release)
+	if err := <-syncDone; err != nil {
+		t.Fatal(err)
+	}
+	if r := <-saved; !r.Share.Shared {
+		t.Fatalf("the save must be shared once the sync ends, got %+v", r.Share)
+	}
+}
+
+// TestSavePlanArtifacts_StagesNothingMidRebase: a save while the Ledger is
+// mid-rebase stages nothing, the .gitignore guard included. Failure
+// prevented: a `git add` during a conflicted rebase marks the conflict
+// resolved.
+func TestSavePlanArtifacts_StagesNothingMidRebase(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git clone + push")
+	}
+	root := newPlanCaptureTestRepo(t)
+	ledger, _ := newSharedLedger(t, root, true)
+	if err := os.MkdirAll(filepath.Join(ledger, ".git", "rebase-merge"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var r planSaveReport
+	in := plan.Parse(plan.ExtractMarkdown([]byte(shareTestPage)))
+	if dir := savePlanArtifacts(root, in, plan.Result{}, []byte(shareTestPage), plan.PrimaryHTML, withReport(&r)); dir == "" || r.Share.Committed {
+		t.Fatalf("want the save written but not committed, got dir=%q %+v", dir, r.Share)
+	}
+	if staged := runGitInDir(t, ledger, "diff", "--cached", "--name-only"); staged != "" {
+		t.Fatalf("the save staged %q mid-rebase", staged)
 	}
 }
 

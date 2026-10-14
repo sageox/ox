@@ -41,7 +41,6 @@ type planShareStatus struct {
 type planShareFacts struct {
 	LedgerPath    string
 	NoLedger      bool
-	UnsafeErr     error // mid-rebase / lock files: nothing was staged
 	CommitErr     error // add or commit failed: files left in the working tree
 	PushErr       error // commit landed locally, push failed
 	Dirty         bool  // plan dir still has uncommitted changes after the attempt
@@ -70,9 +69,6 @@ func classifyPlanShare(f planShareFacts) planShareStatus {
 	switch {
 	case f.NoLedger:
 		st.Reason = "no ledger configured for this repo"
-		st.Fix = planDoctorFix
-	case f.UnsafeErr != nil:
-		st.Reason = fmt.Sprintf("ledger is mid-rebase or locked, nothing was committed: %v", f.UnsafeErr)
 		st.Fix = planDoctorFix
 	case f.CommitErr != nil:
 		st.Reason = fmt.Sprintf("ledger commit failed, plan files left uncommitted: %v", f.CommitErr)
@@ -126,17 +122,17 @@ func sharePlanDir(gitRoot, planDir string) planShareStatus {
 		return classifyPlanShare(f)
 	}
 
-	if err := gitutil.IsSafeForGitOps(f.LedgerPath); err != nil {
-		f.UnsafeErr = err
-	} else if err := commitPlanLocal(f.LedgerPath, planDir, ""); err != nil {
+	// commitPlanLocal checks the Ledger under the repo lock: checked before it,
+	// a sync in progress (its index.lock or rebase) failed the save instead of
+	// being waited out
+	if err := commitPlanLocal(f.LedgerPath, planDir, ""); err != nil {
 		f.CommitErr = err
 	} else if err := pushLedger(context.Background(), f.LedgerPath); err != nil {
 		f.PushErr = err
 	}
-	// The save's files are already written. A failed attempt leaves a marker
-	// for `ox agent prime` to retry, and for the next Approve or review round
-	// to commit first (commitOwedPlanSaveLocked).
-	recordPlanPushOutcome(context.Background(), f.LedgerPath, planDir, cmp.Or(f.UnsafeErr, f.CommitErr, f.PushErr))
+	// the save's files are already written: a failed attempt leaves a marker
+	// for `ox agent prime` to retry
+	recordPlanPushOutcome(context.Background(), f.LedgerPath, planDir, cmp.Or(f.CommitErr, f.PushErr))
 	f.Dirty = planDirDirty(f.LedgerPath, planDir)
 	f.Ahead, f.Behind, f.UpstreamKnown = gitAheadBehind(f.LedgerPath)
 	return classifyPlanShare(f)
@@ -171,6 +167,7 @@ func sharePlanEvent(ctx context.Context, gitRoot, planDir string, kind plan.Even
 		// coworker retries an event an earlier run could not share
 		f.PushErr = pushLedger(ctx, ledgerPath)
 	}
+	recordPlanPushOutcome(ctx, ledgerPath, planDir, cmp.Or(f.CommitErr, f.PushErr), planEventFiles...)
 	if !changed {
 		return false, planShareStatus{}, nil
 	}

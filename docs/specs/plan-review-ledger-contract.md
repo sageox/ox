@@ -147,16 +147,15 @@ The CLI reads and writes review records only through `pkg/planreview`.
   `meta.json`, in one hold of the repo lock, so a pull never finds them half
   written and an author's unsaved files never ride along. While the Ledger is
   mid-rebase, locked, or holds unmerged entries they record nothing, and
-  `/approve` answers 503. A failed push leaves a plan-dir marker owing only
-  those files (`files`); a lifecycle push never clears a marker owed for the
-  whole dir. With no Ledger checkout the event is recorded and reported not
+  `/approve` answers 503. A failed commit or push, from the browser or a CLI
+  verb, leaves a plan-dir marker owing only those files (`files`); a
+  lifecycle push never clears a marker owed for the whole dir. With no Ledger checkout the event is recorded and reported not
   committed, and no git command runs.
-- **Failed saves** (`sharePlanDir`): a save whose commit or push fails writes
-  a whole-dir marker, which `ox plan flush-pending` retries. A lifecycle or
-  review commit on a plan dir with a whole-dir marker first commits that dir,
-  in the same hold of the repo lock (`commitOwedPlanSaveLocked`): the save's
-  files are already written, and its `meta.json` would otherwise ship in the
-  lifecycle commit without its `plan.md`.
+- **Saves** (`sharePlanDir`): a save checks the Ledger, and runs the
+  `.gitignore` guard, under the repo lock, so a sync in progress is waited out
+  instead of failing the save. A save whose commit or push still fails writes
+  a whole-dir marker, which `ox plan flush-pending` retries with the dir as it
+  is then.
 - **Event logs merge:** `data/plans/*/events.jsonl` is `merge=union` in each
   clone's `.git/info/attributes` (`kb.MergeUnionPaths`, rewritten before every
   push and pull), so two clones' appends merge, upstream's lines first, in a
@@ -196,8 +195,7 @@ lock (`ledger.RefreshSparseCheckout`). Still open:
   `events.jsonl`; readers fold the log (`plan.CurrentStatus`) instead of
   trusting it.
 - H5 remains for `meta.json`, and for a failed save's files until their
-  marker is retried or the next lifecycle or review commit on that clone
-  commits them.
+  marker is retried.
 - An in-place rewrite of an `events.jsonl` line (`BackfillSessionID`) racing an
   append can keep both versions of that line.
 - H10–H12 are unchanged.

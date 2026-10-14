@@ -67,69 +67,6 @@ func TestPlanLifecycle_CommitsOnlyTheEventFiles(t *testing.T) {
 	}
 }
 
-// TestPlanCommits_FinishASaveLeftOwed: a save whose commit failed left its
-// files written and a whole-dir retry marker. The next Approve or review round
-// on that clone commits the save first. Failure prevented: the save's files
-// sit uncommitted under the daemon's autostash pulls until the next prime, and
-// an Approve ships the save's meta.json without its plan.md.
-func TestPlanCommits_FinishASaveLeftOwed(t *testing.T) {
-	for name, act := range map[string]func(t *testing.T, f *durableReviewFixture){
-		"browser approve": func(t *testing.T, f *durableReviewFixture) {
-			if code, body := reviewPOSTBody(t, f.srv.URL+"/approve", "secret", "{}"); code != http.StatusOK {
-				t.Fatalf("approve: %d %s", code, body)
-			}
-		},
-		"review round": func(t *testing.T, f *durableReviewFixture) {
-			if code, body := reviewPOSTBody(t, f.srv.URL+"/feedback", "secret", roundBody("round-000A", "hA")); code != http.StatusOK {
-				t.Fatalf("round: %d %s", code, body)
-			}
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			f := lifecycleFixture(t)
-			if err := os.WriteFile(filepath.Join(f.planDir, "plan.md"), []byte("# Durable\n\nsaved revision\n"), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			recordPlanPushOutcome(context.Background(), f.ledger, f.planDir, errors.New("index.lock exists"))
-
-			act(t, f)
-
-			if got := runGitInDir(t, f.origin, "show", "main:data/plans/2026-10-01-durable/plan.md"); !strings.Contains(got, "saved revision") {
-				t.Fatalf("the owed save did not reach the team; remote plan.md = %q", got)
-			}
-			if st := runGitInDir(t, f.ledger, "status", "--porcelain", "--", f.planDir); st != "" {
-				t.Fatalf("the save's files are still uncommitted: %q", st)
-			}
-		})
-	}
-}
-
-// TestPlanCommits_AnOwedSaveThatCannotCommitNeverBlocksTheApprove: the owed
-// save still cannot be committed (its plan.md holds conflict markers, which
-// the Ledger refuses). Failure prevented: the reviewer's Approve fails with
-// it, or the save loses its retry marker.
-func TestPlanCommits_AnOwedSaveThatCannotCommitNeverBlocksTheApprove(t *testing.T) {
-	f := lifecycleFixture(t)
-	conflicted := "# Durable\n<<<<<<< HEAD\nmine\n=======\ntheirs\n>>>>>>> origin/main\n"
-	if err := os.WriteFile(filepath.Join(f.planDir, "plan.md"), []byte(conflicted), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	recordPlanPushOutcome(context.Background(), f.ledger, f.planDir, errors.New("index.lock exists"))
-
-	if code, body := reviewPOSTBody(t, f.srv.URL+"/approve", "secret", "{}"); code != http.StatusOK {
-		t.Fatalf("approve: %d %s", code, body)
-	}
-
-	want := []string{"data/plans/2026-10-01-durable/events.jsonl", "data/plans/2026-10-01-durable/meta.json"}
-	if got := strings.Fields(runGitInDir(t, f.origin, "show", "--name-only", "--format=", "main")); !slices.Equal(got, want) {
-		t.Fatalf("the remote tip's commit carries %v, want only the approval's %v", got, want)
-	}
-	pending, err := listPlanPushPending(f.ledger)
-	if err != nil || len(pending) != 1 || len(pending[0].Files) != 0 {
-		t.Fatalf("the save must stay owed for the whole dir, got %+v (err %v)", pending, err)
-	}
-}
-
 // TestPlanLifecycle_RefusesWhileTheLedgerNeedsRepair: while the Ledger holds
 // an unrelated conflict, a rebase left in progress, or a git lock, an Approve
 // records nothing and says the Ledger needs repair. Failure prevented: the
@@ -320,6 +257,20 @@ func TestPlanLifecycle_AFailedCommitIsUnstagedAndRetried(t *testing.T) {
 			},
 		},
 		{
+			name: "ox plan abandon, retried by the flush", event: `"abandoned"`,
+			record: func(t *testing.T, f *durableReviewFixture) {
+				out, err := runLifecycleVerbForTest(t, f.planDir, plan.EventAbandoned, true, lifecycleVerbFlags{Reason: "replaced"})
+				if err != nil || !strings.Contains(out, "ledger commit failed") {
+					t.Fatalf("want recorded and reported not shared, got %v %s", err, out)
+				}
+			},
+			retry: func(t *testing.T, f *durableReviewFixture) {
+				if ok, failed, err := flushPendingPlanPushes(context.Background(), f.ledger); err != nil || ok != 1 || failed != 0 {
+					t.Fatalf("flush: ok=%d failed=%d err=%v", ok, failed, err)
+				}
+			},
+		},
+		{
 			name: "ox plan abandon, retried by running it again", event: `"abandoned"`,
 			record: func(t *testing.T, f *durableReviewFixture) {
 				out, err := runLifecycleVerbForTest(t, f.planDir, plan.EventAbandoned, true, lifecycleVerbFlags{Reason: "replaced"})
@@ -354,6 +305,27 @@ func TestPlanLifecycle_AFailedCommitIsUnstagedAndRetried(t *testing.T) {
 				t.Fatalf("the retry must not publish the author's edit, remote plan.md is %q", got)
 			}
 		})
+	}
+}
+
+// TestPlanLifecycle_ACanceledCommitLeavesNothingStaged: Ctrl-C lands while a
+// lifecycle commit runs. Failure prevented: the cleanup reset runs on the
+// canceled context, so the event's files stay staged for a later commit.
+func TestPlanLifecycle_ACanceledCommitLeavesNothingStaged(t *testing.T) {
+	f := lifecycleFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	prev := commitPlanSnapshot
+	t.Cleanup(func() { commitPlanSnapshot = prev })
+	commitPlanSnapshot = func(context.Context, string, string, ...string) (bool, error) {
+		cancel()
+		return false, context.Canceled
+	}
+	if _, err := commitPlanEvent(ctx, f.ledger, f.planDir, plan.EventApproved, plan.PlanEventFields{}); !errors.Is(err, errEventNotCommitted) {
+		t.Fatalf("want errEventNotCommitted, got %v", err)
+	}
+	if staged := runGitInDir(t, f.ledger, "diff", "--cached", "--name-only"); staged != "" {
+		t.Fatalf("a canceled commit must leave nothing staged, index has %q", staged)
 	}
 }
 
