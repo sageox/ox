@@ -210,7 +210,7 @@ func TestSessionLinkOutputs_Gate(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotURL, gotDirective := sessionLinkOutputs(projCfg, tt.state, tt.attrSession)
+			gotURL, gotDirective := sessionLinkOutputs(t.TempDir(), projCfg, tt.state, tt.attrSession)
 			assert.Equal(t, tt.wantURL, gotURL)
 			if tt.wantDirective {
 				require.NotEmpty(t, gotDirective)

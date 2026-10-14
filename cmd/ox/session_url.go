@@ -55,20 +55,13 @@ func buildConversationURL(cfg *config.ProjectConfig, sessionID string) string {
 	return fmt.Sprintf("%s/c/%s", ep, url.PathEscape(sessionID))
 }
 
-// effectiveSessionPublishing resolves the publishing mode for the repo in the
-// working directory. Indirected through a variable so link tests stay
-// independent of whatever config happens to exist around them.
-var effectiveSessionPublishing = func() string {
-	return config.GetSessionPublishing(findGitRoot())
-}
-
 // sessionLinkOutputs derives the prime session URL and the exact-literal PR
-// directive for a live recording. The attribution.session toggle gates both:
-// an empty toggle (attribution.session: "") or a missing/unlinkable state
-// yields ("", "") so every session-link surface disables together. The /c/
-// form is preferred; recordings started under an older binary carry no
+// directive for a live recording in projectRoot. The attribution.session toggle
+// gates both: an empty toggle (attribution.session: "") or a missing/unlinkable
+// state yields ("", "") so every session-link surface disables together. The
+// /c/ form is preferred; recordings started under an older binary carry no
 // start-minted ID and fall back to the name-based view URL.
-func sessionLinkOutputs(projCfg *config.ProjectConfig, state *session.RecordingState, attrSession string) (sessionURL, prDirective string) {
+func sessionLinkOutputs(projectRoot string, projCfg *config.ProjectConfig, state *session.RecordingState, attrSession string) (sessionURL, prDirective string) {
 	if attrSession == "" || state == nil {
 		return "", ""
 	}
@@ -78,13 +71,14 @@ func sessionLinkOutputs(projCfg *config.ProjectConfig, state *session.RecordingS
 		// makes it server-visible.
 		return "", ""
 	}
-	if effectiveSessionPublishing() == config.SessionPublishingManual {
-		// Manual publishing suppresses start-registration entirely, so the
-		// server has never heard of this session and a /c/ link would 404.
-		// Identical reasoning to the pending guard above — the id exists
-		// locally, which is not the same as being resolvable — and it must
-		// hold for commit trailers and PR bodies, which outlive the session
-		// and would otherwise carry a permanently dead link.
+	if stopHoldsSession(projectRoot, state) {
+		// A session held on this machine is never registered with the server
+		// (notifySessionStarted applies the same rule: the mode saved at start
+		// or the setting now), so a /c/ link would 404. Identical reasoning to
+		// the pending guard above — the id exists locally, which is not the
+		// same as being resolvable — and it must hold for commit trailers and
+		// PR bodies, which outlive the session and would otherwise carry a
+		// permanently dead link.
 		return "", ""
 	}
 	sessionURL = buildConversationURL(projCfg, state.SessionID)
