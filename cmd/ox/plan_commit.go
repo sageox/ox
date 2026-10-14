@@ -178,11 +178,8 @@ func commitPlanEvent(ctx context.Context, ledgerPath, planDir string, kind plan.
 		if err := gitutil.IsSafeForGitOps(ledgerPath); err != nil {
 			return fmt.Errorf("%w: %w", errLedgerNotSafe, err)
 		}
-		if unmerged, err := gitutil.HasUnmergedEntries(ctx, ledgerPath); err != nil || unmerged {
-			if err == nil {
-				err = errors.New("the index holds unresolved conflicts")
-			}
-			return fmt.Errorf("%w: %w", errLedgerNotSafe, err)
+		if err := errIfUnmerged(ctx, ledgerPath); err != nil {
+			return err
 		}
 		var err error
 		if changed, err = plan.AppendPlanEvent(ctx, planDir, kind, fields); err != nil {
@@ -200,6 +197,9 @@ func commitPlanEvent(ctx context.Context, ledgerPath, planDir string, kind plan.
 // that exist) and commits only them. On failure it unstages them, so no later
 // commit carries what this one refused. The caller holds the repo lock.
 func commitPlanPathsLocked(ctx context.Context, ledgerPath, msg, rel string, files []string) error {
+	if err := errIfUnmerged(ctx, ledgerPath); err != nil {
+		return err
+	}
 	var paths []string
 	for _, f := range files {
 		if _, err := os.Lstat(filepath.Join(ledgerPath, filepath.FromSlash(rel), f)); err == nil {
@@ -214,12 +214,31 @@ func commitPlanPathsLocked(ctx context.Context, ledgerPath, msg, rel string, fil
 		unstage()
 		return fmt.Errorf("git add %s failed: %s: %w", strings.Join(paths, " "), gitutil.SanitizeOutput(out), err)
 	}
-	if _, err := gitutil.CommitLedgerSnapshot(ctx, ledgerPath, msg, paths...); err != nil {
+	if _, err := commitPlanSnapshot(ctx, ledgerPath, msg, paths...); err != nil {
 		unstage()
 		return fmt.Errorf("commit %s: %w", strings.Join(paths, " "), err)
 	}
 	return nil
 }
+
+// errIfUnmerged refuses while the index holds unmerged entries: `git add` of a
+// conflicted path marks it resolved with its conflict markers inside, erasing
+// the conflict the daemon and `ox doctor` look for, and every later commit of
+// that path then fails on the markers.
+func errIfUnmerged(ctx context.Context, ledgerPath string) error {
+	unmerged, err := gitutil.HasUnmergedEntries(ctx, ledgerPath)
+	if err == nil && unmerged {
+		err = errors.New("the index holds unresolved conflicts")
+	}
+	if err != nil {
+		return fmt.Errorf("%w: %w", errLedgerNotSafe, err)
+	}
+	return nil
+}
+
+// commitPlanSnapshot is gitutil.CommitLedgerSnapshot, a variable so a test can
+// fail a plan commit after its files are written and staged.
+var commitPlanSnapshot = gitutil.CommitLedgerSnapshot
 
 // errReviewConflict: the operation is already stored with other content or
 // under another reviewer. Nothing was written, so the client keeps its draft.
@@ -577,6 +596,9 @@ func commitPlanLocalCtx(ctx context.Context, ledgerPath, planDir, msgPrefix stri
 		// resolved (see .claude/rules/cache-only-design.md).
 		if err := gitutil.IsSafeForGitOps(ledgerPath); err != nil {
 			return fmt.Errorf("ledger not safe for plan commit (%s): %w", ledgerPath, err)
+		}
+		if err := errIfUnmerged(ctx, ledgerPath); err != nil {
+			return err
 		}
 		// --sparse: ledger repos use sparse-checkout (cone mode).
 		addArgs := []string{"add", "--sparse", "--", rel}

@@ -231,6 +231,102 @@ func TestPlanLifecycle_ReRunSharesAnEventItsFirstRunCouldNotPush(t *testing.T) {
 	}
 }
 
+// TestPlanLifecycle_AFailedCommitIsUnstagedAndRetried: a lifecycle commit
+// that fails after its event is written reports it recorded but not
+// committed, leaves nothing staged for a later commit to sweep in, and each
+// entry point's retry then publishes only the event's files. Failure
+// prevented: the event's files stay staged for an unrelated commit to carry,
+// or the event is never retried.
+func TestPlanLifecycle_AFailedCommitIsUnstagedAndRetried(t *testing.T) {
+	for _, tc := range []struct {
+		name, event   string
+		record, retry func(t *testing.T, f *durableReviewFixture)
+	}{
+		{
+			name: "browser approve, retried by the flush", event: `"approved"`,
+			record: func(t *testing.T, f *durableReviewFixture) {
+				code, body := reviewPOSTBody(t, f.srv.URL+"/approve", "secret", "{}")
+				if r := decodeReviewResp(t, body); code != http.StatusOK || !r.Saved || r.Committed {
+					t.Fatalf("want saved, not committed; got %d %s", code, body)
+				}
+			},
+			retry: func(t *testing.T, f *durableReviewFixture) {
+				if ok, failed, err := flushPendingPlanPushes(context.Background(), f.ledger); err != nil || ok != 1 || failed != 0 {
+					t.Fatalf("flush: ok=%d failed=%d err=%v", ok, failed, err)
+				}
+			},
+		},
+		{
+			name: "ox plan abandon, retried by running it again", event: `"abandoned"`,
+			record: func(t *testing.T, f *durableReviewFixture) {
+				out, err := runLifecycleVerbForTest(t, f.planDir, plan.EventAbandoned, true, lifecycleVerbFlags{Reason: "replaced"})
+				if err != nil || !strings.Contains(out, "ledger commit failed") {
+					t.Fatalf("want recorded and reported not shared, got %v %s", err, out)
+				}
+			},
+			retry: func(t *testing.T, f *durableReviewFixture) {
+				if _, err := runLifecycleVerbForTest(t, f.planDir, plan.EventAbandoned, true, lifecycleVerbFlags{Reason: "replaced"}); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := lifecycleFixture(t)
+			prev := commitPlanSnapshot
+			t.Cleanup(func() { commitPlanSnapshot = prev })
+			commitPlanSnapshot = func(context.Context, string, string, ...string) (bool, error) {
+				return false, errors.New("disk full")
+			}
+			tc.record(t, f)
+			if staged := runGitInDir(t, f.ledger, "diff", "--cached", "--name-only"); staged != "" {
+				t.Fatalf("a failed commit must leave nothing staged, index has %q", staged)
+			}
+			commitPlanSnapshot = prev
+			tc.retry(t, f)
+			if !strings.Contains(runGitInDir(t, f.origin, "show", "main:data/plans/2026-10-01-durable/events.jsonl"), tc.event) {
+				t.Fatalf("the retry must publish the %s event", tc.event)
+			}
+			if got := runGitInDir(t, f.origin, "show", "main:data/plans/2026-10-01-durable/plan.md"); got != "# Durable" {
+				t.Fatalf("the retry must not publish the author's edit, remote plan.md is %q", got)
+			}
+		})
+	}
+}
+
+// TestPlanCommits_NeverResolveAConflictTheyDidNotMake: while a plan file is
+// left conflicted (an autostash re-apply the daemon could not merge), neither
+// a lifecycle retry's file commit nor an authoring commit stages it, so the
+// conflict stays where the daemon and `ox doctor` look for it. Failure
+// prevented: `git add` marks the file resolved with its conflict markers
+// inside, the conflict signal disappears, and every later commit of the plan
+// fails on the markers.
+func TestPlanCommits_NeverResolveAConflictTheyDidNotMake(t *testing.T) {
+	for name, files := range map[string][]string{"lifecycle retry": planEventFiles, "authoring commit": nil} {
+		t.Run(name, func(t *testing.T) {
+			f := lifecycleFixture(t)
+			const meta = "data/plans/2026-10-01-durable/meta.json"
+			blob := strings.TrimSpace(runGitInDir(t, f.ledger, "rev-parse", "HEAD:"+meta))
+			update := exec.Command("git", "-C", f.ledger, "update-index", "--index-info")
+			update.Stdin = strings.NewReader(fmt.Sprintf("0 %[1]s 0\t%[2]s\n100644 %[3]s 1\t%[2]s\n100644 %[3]s 2\t%[2]s\n100644 %[3]s 3\t%[2]s\n", strings.Repeat("0", len(blob)), meta, blob))
+			if out, err := update.CombinedOutput(); err != nil {
+				t.Fatalf("stage a conflict: %v\n%s", err, out)
+			}
+			head := runGitInDir(t, f.ledger, "rev-parse", "HEAD")
+
+			if _, err := commitAndPushPlanDir(context.Background(), f.ledger, f.planDir, files...); !errors.Is(err, errLedgerNotSafe) {
+				t.Fatalf("want a refusal naming the repair, got %v", err)
+			}
+			if got := runGitInDir(t, f.ledger, "ls-files", "-u", "--", meta); got == "" {
+				t.Fatal("the conflict must stay in the index")
+			}
+			if got := runGitInDir(t, f.ledger, "rev-parse", "HEAD"); got != head {
+				t.Fatal("no commit may land while the conflict stands")
+			}
+		})
+	}
+}
+
 // TestAwaitSnapshot_SeesALegacyApprovalAfterBackfill: a plan saved before
 // event logs existed keeps its approval in meta.json alone; once `ox plan
 // backfill` gives it a first event, the wait still ends as approved. Failure
