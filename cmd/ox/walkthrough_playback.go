@@ -14,6 +14,7 @@ import (
 	"unicode"
 
 	"github.com/sageox/ox/internal/api"
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/conversation/read"
 	"github.com/sageox/ox/internal/fileutil"
 )
@@ -33,9 +34,10 @@ const (
 
 // loadWalkthroughPlayback asks the server for the recording's playback data.
 // It returns the parsed document, or a note saying why there is none. Both
-// empty means the lookup was not attempted (no project, team or login): that
-// is the ordinary state of a machine the read would refuse anyway, and a note
-// there would only be noise.
+// empty means only that the id is not one this reader serves, which the read
+// itself reports. A scope that cannot be resolved (no team, no login, a link
+// from another environment) is a note, never silence: the read got this far,
+// so the reader should know the joined view was skipped and why.
 func loadWalkthroughPlayback(ctx context.Context, idArg string) (*read.Playback, string) {
 	id, parseErr := read.ParseID(idArg)
 	if parseErr != nil {
@@ -44,7 +46,7 @@ func loadWalkthroughPlayback(ctx context.Context, idArg string) (*read.Playback,
 	scope, err := resolveWalkthroughScope(id)
 	if err != nil {
 		slog.Debug("walkthrough playback skipped", "reason", err)
-		return nil, ""
+		return nil, fmt.Sprintf("Playback data could not be fetched (%s); showing the standard evidence index.", strings.Join(strings.Fields(cli.SanitizeTerminalText(err.Error())), " "))
 	}
 	ctx, cancel := context.WithTimeout(ctx, walkthroughPlaybackTimeout)
 	defer cancel()

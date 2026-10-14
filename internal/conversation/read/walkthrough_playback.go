@@ -621,20 +621,26 @@ func (r *Reader) joinPlayback(data *WalkthroughData, id *ID, cues []vtt.Cue, opt
 	}
 
 	if p.HasMoments() {
-		var joined []WalkthroughMoment
+		var matched []playbackMoment
 		for _, pm := range p.moments {
 			if opts.CueFirst != 0 && (pm.cue < opts.CueFirst || pm.cue > opts.CueLast) ||
 				opts.HasWindow && (pm.at < opts.FromOffset || pm.at > opts.ToOffset) {
 				continue
 			}
-			joined = append(joined, r.joinedMoment(p, id, pm))
+			matched = append(matched, pm)
 		}
-		data.Window.Total = len(joined)
-		data.Window.Truncated = len(joined) > limit
+		data.Window.Total = len(matched)
+		data.Window.Truncated = len(matched) > limit
 		if data.Window.Truncated {
-			joined = joined[:limit]
+			matched = matched[:limit]
 		}
-		data.Moments = append([]WalkthroughMoment{}, joined...)
+		// Image refs are built only for the moments returned: resolving one
+		// fully decodes its cached pictures, which is wasted work for a moment
+		// the limit has already cut.
+		data.Moments = make([]WalkthroughMoment, 0, len(matched))
+		for _, pm := range matched {
+			data.Moments = append(data.Moments, r.joinedMoment(p, id, pm))
+		}
 		data.Joined = true
 	}
 
@@ -753,8 +759,12 @@ func cachedJPEG(path string) bool {
 		return false
 	}
 	b, err := os.ReadFile(path)
-	return err == nil && CheckPlaybackJPEG(b) == nil
+	return err == nil && pictureCheck(b) == nil
 }
+
+// pictureCheck is the full decode cachedJPEG applies; a variable so a test can
+// count how many pictures a read decodes.
+var pictureCheck = CheckPlaybackJPEG
 
 // CheckPlaybackJPEG decodes every pixel of b. Reading only the header would
 // pass a file cut off after it, and such a file would then be offered as

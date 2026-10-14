@@ -846,3 +846,42 @@ func TestWalkthroughChapterTranscriptPagesContinue(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, decodeConvEnvelope(t, out).Error.Message, "cursor does not match")
 }
+
+// TestWalkthroughPlaybackScopeFailureLeavesANote: when the read succeeds but the
+// project's team, login or environment cannot be matched to the recording, the
+// joined view is skipped with a note that says why, never silently.
+// Failure prevented: a reader sees the standard index and takes it for the
+// whole story, with nothing to say joined moments were skipped.
+func TestWalkthroughPlaybackScopeFailureLeavesANote(t *testing.T) {
+	root := stagePlaybackDiscussions(t)
+	serve := func(t *testing.T) *playbackServer {
+		original := openConversationReader
+		t.Cleanup(func() { openConversationReader = original })
+		openConversationReader = func() (*read.Reader, *read.Error) { return read.New(root, time.Time{}), nil }
+		return startPlaybackServer(t, "")
+	}
+	for _, tc := range []struct {
+		name  string
+		login bool
+		id    string
+		want  string
+	}{
+		{"a link from another environment", true, "https://sageox.ai/c/" + shareTestWalkthroughRec, "recording link belongs to another SageOx environment"},
+		{"not signed in", false, shareTestWalkthroughRec, "a valid login is required"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := serve(t)
+			walkthroughRecoveryProject(t, srv.URL, tc.login)
+			out, _, err := runConversationInProc(t, "walkthrough", tc.id)
+			require.NoError(t, err, out)
+			env := decodeConvEnvelope(t, out)
+			require.True(t, env.Success, out)
+			var data joinedDataWire
+			require.NoError(t, json.Unmarshal(env.Data, &data))
+			require.Contains(t, strings.Join(data.Notes, "\n"), "Playback data could not be fetched ("+tc.want)
+			require.Contains(t, strings.Join(data.Notes, "\n"), "showing the standard evidence index")
+			require.NotEmpty(t, data.Moments, "today's moments are still there")
+			require.Zero(t, srv.playbackRequests(), "no request is made without a usable scope")
+		})
+	}
+}

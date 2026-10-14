@@ -186,7 +186,10 @@ func (r *Reader) walkthroughEvidence(start time.Time, id *ID, rw row, root *os.R
 		data.Moments = []WalkthroughMoment{}
 	}
 	r.joinPlayback(data, id, cues, opts)
-	if len(data.Moments) == 0 && !opts.Transcript {
+	// Joined playback data speaks for itself (an empty window prints as having
+	// no moments), and its spans, pages and chapters are evidence even where
+	// there is no still.
+	if len(data.Moments) == 0 && !data.Joined && !opts.Transcript {
 		data.Notes = append(data.Notes, "No retained images in this window. Source words remain available; missing frames do not mean there is no feedback.")
 	}
 	if !index.Capabilities.Pointer {

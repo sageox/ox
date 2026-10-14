@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -563,4 +564,67 @@ func TestWalkthroughGuidanceKeepsTheChapterOnTheNextTranscriptPage(t *testing.T)
 
 	plain := New(root, time.Time{}).Walkthrough(walkthroughCnv, WalkthroughOptions{HasWindow: true, FromOffset: from, ToOffset: to, Transcript: true})
 	require.NotContains(t, plain.Guidance, "--chapter", "a window that is not a chapter does not invent one")
+}
+
+// TestPlaybackDecodesOnlyReturnedPictures: a cached picture is fully decoded
+// only for a moment the read returns. Moments the limit or the window cut are
+// counted but not resolved.
+// Failure prevented: after a long recording's pictures have been fetched, a
+// read of one moment decodes every cached picture in the recording.
+func TestPlaybackDecodesOnlyReturnedPictures(t *testing.T) {
+	root := stagePlaybackWalkthrough(t)
+	_, d := readPlayback(t, root, WalkthroughOptions{})
+	for _, m := range d.Moments {
+		if m.Focus == nil {
+			continue
+		}
+		require.NoError(t, os.MkdirAll(filepath.Dir(m.Focus.CachePath), 0o755))
+		require.NoError(t, os.WriteFile(m.Focus.CachePath, tinyJPEG(t), 0o644))
+	}
+
+	var checks atomic.Int32
+	original := pictureCheck
+	pictureCheck = func(b []byte) error { checks.Add(1); return original(b) }
+	t.Cleanup(func() { pictureCheck = original })
+
+	reads := func(opts WalkthroughOptions) (*WalkthroughData, int32) {
+		checks.Store(0)
+		_, d := readPlayback(t, root, opts)
+		return d, checks.Load()
+	}
+	d, n := reads(WalkthroughOptions{})
+	require.Len(t, d.Moments, 5)
+	require.EqualValues(t, 4, n, "four moments have a cached picture")
+
+	d, n = reads(WalkthroughOptions{Limit: 1})
+	require.Len(t, d.Moments, 1)
+	require.Equal(t, 5, d.Window.Total, "every matching moment is still counted")
+	require.True(t, d.Window.Truncated)
+	require.Equal(t, "local", d.Moments[0].Focus.Availability)
+	require.EqualValues(t, 1, n, "only the returned moment's picture is decoded")
+
+	d, n = reads(WalkthroughOptions{HasWindow: true, FromOffset: 90 * time.Second, ToOffset: 130 * time.Second})
+	require.Len(t, d.Moments, 2)
+	require.EqualValues(t, 2, n, "moments outside the window are never resolved")
+}
+
+// TestPlaybackEmptyJoinedWindowGetsNoRetainedImagesNote: a window with no joined
+// moments is just empty; "no retained images" is about stills and is wrong when
+// joined data is present, which may still have spans, pages and chapters there.
+func TestPlaybackEmptyJoinedWindowGetsNoRetainedImagesNote(t *testing.T) {
+	root, rev, _ := stageEvidence(t, 12)
+	window := WalkthroughOptions{Revision: rev, HasWindow: true, FromOffset: 10 * time.Second, ToOffset: 20 * time.Second}
+
+	joined := window
+	joined.Playback = loadPlaybackFixture(t)
+	d := walkthroughData(t, New(root, time.Time{}).Walkthrough(walkthroughCnv, joined))
+	require.True(t, d.Joined)
+	require.Empty(t, d.Moments)
+	require.Len(t, d.Chapters, 1, "the window still sits in a chapter")
+	require.NotContains(t, strings.Join(d.Notes, "\n"), "No retained images")
+
+	// Without joined data the note is still right.
+	plain := walkthroughData(t, New(root, time.Time{}).Walkthrough(walkthroughCnv, window))
+	require.Empty(t, plain.Moments)
+	require.Contains(t, strings.Join(plain.Notes, "\n"), "No retained images in this window")
 }
