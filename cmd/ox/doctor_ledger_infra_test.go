@@ -66,6 +66,23 @@ func TestCheckLedgerSparseCheckout_MissingDataPlans(t *testing.T) {
 	assert.Contains(t, result.detail, "data/plans", "detail should name the missing dir and its impact")
 }
 
+// TestCheckLedgerSparseCheckout_FixRepairsTheCone drives `ox doctor --fix`.
+// Failure prevented: the fix reports the cone repaired while it still lacks
+// data/plans, or fails to take the repo lock it now runs under.
+func TestCheckLedgerSparseCheckout_FixRepairsTheCone(t *testing.T) {
+	t.Parallel()
+
+	ledgerDir := initBareGitRepo(t)
+	writeSparseCheckout(t, ledgerDir, "/*\n!/*/\n/.sageox/\n/.sync/\n/sessions/\n")
+
+	result := checkLedgerSparseCheckoutAtPath(ledgerDir, true)
+
+	require.True(t, result.passed, result.detail)
+	content, err := os.ReadFile(filepath.Join(ledgerDir, ".git", "info", "sparse-checkout"))
+	require.NoError(t, err)
+	assert.Empty(t, missingSparseConeDirs(string(content)), "the repaired cone must carry every required dir")
+}
+
 // TestMissingSparseConeDirs covers the pure matcher directly — the surrounding
 // check is mostly path resolution.
 func TestMissingSparseConeDirs(t *testing.T) {

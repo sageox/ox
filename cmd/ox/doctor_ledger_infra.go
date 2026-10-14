@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -109,7 +110,7 @@ func checkLedgerSparseCheckoutAtPath(ledgerPath string, fix bool) checkResult {
 
 	missingList := strings.Join(missing, ", ")
 	if fix {
-		if repairErr := ledger.ConfigureSparseCheckout(ledgerPath); repairErr != nil {
+		if repairErr := ledger.RefreshSparseCheckout(context.Background(), ledgerPath); repairErr != nil {
 			return FailedCheck("Ledger sparse checkout",
 				fmt.Sprintf("%s missing from cone, repair failed", missingList),
 				fmt.Sprintf("error: %v", repairErr))

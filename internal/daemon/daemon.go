@@ -1101,6 +1101,20 @@ func IsStarting() bool {
 	return s == DaemonStateStarting || s == DaemonStateStuck
 }
 
+// ensureLedgerSparseCheckout refreshes the Ledger cone at daemon startup. It
+// takes the repo lock (RefreshSparseCheckout) because a CLI process can be
+// committing to the Ledger while the daemon starts.
+func (d *Daemon) ensureLedgerSparseCheckout(ctx context.Context) {
+	if !pathIsGitRepo(d.config.LedgerPath) {
+		return
+	}
+	if err := ledger.RefreshSparseCheckout(ctx, d.config.LedgerPath); err != nil {
+		d.logger.Warn("failed to set ledger sparse-checkout at startup", "error", err)
+		return
+	}
+	d.logger.Info("ledger sparse-checkout verified at startup")
+}
+
 // initComponents creates and wires all daemon subsystems. Returns setup duration.
 func (d *Daemon) initComponents() time.Duration {
 	startSetup := time.Now()
@@ -1122,13 +1136,7 @@ func (d *Daemon) initComponents() time.Duration {
 	// ensure ledger sparse-checkout cone is correct before any sync or indexing.
 	// without this, a corrupt cone from a previous session causes every sync cycle
 	// to wipe .sageox/cache/ via ConfigureSparseCheckout's rolling-window refresh.
-	if d.config.LedgerPath != "" && pathIsGitRepo(d.config.LedgerPath) {
-		if err := ledger.ConfigureSparseCheckout(d.config.LedgerPath); err != nil {
-			d.logger.Warn("failed to set ledger sparse-checkout at startup", "error", err)
-		} else {
-			d.logger.Info("ledger sparse-checkout verified at startup")
-		}
-	}
+	d.ensureLedgerSparseCheckout(d.ctx)
 
 	// telemetry + friction collectors
 	d.telemetry = NewTelemetryCollector(d.logger)

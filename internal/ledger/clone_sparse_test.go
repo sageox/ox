@@ -1,11 +1,14 @@
 package ledger
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -177,4 +180,27 @@ func TestCloneWithSparseCheckout_CacheSurvivesReconfigure(t *testing.T) {
 	assert.NoError(t, err,
 		".sageox/cache/codedb/index.bleve must survive ConfigureSparseCheckout; "+
 			"if missing, the sync scheduler is destroying codedb indexes on every pull cycle")
+}
+
+// TestRefreshSparseCheckout_WaitsForTheRepoLock: `git sparse-checkout`
+// rewrites the index. A refresh run while another ox process held the repo
+// lock to commit failed that commit on index.lock and left its files
+// uncommitted.
+func TestRefreshSparseCheckout_WaitsForTheRepoLock(t *testing.T) {
+	clone := filepath.Join(t.TempDir(), "ledger")
+	out, err := exec.Command("git", "clone", "-q", initBareRepo(t), clone).CombinedOutput()
+	require.NoError(t, err, "clone: %s", out)
+	sparseFile := filepath.Join(clone, ".git", "info", "sparse-checkout")
+
+	require.NoError(t, gitutil.WithRepoLock(context.Background(), clone, func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		defer cancel()
+		err := RefreshSparseCheckout(ctx, clone)
+		assert.True(t, gitutil.IsRepoLockBusy(err), "want the lock-busy error, got %v", err)
+		assert.NoFileExists(t, sparseFile, "the refresh ran while a peer held the repo lock")
+		return nil
+	}))
+
+	require.NoError(t, RefreshSparseCheckout(context.Background(), clone))
+	assert.FileExists(t, sparseFile, "the refresh must run once the lock is free")
 }

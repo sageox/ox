@@ -186,3 +186,57 @@ func TestDoPull_ClearsRebaseStuckOnSuccess(t *testing.T) {
 	_, backoff := tracker.GetIssue(IssueTypeSyncBackoff, "ledger")
 	assert.False(t, backoff, "a successful pull must clear the stale sync-suspended warning")
 }
+
+// TestLedgerSparseRefresh_WaitsForTheRepoLock: `git sparse-checkout` rewrites
+// the Ledger index. Run outside the repo lock, the daemon's refresh failed CLI
+// commits holding that lock on index.lock (16 of 60 plan lifecycle commits in
+// a stress run), and each failure left that writer's files uncommitted.
+func TestLedgerSparseRefresh_WaitsForTheRepoLock(t *testing.T) {
+	tests := []struct {
+		name    string
+		refresh func(t *testing.T, ctx context.Context, ledgerDir string)
+	}{
+		{"sync cycle", func(t *testing.T, ctx context.Context, ledgerDir string) {
+			cfg := DefaultConfig()
+			cfg.LedgerPath = ledgerDir
+			_ = NewSyncScheduler(cfg, newTestScheduler(t.TempDir()).logger).doPull(ctx, nil, true, true)
+		}},
+		{"daemon startup", func(_ *testing.T, ctx context.Context, ledgerDir string) {
+			New(&Config{LedgerPath: ledgerDir}, nil).ensureLedgerSparseCheckout(ctx)
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, ledgerDir, _ := setupRacingLedger(t)
+			sparseFile := filepath.Join(ledgerDir, ".git", "info", "sparse-checkout")
+
+			// a CLI commit holds the repo lock for the whole refresh attempt
+			require.NoError(t, gitutil.WithRepoLock(context.Background(), ledgerDir, func() error {
+				ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+				defer cancel()
+				tt.refresh(t, ctx, ledgerDir)
+				assert.NoFileExists(t, sparseFile, "the refresh rewrote the index while a peer held the repo lock")
+				return nil
+			}))
+
+			tt.refresh(t, context.Background(), ledgerDir)
+			assert.FileExists(t, sparseFile, "the refresh must run once the lock is free")
+		})
+	}
+}
+
+// TestEnsureLedgerSparseCheckout_SkipsALedgerDirThatIsNotACheckout: git run in
+// a directory that is not a checkout finds the enclosing repository, so a
+// startup refresh there would turn on sparse checkout in the coworker's
+// project.
+func TestEnsureLedgerSparseCheckout_SkipsALedgerDirThatIsNotACheckout(t *testing.T) {
+	project := t.TempDir()
+	out, err := runGitOut(t, project, "init", "-q")
+	require.NoError(t, err, out)
+	ledgerDir := filepath.Join(project, "ledger")
+	require.NoError(t, os.Mkdir(ledgerDir, 0o755))
+
+	New(&Config{LedgerPath: ledgerDir}, nil).ensureLedgerSparseCheckout(context.Background())
+
+	assert.NoFileExists(t, filepath.Join(project, ".git", "info", "sparse-checkout"))
+}

@@ -1439,7 +1439,7 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 		// Without this, hourly directories computed at clone time go stale and
 		// new murmur files pulled from remote are not materialized on disk.
 		if refreshSparse {
-			if err := ledger.ConfigureSparseCheckout(s.config.LedgerPath); err != nil {
+			if err := ledger.RefreshSparseCheckout(ctx, s.config.LedgerPath); err != nil {
 				s.logger.Warn("failed to refresh ledger sparse checkout", "error", err)
 			}
 		}

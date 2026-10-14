@@ -531,6 +531,7 @@ func sparseCheckoutDirs() []string {
 // Excludes: assets/ (large files), older data outside the windows.
 //
 // Called during initial clone (CloneWithSparseCheckout) and by EnableSparseCheckout.
+// The daemon and doctor run it on a live clone through RefreshSparseCheckout.
 // Future: daemon GC reclone will also call this to reconfigure the sliding window
 // on fresh clones, pruning old data/github/ directories outside the 30-day window.
 //
@@ -590,6 +591,16 @@ func ConfigureSparseCheckout(path string) error {
 	}
 
 	return nil
+}
+
+// RefreshSparseCheckout runs ConfigureSparseCheckout under gitutil.WithRepoLock,
+// which CommitLedgerSnapshot callers hold from their first git add through the
+// commit. `git sparse-checkout` rewrites the index, so a refresh outside the
+// lock can fail such a commit on index.lock and leave its files uncommitted.
+func RefreshSparseCheckout(ctx context.Context, path string) error {
+	return gitutil.WithRepoLock(ctx, path, func() error {
+		return ConfigureSparseCheckout(path)
+	})
 }
 
 // DisableSymlinks saves core.symlinks=false so git checks Ledger symlinks out
