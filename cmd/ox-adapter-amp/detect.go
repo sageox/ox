@@ -87,17 +87,20 @@ var installFixArgv = []string{"ox", "integrate", "install", "--amp"}
 // Amp reads $XDG_CONFIG_HOME/amp/plugins/ instead. The second gets its own slug
 // so the coworker learns why an install that looked fine records nothing.
 //
-// A path that can't be checked (a file where Amp expects the plugins
-// directory, a permission error) is reported as such, never as healthy and
-// never as "missing": install-hooks would fail on it the same way, so there is
-// no automatic repair to offer. An unresolvable home directory reports nothing;
+// A path Amp cannot load from (a file where Amp expects the plugins
+// directory, a directory where the plugin file belongs, a permission error) is
+// reported as such, never as healthy and never as "missing": install-hooks
+// fails on it the same way, so there is no automatic repair to offer. An unresolvable home directory reports nothing;
 // with no path to name, there is nothing to tell the coworker to fix.
 func diagnoseBridgePlugin(repoRoot string) []adapterprotocol.DiagnoseIssue {
 	bridgePath, err := userBridgePluginPath()
 	if err != nil {
 		return nil
 	}
-	_, statErr := os.Stat(bridgePath)
+	info, statErr := os.Stat(bridgePath)
+	if statErr == nil && info.IsDir() {
+		statErr = errors.New("it is a directory, not the plugin file")
+	}
 	if statErr == nil {
 		return nil
 	}
@@ -105,10 +108,10 @@ func diagnoseBridgePlugin(repoRoot string) []adapterprotocol.DiagnoseIssue {
 		return []adapterprotocol.DiagnoseIssue{{
 			Slug:     "amp:bridge-plugin-unreadable",
 			Severity: "warning",
-			Title:    "Amp ox-bridge plugin could not be checked",
-			Detail: fmt.Sprintf("Cannot check %s: %v. Amp loads system plugins from %s; "+
-				"until that path is readable, Amp sessions may not be recorded.",
-				bridgePath, statErr, filepath.Dir(bridgePath)),
+			Title:    "Amp cannot read the ox-bridge plugin",
+			Detail: fmt.Sprintf("Cannot use %s: %v. Amp loads system plugins from %s; "+
+				"clear that path by hand, then run `%s`. Until then, Amp sessions are not recorded.",
+				bridgePath, statErr, filepath.Dir(bridgePath), installFix),
 		}}
 	}
 

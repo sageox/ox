@@ -272,30 +272,64 @@ func TestDiagnose_SafeFixesRunUnderDoctorFix(t *testing.T) {
 	assert.Equal(t, "ox integrate install --amp", issue.Fix)
 }
 
-// TestDiagnose_UnreadableBridgePathIsReported covers a plugin path that can't
-// be checked at all: a regular file named `plugins` where Amp expects a
-// directory. Amp loads nothing from there and install-hooks cannot write
-// there, so diagnose must say so rather than report nothing.
-// Failure prevented: "I could not look" reading as "all checks passed".
+// TestDiagnose_UnreadableBridgePathIsReported covers a plugin path Amp cannot
+// load from and install-hooks cannot write to. Diagnose must report it, never
+// call it healthy, and must not offer install as a "safe" fix that would fail.
+// Failure prevented: "I could not look" or "something else is there" reading as
+// "all checks passed".
 func TestDiagnose_UnreadableBridgePathIsReported(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		// stat through a file component reports "path not found" on Windows,
-		// which is ErrNotExist, so this setup reads as missing there
-		t.Skip("a file in place of a directory is not-exist on Windows, not ENOTDIR")
+	tests := []struct {
+		name      string
+		block     func(t *testing.T, plugin string)
+		skipOn    string
+		skipWhy   string
+		wantInErr string
+	}{
+		{
+			name: "file where the plugins directory should be",
+			block: func(t *testing.T, plugin string) {
+				require.NoError(t, os.MkdirAll(filepath.Dir(filepath.Dir(plugin)), 0o755))
+				require.NoError(t, os.WriteFile(filepath.Dir(plugin), []byte("not a directory"), 0o644))
+			},
+			// stat through a file component reports "path not found" on
+			// Windows, which is ErrNotExist, so this setup reads as missing there
+			skipOn:  "windows",
+			skipWhy: "a file in place of a directory is not-exist on Windows, not ENOTDIR",
+		},
+		{
+			name: "directory where the plugin file should be",
+			block: func(t *testing.T, plugin string) {
+				require.NoError(t, os.MkdirAll(plugin, 0o755))
+			},
+			wantInErr: "is a directory",
+		},
 	}
-	xdg := t.TempDir()
-	setHome(t, t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", xdg)
-	pluginsDir := filepath.Dir(pluginUnder(xdg))
-	require.NoError(t, os.MkdirAll(filepath.Dir(pluginsDir), 0o755))
-	require.NoError(t, os.WriteFile(pluginsDir, []byte("not a directory"), 0o644))
 
-	res, err := handleDiagnose(adapterprotocol.DiagnoseParams{RepoRoot: t.TempDir(), Scope: "project"})
-	require.NoError(t, err)
-	issue := bridgeIssue(t, res.Issues)
-	require.NotNil(t, issue, "an unreadable plugin path must not read as healthy, got %+v", res.Issues)
-	assert.Equal(t, "amp:bridge-plugin-unreadable", issue.Slug)
-	assert.Contains(t, issue.Detail, pluginUnder(xdg), "the detail must name the path that could not be checked")
-	assert.False(t, issue.FixSafe, "install-hooks fails on the same path, so there is no automatic repair")
-	assert.Empty(t, issue.FixArgv)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if runtime.GOOS == tt.skipOn {
+				t.Skip(tt.skipWhy)
+			}
+			xdg, repo := t.TempDir(), t.TempDir()
+			setHome(t, t.TempDir())
+			t.Setenv("XDG_CONFIG_HOME", xdg)
+			tt.block(t, pluginUnder(xdg))
+
+			res, err := handleDiagnose(adapterprotocol.DiagnoseParams{RepoRoot: repo, Scope: "project"})
+			require.NoError(t, err)
+			issue := bridgeIssue(t, res.Issues)
+			require.NotNil(t, issue, "an unusable plugin path must not read as healthy, got %+v", res.Issues)
+			assert.Equal(t, "amp:bridge-plugin-unreadable", issue.Slug)
+			assert.Contains(t, issue.Detail, pluginUnder(xdg), "the detail must name the path")
+			if tt.wantInErr != "" {
+				assert.Contains(t, issue.Detail, tt.wantInErr)
+			}
+
+			// the premise for offering no fix: install fails on this path too
+			_, installErr := handleInstallHooks(adapterprotocol.HookParams{RepoRoot: repo, Scope: "project"})
+			require.Error(t, installErr, "install-hooks repaired this path; diagnose could offer it as a fix")
+			assert.False(t, issue.FixSafe, "install-hooks fails on this path, so it is not a safe fix")
+			assert.Empty(t, issue.FixArgv)
+		})
+	}
 }
