@@ -381,3 +381,39 @@ func TestDispatch_FindSession_ByThreadURL(t *testing.T) {
 	require.NoError(t, json.Unmarshal(out.Bytes(), &got), out.String())
 	assert.Equal(t, want, got.SessionFile)
 }
+
+// TestFindAmpSession_ExplicitThreadMissIsNotFound: a lookup that names a
+// thread must find that thread's sidecar or nothing. Failure prevented:
+// session stop (or import) for thread A, whose sidecar is missing, silently
+// picks the newest sidecar on the machine, thread B, and uploads B's
+// conversation under A's recording.
+func TestFindAmpSession_ExplicitThreadMissIsNotFound(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	line := []byte(`{"type":"user","timestamp":"2026-10-14T10:00:00Z","content":"another thread"}` + "\n")
+	other := filepath.Join(home, ".cache", "amp", "ox-sessions", "T-other.jsonl")
+	legacy := filepath.Join(home, ".amp", "sessions", "legacy.jsonl")
+	for _, p := range []string{other, legacy} {
+		require.NoError(t, os.MkdirAll(filepath.Dir(p), 0o755))
+		require.NoError(t, os.WriteFile(p, line, 0o644))
+	}
+
+	for _, id := range []string{"T-missing", "https://ampcode.com/threads/T-missing"} {
+		t.Run(id, func(t *testing.T) {
+			got, err := findAmpSession("", "", "", id)
+			require.Error(t, err, "a named thread with no sidecar must not resolve to another thread's")
+			assert.Empty(t, got)
+		})
+	}
+
+	t.Run("no id still finds the newest sidecar", func(t *testing.T) {
+		got, err := findAmpSession("", "", "", "")
+		require.NoError(t, err)
+		assert.Equal(t, other, got)
+	})
+
+	t.Run("import by a missing id fails", func(t *testing.T) {
+		_, err := handleImportSession(adapterprotocol.ImportSessionParams{SessionID: "T-missing"})
+		require.Error(t, err)
+	})
+}

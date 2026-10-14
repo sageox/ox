@@ -227,6 +227,10 @@ func findAmpSession(_, agentID, since, agentSessionID string) (string, error) {
 				return direct, nil
 			}
 		}
+		// A named thread resolves to its own sidecar or to nothing. The
+		// newest-file search below would hand back another thread's
+		// conversation, which session stop would then upload under this one.
+		return "", fmt.Errorf("no sidecar for thread %s in %s", threadID, strings.Join(dirs, ", "))
 	}
 
 	sinceTime := time.Time{}
