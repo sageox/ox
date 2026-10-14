@@ -144,6 +144,31 @@ func TestWrite_OmitsEmptyLedger(t *testing.T) {
 	assert.NotContains(t, onDisk, "last_nagged_at")
 }
 
+// With no override, Read, Write, and Reset must agree on one file: the
+// version-check.json in the SageOx cache directory that the daemon writes too.
+// Failure prevented: the default location drifting, or one operation using a
+// different file, while every override-based test above still passes.
+func TestDefaultCacheFile_SharedUnderCacheDir(t *testing.T) {
+	old := Path
+	Path = ""
+	t.Cleanup(func() { Path = old })
+	t.Setenv("OX_XDG_DISABLE", "")
+	require.NoError(t, os.Unsetenv("OX_XDG_DISABLE")) // legacy mode ignores XDG_CACHE_HOME
+	cache := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cache)
+	want := filepath.Join(cache, "sageox", "version-check.json")
+
+	require.NoError(t, Write(&Data{LatestVersion: "v0.16.0"}))
+	require.FileExists(t, want)
+	got := Read()
+	require.NotNil(t, got)
+	assert.Equal(t, "v0.16.0", got.LatestVersion)
+
+	Reset()
+	assert.NoFileExists(t, want)
+	assert.Nil(t, Read())
+}
+
 // A successful `ox upgrade` must forget both ledger fields, so the FIRST notice
 // about the next release line is not swallowed by a stale cap.
 func TestReset_ClearsLedgerSoNextLineSpeaks(t *testing.T) {

@@ -7,27 +7,38 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/sageox/ox/internal/paths"
+	"github.com/sageox/ox/internal/testguard"
+	"github.com/zalando/go-keyring"
 )
 
-// shadowedCLIs are third-party tools ox execs that keep per-user state under the
+// hiddenCLIs are third-party tools ox execs that keep per-user state under the
 // home directory or in the OS keychain. `claude auth status` rewrote the
 // developer's ~/.claude.json, and `gh` wrote ~/.local/state/gh/device-id; worse,
 // a test's outcome depended on whether the developer happened to be logged in.
-// Each is shadowed by a stub that fails the way an installed-but-logged-out CLI
-// does. A test that needs one prepends its own fake to PATH, which still wins.
-var shadowedCLIs = []string{"claude", "codex", "gemini", "gh"}
+// Tests see none of them installed, as on CI. A test that needs one prepends its
+// own fake to PATH.
+//
+// Hidden, not stubbed: a stub that fails reads as installed-but-logged-out, a
+// third state that doctor reports as a warning and that neither CI nor most
+// developers have.
+var hiddenCLIs = []string{"claude", "codex", "gemini", "gh"}
+
+// credentialsFileEnv makes ox store git credentials in a file instead of the OS
+// keychain.
+const credentialsFileEnv = "OX_GIT_CREDENTIALS_FILE"
 
 // developerEnv records each variable isolateHome changed, as the test binary
 // started with it, so useDeveloperHome can put it back.
 var developerEnv = map[string]*string{}
 
-// isolateHome points every home-derived location at <sandbox>/home and puts
-// stubs for shadowedCLIs at the front of PATH, then refuses to run if any of it
-// did not take.
+// isolateHome points every home-derived location at <sandbox>/home and removes
+// hiddenCLIs from PATH, then refuses to run if any of it did not take.
 //
 // `go test ./cmd/ox/` used to write into the developer's real home: it replaced
 // ~/.local/share/sageox/cli/known-repos.json, left session caches and an auth
@@ -45,8 +56,8 @@ func isolateHome(sandbox string) error {
 	}
 
 	home := filepath.Join(sandbox, "home")
-	bin := filepath.Join(sandbox, "bin")
-	for _, dir := range []string{home, bin} {
+	mirrors := filepath.Join(sandbox, "path")
+	for _, dir := range []string{home, mirrors} {
 		if err := os.Mkdir(dir, 0o700); err != nil {
 			return err
 		}
@@ -62,17 +73,17 @@ func isolateHome(sandbox string) error {
 		"CLAUDE_CONFIG_DIR", "CODEX_HOME",
 	}
 
-	// The stubs are POSIX shell scripts. Windows would need a .bat port that no
-	// CI job runs, and a shim nobody exercises is how the next fail-open gets
-	// written, so the real CLIs stay reachable there; the home is still isolated.
+	// Hiding relies on symlinks, which need a privilege on Windows, and
+	// hard-linked executables there would load DLLs from the mirror. No CI job
+	// runs this package on Windows, and a port nobody exercises is how the next
+	// fail-open gets written, so the real CLIs stay reachable there; the home is
+	// still isolated.
 	if runtime.GOOS != "windows" {
-		for _, name := range shadowedCLIs {
-			stub := fmt.Sprintf("#!/bin/sh\necho '%s is shadowed in cmd/ox tests; put a fake first on PATH' >&2\nexit 127\n", name)
-			if err := os.WriteFile(filepath.Join(bin, name), []byte(stub), 0o755); err != nil {
-				return err
-			}
+		path, err := hideCLIs(os.Getenv("PATH"), mirrors)
+		if err != nil {
+			return fmt.Errorf("hide %s from PATH: %w", strings.Join(hiddenCLIs, ", "), err)
 		}
-		setenv["PATH"] = bin + string(os.PathListSeparator) + os.Getenv("PATH")
+		setenv["PATH"] = path
 	}
 
 	for key, value := range setenv {
@@ -88,6 +99,19 @@ func isolateHome(sandbox string) error {
 		}
 	}
 
+	// ox keeps git credentials in the OS keychain unless OX_GIT_CREDENTIALS_FILE
+	// is set, and the keychain does not live under HOME: tests that reached it
+	// wrote sageox-git items into the developer's real macOS login keychain, and
+	// with HOME sandboxed they raise a blocking "Keychain Not Found" dialog
+	// instead. Point the file store at the path ox would use anyway, so only the
+	// backend changes; testguard hands the variable to every ox subprocess.
+	// MockInit covers in-process tests that clear the variable.
+	recordDeveloperEnv(credentialsFileEnv)
+	if err := os.Setenv(credentialsFileEnv, paths.GitCredentialsFile()); err != nil {
+		return err
+	}
+	keyring.MockInit()
+
 	// Without the developer's ~/.gitconfig, git has no identity to commit with.
 	// CI sets one globally, which the sandbox now hides too. A fixed identity
 	// also keeps settings such as commit.gpgsign out of the tests.
@@ -96,7 +120,52 @@ func isolateHome(sandbox string) error {
 		return err
 	}
 
-	return verifyHomeSandbox(home, bin)
+	return verifyHomeSandbox(home)
+}
+
+// hideCLIs returns pathList with each directory that holds one of hiddenCLIs
+// replaced by a mirror under mirrors: a directory of symlinks to everything else
+// in it. git, go, and every other tool in that directory stay reachable.
+func hideCLIs(pathList, mirrors string) (string, error) {
+	dirs := filepath.SplitList(pathList)
+	mirrored := map[string]string{} // a directory can appear on PATH more than once
+	for i, dir := range dirs {
+		if mirror, ok := mirrored[dir]; ok {
+			dirs[i] = mirror
+			continue
+		}
+		if dir == "" || !holdsHiddenCLI(dir) {
+			continue
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return "", err
+		}
+		mirror := filepath.Join(mirrors, strconv.Itoa(len(mirrored)))
+		if err := os.Mkdir(mirror, 0o700); err != nil {
+			return "", err
+		}
+		for _, entry := range entries {
+			if slices.Contains(hiddenCLIs, entry.Name()) {
+				continue
+			}
+			if err := os.Symlink(filepath.Join(dir, entry.Name()), filepath.Join(mirror, entry.Name())); err != nil {
+				return "", err
+			}
+		}
+		mirrored[dir] = mirror
+		dirs[i] = mirror
+	}
+	return strings.Join(dirs, string(os.PathListSeparator)), nil
+}
+
+func holdsHiddenCLI(dir string) bool {
+	for _, name := range hiddenCLIs {
+		if info, err := os.Stat(filepath.Join(dir, name)); err == nil && !info.IsDir() {
+			return true
+		}
+	}
+	return false
 }
 
 func recordDeveloperEnv(key string) {
@@ -110,7 +179,7 @@ func recordDeveloperEnv(key string) {
 // verifyHomeSandbox checks the redirect from the outside, the way the code under
 // test will see it. Calling into internal/paths here also pins its cached home
 // directory to the sandbox for the rest of the run.
-func verifyHomeSandbox(home, bin string) error {
+func verifyHomeSandbox(home string) error {
 	inside := func(path string) bool { return strings.HasPrefix(path, home+string(filepath.Separator)) }
 
 	if got, err := os.UserHomeDir(); err != nil || got != home {
@@ -128,11 +197,17 @@ func verifyHomeSandbox(home, bin string) error {
 				"Resolve that path when it is used instead", name, dir, home)
 		}
 	}
+	// The ox binaries tests start get their environment from testguard, not from
+	// this process, so check the keychain switch survives that hop.
+	want := credentialsFileEnv + "=" + os.Getenv(credentialsFileEnv)
+	if !inside(os.Getenv(credentialsFileEnv)) || !slices.Contains(testguard.MinimalEnv(nil), want) {
+		return fmt.Errorf("ox subprocesses would not get %s; they would store git credentials in the "+
+			"developer's OS keychain", want)
+	}
 	if runtime.GOOS != "windows" {
-		for _, name := range shadowedCLIs {
-			got, err := exec.LookPath(name)
-			if err != nil || filepath.Dir(got) != bin {
-				return fmt.Errorf("%s resolves to %q (err=%v), not the stub in %s", name, got, err, bin)
+		for _, name := range hiddenCLIs {
+			if got, err := exec.LookPath(name); !errors.Is(err, exec.ErrNotFound) {
+				return fmt.Errorf("%s is still on PATH at %q (err=%v)", name, got, err)
 			}
 		}
 	}
