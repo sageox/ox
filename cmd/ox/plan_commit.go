@@ -88,8 +88,9 @@ func commitPlanToLedger(gitRoot, planDir string) error {
 		return err
 	}
 	ctx := context.Background()
+	started := time.Now()
 	_, err = commitAndPushPlanDir(ctx, ledgerPath, planDir)
-	recordPlanPushOutcome(ctx, ledgerPath, planDir, err)
+	recordPlanPushOutcome(ctx, ledgerPath, planDir, started, err)
 	return err
 }
 

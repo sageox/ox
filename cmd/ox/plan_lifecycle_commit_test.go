@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sageox/ox/internal/plan"
 )
@@ -198,7 +199,7 @@ func TestPlanLifecycle_ReapproveCommitsAnEarlierApprovalLeftUncommitted(t *testi
 	if _, err := plan.AppendPlanEvent(context.Background(), f.planDir, plan.EventApproved, plan.PlanEventFields{}); err != nil {
 		t.Fatal(err)
 	}
-	recordPlanPushOutcome(context.Background(), f.ledger, f.planDir, errors.New("commit failed"), planEventFiles...)
+	recordPlanPushOutcome(context.Background(), f.ledger, f.planDir, time.Now(), errors.New("commit failed"), planEventFiles...)
 
 	code, body := reviewPOSTBody(t, f.srv.URL+"/approve", "secret", "{}")
 	if r := decodeReviewResp(t, body); code != http.StatusOK || !r.Pushed {

@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
@@ -125,6 +126,7 @@ func sharePlanDir(gitRoot, planDir string) planShareStatus {
 	// commitPlanLocal checks the Ledger under the repo lock: checked before it,
 	// a sync in progress (its index.lock or rebase) failed the save instead of
 	// being waited out
+	started := time.Now()
 	if err := commitPlanLocal(f.LedgerPath, planDir, ""); err != nil {
 		f.CommitErr = err
 	} else if err := pushLedger(context.Background(), f.LedgerPath); err != nil {
@@ -132,7 +134,7 @@ func sharePlanDir(gitRoot, planDir string) planShareStatus {
 	}
 	// the save's files are already written: a failed attempt leaves a marker
 	// for `ox agent prime` to retry
-	recordPlanPushOutcome(context.Background(), f.LedgerPath, planDir, cmp.Or(f.CommitErr, f.PushErr))
+	recordPlanPushOutcome(context.Background(), f.LedgerPath, planDir, started, cmp.Or(f.CommitErr, f.PushErr))
 	f.Dirty = planDirDirty(f.LedgerPath, planDir)
 	f.Ahead, f.Behind, f.UpstreamKnown = gitAheadBehind(f.LedgerPath)
 	return classifyPlanShare(f)
@@ -156,6 +158,7 @@ func sharePlanEvent(ctx context.Context, gitRoot, planDir string, kind plan.Even
 		return changed, classifyPlanShare(f), err
 	}
 	f.LedgerPath = ledgerPath
+	started := time.Now()
 	changed, err := commitPlanEvent(ctx, ledgerPath, planDir, kind, fields)
 	switch {
 	case errors.Is(err, errEventNotCommitted):
@@ -167,7 +170,7 @@ func sharePlanEvent(ctx context.Context, gitRoot, planDir string, kind plan.Even
 		// coworker retries an event an earlier run could not share
 		f.PushErr = pushLedger(ctx, ledgerPath)
 	}
-	recordPlanPushOutcome(ctx, ledgerPath, planDir, cmp.Or(f.CommitErr, f.PushErr), planEventFiles...)
+	recordPlanPushOutcome(ctx, ledgerPath, planDir, started, cmp.Or(f.CommitErr, f.PushErr), planEventFiles...)
 	if !changed {
 		return false, planShareStatus{}, nil
 	}

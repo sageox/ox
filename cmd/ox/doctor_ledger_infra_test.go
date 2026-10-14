@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/daemon"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -66,19 +68,44 @@ func TestCheckLedgerSparseCheckout_MissingDataPlans(t *testing.T) {
 	assert.Contains(t, result.detail, "data/plans", "detail should name the missing dir and its impact")
 }
 
-// TestCheckLedgerSparseCheckout_FixRepairsTheCone drives `ox doctor --fix`.
-// Failure prevented: the fix reports the cone repaired while it still lacks
-// data/plans, or fails to take the repo lock it now runs under.
+// TestCheckLedgerSparseCheckout_FixRepairsTheCone drives `ox doctor --fix`
+// while another ox process holds the Ledger. Failure prevented: the repair
+// rewrites the index under that process's commit (failing it on index.lock),
+// or reports the cone repaired while it still lacks data/plans.
 func TestCheckLedgerSparseCheckout_FixRepairsTheCone(t *testing.T) {
 	t.Parallel()
 
 	ledgerDir := initBareGitRepo(t)
-	writeSparseCheckout(t, ledgerDir, "/*\n!/*/\n/.sageox/\n/.sync/\n/sessions/\n")
+	stale := "/*\n!/*/\n/.sageox/\n/.sync/\n/sessions/\n"
+	writeSparseCheckout(t, ledgerDir, stale)
+	sparseFile := filepath.Join(ledgerDir, ".git", "info", "sparse-checkout")
 
-	result := checkLedgerSparseCheckoutAtPath(ledgerDir, true)
+	held, release, lockDone := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	go func() {
+		lockDone <- gitutil.WithRepoLock(context.Background(), ledgerDir, func() error {
+			close(held)
+			<-release
+			return nil
+		})
+	}()
+	<-held
+	fixed := make(chan checkResult, 1)
+	go func() { fixed <- checkLedgerSparseCheckoutAtPath(ledgerDir, true) }()
+	select {
+	case r := <-fixed:
+		close(release)
+		t.Fatalf("the repair ran while a peer held the repo lock: %+v", r)
+	case <-time.After(500 * time.Millisecond):
+	}
+	got, err := os.ReadFile(sparseFile)
+	close(release)
+	require.NoError(t, err)
+	assert.Equal(t, stale, string(got), "the repair rewrote the cone while a peer held the repo lock")
+	require.NoError(t, <-lockDone)
 
+	result := <-fixed
 	require.True(t, result.passed, result.detail)
-	content, err := os.ReadFile(filepath.Join(ledgerDir, ".git", "info", "sparse-checkout"))
+	content, err := os.ReadFile(sparseFile)
 	require.NoError(t, err)
 	assert.Empty(t, missingSparseConeDirs(string(content)), "the repaired cone must carry every required dir")
 }

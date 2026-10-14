@@ -245,9 +245,11 @@ func planPushMarkerPath(ledgerPath, rel string) string {
 
 // recordPlanPushOutcome writes (or clears) the pending marker for planDir
 // after a commit+push attempt of the whole dir or, given files, of those
-// alone. Marker I/O failures are logged, never returned: the caller already
-// has the real outcome to report.
-func recordPlanPushOutcome(ctx context.Context, ledgerPath, planDir string, pushErr error, files ...string) {
+// alone. started is when the attempt began: a success clears only a failure
+// recorded before it, since the attempt's commit staged those files as they
+// were on disk. Marker I/O failures are logged, never returned: the caller
+// already has the real outcome to report.
+func recordPlanPushOutcome(ctx context.Context, ledgerPath, planDir string, started time.Time, pushErr error, files ...string) {
 	rel, err := ledgerRelPath(ledgerPath, planDir)
 	if err != nil {
 		return // not a Ledger plan dir — nothing a retry could push
@@ -259,7 +261,7 @@ func recordPlanPushOutcome(ctx context.Context, ledgerPath, planDir string, push
 	// closed the page): the marker is the retry for work already written. Its
 	// own acquire timeout still bounds the wait.
 	if lerr := fileutil.WithFileLock(context.WithoutCancel(ctx), path, func() error {
-		updatePlanPushMarker(ctx, path, rel, pushErr, files)
+		updatePlanPushMarker(ctx, path, rel, started, pushErr, files)
 		return nil
 	}); lerr != nil {
 		slog.WarnContext(ctx, "plan push marker not updated: lock unavailable", "plan_dir", rel, "error", lerr)
@@ -268,14 +270,15 @@ func recordPlanPushOutcome(ctx context.Context, ledgerPath, planDir string, push
 
 // updatePlanPushMarker is recordPlanPushOutcome's read-merge-write; the caller
 // holds the marker's lock.
-func updatePlanPushMarker(ctx context.Context, path, rel string, pushErr error, files []string) {
+func updatePlanPushMarker(ctx context.Context, path, rel string, started time.Time, pushErr error, files []string) {
 	var prev planPushPending
 	b, rerr := os.ReadFile(path)
 	hasPrev := rerr == nil && json.Unmarshal(b, &prev) == nil
 
 	if pushErr == nil {
-		// pushing some files does not settle a marker owed for the whole dir
-		if hasPrev && len(prev.Files) == 0 && len(files) > 0 {
+		// pushing some files does not settle a marker owed for the whole dir,
+		// and an attempt does not settle a failure recorded after it began
+		if hasPrev && (len(prev.Files) == 0 && len(files) > 0 || !prev.LastFailedAt.Before(started)) {
 			return
 		}
 		if rmErr := os.Remove(path); rmErr == nil {
@@ -379,8 +382,9 @@ func flushPendingPlanPushes(ctx context.Context, ledgerPath string) (succeeded, 
 			slog.WarnContext(ctx, "plan push retry dropped: plan dir no longer exists", "plan_dir", m.PlanDir)
 			continue
 		}
+		attempt := time.Now()
 		_, pushErr := commitAndPushPlanDir(ctx, ledgerPath, planDir, m.Files...)
-		recordPlanPushOutcome(ctx, ledgerPath, planDir, pushErr, m.Files...)
+		recordPlanPushOutcome(ctx, ledgerPath, planDir, attempt, pushErr, m.Files...)
 		if pushErr != nil {
 			failed++
 			slog.WarnContext(ctx, "plan push retry failed", "plan_dir", m.PlanDir, "error", pushErr)

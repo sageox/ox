@@ -651,6 +651,7 @@ func reviewWriteErrorCode(err error) int {
 // 200. With no Ledger checkout the event is recorded and reported not
 // committed, as before: nothing pulls or pushes that dir.
 func approvePlanForReview(ctx context.Context, gitRoot, planDir string, fields plan.PlanEventFields) (bool, planCommitStatus, error) {
+	started := time.Now()
 	ledgerPath, err := planLedgerPathFor(gitRoot)
 	if err == nil && !gitutil.IsGitRepo(ledgerPath) {
 		err = fmt.Errorf("ledger %s is not a git checkout", ledgerPath)
@@ -661,7 +662,7 @@ func approvePlanForReview(ctx context.Context, gitRoot, planDir string, fields p
 	}
 	changed, err := commitPlanEvent(ctx, ledgerPath, planDir, plan.EventApproved, fields)
 	if errors.Is(err, errEventNotCommitted) {
-		recordPlanPushOutcome(ctx, ledgerPath, planDir, err, planEventFiles...)
+		recordPlanPushOutcome(ctx, ledgerPath, planDir, started, err, planEventFiles...)
 		return changed, planCommitStatus{Err: gitutil.SanitizeOutput(err.Error())}, nil
 	}
 	if err != nil {
@@ -671,7 +672,7 @@ func approvePlanForReview(ctx context.Context, gitRoot, planDir string, fields p
 	// still waiting on a failed push
 	st := planCommitStatus{Committed: true}
 	perr := pushLedger(ctx, ledgerPath)
-	recordPlanPushOutcome(ctx, ledgerPath, planDir, perr, planEventFiles...)
+	recordPlanPushOutcome(ctx, ledgerPath, planDir, started, perr, planEventFiles...)
 	if perr != nil {
 		st.Err = gitutil.SanitizeOutput(perr.Error())
 		return changed, st, nil

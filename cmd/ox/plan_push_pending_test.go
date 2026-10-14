@@ -50,7 +50,7 @@ func TestRecordPlanPushOutcome_WaitsForTheMarkerLock(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	go func() {
-		recordPlanPushOutcome(ctx, ledger, planDir, errors.New("push canceled"), planEventFiles...)
+		recordPlanPushOutcome(ctx, ledger, planDir, time.Now(), errors.New("push canceled"), planEventFiles...)
 		close(done)
 	}()
 	select {
@@ -86,13 +86,36 @@ func TestRecordPlanPushOutcome_MergesWhatEachAttemptOwes(t *testing.T) {
 			if err := os.MkdirAll(planDir, 0o755); err != nil {
 				t.Fatal(err)
 			}
-			recordPlanPushOutcome(ctx, ledger, planDir, errors.New("offline"), tc.first...)
-			recordPlanPushOutcome(ctx, ledger, planDir, errors.New("offline"), tc.second...)
+			recordPlanPushOutcome(ctx, ledger, planDir, time.Now(), errors.New("offline"), tc.first...)
+			recordPlanPushOutcome(ctx, ledger, planDir, time.Now(), errors.New("offline"), tc.second...)
 			markers, err := listPlanPushPending(ledger)
 			if err != nil || len(markers) != 1 || !slices.Equal(markers[0].Files, tc.want) {
 				t.Fatalf("want one marker owing %v, got %+v (err %v)", tc.want, markers, err)
 			}
 		})
+	}
+}
+
+// TestRecordPlanPushOutcome_KeepsAFailureRecordedAfterTheAttemptStarted: one
+// action's push succeeds while another's commit fails and records its marker.
+// Failure prevented: the earlier attempt's success clears the later failure's
+// marker, and nothing retries that event.
+func TestRecordPlanPushOutcome_KeepsAFailureRecordedAfterTheAttemptStarted(t *testing.T) {
+	ctx := context.Background()
+	ledger := t.TempDir()
+	planDir := filepath.Join(ledger, "data", "plans", "p")
+	if err := os.MkdirAll(planDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	recordPlanPushOutcome(ctx, ledger, planDir, time.Now(), errors.New("commit failed"), planEventFiles...)
+	recordPlanPushOutcome(ctx, ledger, planDir, started, nil, planEventFiles...)
+	if markers, err := listPlanPushPending(ledger); err != nil || len(markers) != 1 {
+		t.Fatalf("the later failure must keep its marker, got %+v (err %v)", markers, err)
+	}
+	recordPlanPushOutcome(ctx, ledger, planDir, time.Now(), nil, planEventFiles...)
+	if markers, err := listPlanPushPending(ledger); err != nil || len(markers) != 0 {
+		t.Fatalf("an attempt that began after the failure clears it, got %+v (err %v)", markers, err)
 	}
 }
 
@@ -108,12 +131,12 @@ func TestRecordPlanPushOutcome_RepeatedFailureThenSuccess(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	recordPlanPushOutcome(ctx, ledger, planDir, errors.New("remote unreachable"))
+	recordPlanPushOutcome(ctx, ledger, planDir, time.Now(), errors.New("remote unreachable"))
 	first, err := listPlanPushPending(ledger)
 	if err != nil || len(first) != 1 {
 		t.Fatalf("want one marker, got %+v err=%v", first, err)
 	}
-	recordPlanPushOutcome(ctx, ledger, planDir, errors.New("still unreachable"))
+	recordPlanPushOutcome(ctx, ledger, planDir, time.Now(), errors.New("still unreachable"))
 	second, err := listPlanPushPending(ledger)
 	if err != nil || len(second) != 1 {
 		t.Fatalf("want one marker after second failure, got %d (err %v)", len(second), err)
@@ -126,12 +149,12 @@ func TestRecordPlanPushOutcome_RepeatedFailureThenSuccess(t *testing.T) {
 		t.Fatalf("first_failed_at moved: %v -> %v", first[0].FirstFailedAt, got.FirstFailedAt)
 	}
 
-	recordPlanPushOutcome(ctx, ledger, planDir, nil)
+	recordPlanPushOutcome(ctx, ledger, planDir, time.Now(), nil)
 	if left, err := listPlanPushPending(ledger); err != nil || len(left) != 0 {
 		t.Fatalf("success must clear the marker, %d left (err %v)", len(left), err)
 	}
 	// clearing when nothing is pending is a no-op, not an error
-	recordPlanPushOutcome(ctx, ledger, planDir, nil)
+	recordPlanPushOutcome(ctx, ledger, planDir, time.Now(), nil)
 }
 
 func TestRecordPlanPushOutcome_IgnoresNonLedgerAndUnwritableMarkerDir(t *testing.T) {
@@ -139,7 +162,7 @@ func TestRecordPlanPushOutcome_IgnoresNonLedgerAndUnwritableMarkerDir(t *testing
 
 	// a plan dir outside the Ledger has nothing a retry could push
 	ledger := t.TempDir()
-	recordPlanPushOutcome(ctx, ledger, t.TempDir(), errors.New("boom"))
+	recordPlanPushOutcome(ctx, ledger, t.TempDir(), time.Now(), errors.New("boom"))
 	if _, err := os.Stat(filepath.Join(ledger, filepath.FromSlash(planPushPendingDir))); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("no marker dir expected for a non-ledger plan, stat err=%v", err)
 	}
@@ -157,7 +180,7 @@ func TestRecordPlanPushOutcome_IgnoresNonLedgerAndUnwritableMarkerDir(t *testing
 	if err := os.MkdirAll(blockedPlan, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	recordPlanPushOutcome(ctx, blocked, blockedPlan, errors.New("boom"))
+	recordPlanPushOutcome(ctx, blocked, blockedPlan, time.Now(), errors.New("boom"))
 	if _, err := listPlanPushPending(blocked); err == nil {
 		t.Fatal("listing a marker dir that is a file must error")
 	}
