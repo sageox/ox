@@ -144,6 +144,54 @@ func TestCommitTrailer_FallsBackToNameURLForLegacyRecording(t *testing.T) {
 	assert.NotContains(t, msg, "/c/", "no /c/ URL may be invented without a start-minted ID")
 }
 
+// TestCommitTrailer_HeldSessionGetsNoTrailer covers a recording held on this
+// machine: session_publishing is manual now, or was when the recording started.
+// The server never registered it, so a SageOx-Session trailer would put a /c/
+// link into git history that 404s for good, pushed with the commit.
+//
+// Failure prevented: every commit made during a held session carries a dead
+// link. Red-first: drop the held check in runHooksCommitMsg and both held cases
+// get the trailer.
+func TestCommitTrailer_HeldSessionGetsNoTrailer(t *testing.T) {
+	tests := []struct {
+		name        string
+		modeAtStart string // the mode the recording saved
+		modeNow     string
+		wantTrailer bool
+	}{
+		{"setting now manual", config.SessionPublishingAuto, config.SessionPublishingManual, false},
+		{"started manual, setting now auto", config.SessionPublishingManual, config.SessionPublishingAuto, false},
+		// Negative control: without it, a hook that never adds the trailer
+		// passes both held cases.
+		{"auto throughout", config.SessionPublishingAuto, config.SessionPublishingAuto, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			projectRoot, sessionName, _ := trailerRewriteEnv(t)
+			const sesID = "ses_01890a5d-ac96-774b-bcce-b302099a8058"
+			statePath := filepath.Join(projectRoot, "sessions", sessionName, ".recording.json")
+			raw, err := os.ReadFile(statePath)
+			require.NoError(t, err)
+			var state session.RecordingState
+			require.NoError(t, json.Unmarshal(raw, &state))
+			state.SessionID = sesID
+			state.PublishingMode = tc.modeAtStart
+			updated, err := json.Marshal(state)
+			require.NoError(t, err)
+			require.NoError(t, os.WriteFile(statePath, updated, 0o644))
+			t.Setenv(config.EnvSessionPublishing, tc.modeNow)
+
+			msg := runCommitMsgHookOn(t, "feat: add thing")
+
+			if !tc.wantTrailer {
+				assert.NotContains(t, msg, "SageOx-Session:", "a session held on this machine must not be linked from git history")
+				return
+			}
+			assert.Contains(t, msg, "SageOx-Session: https://sageox.ai/c/"+sesID)
+		})
+	}
+}
+
 // --- C. Prime emits the exact-literal PR directive ---
 
 // TestOutputAgentPrimeXML_PRDirective verifies the session-context block

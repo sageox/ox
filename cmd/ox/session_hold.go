@@ -23,8 +23,9 @@ const heldSessionGuidance = "Session held on this machine (session_publishing: m
 // stopHoldsSession reports whether a stopping session is held on this machine.
 // It fails closed: the mode resolved now (contract D13: env > user > project >
 // team) or the mode recorded when the recording started makes it held. The
-// session-link surfaces (sessionLinkOutputs, autoSessionURL) apply the same
-// rule: a held session is never registered, so its /c/ link would 404.
+// session-link surfaces (sessionLinkOutputs, autoSessionURL, the commit-msg
+// trailer) apply the same rule: a held session is never registered, so its /c/
+// link would 404.
 func stopHoldsSession(projectRoot string, state *session.RecordingState) bool {
 	return config.GetSessionPublishing(projectRoot) == config.SessionPublishingManual ||
 		state.RecordedManualPublishing()
