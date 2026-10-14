@@ -466,10 +466,10 @@ func TestRunInit_SessionImportDiscovery(t *testing.T) {
 				return
 			}
 			require.Equal(t, 1, strings.Count(output, "ox session import"))
-			assert.Contains(t, output, "After setup and sync:")
-			assert.Contains(t, output, "nothing uploads until you confirm")
-			assert.Less(t, strings.Index(output, "initialized successfully"), strings.Index(output, "ox session import"))
-			assert.Less(t, strings.Index(output, "ox session import"), strings.Index(strings.ToLower(output), "next steps"))
+			assert.Contains(t, output, "6. Bring past Claude and Codex sessions into your team's Ledger: ox session import")
+			assert.NotContains(t, output, "Optional:")
+			assert.Less(t, strings.Index(strings.ToLower(output), "next steps"), strings.Index(output, "ox session import"))
+			assert.Less(t, strings.Index(output, "Start Claude Code"), strings.Index(output, "ox session import"))
 			assert.Contains(t, output, "ox sync")
 			assert.Contains(t, output, "ox doctor")
 			for _, path := range env.Requested() {
@@ -525,7 +525,7 @@ func TestRunInit_RegistrationConfirmationGatesSessionImport(t *testing.T) {
 				assert.Contains(t, output, "API registration skipped")
 			}
 			if tc.wantHint {
-				assert.Contains(t, output, "ox session import", "a confirmed binding should advertise optional import")
+				assert.Contains(t, output, "ox session import", "a confirmed binding should advertise session import")
 			} else {
 				assert.NotContains(t, output, "ox session import", "old IDs do not establish fresh team confirmation")
 			}

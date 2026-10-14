@@ -30,7 +30,7 @@ Verify with `ox doctor` and `ox status`.
 
 ## Bring past sessions into your Ledger
 
-Optional: after setup and sync, run this from the repo you connected:
+After setup and sync, run this from the repo you connected:
 
 ```bash
 ox session import

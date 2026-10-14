@@ -133,7 +133,7 @@ This command will:
 
 Use --team to specify a team by name, slug, or ID, or let ox init prompt you.
 
-After setup and sync, optionally run 'ox session import' to preview and choose
+After setup and sync, run 'ox session import' to preview and choose
 past Claude Code or Codex sessions from this repo for your team's Ledger.
 
 After init, run 'ox guide getting-started' for a five-minute walkthrough,
@@ -1039,12 +1039,6 @@ func runInit() error {
 		fmt.Println(cli.StyleBold.Render("SageOx initialized successfully!"))
 		fmt.Println(ui.MutedStyle.Render(ui.SeparatorHeavy))
 
-		// Old IDs can survive skipped or partial registration and later reinit.
-		// Only fresh team confirmation qualifies for this optional guidance.
-		if resp != nil && resp.TeamID != "" {
-			printInitSessionImportHint(gitRoot, cfg)
-		}
-
 		// next steps - THE primary call to action
 		fmt.Println()
 		fmt.Println(ui.RenderCategory("Next Steps"))
@@ -1091,6 +1085,13 @@ func runInit() error {
 
 		// step N: start Claude Code (ox will auto-prime and surface team context)
 		fmt.Printf("  %d. Start Claude Code in this repo — ox will auto-prime and surface your team context\n", step)
+		step++
+
+		// Old IDs can survive skipped or partial registration and later reinit.
+		// Only fresh team confirmation qualifies for the session-import step.
+		if resp != nil && resp.TeamID != "" {
+			printInitSessionImportStep(gitRoot, cfg, step)
+		}
 
 		// show team context sync status so user knows what's happening in the background
 		if cfg.TeamID != "" {
@@ -1112,20 +1113,16 @@ func runInit() error {
 	return nil
 }
 
-// printInitSessionImportHint is deterministic setup help, independent of tips.
+// printInitSessionImportStep is deterministic setup help, independent of tips.
 // Sync requests do not establish import readiness; the importer owns preflight.
-func printInitSessionImportHint(gitRoot string, projectCfg *config.ProjectConfig) {
+func printInitSessionImportStep(gitRoot string, projectCfg *config.ProjectConfig, step int) {
 	if initQuiet || (cfg != nil && (cfg.JSON || cfg.Quiet)) || projectCfg == nil ||
 		projectCfg.RepoID == "" || projectCfg.TeamID == "" ||
 		!config.ResolveSessionRecording(gitRoot).ShouldRecord() {
 		return
 	}
 
-	fmt.Println()
-	fmt.Println(cli.StyleBold.Render("Optional: Bring past sessions into your team’s Ledger"))
-	fmt.Println("Claude Code and Codex sessions from this repo.")
-	fmt.Println("After setup and sync: " + cli.StyleCommand.Render("ox session import"))
-	fmt.Println("Preview and choose; nothing uploads until you confirm.")
+	fmt.Printf("  %d. Bring past Claude and Codex sessions into your team's Ledger: %s\n", step, cli.StyleCommand.Render("ox session import"))
 }
 
 // fetchGitCredentials fetches git credentials from GET /api/v1/cli/repos (team context repos only).
