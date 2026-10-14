@@ -247,10 +247,16 @@ jobs:
       - name: Prune superseded build caches
         env:
           GH_TOKEN: ${{ github.token }}
+        # A cache listed here can be gone by the time it is deleted (GitHub
+        # evicts caches on its own): gone is the goal, so only another error
+        # fails the step.
         run: |
           gh cache list --repo "$GITHUB_REPOSITORY" --ref refs/heads/main --key "go-${RUNNER_OS}-" \
             --sort created_at --order desc --limit 100 --json id --jq '.[1:][].id' \
-            | xargs -r -n1 gh cache delete --repo "$GITHUB_REPOSITORY"
+            | while read -r id; do
+                out=$(gh cache delete --repo "$GITHUB_REPOSITORY" "$id" 2>&1) && continue
+                case "$out" in *"Could not find a cache"*) ;; *) echo "$out" >&2; exit 1 ;; esac
+              done
 
   # Compiled-binary acceptance journeys through a coverage-instrumented ox.
   acceptance:
