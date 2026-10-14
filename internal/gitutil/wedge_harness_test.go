@@ -89,6 +89,17 @@ func newLedgerFixture(t *testing.T) *ledgerFixture {
 		cloud: filepath.Join(root, "cloud"),
 	}
 	gitInRepo(t, root, "init", "--bare", "--initial-branch=main", f.bare)
+	// Local receive-pack clears inherited Git command configuration. Store
+	// maintenance isolation in the origin before its first push so it cannot
+	// fork a background writer that races temporary-repository cleanup.
+	for key, value := range map[string]string{
+		"gc.auto":          "0",
+		"gc.autoDetach":    "false",
+		"maintenance.auto": "false",
+		"receive.autogc":   "false",
+	} {
+		gitInRepo(t, f.bare, "config", "--local", key, value)
+	}
 	gitInRepo(t, root, "clone", f.bare, f.cloud)
 	f.write(f.cloud, "sessions/s1/meta.json", `{"session_name":"s1","summary_status":""}`)
 	f.git(f.cloud, "add", "-A")
@@ -96,6 +107,25 @@ func newLedgerFixture(t *testing.T) *ledgerFixture {
 	f.git(f.cloud, "push", "origin", "main")
 	gitInRepo(t, root, "clone", f.bare, f.local)
 	return f
+}
+
+// A local push clears inherited command config before invoking receive-pack.
+// Trace the actual receiver so a detached maintenance process cannot silently
+// escape fixture isolation and race t.TempDir cleanup.
+func TestLedgerFixturePushDoesNotSpawnMaintenance(t *testing.T) {
+	f := newLedgerFixture(t)
+	trace := filepath.Join(t.TempDir(), "git.trace")
+	f.write(f.local, "probe.txt", "push without background maintenance")
+	f.commitAll(f.local, "probe")
+	t.Setenv("GIT_TRACE", trace)
+	f.git(f.local, "push", "origin", "main")
+
+	data, err := os.ReadFile(trace)
+	require.NoError(t, err)
+	output := string(data)
+	require.Contains(t, output, "receive-pack", "must trace the actual local receiver")
+	assert.NotContains(t, output, "maintenance run --auto")
+	assert.NotContains(t, output, "gc --auto")
 }
 
 func (f *ledgerFixture) git(dir string, args ...string) string {
