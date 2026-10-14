@@ -20,6 +20,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -182,6 +183,25 @@ func ampSessionsDirs(home string) []string {
 	}
 }
 
+// ampThreadID reduces a native session id to the thread id the ox-bridge
+// sidecar is named by. Amp exports a thread to the agent as AMP_THREAD_URL
+// (https://ampcode.com/threads/T-…), and ox records that URL as the native
+// session id, so it is what comes back for lookup (sageox/ox#1314). A bare
+// thread id passes through; anything else is returned as given, for
+// ValidateSessionID to judge.
+func ampThreadID(id string) string {
+	u, err := url.Parse(strings.TrimSpace(id))
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return id
+	}
+	path := strings.TrimSuffix(u.Path, "/")
+	i := strings.LastIndex(path, "/threads/")
+	if i < 0 {
+		return id
+	}
+	return path[i+len("/threads/"):]
+}
+
 func findAmpSession(_, agentID, since, agentSessionID string) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -192,17 +212,25 @@ func findAmpSession(_, agentID, since, agentSessionID string) (string, error) {
 
 	// direct lookup by session ID
 	if agentSessionID != "" {
-		if err := adapterruntime.ValidateSessionID(agentSessionID); err != nil {
+		threadID := ampThreadID(agentSessionID)
+		if threadID == "" {
+			return "", fmt.Errorf("invalid session ID %q: no thread id", agentSessionID)
+		}
+		if err := adapterruntime.ValidateSessionID(threadID); err != nil {
 			return "", err
 		}
 		// Search every candidate directory by ID — covers users mid-
 		// migration who have files in both locations.
 		for _, d := range dirs {
-			direct := filepath.Join(d, agentSessionID+".jsonl")
+			direct := filepath.Join(d, threadID+".jsonl")
 			if _, err := os.Stat(direct); err == nil {
 				return direct, nil
 			}
 		}
+		// A named thread resolves to its own sidecar or to nothing. The
+		// newest-file search below would hand back another thread's
+		// conversation, which session stop would then upload under this one.
+		return "", fmt.Errorf("no sidecar for thread %s in %s", threadID, strings.Join(dirs, ", "))
 	}
 
 	sinceTime := time.Time{}

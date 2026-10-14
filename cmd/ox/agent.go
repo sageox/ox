@@ -218,6 +218,15 @@ func init() {
 		"skip summary-input optimization; summarizer reads raw.jsonl directly (session stop)")
 	_ = agentCmd.PersistentFlags().MarkHidden("no-optimize")
 
+	// Set by the SessionEnd hook when it runs `session stop` because the
+	// agent ended (session_end_sync.go). The coworker did not opt out of
+	// recording, so a stop that completes clears its explicit-stop signal and
+	// a later prime for this agent records again. The stop does this itself
+	// because it may outlive the hook that started it.
+	agentCmd.PersistentFlags().Bool("agent-ended", false,
+		"the agent ended; do not suppress the next recording (session stop)")
+	_ = agentCmd.PersistentFlags().MarkHidden("agent-ended")
+
 	// initialize prime command flags
 	initAgentPrimeCmd()
 
@@ -566,7 +575,7 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 	// command output. This is opportunistic — the primary channel is
 	// handlePrompt (UserPromptSubmit hook) and the active pull is
 	// `ox agent <id> whisper`.
-	emitWhispers(cmd.OutOrStdout(), agentID)
+	deliverPendingWhispers(cmd, agentID)
 
 	subcommand := args[0]
 
@@ -607,7 +616,7 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 		case "start":
 			return runAgentSessionStart(inst, sessionArgs)
 		case "stop":
-			return runAgentSessionStop(inst)
+			return runAgentSessionStopCommand(cmd, inst)
 		case "remind":
 			return runAgentSessionRemind(inst)
 		case "summarize":
@@ -1164,6 +1173,20 @@ func runAgentWhisper(w io.Writer, inst *agentinstance.Instance) error {
 	formatWhispers(w, entries)
 	traceWhisperDelivery(projectRoot, inst.AgentID, entries)
 	return nil
+}
+
+// emitWhispersFn is emitWhispers, swapped by tests.
+var emitWhispersFn = emitWhispers
+
+// deliverPendingWhispers emits pending whispers on an `ox agent <id> <cmd>`
+// invocation, except a `session stop --agent-ended`: the SessionEnd hook runs
+// that stop with no agent left to read its output (session_end_sync.go), and
+// reading whispers marks them delivered, so they would be lost.
+func deliverPendingWhispers(cmd *cobra.Command, agentID string) {
+	if agentEnded, _ := cmd.Flags().GetBool("agent-ended"); agentEnded {
+		return
+	}
+	emitWhispersFn(cmd.OutOrStdout(), agentID)
 }
 
 // emitWhispers checks daemon for pending whisper entries and writes them to stdout.

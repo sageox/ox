@@ -149,11 +149,17 @@ func runAgentHook(args []string) error {
 }
 
 // localEventPhases supplements the agentx registry with phase mappings for
-// agents whose agentx definition does not implement LifecycleEventMapper yet.
-// Without an entry here such an agent resolves through the "try all maps"
-// fallback in resolvePhase, which works only while every agent spells its
-// events the same way.
+// agents whose agentx definition does not implement LifecycleEventMapper yet,
+// or maps only some of the events ox delivers. Without an entry here such an
+// agent resolves through the "try all maps" fallback in resolvePhase, which
+// works only while every agent spells its events the same way.
 var localEventPhases = map[string]map[agentx.HookEvent]agentx.Phase{
+	// Amp has no session-end event of its own. The ox-bridge plugin sends
+	// SessionEnd once a thread in an orb goes idle (sageox/ox#1314); agentx
+	// maps only Amp's tool events.
+	"amp": {
+		"SessionEnd": agentx.PhaseEnd,
+	},
 	"gemini": {
 		"SessionStart": agentx.PhaseStart,
 		"BeforeAgent":  agentx.PhasePrompt,
@@ -173,32 +179,29 @@ var localEventPhases = map[string]map[agentx.HookEvent]agentx.Phase{
 
 // resolvePhase maps an agent's native event name to a canonical lifecycle phase.
 // Uses agentx registry to discover event mappings from each agent's definition,
-// with local fallbacks for agents not yet in agentx.
+// with local supplements for events agentx does not map.
 // Returns empty string for unknown events.
 func resolvePhase(agentType, eventName string) string {
+	event := agentx.HookEvent(eventName)
 	eventPhases := agentx.BuildEventPhaseMap()
 
-	agentMap, ok := eventPhases[agentType]
-	if !ok {
-		// check local fallback mappings
-		if localMap, ok := localEventPhases[agentType]; ok {
-			if phase, ok := localMap[agentx.HookEvent(eventName)]; ok {
-				return string(phase)
-			}
-		}
-		// unknown agent type — try all maps as fallback
-		for _, m := range eventPhases {
-			if phase, ok := m[agentx.HookEvent(eventName)]; ok {
-				return string(phase)
-			}
-		}
+	agentMap, known := eventPhases[agentType]
+	if phase, ok := agentMap[event]; ok {
+		return string(phase)
+	}
+	if phase, ok := localEventPhases[agentType][event]; ok {
+		return string(phase)
+	}
+	if known {
 		return ""
 	}
-	phase, ok := agentMap[agentx.HookEvent(eventName)]
-	if !ok {
-		return ""
+	// unknown agent type — try all maps as fallback
+	for _, m := range eventPhases {
+		if phase, ok := m[event]; ok {
+			return string(phase)
+		}
 	}
-	return string(phase)
+	return ""
 }
 
 // hookAgentID returns the agent ID for heartbeat purposes.
@@ -395,17 +398,17 @@ func stopSessionForClear(ctx *HookContext, agentID string) {
 // `agent.summarizer` setting: at this point the calling agent process is
 // being torn down, so `inline` (which whispers a prompt back to the agent
 // for it to run the LLM in its warm cache) has no agent left to whisper to.
-// The daemon IPC dispatch below is the only viable path in this window.
+// The daemon IPC dispatch below is the only viable path in this window —
+// unless the daemon will not outlive the agent (an Amp orb, Claude Code
+// Cloud, Devin, or no daemon at all). Then the hook uploads the session
+// itself before returning; see session_end_sync.go.
 //
 // Idempotency: SessionEnd can fire multiple times (window close, debugger
 // reattach, IDE reload). The handler is safe to call repeatedly — the
 // first call sets StoppedAt and clears recording state; subsequent calls
 // see no state and return immediately.
 func handleEnd(ctx *HookContext) error {
-	agentID := ""
-	if ctx.Marker != nil {
-		agentID = ctx.Marker.AgentID
-	}
+	agentID := sessionEndAgentID(ctx)
 	if agentID == "" {
 		slog.Debug("hook: end skipped, no agent ID")
 		return nil
@@ -420,6 +423,27 @@ func handleEnd(ctx *HookContext) error {
 	if state.StoppedAt != nil {
 		slog.Debug("hook: end already finalized", "agent_id", agentID, "stopped_at", *state.StoppedAt)
 		return nil
+	}
+
+	if !daemonOutlivesSession() {
+		err := finishRecordingAtEnd(ctx.ProjectRoot, agentID)
+		switch {
+		case err == nil:
+			slog.Info("hook: uploaded session at agent end", "agent_id", agentID)
+			return nil
+		case errors.Is(err, errSessionHeld):
+			// session_publishing: manual — the stop kept it on this machine
+			slog.Info("hook: held session kept on this machine at agent end", "agent_id", agentID)
+			return nil
+		case errors.Is(err, errSessionUploadFailed):
+			// the stop kept the session and flagged it for `ox doctor`
+			slog.Warn("hook: session upload at agent end failed, kept for ox doctor", "agent_id", agentID, "error", err)
+			return nil
+		case !stopLeftRecordingUntouched(err, ctx.ProjectRoot, agentID):
+			slog.Warn("hook: session stop at agent end did not finish", "agent_id", agentID, "error", err)
+			return nil
+		}
+		slog.Debug("hook: session stop at agent end did not run, handing off to the daemon", "agent_id", agentID, "error", err)
 	}
 
 	// a held stop saves the manual choice with StoppedAt (see stopSessionForClear)
