@@ -63,8 +63,12 @@ func isolateHome(sandbox string) error {
 		}
 	}
 
-	// USERPROFILE is what os.UserHomeDir reads on Windows.
-	setenv := map[string]string{"HOME": home, "USERPROFILE": home}
+	// USERPROFILE is what os.UserHomeDir reads on Windows. An inherited
+	// GIT_CONFIG_GLOBAL would take precedence over the sandbox's ~/.gitconfig.
+	setenv := map[string]string{
+		"HOME": home, "USERPROFILE": home,
+		"GIT_CONFIG_GLOBAL": filepath.Join(home, ".gitconfig"),
+	}
 	// Unset rather than point into the sandbox, so the defaults derived from HOME
 	// are what tests exercise. CLAUDE_CONFIG_DIR and CODEX_HOME relocate those
 	// agents' state, which ox reads and imports.
@@ -184,6 +188,9 @@ func verifyHomeSandbox(home string) error {
 
 	if got, err := os.UserHomeDir(); err != nil || got != home {
 		return fmt.Errorf("os.UserHomeDir() = %q (err=%v), want the home sandbox %s", got, err, home)
+	}
+	if got, want := os.Getenv("GIT_CONFIG_GLOBAL"), filepath.Join(home, ".gitconfig"); got != want {
+		return fmt.Errorf("GIT_CONFIG_GLOBAL = %q, want the sandbox's %s", got, want)
 	}
 	for name, dir := range map[string]string{
 		"paths.ConfigDir()": paths.ConfigDir(),

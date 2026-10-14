@@ -152,8 +152,10 @@ func TestDefaultCacheFile_SharedUnderCacheDir(t *testing.T) {
 	old := Path
 	Path = ""
 	t.Cleanup(func() { Path = old })
+	// t.Setenv registers the restore of any inherited value; the unset puts the
+	// test in XDG mode, since legacy mode ignores XDG_CACHE_HOME.
 	t.Setenv("OX_XDG_DISABLE", "")
-	require.NoError(t, os.Unsetenv("OX_XDG_DISABLE")) // legacy mode ignores XDG_CACHE_HOME
+	require.NoError(t, os.Unsetenv("OX_XDG_DISABLE"))
 	cache := t.TempDir()
 	t.Setenv("XDG_CACHE_HOME", cache)
 	want := filepath.Join(cache, "sageox", "version-check.json")
