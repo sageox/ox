@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -43,7 +44,7 @@ func TestSnapshotPriorRevision_RefusesWhenNoStoreAndPageAwaitsUpload(t *testing.
 	planLFSClientFn = func(string) *lfs.Client { return nil }
 	t.Cleanup(func() { planLFSClientFn = prev })
 
-	err := snapshotPriorRevision(root, planDir)
+	err := snapshotPriorRevision(context.Background(), root, ledger, planDir)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no content store is reachable")
 }

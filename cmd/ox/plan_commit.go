@@ -589,6 +589,14 @@ func commitPlanLocal(ledgerPath, planDir, msgPrefix string) error {
 // commits the exact index entries under the pathspec as an immutable tree,
 // unlike `git commit -- <path>`, which re-reads the worktree at commit time.
 func commitPlanLocalCtx(ctx context.Context, ledgerPath, planDir, msgPrefix string) error {
+	return gitutil.WithRepoLock(ctx, ledgerPath, func() error {
+		return commitPlanDirLocked(ctx, ledgerPath, planDir, msgPrefix)
+	})
+}
+
+// commitPlanDirLocked is commitPlanLocalCtx's commit, for a caller that holds
+// the repo lock.
+func commitPlanDirLocked(ctx context.Context, ledgerPath, planDir, msgPrefix string) error {
 	rel, err := ledgerRelPath(ledgerPath, planDir)
 	if err != nil {
 		return err
@@ -596,40 +604,38 @@ func commitPlanLocalCtx(ctx context.Context, ledgerPath, planDir, msgPrefix stri
 	if msgPrefix == "" {
 		msgPrefix = "plan: "
 	}
-	return gitutil.WithRepoLock(ctx, ledgerPath, func() error {
-		// Mid-rebase safety belongs at index-mutation time, not just push time:
-		// an unguarded `git add` during a conflicted rebase marks the conflict
-		// resolved (see .claude/rules/cache-only-design.md).
-		if err := gitutil.IsSafeForGitOps(ledgerPath); err != nil {
-			return fmt.Errorf("ledger not safe for plan commit (%s): %w", ledgerPath, err)
+	// Mid-rebase safety belongs at index-mutation time, not just push time:
+	// an unguarded `git add` during a conflicted rebase marks the conflict
+	// resolved (see .claude/rules/cache-only-design.md).
+	if err := gitutil.IsSafeForGitOps(ledgerPath); err != nil {
+		return fmt.Errorf("ledger not safe for plan commit (%s): %w", ledgerPath, err)
+	}
+	if err := errIfUnmerged(ctx, ledgerPath); err != nil {
+		return err
+	}
+	// ensure .gitignore is in place before any commit to prevent cache
+	// leakage. It stages and untracks files, so it runs after the checks.
+	gitserver.EnsureGitignoreBeforeCommitCtx(ctx, ledgerPath)
+	// --sparse: ledger repos use sparse-checkout (cone mode).
+	addArgs := []string{"add", "--sparse", "--", rel}
+	if planHTMLAwaitingUpload(planDir) {
+		// a large plain plan.html left by a failed upload must never be committed:
+		// it would bury multi-megabyte HTML in history and the pointer retry would
+		// then find nothing to dehydrate
+		addArgs = append(addArgs, ":(exclude)"+rel+"/"+planHTMLFileName)
+		// an earlier add may already have staged the plain page; the exclude
+		// above does not touch the index, so unstage it explicitly
+		if out, err := gitutil.RunGit(ctx, ledgerPath, "reset", "-q", "--", rel+"/"+planHTMLFileName); err != nil {
+			return fmt.Errorf("unstage pending %s: %s: %w", planHTMLFileName, gitutil.SanitizeOutput(out), err)
 		}
-		if err := errIfUnmerged(ctx, ledgerPath); err != nil {
-			return err
-		}
-		// ensure .gitignore is in place before any commit to prevent cache
-		// leakage. It stages and untracks files, so it runs after the checks.
-		gitserver.EnsureGitignoreBeforeCommitCtx(ctx, ledgerPath)
-		// --sparse: ledger repos use sparse-checkout (cone mode).
-		addArgs := []string{"add", "--sparse", "--", rel}
-		if planHTMLAwaitingUpload(planDir) {
-			// a large plain plan.html left by a failed upload must never be committed:
-			// it would bury multi-megabyte HTML in history and the pointer retry would
-			// then find nothing to dehydrate
-			addArgs = append(addArgs, ":(exclude)"+rel+"/"+planHTMLFileName)
-			// an earlier add may already have staged the plain page; the exclude
-			// above does not touch the index, so unstage it explicitly
-			if out, err := gitutil.RunGit(ctx, ledgerPath, "reset", "-q", "--", rel+"/"+planHTMLFileName); err != nil {
-				return fmt.Errorf("unstage pending %s: %s: %w", planHTMLFileName, gitutil.SanitizeOutput(out), err)
-			}
-		}
-		if out, err := gitutil.RunGit(ctx, ledgerPath, addArgs...); err != nil {
-			return fmt.Errorf("git add %s failed: %s: %w", rel, gitutil.SanitizeOutput(out), err)
-		}
-		if _, err := gitutil.CommitLedgerSnapshot(ctx, ledgerPath, msgPrefix+filepath.Base(planDir), rel); err != nil {
-			return fmt.Errorf("commit plan %s: %w", rel, err)
-		}
-		return nil
-	})
+	}
+	if out, err := gitutil.RunGit(ctx, ledgerPath, addArgs...); err != nil {
+		return fmt.Errorf("git add %s failed: %s: %w", rel, gitutil.SanitizeOutput(out), err)
+	}
+	if _, err := gitutil.CommitLedgerSnapshot(ctx, ledgerPath, msgPrefix+filepath.Base(planDir), rel); err != nil {
+		return fmt.Errorf("commit plan %s: %w", rel, err)
+	}
+	return nil
 }
 
 // commitPlanBackfillToLedger stages every backfilled plan rename, in-place

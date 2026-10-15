@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/gitutil"
+	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/plan"
 )
 
@@ -265,6 +267,80 @@ func TestSavePlanArtifacts_StagesNothingMidRebase(t *testing.T) {
 	}
 }
 
+// TestSavePlanArtifacts_HoldsTheLedgerFromWriteToCommit: a daemon pull must
+// not land between a save's writes and its commit. Failure prevented: the
+// pull autostashes the half-saved plan, which conflicts with a teammate's
+// change to it or strands the new revision in `git stash list`.
+func TestSavePlanArtifacts_HoldsTheLedgerFromWriteToCommit(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git clone + push")
+	}
+	root := newPlanCaptureTestRepo(t)
+	ledger, _ := newSharedLedger(t, root, true)
+	prev := planDehydrateHTML
+	t.Cleanup(func() { planDehydrateHTML = prev })
+	var probeErr error
+	planDehydrateHTML = func(dir string, c *lfs.Client) (bool, error) {
+		// runs after the save's writes and before its commit: the daemon's pull
+		// takes this same lock
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		probeErr = gitutil.WithRepoLock(ctx, ledger, func() error { return nil })
+		return prev(dir, c)
+	}
+
+	var r planSaveReport
+	in := plan.Parse(plan.ExtractMarkdown([]byte(shareTestPage)))
+	if dir := savePlanArtifacts(root, in, plan.Result{}, []byte(shareTestPage), plan.PrimaryHTML, withReport(&r)); dir == "" || !r.Share.Shared {
+		t.Fatalf("save: dir=%q %+v", dir, r.Share)
+	}
+	if !gitutil.IsRepoLockBusy(probeErr) {
+		t.Fatalf("a pull could take the Ledger between the save's writes and its commit (probe: %v)", probeErr)
+	}
+}
+
+// TestPlanDirDirty_NeverFailsAConcurrentAdd: ox reads a plan dir's status
+// after its commits, while another ox commit may be staging. Failure
+// prevented: the status refreshes the index under index.lock, and that
+// commit's `git add` fails on the lock.
+func TestPlanDirDirty_NeverFailsAConcurrentAdd(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: many git runs")
+	}
+	repo := t.TempDir()
+	runGitInDir(t, repo, "init", "-q")
+	file := filepath.Join(repo, "data", "f.txt")
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stop, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				planDirDirty(repo, "data")
+			}
+		}
+	}()
+	var failures []string
+	for i := range 60 {
+		if err := os.WriteFile(file, []byte(fmt.Sprint(i)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if out, err := exec.Command("git", "-C", repo, "add", "--", "data/f.txt").CombinedOutput(); err != nil {
+			failures = append(failures, strings.TrimSpace(string(out)))
+		}
+	}
+	close(stop)
+	<-done
+	if len(failures) > 0 {
+		t.Fatalf("%d of 60 adds failed beside the status read, e.g. %q", len(failures), failures[0])
+	}
+}
+
 // TestSavePlanArtifacts_LedgerNotYetClonedGetsNoGitDir: a save before the
 // Ledger is cloned writes its files where the clone will go. Failure
 // prevented: the save's retry marker creates <ledger>/.git, and the daemon
@@ -452,7 +528,7 @@ func TestSharePlanDir_NoLedgerIsNotShared(t *testing.T) {
 	daemonRunningFn = func() bool { return true }
 	t.Cleanup(func() { daemonRunningFn = prev })
 
-	st := sharePlanDir(t.TempDir(), filepath.Join(t.TempDir(), "plan"))
+	st := sharePlanDir(t.TempDir(), filepath.Join(t.TempDir(), "plan"), time.Now(), nil)
 	if st.Shared || st.Committed || st.Fix != planDoctorFix || !strings.Contains(st.Reason, "no ledger") {
 		t.Errorf("verdict = %+v, want not shared / no ledger / doctor fix", st)
 	}

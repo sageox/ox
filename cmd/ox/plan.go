@@ -15,6 +15,7 @@ import (
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/plan"
@@ -421,107 +422,147 @@ func savePlanArtifacts(gitRoot string, in plan.Input, result plan.Result, html [
 		Collaboration:  collab,
 	}
 
-	// A revision overwrites the plan dir in place. If an earlier save of it
-	// never got committed (its push/commit failed), that prior revision exists
-	// only in the working tree — commit it locally first so it stays
-	// recoverable from ledger history. If that snapshot fails (e.g. a held
-	// index.lock), REFUSE the save: overwriting would destroy the only copy of
-	// the prior revision (Sacred tier), while refusing loses nothing — the new
-	// revision is still in its source file and saves once the ledger is fixed.
-	if target, rerr := plan.ResolveSaveDir(gitRoot, meta); rerr == nil {
-		if _, serr := os.Stat(filepath.Join(target, "meta.json")); serr == nil {
-			if err := snapshotPriorRevision(gitRoot, target); err != nil {
-				report.Err = fmt.Errorf("prior revision of %s is uncommitted and could not be snapshotted, so it was NOT overwritten (resolve the error below, then re-run `ox plan save`): %w", filepath.Base(target), err)
-				slog.Warn("plan: refused revision, prior revision could not be snapshotted", "error", err, "dir", target)
-				return ""
+	// With a Ledger checkout, everything from the prior revision's snapshot to
+	// the commit runs in one hold of its repo lock. A daemon pull between the
+	// writes and the commit autostashed the half-saved plan: that could
+	// conflict with a teammate's change to it, and a write landing mid-autostash
+	// left the new revision only in `git stash list`.
+	var ledgerPath string
+	if pctx, err := config.LoadProjectContext(gitRoot); err == nil && pctx != nil {
+		ledgerPath = pctx.DefaultLedgerPath()
+	}
+	checkout := ledgerPath != "" && gitutil.IsGitRepo(ledgerPath)
+	started := time.Now()
+	var (
+		dir       string
+		savedKind plan.EventKind
+		slug      string
+		commitErr error
+		ended     bool   // the save stopped early, report filled in
+		endDir    string // what savePlanArtifacts returns then
+	)
+	write := func() error {
+		ctx := context.Background()
+		// A revision overwrites the plan dir in place. If an earlier save of it
+		// never got committed (its push/commit failed), that prior revision exists
+		// only in the working tree — commit it locally first so it stays
+		// recoverable from ledger history. If that snapshot fails (e.g. a held
+		// index.lock), REFUSE the save: overwriting would destroy the only copy of
+		// the prior revision (Sacred tier), while refusing loses nothing — the new
+		// revision is still in its source file and saves once the ledger is fixed.
+		if target, rerr := plan.ResolveSaveDir(gitRoot, meta); rerr == nil {
+			if _, serr := os.Stat(filepath.Join(target, "meta.json")); serr == nil {
+				if err := snapshotPriorRevision(ctx, gitRoot, ledgerPath, target); err != nil {
+					report.Err = fmt.Errorf("prior revision of %s is uncommitted and could not be snapshotted, so it was NOT overwritten (resolve the error below, then re-run `ox plan save`): %w", filepath.Base(target), err)
+					slog.Warn("plan: refused revision, prior revision could not be snapshotted", "error", err, "dir", target)
+					ended = true
+					return nil
+				}
 			}
 		}
-	}
 
-	dir, savedKind, err := plan.Save(gitRoot, in, result, html, meta)
-	if err != nil {
-		report.Err = err
-		slog.Warn("plan: save failed", "error", err, "slug", explicitSlug)
+		var err error
+		dir, savedKind, err = plan.Save(gitRoot, in, result, html, meta)
+		if err != nil {
+			report.Err = err
+			slog.Warn("plan: save failed", "error", err, "slug", explicitSlug)
+			ended = true
+			return nil
+		}
+
+		// plan.Save owns the final slug for the derived case, so read back what it
+		// decided rather than assuming what we passed in. Everything below names
+		// this plan by slug — the reverse link onto the live recording most of all,
+		// and an empty one there is how produced_plans goes silently unset.
+		slug = planSavedSlug(dir, explicitSlug, topic)
+
+		// The plan is in the ledger, so any pending "you drafted and never saved"
+		// nudge is now wrong. Cleared here rather than at the end of the function
+		// because everything below is best-effort decoration on an already-durable
+		// save.
+		clearUnsavedPlanStamp(gitRoot, envAgentID())
+
+		// Hero poster: a designed SVG poster of the plan (internal/planhero),
+		// generated from its structured data — NOT a browser screenshot, so this
+		// adds no headless-browser/Chromium dependency to the ox binary. Primary
+		// producer for plan gallery thumbnails. Only on an HTML-primary save (a
+		// hero only makes sense paired with a plan.html), and best-effort: a hero
+		// failure must never break `ox plan save`. Placed here (after Save, before
+		// the commit) so the commit's `git add --sparse <dir>` sweeps hero.svg into
+		// the same commit as plan.html with no separate commit path.
+		if primary == plan.PrimaryHTML && config.PlanHero(gitRoot) {
+			if err := writePlanHero(dir, in, result, meta); err != nil {
+				slog.Warn("plan: hero poster generation failed, skipping", "error", err, "dir", dir)
+			}
+		}
+
+		// reverse link: record the slug on the live recording so it folds into the
+		// session's meta.json at stop (no-op if there's no live recording). Passes
+		// the state resolved alongside the provenance so both links name the same
+		// session — see appendProducedPlan.
+		//
+		// Logged, not discarded. This write failing is precisely how produced_plans
+		// ended up unset on 2887 sessions, and a `_ =` here meant a recurrence would
+		// again be completely silent — while the structurally identical best-effort
+		// call twelve lines down logs at Warn.
+		if err := appendProducedPlan(gitRoot, recState, slug); err != nil {
+			slog.Warn("plan: reverse link (produced_plans) failed", "error", err, "slug", slug)
+		}
+
+		// Dehydrate a large plan.html to an LFS pointer BEFORE committing, so the
+		// commit carries a pointer and dehydrated clones stay lean — but only after
+		// the blob is uploaded, so a pointer whose object is missing never reaches the
+		// remote (the GH #810 wedge). Small renders and offline saves stay plain by
+		// design. When the upload of a large render FAILS, nothing is committed: the
+		// plain plan.html stays on disk (the bytes are safe), the plan dir is not
+		// shared, and re-running the save retries the upload. Committing the plain
+		// multi-megabyte page instead would bury the failure in ledger history.
+		if html != nil {
+			// DehydrateHTML reads the on-disk (stamped) plan.html itself, so the
+			// uploaded blob's OID matches the committed file — see its doc comment.
+			if pointerized, derr := planDehydrateHTML(dir, planLFSClientFn(gitRoot)); derr != nil {
+				slog.Warn("plan: plan.html LFS upload failed, nothing committed", "error", derr, "dir", dir)
+				planID := planIDForDir(dir)
+				*report = planSaveReport{
+					Dir:      dir,
+					Slug:     slug,
+					PlanID:   planID,
+					URL:      planShareURL(gitRoot, planID),
+					Event:    savedKind,
+					Revision: planRevisionCount(dir),
+					Share: planShareStatus{
+						Reason: planHTMLUploadFailedReason,
+						Fix:    "ox plan save",
+					},
+				}
+				ended, endDir = true, dir
+				return nil
+			} else if pointerized {
+				slog.Debug("plan: plan.html dehydrated to LFS pointer", "dir", dir)
+			}
+		}
+
+		if checkout {
+			commitErr = commitPlanDirLocked(ctx, ledgerPath, dir, "")
+		}
+		return nil
+	}
+	if !checkout {
+		_ = write()
+	} else if err := gitutil.WithRepoLock(context.Background(), ledgerPath, write); err != nil {
+		report.Err = fmt.Errorf("the Ledger stayed busy, so nothing was saved; re-run `ox plan save`: %w", err)
+		slog.Warn("plan: save skipped, ledger lock unavailable", "error", err)
 		return ""
 	}
-
-	// plan.Save owns the final slug for the derived case, so read back what it
-	// decided rather than assuming what we passed in. Everything below names
-	// this plan by slug — the reverse link onto the live recording most of all,
-	// and an empty one there is how produced_plans goes silently unset.
-	slug := planSavedSlug(dir, explicitSlug, topic)
-
-	// The plan is in the ledger, so any pending "you drafted and never saved"
-	// nudge is now wrong. Cleared here rather than at the end of the function
-	// because everything below is best-effort decoration on an already-durable
-	// save.
-	clearUnsavedPlanStamp(gitRoot, envAgentID())
-
-	// Hero poster: a designed SVG poster of the plan (internal/planhero),
-	// generated from its structured data — NOT a browser screenshot, so this
-	// adds no headless-browser/Chromium dependency to the ox binary. Primary
-	// producer for plan gallery thumbnails. Only on an HTML-primary save (a
-	// hero only makes sense paired with a plan.html), and best-effort: mirrors
-	// commitPlanToLedger below — a hero failure must never break `ox plan
-	// save`. Placed here (after Save, before commitPlanToLedger) so the
-	// existing `git add --sparse <dir>` sweeps hero.svg into the same commit
-	// as plan.html with no separate commit path.
-	if primary == plan.PrimaryHTML && config.PlanHero(gitRoot) {
-		if err := writePlanHero(dir, in, result, meta); err != nil {
-			slog.Warn("plan: hero poster generation failed, skipping", "error", err, "dir", dir)
-		}
+	if ended {
+		return endDir
 	}
 
-	// reverse link: record the slug on the live recording so it folds into the
-	// session's meta.json at stop (no-op if there's no live recording). Passes
-	// the state resolved alongside the provenance so both links name the same
-	// session — see appendProducedPlan.
-	//
-	// Logged, not discarded. This write failing is precisely how produced_plans
-	// ended up unset on 2887 sessions, and a `_ =` here meant a recurrence would
-	// again be completely silent — while the structurally identical best-effort
-	// call twelve lines down logs at Warn.
-	if err := appendProducedPlan(gitRoot, recState, slug); err != nil {
-		slog.Warn("plan: reverse link (produced_plans) failed", "error", err, "slug", slug)
-	}
-
-	// Dehydrate a large plan.html to an LFS pointer BEFORE committing, so the
-	// commit carries a pointer and dehydrated clones stay lean — but only after
-	// the blob is uploaded, so a pointer whose object is missing never reaches the
-	// remote (the GH #810 wedge). Small renders and offline saves stay plain by
-	// design. When the upload of a large render FAILS, nothing is committed: the
-	// plain plan.html stays on disk (the bytes are safe), the plan dir is not
-	// shared, and re-running the save retries the upload. Committing the plain
-	// multi-megabyte page instead would bury the failure in ledger history.
-	if html != nil {
-		// DehydrateHTML reads the on-disk (stamped) plan.html itself, so the
-		// uploaded blob's OID matches the committed file — see its doc comment.
-		if pointerized, derr := planDehydrateHTML(dir, planLFSClientFn(gitRoot)); derr != nil {
-			slog.Warn("plan: plan.html LFS upload failed, nothing committed", "error", derr, "dir", dir)
-			planID := planIDForDir(dir)
-			*report = planSaveReport{
-				Dir:      dir,
-				Slug:     slug,
-				PlanID:   planID,
-				URL:      planShareURL(gitRoot, planID),
-				Event:    savedKind,
-				Revision: planRevisionCount(dir),
-				Share: planShareStatus{
-					Reason: planHTMLUploadFailedReason,
-					Fix:    "ox plan save",
-				},
-			}
-			return dir
-		} else if pointerized {
-			slog.Debug("plan: plan.html dehydrated to LFS pointer", "dir", dir)
-		}
-	}
-
-	// durability: commit + push the plan dir now (sync), and OBSERVE the
-	// outcome. Still best-effort — a push failure leaves the local commit for
+	// durability: push the plan dir the save committed now (sync), and OBSERVE
+	// the outcome. Still best-effort — a push failure leaves the local commit for
 	// the next push / `ox doctor` — but no longer silent: the verdict goes back
 	// to the caller, which tells the human whether teammates can see the plan.
-	share := sharePlanDir(gitRoot, dir)
+	share := sharePlanDir(gitRoot, dir, started, commitErr)
 	if !share.Shared {
 		slog.Warn("plan: saved but not shared", "dir", dir, "reason", share.Reason, "ahead", share.Ahead, "behind", share.Behind)
 	}
