@@ -247,7 +247,7 @@ func TestPlanLifecycle_ReRunReportsWhetherItSharedTheEvent(t *testing.T) {
 // Devon's session stop then stamps the session id onto Devon's event lines
 // and pushes over the approval. Failure prevented: the merge keeps Devon's
 // restamped "created" line after the approval, and the whole team reads the
-// plan as a draft again.
+// plan as a draft again, saved twice.
 func TestPlanLifecycle_ATeammatesApprovalSurvivesTheAuthorsSessionStop(t *testing.T) {
 	f := newDurableReviewFixture(t)
 	ctx := context.Background()
@@ -277,6 +277,9 @@ func TestPlanLifecycle_ATeammatesApprovalSurvivesTheAuthorsSessionStop(t *testin
 	runGitInDir(t, sam, "pull", "-q", "--rebase")
 	if got := plan.CurrentStatus(samPlan); got != plan.PlanStatusApproved {
 		t.Fatalf("after Devon's session stop the team reads the plan as %q, want approved", got)
+	}
+	if got := planRevisionCount(samPlan); got != 1 {
+		t.Fatalf("after Devon's session stop the plan counts %d revisions, want 1", got)
 	}
 }
 

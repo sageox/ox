@@ -261,6 +261,7 @@ type FoldedState struct {
 	UpdatedAt  time.Time
 	Visibility string
 	Sessions   []SessionRef // distinct sessions, first-seen order
+	Revisions  int          // distinct created and revised events: the plan's saves
 }
 
 // SessionRef is one distinct session that touched a plan, folded from every
@@ -295,9 +296,10 @@ const defaultVisibility = "private"
 //     first event overall if the log has no created event (e.g. one
 //     backfilled starting mid-lifecycle).
 //   - UpdatedAt: the latest event timestamp in the slice.
+//   - Revisions: the number of created and revised events.
 //
-// A second copy of an event (same timestamp, kind and session name) sets no
-// topic, status or visibility. events.jsonl is merge=union: when one clone's
+// A second copy of an event (same timestamp, kind and session name) counts no
+// revision and sets no topic, status or visibility. events.jsonl is merge=union: when one clone's
 // BackfillSessionID rewrites lines that another clone appended after, the
 // merge can keep both copies of each, the rewritten copy after the append.
 // Read as a new event, a session's draft "created" line would undo a
@@ -332,8 +334,11 @@ func Fold(events []Event) FoldedState {
 
 		if k := (eventKey{ev.Timestamp.UnixNano(), ev.Kind, ev.SessionName}); !seenEvent[k] {
 			seenEvent[k] = true
-			if (ev.Kind == EventCreated || ev.Kind == EventRevised) && ev.Topic != "" {
-				state.Topic = ev.Topic
+			if ev.Kind == EventCreated || ev.Kind == EventRevised {
+				state.Revisions++
+				if ev.Topic != "" {
+					state.Topic = ev.Topic
+				}
 			}
 			if ev.Status != "" {
 				state.Status = ev.Status

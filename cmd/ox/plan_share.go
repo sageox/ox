@@ -260,11 +260,5 @@ func planRevisionCount(planDir string) int {
 	if err != nil {
 		return 0
 	}
-	n := 0
-	for _, ev := range events {
-		if ev.Kind == plan.EventCreated || ev.Kind == plan.EventRevised {
-			n++
-		}
-	}
-	return n
+	return plan.Fold(events).Revisions
 }
