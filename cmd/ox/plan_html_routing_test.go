@@ -6,8 +6,10 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -178,5 +180,236 @@ func TestPlanLintFile_RoutesByFileName(t *testing.T) {
 	err := runPlanLintFile(cmd, md, false, "")
 	if err == nil || !strings.Contains(err.Error(), "does not look like an authored HTML page") {
 		t.Errorf("lint must refuse a markdown file, got %v", err)
+	}
+}
+
+// identityMetaRe matches the identity <meta> tags save stamps into a <head>.
+var identityMetaRe = regexp.MustCompile(`<meta name="sageox:[^"]*" content="[^"]*">\n`)
+
+// assertSavedAsAuthoredPage checks the ledger holds exactly one plan, saved
+// HTML-primary, with the page as plan.html and markdown derived from it as
+// plan.md. Save stamps the plan's identity <meta> tags into a page that has a
+// <head>; with those taken out the page must match byte for byte.
+func assertSavedAsAuthoredPage(t *testing.T, page string) {
+	t.Helper()
+	info, meta := savedOnlyPlan(t)
+	if meta.Primary != plan.PrimaryHTML {
+		t.Errorf("meta.primary = %q, want %q", meta.Primary, plan.PrimaryHTML)
+	}
+	if !info.HasHTML {
+		t.Fatal("no plan.html stored: the authored page was dropped")
+	}
+	stored, err := os.ReadFile(filepath.Join(info.Dir, "plan.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := identityMetaRe.ReplaceAllString(string(stored), ""); got != page {
+		t.Errorf("plan.html is not the authored page verbatim (identity metas aside):\n%s", stored)
+	}
+	md, err := os.ReadFile(filepath.Join(info.Dir, "plan.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(md), "<title>") || !strings.Contains(string(md), "# Real title") {
+		t.Errorf("plan.md is not markdown derived from the page:\n%s", md)
+	}
+}
+
+// TestPlanEnrichSave_KeepsAuthoredHTMLPage is the ox#1115 regression: enrich
+// swapped an authored page for its derived markdown, then saved with a nil
+// page, so the ledger got plan.md only, no plan.html and an empty primary.
+// Both enrich save paths, --persist (the ExitPlanMode hook) and the --text
+// auto-save, must store the page the way `ox plan save --file` does.
+func TestPlanEnrichSave_KeepsAuthoredHTMLPage(t *testing.T) {
+	pages := map[string]string{
+		"no doctype":   doctypelessPage,
+		"with doctype": "<!doctype html><html><head><title>My Plan</title></head><body><h1>Real title</h1><p>Body.</p></body></html>",
+	}
+	modes := map[string][]string{
+		"persist": {"persist", "true"},
+		"text":    {"text", "true"},
+	}
+	for pageName, page := range pages {
+		for modeName, flag := range modes {
+			t.Run(modeName+" "+pageName, func(t *testing.T) {
+				root := newPlanCaptureTestRepo(t)
+				t.Setenv("SAGEOX_AGENT_ID", "")
+
+				src := filepath.Join(root, ".context", "plan.html")
+				writePlanSource(t, src, page)
+				runPlanEnrich(t, "file", src, flag[0], flag[1])
+
+				assertSavedAsAuthoredPage(t, page)
+			})
+		}
+	}
+}
+
+// TestPlanEnrichSave_MarkdownStaysMarkdownPrimary: the ox#1115 fix must not
+// turn a markdown plan into an HTML-primary one.
+func TestPlanEnrichSave_MarkdownStaysMarkdownPrimary(t *testing.T) {
+	for _, mode := range []string{"persist", "text"} {
+		t.Run(mode, func(t *testing.T) { checkEnrichSavesMarkdownPrimary(t, mode) })
+	}
+}
+
+func checkEnrichSavesMarkdownPrimary(t *testing.T, mode string) {
+	root := newPlanCaptureTestRepo(t)
+	t.Setenv("SAGEOX_AGENT_ID", "")
+
+	const md = "# Cache warmup\n\n## Approach\n\nWarm the cache on boot.\n"
+	src := filepath.Join(root, ".context", "plan.md")
+	writePlanSource(t, src, md)
+	runPlanEnrich(t, "file", src, mode, "true")
+
+	info, meta := savedOnlyPlan(t)
+	if meta.Primary != "" || info.HasHTML {
+		t.Errorf("markdown plan saved with primary=%q html=%v, want markdown-primary with no plan.html", meta.Primary, info.HasHTML)
+	}
+	stored, err := os.ReadFile(filepath.Join(info.Dir, "plan.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(stored) != md {
+		t.Errorf("plan.md is not the authored markdown verbatim:\n%s", stored)
+	}
+}
+
+// TestPlanReviewSaveDraft_KeepsAuthoredHTMLPage: `ox plan review --file
+// plan.html` saved the same way as enrich (ox#1115) and also enriched the raw
+// HTML, so it stored the page's markup as plan.md and dropped the page.
+func TestPlanReviewSaveDraft_KeepsAuthoredHTMLPage(t *testing.T) {
+	root := newPlanCaptureTestRepo(t)
+	t.Setenv("SAGEOX_AGENT_ID", "")
+
+	src := filepath.Join(root, ".context", "plan.html")
+	writePlanSource(t, src, doctypelessPage)
+	cmd := &cobra.Command{}
+	cmd.Flags().StringSlice("companion", nil, "")
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	if _, err := reviewSaveDraft(cmd, src); err != nil {
+		t.Fatalf("reviewSaveDraft: %v", err)
+	}
+
+	assertSavedAsAuthoredPage(t, doctypelessPage)
+}
+
+// TestPlanEnrichPersist_StdinPageKeepsAuthoredHTML: the ExitPlanMode hook pipes
+// the plan on stdin with no path, so the page is recognized by its content.
+func TestPlanEnrichPersist_StdinPageKeepsAuthoredHTML(t *testing.T) {
+	newPlanCaptureTestRepo(t)
+	t.Setenv("SAGEOX_AGENT_ID", "")
+
+	const page = "<!doctype html><html><head><title>My Plan</title></head><body><h1>Real title</h1><p>Body.</p></body></html>"
+	cmd := planEnrichCmd
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetIn(strings.NewReader(page))
+	t.Cleanup(func() {
+		cmd.SetIn(strings.NewReader(""))
+		_ = cmd.Flags().Set("persist", "false")
+	})
+	if err := cmd.Flags().Set("persist", "true"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.RunE(cmd, nil); err != nil {
+		t.Fatalf("enrich RunE: %v", err)
+	}
+	var res plan.Result
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatalf("--persist stdout is not one JSON document: %v\n%s", err, out.String())
+	}
+
+	assertSavedAsAuthoredPage(t, page)
+}
+
+// TestPlanReviewSaveDraft_ReturnsTheSavedSlug: an authored page's
+// ox-plan-slug decides where it is saved, so the slug handed to the review
+// loop must be that one, not the one its title would give.
+func TestPlanReviewSaveDraft_ReturnsTheSavedSlug(t *testing.T) {
+	root := newPlanCaptureTestRepo(t)
+	t.Setenv("SAGEOX_AGENT_ID", "")
+
+	const page = `<meta name="ox-plan-slug" content="custom-slug"><title>My Plan</title><h1>Real title</h1><p>Body.</p>`
+	src := filepath.Join(root, ".context", "plan.html")
+	writePlanSource(t, src, page)
+	cmd := &cobra.Command{}
+	cmd.Flags().StringSlice("companion", nil, "")
+	slug, err := reviewSaveDraft(cmd, src)
+	if err != nil {
+		t.Fatalf("reviewSaveDraft: %v", err)
+	}
+	info, _ := savedOnlyPlan(t)
+	if slug != info.Slug || slug != "custom-slug" {
+		t.Errorf("reviewSaveDraft returned %q, saved plan slug is %q, want both %q", slug, info.Slug, "custom-slug")
+	}
+}
+
+// TestPlanReviewSaveDraft_ReportsWhySaveFailed: when the page's ox-plan-slug
+// names two live plans, save refuses to guess. review --file must say so and
+// name the cause, not just "could not save draft".
+func TestPlanReviewSaveDraft_ReportsWhySaveFailed(t *testing.T) {
+	root := newPlanCaptureTestRepo(t)
+	t.Setenv("SAGEOX_AGENT_ID", "")
+
+	const page = `<meta name="ox-plan-slug" content="dup-slug"><title>My Plan</title><h1>Real title</h1><p>Body.</p>`
+	src := filepath.Join(root, ".context", "plan.html")
+	writePlanSource(t, src, page)
+	cmd := &cobra.Command{}
+	cmd.Flags().StringSlice("companion", nil, "")
+	if _, err := reviewSaveDraft(cmd, src); err != nil {
+		t.Fatalf("first save: %v", err)
+	}
+	// a second live plan claiming the same slug, as a copied page would leave
+	info, _ := savedOnlyPlan(t)
+	twin := filepath.Join(filepath.Dir(info.Dir), "1999-01-01-dup-slug")
+	if err := os.MkdirAll(twin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	meta, err := os.ReadFile(filepath.Join(info.Dir, "meta.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(twin, "meta.json"), meta, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = reviewSaveDraft(cmd, src)
+	var amb *plan.AmbiguousSlugError
+	if !errors.As(err, &amb) {
+		t.Fatalf("err = %v, want it to wrap the AmbiguousSlugError that blocked the save", err)
+	}
+	if !strings.Contains(err.Error(), "could not save draft to the ledger") {
+		t.Errorf("err = %q, want the review-facing context kept", err)
+	}
+}
+
+// TestWritePlanHuman_NextStepFollowsWhatWasSaved: once enrich has saved the
+// authored page as the plan of record, the advice must not ask the coworker
+// to author and save a plan.html again; for a markdown plan it still must.
+func TestWritePlanHuman_NextStepFollowsWhatWasSaved(t *testing.T) {
+	result := plan.Result{Signals: plan.SignalSummary{Material: true}}
+	for _, tc := range []struct {
+		name      string
+		pageSaved bool
+		want      string
+		notWant   string
+	}{
+		{"page saved", true, "The page is saved as the plan of record", "Author a visual `plan.html`"},
+		{"markdown saved", false, "Author a visual `plan.html`", "The page is saved as the plan of record"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := &cobra.Command{}
+			var out bytes.Buffer
+			cmd.SetOut(&out)
+			if err := writePlanHuman(cmd, result, "/ledger/data/plans/x", tc.pageSaved); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(out.String(), tc.want) || strings.Contains(out.String(), tc.notWant) {
+				t.Errorf("advice for %s:\n%s", tc.name, out.String())
+			}
+		})
 	}
 }
