@@ -103,9 +103,11 @@ type ConfirmRecordingUploadResponse struct {
 	// Pending is set when confirm answered 202 Accepted: the upload was
 	// received but not yet accepted, and the caller confirms again later.
 	Pending bool `json:"-"`
-	// RetryAfter is the answer's Retry-After in whole seconds, or 0 when
-	// absent or unreadable. The caller picks its own default and bounds.
-	RetryAfter time.Duration `json:"-"`
+	// RetryAfter is the answer's Retry-After in whole seconds. HasRetryAfter
+	// is false when the header was absent or unreadable, so a caller can tell
+	// "ask again at once" (0) from "no advice" and apply its own default.
+	RetryAfter    time.Duration `json:"-"`
+	HasRetryAfter bool          `json:"-"`
 }
 
 // HTTPStatusError is a non-2xx answer from a SageOx API route. Code and
@@ -202,6 +204,7 @@ func (c *RepoClient) ConfirmRecordingUpload(ctx context.Context, contextType, co
 	if status == http.StatusAccepted {
 		out.Pending = true
 		out.RetryAfter = parseRetryAfter(header)
+		out.HasRetryAfter = out.RetryAfter > 0 || strings.TrimSpace(header.Get("Retry-After")) == "0"
 	}
 	return &out, nil
 }
