@@ -21,7 +21,6 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
-	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/plan"
 	"github.com/sageox/ox/pkg/planreview"
 	"github.com/spf13/cobra"
@@ -93,16 +92,8 @@ func reviewSaveDraft(cmd *cobra.Command, file string) (string, error) {
 		return "", fmt.Errorf("review --file needs a ledger with plan capture enabled (run `ox init`)")
 	}
 	result := plan.Enrich(context.Background(), in, gitRoot)
-	dir := savePlanWithProvenance(gitRoot, in, result, nil)
-	if dir == "" {
+	if savePlanArtifacts(gitRoot, in, result, nil, "", withCompanions(gatherCompanions(cmd, in))) == "" {
 		return "", fmt.Errorf("could not save draft to the ledger")
-	}
-	if companions := gatherCompanions(cmd, in); len(companions) > 0 {
-		if names, cerr := plan.CopyCompanions(companions, dir); cerr != nil {
-			cli.PrintHint("could not bundle companion(s): " + cerr.Error())
-		} else if rerr := plan.RecordCompanions(dir, names); rerr != nil {
-			cli.PrintHint("could not record companion(s) in plan meta: " + rerr.Error())
-		}
 	}
 	return plan.Slugify(planTopic(in)), nil
 }
@@ -555,13 +546,13 @@ func liveReviewHandlerWithActivity(gitRoot, slug, planDir, base, token string, b
 	})
 
 	post("/approve", func(ctx context.Context, body []byte) (map[string]any, int, error) {
-		// Same engine `ox plan approve` uses (commitPlanEvent) — a browser
+		// Same engine `ox plan approve` uses (sharePlanEvent) — a browser
 		// Approve click and the CLI verb are one mechanism, never two.
 		// changed is only used to gate the best-effort activity notify below;
 		// the response here always reports success regardless of its value —
 		// an already-approved plan re-approving via a stale/duplicate click
 		// must still report success.
-		changed, st, err := approvePlanForReview(ctx, gitRoot, planDir, planEventFieldsFromProvenance(gitRoot))
+		changed, st, err := sharePlanEvent(ctx, gitRoot, planDir, plan.EventApproved, planEventFieldsFromProvenance(gitRoot))
 		if errors.Is(err, errLedgerNotSafe) {
 			return nil, http.StatusServiceUnavailable, err
 		}
@@ -575,7 +566,7 @@ func liveReviewHandlerWithActivity(gitRoot, slug, planDir, base, token string, b
 			// unreachable activity-index endpoint.
 			go postPlanActivityBestEffort(gitRoot, planDir, plan.EventApproved)
 		}
-		resp := planCommitFields(st)
+		resp := planCommitFields(planCommitStatus{Committed: st.Committed, Pushed: st.Pushed})
 		select {
 		case approved <- struct{}{}:
 		default:
@@ -642,43 +633,6 @@ func reviewWriteErrorCode(err error) int {
 		return http.StatusConflict
 	}
 	return http.StatusInternalServerError
-}
-
-// approvePlanForReview is /approve's write: the approved event committed
-// alone (commitPlanEvent), then pushed. A failed push, or a commit that failed
-// after the write, leaves a marker that `ox agent prime` retries for those
-// files only, and the page is told committed/pushed=false instead of a silent
-// 200. With no Ledger checkout the event is recorded and reported not
-// committed, as before: nothing pulls or pushes that dir.
-func approvePlanForReview(ctx context.Context, gitRoot, planDir string, fields plan.PlanEventFields) (bool, planCommitStatus, error) {
-	started := time.Now()
-	ledgerPath, err := planLedgerPathFor(gitRoot)
-	if err == nil && !gitutil.IsGitRepo(ledgerPath) {
-		err = fmt.Errorf("ledger %s is not a git checkout", ledgerPath)
-	}
-	if err != nil {
-		changed, aerr := plan.AppendPlanEvent(ctx, planDir, plan.EventApproved, fields)
-		return changed, planCommitStatus{Err: err.Error()}, aerr
-	}
-	changed, err := commitPlanEvent(ctx, ledgerPath, planDir, plan.EventApproved, fields)
-	if errors.Is(err, errEventNotCommitted) {
-		recordPlanPushOutcome(ctx, ledgerPath, planDir, started, err, planEventFiles...)
-		return changed, planCommitStatus{Err: gitutil.SanitizeOutput(err.Error())}, nil
-	}
-	if err != nil {
-		return false, planCommitStatus{}, err
-	}
-	// pushed even when nothing changed: an earlier approve may be the commit
-	// still waiting on a failed push
-	st := planCommitStatus{Committed: true}
-	perr := pushLedger(ctx, ledgerPath)
-	recordPlanPushOutcome(ctx, ledgerPath, planDir, started, perr, planEventFiles...)
-	if perr != nil {
-		st.Err = gitutil.SanitizeOutput(perr.Error())
-		return changed, st, nil
-	}
-	st.Pushed = true
-	return changed, st, nil
 }
 
 // planCommitFields is the durability half of every review POST response.

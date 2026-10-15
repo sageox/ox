@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -14,7 +15,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/plan"
+	"github.com/spf13/cobra"
 )
 
 // lifecycleFixture is a durable review fixture whose plan has an event log on
@@ -213,15 +216,22 @@ func TestPlanLifecycle_ReapproveCommitsAnEarlierApprovalLeftUncommitted(t *testi
 	}
 }
 
-// TestPlanLifecycle_ReRunSharesAnEventItsFirstRunCouldNotPush: `ox plan
-// abandon` whose push failed is reported not shared; running it again, which
-// records nothing new, pushes the event. Failure prevented: the natural retry
-// reports no change and the abandonment stays on one laptop.
-func TestPlanLifecycle_ReRunSharesAnEventItsFirstRunCouldNotPush(t *testing.T) {
+// TestPlanLifecycle_ReRunReportsWhetherItSharedTheEvent: `ox plan abandon`
+// whose push failed is run again, which records nothing new and retries the
+// push. While the push still fails the re-run says the abandonment is not
+// shared; once it can push, it publishes it. Failure prevented: the re-run
+// reports only "no change", and the abandonment stays on one laptop.
+func TestPlanLifecycle_ReRunReportsWhetherItSharedTheEvent(t *testing.T) {
 	f := lifecycleFixture(t)
 	runGitInDir(t, f.ledger, "remote", "set-url", "origin", filepath.Join(t.TempDir(), "gone.git"))
-	if _, err := runLifecycleVerbForTest(t, f.planDir, plan.EventAbandoned, true, lifecycleVerbFlags{Reason: "replaced"}); err != nil {
-		t.Fatal(err)
+	for _, run := range []string{"the first run", "a re-run"} {
+		out, err := runLifecycleVerbForTest(t, f.planDir, plan.EventAbandoned, true, lifecycleVerbFlags{Reason: "replaced"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res := decodeStrictLifecycleJSON[planLifecycleResult](t, out); res.Share == nil || res.Share.Shared {
+			t.Fatalf("%s must report the abandonment not shared, got %s", run, out)
+		}
 	}
 	runGitInDir(t, f.ledger, "remote", "set-url", "origin", f.origin)
 	if _, err := runLifecycleVerbForTest(t, f.planDir, plan.EventAbandoned, true, lifecycleVerbFlags{Reason: "replaced"}); err != nil {
@@ -229,6 +239,44 @@ func TestPlanLifecycle_ReRunSharesAnEventItsFirstRunCouldNotPush(t *testing.T) {
 	}
 	if !strings.Contains(runGitInDir(t, f.origin, "show", "main:data/plans/2026-10-01-durable/events.jsonl"), `"abandoned"`) {
 		t.Fatal("the re-run must publish the abandonment")
+	}
+}
+
+// TestPlanLifecycle_ATeammatesApprovalSurvivesTheAuthorsSessionStop: Sam
+// approves on Sam's own clone while Devon's session is still recording;
+// Devon's session stop then stamps the session id onto Devon's event lines
+// and pushes over the approval. Failure prevented: the merge keeps Devon's
+// restamped "created" line after the approval, and the whole team reads the
+// plan as a draft again.
+func TestPlanLifecycle_ATeammatesApprovalSurvivesTheAuthorsSessionStop(t *testing.T) {
+	f := newDurableReviewFixture(t)
+	ctx := context.Background()
+	if err := plan.AppendEvent(ctx, f.planDir, plan.Event{PlanID: "pln_lifecycle01", Kind: plan.EventCreated, Status: plan.PlanStatusDraft, SessionName: "devon-session"}); err != nil {
+		t.Fatal(err)
+	}
+	runGitInDir(t, f.ledger, "add", "data")
+	runGitInDir(t, f.ledger, "commit", "-q", "-m", "plan: created")
+	runGitInDir(t, f.ledger, "push", "-q")
+
+	sam := filepath.Join(t.TempDir(), "sam")
+	runGitInDir(t, filepath.Dir(sam), "clone", "-q", "-b", "main", f.origin, sam)
+	samPlan := filepath.Join(sam, "data", "plans", "2026-10-01-durable")
+	if _, err := plan.AppendPlanEvent(ctx, samPlan, plan.EventApproved, plan.PlanEventFields{}); err != nil {
+		t.Fatal(err)
+	}
+	runGitInDir(t, sam, "commit", "-q", "-am", "plan: approved")
+	runGitInDir(t, sam, "push", "-q")
+
+	// Devon's session stop, as reconcileProducedPlansAtStop runs it
+	if _, err := plan.BackfillSessionID(ctx, f.planDir, "devon-session", "ses_devon"); err != nil {
+		t.Fatal(err)
+	}
+	if err := commitAndPushPlanDir(ctx, f.ledger, f.planDir); err != nil {
+		t.Fatal(err)
+	}
+	runGitInDir(t, sam, "pull", "-q", "--rebase")
+	if got := plan.CurrentStatus(samPlan); got != plan.PlanStatusApproved {
+		t.Fatalf("after Devon's session stop the team reads the plan as %q, want approved", got)
 	}
 }
 
@@ -334,6 +382,65 @@ func TestPlanLifecycle_ACanceledCommitStillLands(t *testing.T) {
 	}
 }
 
+// TestPlanLifecycle_ACanceledPushNeverLeavesARebase: a Ctrl-C reaches `ox
+// plan abandon` while its push rebases over a teammate's commit. Failure
+// prevented: the cancel kills the rebase and skips its abort, and the Ledger
+// stays mid-rebase, refusing every plan write until it is repaired.
+func TestPlanLifecycle_ACanceledPushNeverLeavesARebase(t *testing.T) {
+	f := lifecycleFixture(t)
+	teammate := filepath.Join(t.TempDir(), "teammate")
+	runGitInDir(t, filepath.Dir(teammate), "clone", "-q", "-b", "main", f.origin, teammate)
+	if err := os.WriteFile(filepath.Join(teammate, "notes.md"), []byte("teammate\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitInDir(t, teammate, "add", "notes.md")
+	runGitInDir(t, teammate, "commit", "-q", "-m", "teammate")
+	runGitInDir(t, teammate, "push", "-q")
+
+	// git runs post-checkout mid-rebase: the hook marks that moment, then
+	// holds the rebase open until the test has canceled
+	hookDir := t.TempDir()
+	rebasing, release := filepath.Join(hookDir, "rebasing"), filepath.Join(hookDir, "release")
+	hook := fmt.Sprintf(`#!/bin/sh
+[ -d "$(git rev-parse --git-dir)/rebase-merge" ] || exit 0
+touch %q
+i=0
+while [ ! -e %q ] && [ $i -lt 1000 ]; do sleep 0.01; i=$((i+1)); done
+`, rebasing, release)
+	if err := os.WriteFile(filepath.Join(f.ledger, ".git", "hooks", "post-checkout"), []byte(hook), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		for {
+			if _, err := os.Stat(rebasing); err == nil {
+				cancel()
+				_ = os.WriteFile(release, nil, 0o644)
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+	cmd := &cobra.Command{}
+	cmd.SetContext(ctx)
+	cmd.Flags().Bool("json", true, "")
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	if err := runPlanLifecycleVerbOnDir(cmd, "", f.planDir, "durable", plan.EventAbandoned, lifecycleVerbFlags{Reason: "replaced"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(rebasing); err != nil {
+		t.Fatal("the push never rebased, so nothing was canceled mid-rebase")
+	}
+	if gitutil.IsRebaseInProgress(f.ledger) {
+		t.Fatal("the canceled push left the Ledger mid-rebase")
+	}
+	if !strings.Contains(runGitInDir(t, f.origin, "show", "main:data/plans/2026-10-01-durable/events.jsonl"), `"abandoned"`) {
+		t.Fatal("the abandonment did not reach the remote")
+	}
+}
+
 // TestPlanCommits_NeverResolveAConflictTheyDidNotMake: while a plan file is
 // left conflicted (an autostash re-apply the daemon could not merge), neither
 // a lifecycle retry's file commit nor an authoring commit stages it, so the
@@ -354,7 +461,7 @@ func TestPlanCommits_NeverResolveAConflictTheyDidNotMake(t *testing.T) {
 			}
 			head := runGitInDir(t, f.ledger, "rev-parse", "HEAD")
 
-			if _, err := commitAndPushPlanDir(context.Background(), f.ledger, f.planDir, files...); !errors.Is(err, errLedgerNotSafe) {
+			if err := commitAndPushPlanDir(context.Background(), f.ledger, f.planDir, files...); !errors.Is(err, errLedgerNotSafe) {
 				t.Fatalf("want a refusal naming the repair, got %v", err)
 			}
 			if got := runGitInDir(t, f.ledger, "ls-files", "-u", "--", meta); got == "" {
@@ -364,24 +471,6 @@ func TestPlanCommits_NeverResolveAConflictTheyDidNotMake(t *testing.T) {
 				t.Fatal("no commit may land while the conflict stands")
 			}
 		})
-	}
-}
-
-// TestAwaitSnapshot_SeesALegacyApprovalAfterBackfill: a plan saved before
-// event logs existed keeps its approval in meta.json alone; once `ox plan
-// backfill` gives it a first event, the wait still ends as approved. Failure
-// prevented: the backfill's draft first event outranks the legacy approval,
-// and an AI coworker waits on an approved plan until its timeout.
-func TestAwaitSnapshot_SeesALegacyApprovalAfterBackfill(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "meta.json"), []byte(`{"topic":"Old","slug":"old","status":"approved"}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := plan.ApplyBackfillMeta(context.Background(), dir, "Old plan", "old-plan"); err != nil {
-		t.Fatal(err)
-	}
-	if res, done := awaitSnapshot(dir); !done || res.Status != "approved" {
-		t.Fatalf("want the wait over as approved, got done=%v %+v", done, res)
 	}
 }
 

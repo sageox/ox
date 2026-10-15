@@ -65,10 +65,9 @@ func TestRecordPlanPushOutcome_WaitsForTheMarkerLock(t *testing.T) {
 	}
 }
 
-// A marker owes the union of what its failed attempts tried to commit, and
-// the whole dir absorbs any files. Failure prevented: a later lifecycle
-// failure narrows a marker an author's save left owing the whole dir, or one
-// file set's retry drops another's.
+// A marker owed for the whole dir stays owed for it whichever attempt fails
+// next. Failure prevented: a later lifecycle failure narrows a marker an
+// author's save left owing the whole dir, and the save is never retried.
 func TestRecordPlanPushOutcome_MergesWhatEachAttemptOwes(t *testing.T) {
 	ctx := context.Background()
 	for _, tc := range []struct {
@@ -78,7 +77,6 @@ func TestRecordPlanPushOutcome_MergesWhatEachAttemptOwes(t *testing.T) {
 	}{
 		{"whole dir, then files", nil, []string{"events.jsonl"}, nil},
 		{"files, then whole dir", []string{"events.jsonl"}, nil, nil},
-		{"two file sets", []string{"events.jsonl"}, []string{"meta.json"}, []string{"meta.json", "events.jsonl"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ledger := t.TempDir()

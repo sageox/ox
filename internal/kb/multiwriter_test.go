@@ -467,7 +467,37 @@ func testContentContentGitignoreUnionMerges(t *testing.T) {
 //
 // Failure prevented: silent drift between MergeUnionPaths (the public
 // contract) and the actual attribute file written to .git/info/attributes.
-// --- Plan event logs ---
+func testEveryUnionPathHasMergeRule(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".git"), 0o755))
+	_, err := EnsureMergeAttributes(dir)
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(filepath.Join(dir, ".git/info/attributes"))
+	require.NoError(t, err)
+	got := string(data)
+
+	for _, p := range MergeUnionPaths {
+		// every path must appear with merge=union on its line. We check
+		// the literal "<path> ... merge=union" combination so a typo
+		// (e.g. "merge=onion") is caught.
+		expected := p
+		if !strings.Contains(got, expected) {
+			t.Errorf("MergeUnionPaths entry %q is missing from rendered attributes:\n%s", p, got)
+			continue
+		}
+		// confirm the line containing the path also contains merge=union
+		for _, line := range strings.Split(got, "\n") {
+			if strings.HasPrefix(line, p+" ") || strings.HasPrefix(line, p+"\t") {
+				if !strings.Contains(line, "merge=union") {
+					t.Errorf("path %q is in attributes but not declared merge=union: %q", p, line)
+				}
+			}
+		}
+	}
+}
+
+// --- I. Plan event logs ---
 //
 // Failure prevented: two clones append to one plan's events.jsonl (a
 // reviewer approves while the author revises). Without union the rebase
@@ -545,34 +575,4 @@ func testAutostashPlanEventsUnionMerges(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join(author, planEvents))
 	require.NoError(t, err)
 	assert.Equal(t, `{"kind":"created"}`+"\n"+`{"kind":"approved"}`+"\n"+`{"kind":"worked"}`+"\n", string(data))
-}
-
-func testEveryUnionPathHasMergeRule(t *testing.T) {
-	dir := t.TempDir()
-	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".git"), 0o755))
-	_, err := EnsureMergeAttributes(dir)
-	require.NoError(t, err)
-
-	data, err := os.ReadFile(filepath.Join(dir, ".git/info/attributes"))
-	require.NoError(t, err)
-	got := string(data)
-
-	for _, p := range MergeUnionPaths {
-		// every path must appear with merge=union on its line. We check
-		// the literal "<path> ... merge=union" combination so a typo
-		// (e.g. "merge=onion") is caught.
-		expected := p
-		if !strings.Contains(got, expected) {
-			t.Errorf("MergeUnionPaths entry %q is missing from rendered attributes:\n%s", p, got)
-			continue
-		}
-		// confirm the line containing the path also contains merge=union
-		for _, line := range strings.Split(got, "\n") {
-			if strings.HasPrefix(line, p+" ") || strings.HasPrefix(line, p+"\t") {
-				if !strings.Contains(line, "merge=union") {
-					t.Errorf("path %q is in attributes but not declared merge=union: %q", p, line)
-				}
-			}
-		}
-	}
 }

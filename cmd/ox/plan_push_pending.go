@@ -13,7 +13,6 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strings"
 	"time"
 
@@ -290,22 +289,15 @@ func updatePlanPushMarker(ctx context.Context, path, rel string, started time.Ti
 	}
 
 	now := time.Now().UTC()
-	m := planPushPending{PlanDir: rel, Files: slices.Clone(files), FirstFailedAt: now}
+	m := planPushPending{PlanDir: rel, Files: files, FirstFailedAt: now}
 	if hasPrev && !prev.FirstFailedAt.IsZero() {
 		m.FirstFailedAt = prev.FirstFailedAt
 		m.FailedAttempts = prev.FailedAttempts
 	}
-	if hasPrev {
-		// the whole dir covers any files; otherwise owe both sets
-		if len(prev.Files) == 0 || len(files) == 0 {
-			m.Files = nil
-		} else {
-			for _, f := range prev.Files {
-				if !slices.Contains(m.Files, f) {
-					m.Files = append(m.Files, f)
-				}
-			}
-		}
+	// the whole dir, once owed, stays owed; file sets need no merging, since
+	// every caller that passes files passes planEventFiles
+	if hasPrev && len(prev.Files) == 0 {
+		m.Files = nil
 	}
 	m.LastFailedAt = now
 	m.LastError = gitutil.SanitizeOutput(pushErr.Error())
@@ -383,7 +375,7 @@ func flushPendingPlanPushes(ctx context.Context, ledgerPath string) (succeeded, 
 			continue
 		}
 		attempt := time.Now()
-		_, pushErr := commitAndPushPlanDir(ctx, ledgerPath, planDir, m.Files...)
+		pushErr := commitAndPushPlanDir(ctx, ledgerPath, planDir, m.Files...)
 		recordPlanPushOutcome(ctx, ledgerPath, planDir, attempt, pushErr, m.Files...)
 		if pushErr != nil {
 			failed++

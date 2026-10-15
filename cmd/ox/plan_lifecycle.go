@@ -176,12 +176,16 @@ func runPlanLifecycleVerbOnDir(cmd *cobra.Command, gitRoot, planDir, slug string
 	if err != nil {
 		return fmt.Errorf("record %s event for plan %q: %w", kind, slug, err)
 	}
+	// a no-op still commits and pushes, retrying an earlier event; it is
+	// reported only when that left the plan unshared
 	var share *planShareStatus
-	if changed {
+	if changed || st.Reason != "" {
 		share = &st
 		if !st.Shared {
 			cli.PrintWarningTo(cmd.ErrOrStderr(), fmt.Sprintf("NOT SHARED — %s recorded locally only: %s. Fix: `%s`", kind, st.Reason, st.Fix))
 		}
+	}
+	if changed {
 		// best-effort, off-by-default caller-driven index report — see
 		// plan_activity.go. Only on an actual change, matching the no-op
 		// re-run contract the rest of this function already honors.
@@ -234,8 +238,9 @@ func currentPlanStatus(planDir string) plan.PlanStatus {
 type planLifecycleResult struct {
 	Changed bool            `json:"changed"`
 	Status  plan.PlanStatus `json:"status,omitempty"`
-	// Share is set only when the verb changed something and so had to be
-	// committed: whether the new status reached teammates.
+	// Share is whether the plan's event reached teammates: set when the verb
+	// changed something, or when a no-op's retry of an earlier event left the
+	// plan unshared.
 	Share *planShareStatus `json:"share,omitempty"`
 }
 

@@ -402,6 +402,7 @@ func Save(gitRoot string, in Input, res Result, html []byte, meta Meta) (string,
 		// original CreatedAt, while refreshing the rest. Routing through
 		// MutatePlanMeta also serializes against a concurrent session-stop/
 		// doctor outcome write to the same file.
+		var status PlanStatus // meta.json's, after this save
 		if err := MutatePlanMeta(context.Background(), dir, func(existing *Meta) (*Meta, error) {
 			merged := meta
 			if existing != nil {
@@ -444,6 +445,7 @@ func Save(gitRoot string, in Input, res Result, html []byte, meta Meta) (string,
 			if merged.Status == "" {
 				merged.Status = PlanStatusDraft
 			}
+			status = merged.Status
 			merged.SchemaVersion = SchemaVersion
 			return &merged, nil
 		}); err != nil {
@@ -504,7 +506,9 @@ func Save(gitRoot string, in Input, res Result, html []byte, meta Meta) (string,
 		ev := Event{PlanID: planID, Kind: EventRevised, Topic: meta.Topic}
 		if firstSave {
 			ev.Kind = EventCreated
-			ev.Status = PlanStatusDraft
+			// draft, or the status a legacy plan's meta.json held before it
+			// had events: from now on the status is folded from them
+			ev.Status = status
 		}
 		savedKind = ev.Kind
 		if meta.Provenance != nil {

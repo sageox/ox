@@ -555,7 +555,7 @@ func ConfigureSparseCheckout(path string) error {
 	// is sufficient for that.
 	checkCmd := exec.Command("git", "-C", path, "config", "--type=bool", "--get", "core.sparseCheckout")
 	if out, err := checkCmd.CombinedOutput(); err != nil || strings.TrimSpace(string(out)) != "true" {
-		initCmd := exec.Command("git", "-C", path, "sparse-checkout", "init", "--cone")
+		initCmd := exec.Command("git", append(gitutil.GitHTTPTimeoutFlags(), "-C", path, "sparse-checkout", "init", "--cone")...)
 		if output, err := initCmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("sparse-checkout init: %w: %s", err, output)
 		}
@@ -577,8 +577,12 @@ func ConfigureSparseCheckout(path string) error {
 		return err
 	}
 
-	// set directories to include (excludes everything else like assets/)
-	args := append([]string{"-C", path, "sparse-checkout", "set"}, dirs...)
+	// set directories to include (excludes everything else like assets/).
+	// In a blobless clone, checking out the paths a cone adds fetches their
+	// blobs, and RefreshSparseCheckout holds the repo lock for this, so a
+	// stalled fetch must fail (GitHTTPTimeoutFlags) rather than hold it.
+	args := append(gitutil.GitHTTPTimeoutFlags(), "-C", path, "sparse-checkout", "set")
+	args = append(args, dirs...)
 	setCmd := exec.Command("git", args...)
 	if output, err := setCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("sparse-checkout set: %w: %s", err, output)

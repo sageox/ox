@@ -588,6 +588,36 @@ func TestSave_ResaveSkipsAPlanItsHistoryCloses(t *testing.T) {
 	}
 }
 
+// TestSave_FirstEventKeepsALegacyStatus: re-saving a plan saved before event
+// logs existed, whose status lives in meta.json alone, records that status on
+// the plan's first event, as backfill does. Failure prevented: the re-save
+// turns a legacy approval into a draft, since readers fold the new event log.
+func TestSave_FirstEventKeepsALegacyStatus(t *testing.T) {
+	withLedger(t, t.TempDir())
+	ctx := context.Background()
+	m := Meta{Topic: "Legacy", Slug: "legacy"}
+	dir, _, err := Save("/g", Input{}, Result{}, nil, m)
+	if err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	// what a release before the event log left behind
+	if err := os.Remove(filepath.Join(dir, eventsFile)); err != nil {
+		t.Fatal(err)
+	}
+	if err := MutatePlanMeta(ctx, dir, func(m *Meta) (*Meta, error) {
+		m.Status = PlanStatusApproved
+		return m, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Save("/g", Input{}, Result{}, nil, m); err != nil {
+		t.Fatalf("re-save: %v", err)
+	}
+	if got := CurrentStatus(dir); got != PlanStatusApproved {
+		t.Fatalf("status after the re-save = %q, want approved", got)
+	}
+}
+
 // TestSave_KindRecordedAndDefaulted pins that an artifact's KIND survives the
 // round-trip and that everything saved before kinds existed still reads as a
 // plan. The single noun "plan" is what let a finished review sheet go unsaved.

@@ -61,12 +61,14 @@ const mergeAttributesRelPath = ".git/info/attributes"
 //     point of the file.
 //   - .gitignore — both repo types may have ignore patterns added by
 //     either side.
-//   - data/plans/*/events.jsonl — a Ledger plan's append-only lifecycle
-//     log, appended on any clone by the author's saves, reviewers'
-//     approvals, and session processing. Without union, two clones'
-//     appends always conflict, and the Ledger's data/ auto-resolve then
-//     keeps the rebasing clone's whole file, silently dropping the other's
-//     events (an approval among them).
+//   - data/plans/*/events.jsonl — a Ledger plan's lifecycle log, appended
+//     on any clone by the author's saves, reviewers' approvals, and session
+//     processing. Without union, two clones' appends always conflict, and
+//     the Ledger's data/ auto-resolve then keeps the rebasing clone's whole
+//     file, silently dropping the other's events (an approval among them).
+//     Session stop rewrites its own lines in place (BackfillSessionID), so
+//     a merge can keep two copies of one event; plan.Fold reads the second
+//     as a repeat.
 //
 // Exported so external tooling and tests can introspect the canonical
 // list without re-deriving it.

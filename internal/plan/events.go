@@ -294,7 +294,14 @@ const defaultVisibility = "private"
 //   - CreatedAt: timestamp of the first "created" event; falls back to the
 //     first event overall if the log has no created event (e.g. one
 //     backfilled starting mid-lifecycle).
-//   - UpdatedAt: timestamp of the last event in the slice.
+//   - UpdatedAt: the latest event timestamp in the slice.
+//
+// A second copy of an event (same timestamp, kind and session name) sets no
+// topic, status or visibility. events.jsonl is merge=union: when one clone's
+// BackfillSessionID rewrites lines that another clone appended after, the
+// merge can keep both copies of each, the rewritten copy after the append.
+// Read as a new event, a session's draft "created" line would undo a
+// teammate's approval.
 func Fold(events []Event) FoldedState {
 	state := FoldedState{
 		Status:     PlanStatusDraft,
@@ -309,6 +316,7 @@ func Fold(events []Event) FoldedState {
 	state.UpdatedAt = events[len(events)-1].Timestamp
 
 	seenAuthor := make(map[string]bool, len(events))
+	seenEvent := make(map[eventKey]bool, len(events))
 	sessionsByKey := make(map[string]*SessionRef, len(events))
 	var sessionOrder []string
 	haveCreated := false
@@ -322,14 +330,17 @@ func Fold(events []Event) FoldedState {
 			state.UpdatedAt = ev.Timestamp // defensive: tolerate a slice not already in file/append order
 		}
 
-		if (ev.Kind == EventCreated || ev.Kind == EventRevised) && ev.Topic != "" {
-			state.Topic = ev.Topic
-		}
-		if ev.Status != "" {
-			state.Status = ev.Status
-		}
-		if ev.Visibility != "" {
-			state.Visibility = ev.Visibility
+		if k := (eventKey{ev.Timestamp.UnixNano(), ev.Kind, ev.SessionName}); !seenEvent[k] {
+			seenEvent[k] = true
+			if (ev.Kind == EventCreated || ev.Kind == EventRevised) && ev.Topic != "" {
+				state.Topic = ev.Topic
+			}
+			if ev.Status != "" {
+				state.Status = ev.Status
+			}
+			if ev.Visibility != "" {
+				state.Visibility = ev.Visibility
+			}
 		}
 		if ev.Author != "" && !seenAuthor[ev.Author] {
 			seenAuthor[ev.Author] = true
@@ -380,6 +391,14 @@ func Fold(events []Event) FoldedState {
 		}
 	}
 	return state
+}
+
+// eventKey identifies an event across BackfillSessionID's rewrite of its
+// line, which sets only session_id.
+type eventKey struct {
+	unixNano    int64
+	kind        EventKind
+	sessionName string
 }
 
 func containsKind(kinds []EventKind, k EventKind) bool {

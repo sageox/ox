@@ -106,41 +106,42 @@ func classifyPlanShare(f planShareFacts) planShareStatus {
 var daemonRunningFn = daemon.IsRunning
 
 // sharePlanDir pushes the plan dir a save committed and reports whether
-// teammates can see it. commitErr is that commit's outcome; started is when
-// the save began.
-func sharePlanDir(gitRoot, planDir string, started time.Time, commitErr error) planShareStatus {
-	f := planShareFacts{DaemonRunning: daemonRunningFn()}
-	ctx, err := config.LoadProjectContext(gitRoot)
-	if err != nil || ctx == nil || ctx.DefaultLedgerPath() == "" {
+// teammates can see it. ledgerPath is the save's Ledger ("" for none),
+// commitErr its commit's outcome, and started when the save began.
+func sharePlanDir(ledgerPath, planDir string, started time.Time, commitErr error) planShareStatus {
+	f := planShareFacts{DaemonRunning: daemonRunningFn(), LedgerPath: ledgerPath}
+	if ledgerPath == "" {
 		f.NoLedger = true
 		return classifyPlanShare(f)
 	}
-	f.LedgerPath = ctx.DefaultLedgerPath()
-	// git run in a directory that is not a checkout finds any enclosing
-	// repository and would commit the plan there, and a retry marker would
-	// create a .git dir the daemon reads as a corrupt clone
-	if !gitutil.IsGitRepo(f.LedgerPath) {
-		f.CommitErr = fmt.Errorf("ledger %s is not a git checkout", f.LedgerPath)
+	// git run in a directory that is not a checkout reads any enclosing
+	// repository, and a retry marker would create a .git dir the daemon reads
+	// as a corrupt clone
+	if !gitutil.IsGitRepo(ledgerPath) {
+		f.CommitErr = fmt.Errorf("ledger %s is not a git checkout", ledgerPath)
 		return classifyPlanShare(f)
 	}
 
 	f.CommitErr = commitErr
 	if commitErr == nil {
-		f.PushErr = pushLedger(context.Background(), f.LedgerPath)
+		f.PushErr = pushLedger(context.Background(), ledgerPath)
 	}
 	// the save's files are already written: a failed attempt leaves a marker
 	// for `ox agent prime` to retry
-	recordPlanPushOutcome(context.Background(), f.LedgerPath, planDir, started, cmp.Or(f.CommitErr, f.PushErr))
-	f.Dirty = planDirDirty(f.LedgerPath, planDir)
-	f.Ahead, f.Behind, f.UpstreamKnown = gitAheadBehind(f.LedgerPath)
+	recordPlanPushOutcome(context.Background(), ledgerPath, planDir, started, cmp.Or(f.CommitErr, f.PushErr))
+	f.Dirty = planDirDirty(ledgerPath, planDir)
+	f.Ahead, f.Behind, f.UpstreamKnown = gitAheadBehind(ledgerPath)
 	return classifyPlanShare(f)
 }
 
-// sharePlanEvent is the lifecycle verbs' write: the event committed alone
-// (commitPlanEvent), pushed, and the outcome classified like a save's, with
-// only the event's own files checked for uncommitted changes. An error means
-// nothing was recorded. With no Ledger checkout the event is recorded and
-// reported not shared, as before: nothing pulls or pushes that dir.
+// sharePlanEvent is the lifecycle verbs' and the review page's Approve write:
+// the event committed alone (commitPlanEvent), pushed, and the outcome
+// classified like a save's, with only the event's own files checked for
+// uncommitted changes. The push runs even when the event changes nothing:
+// re-running a verb is how a coworker retries an event an earlier run could
+// not share. An error means nothing was recorded. With no Ledger checkout the
+// event is recorded and reported not shared, since nothing pulls or pushes
+// that dir; a no-op there reports nothing (a zero status).
 func sharePlanEvent(ctx context.Context, gitRoot, planDir string, kind plan.EventKind, fields plan.PlanEventFields) (bool, planShareStatus, error) {
 	f := planShareFacts{DaemonRunning: daemonRunningFn()}
 	ledgerPath, err := planLedgerPathFor(gitRoot)
@@ -151,10 +152,15 @@ func sharePlanEvent(ctx context.Context, gitRoot, planDir string, kind plan.Even
 			f.CommitErr = fmt.Errorf("ledger %s is not a git checkout", ledgerPath)
 		}
 		changed, err := plan.AppendPlanEvent(ctx, planDir, kind, fields)
-		return changed, classifyPlanShare(f), err
+		if !changed {
+			return false, planShareStatus{}, err // nothing new, and nothing to push it
+		}
+		return true, classifyPlanShare(f), err
 	}
 	f.LedgerPath = ledgerPath
 	started := time.Now()
+	planCommitMu.Lock()
+	defer planCommitMu.Unlock()
 	changed, err := commitPlanEvent(ctx, ledgerPath, planDir, kind, fields)
 	switch {
 	case errors.Is(err, errEventNotCommitted):
@@ -162,26 +168,21 @@ func sharePlanEvent(ctx context.Context, gitRoot, planDir string, kind plan.Even
 	case err != nil:
 		return false, planShareStatus{}, err
 	default:
-		// pushed even when nothing changed: re-running the verb is how a
-		// coworker retries an event an earlier run could not share
 		f.PushErr = pushLedger(ctx, ledgerPath)
 	}
 	recordPlanPushOutcome(ctx, ledgerPath, planDir, started, cmp.Or(f.CommitErr, f.PushErr), planEventFiles...)
-	if !changed {
-		return false, planShareStatus{}, nil
-	}
 	var paths []string
 	for _, name := range planEventFiles {
 		paths = append(paths, filepath.Join(planDir, name))
 	}
 	f.Dirty = planDirDirty(ledgerPath, paths...)
 	f.Ahead, f.Behind, f.UpstreamKnown = gitAheadBehind(ledgerPath)
-	return true, classifyPlanShare(f), nil
+	return changed, classifyPlanShare(f), nil
 }
 
-// planDirDirty reports whether the plan dir has staged or unstaged changes in
-// the ledger. An unreadable status reads as dirty: "could not look" must not
-// be reported as "shared".
+// planDirDirty reports whether paths (a plan dir or files in one) have staged
+// or unstaged changes in the ledger. An unreadable status reads as dirty:
+// "could not look" must not be reported as "shared".
 func planDirDirty(ledgerPath string, paths ...string) bool {
 	cmd := exec.Command("git", append([]string{"-C", ledgerPath, "status", "--porcelain", "--"}, paths...)...)
 	// without it, status refreshes the index under index.lock, and a concurrent
@@ -211,9 +212,6 @@ func snapshotPriorRevision(ctx context.Context, gitRoot, ledgerPath, planDir str
 	}
 	if !planDirDirty(ledgerPath, planDir) {
 		return nil
-	}
-	if err := gitutil.IsSafeForGitOps(ledgerPath); err != nil {
-		return fmt.Errorf("ledger not safe to snapshot prior revision: %w", err)
 	}
 	// a failed upload left a large plain plan.html behind; finish the upload before
 	// the snapshot, and refuse the save if it still fails rather than lose or

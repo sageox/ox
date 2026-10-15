@@ -150,13 +150,21 @@ The CLI reads and writes review records only through `pkg/planreview`.
   `/approve` answers 503. A failed commit or push, from the browser or a CLI
   verb, leaves a plan-dir marker owing only those files (`files`); a
   lifecycle push never clears a marker owed for the whole dir, and no success
-  clears a failure recorded after its own attempt began. With no Ledger checkout the event is recorded and reported not
-  committed, and no git command runs.
-- **Saves** (`savePlanArtifacts`): the prior revision's snapshot, the writes,
-  plan.html's upload and the commit run in one hold of the repo lock, so a
-  daemon pull never finds a save half written; the push follows outside it. A
-  save whose commit or push still fails writes a whole-dir marker, which
+  clears a failure recorded after its own attempt began. A verb that records
+  nothing new still commits and pushes, retrying an earlier event, and says
+  so when that left the plan unshared. With no Ledger checkout the event is
+  recorded and reported not committed, and no git command runs.
+- **Saves** (`savePlanArtifacts`): while the Ledger is mid-rebase, locked, or
+  holds unmerged entries a save writes nothing. Otherwise the prior
+  revision's snapshot, the writes (companion pages included), plan.html's
+  upload and the commit run in one hold of the repo lock, so a daemon pull
+  never finds a save half written; the push follows outside it. A save whose
+  commit or push still fails writes a whole-dir marker, which
   `ox plan flush-pending` retries with the dir as it is then.
+- **Pushes** (`pushLedger`) ignore their caller's cancellation: a cancel
+  during the pull-rebase that a rejected push runs kills git and skips its
+  abort, leaving the clone mid-rebase. `PushWithRetry`'s own timeouts bound
+  the push.
 - **Autostash conflicts on save files** (`gitutil.ResolveAutostashConflicts`):
   when the daemon's pull re-applies its autostash over a teammate's change to
   a file a save writes (`plan.md`, `meta.json`, `plan.html`, `annotations.json`,
@@ -166,7 +174,12 @@ The CLI reads and writes review records only through `pkg/planreview`.
 - **Event logs merge:** `data/plans/*/events.jsonl` is `merge=union` in each
   clone's `.git/info/attributes` (`kb.MergeUnionPaths`, rewritten before every
   push and pull), so two clones' appends merge, upstream's lines first, in a
-  rebase and in an autostash re-apply.
+  rebase and in an autostash re-apply. Session stop rewrites its own lines in
+  place (`BackfillSessionID`); merged with an append after them, both copies
+  of each rewritten line survive, and a copy can follow the append. A reader
+  that folds the log must take a line repeating an earlier event (same `ts`,
+  `event` and `session_name`) as that event, not a new one: `plan.Fold` sets
+  no status, topic or visibility from it.
 
 ---
 
@@ -196,7 +209,9 @@ re-apply no longer conflicts; this needs no per-entry layout, and a reader
 sees the same file format. Lifecycle writes commit under the repo lock and
 refuse while the Ledger needs repair, so they leave no plan file uncommitted
 for a pull to conflict on. H14 is fixed: all three refreshes take the repo
-lock (`ledger.RefreshSparseCheckout`). Still open:
+lock (`ledger.RefreshSparseCheckout`), and the blob fetch a widened cone
+starts in a blobless clone fails on a stalled transfer
+(`gitutil.GitHTTPTimeoutFlags`) instead of holding that lock. Still open:
 
 - `meta.json` stays keep-local on a rebase conflict, so its status can lag
   `events.jsonl`; readers fold the log (`plan.CurrentStatus`) instead of
@@ -204,7 +219,8 @@ lock (`ledger.RefreshSparseCheckout`). Still open:
 - H5 remains only where picking a side would drop entries: `events.jsonl`
   without its union attribute, and review records.
 - An in-place rewrite of an `events.jsonl` line (`BackfillSessionID`) racing an
-  append can keep both versions of that line.
+  append keeps both versions of that line; readers fold the second as a
+  repeat (above).
 - H10–H12 are unchanged.
 
 **Reproductions** (real clones of one Ledger with a bare remote, publishing

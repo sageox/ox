@@ -68,9 +68,9 @@ func TestCheckLedgerSparseCheckout_MissingDataPlans(t *testing.T) {
 	assert.Contains(t, result.detail, "data/plans", "detail should name the missing dir and its impact")
 }
 
-// TestCheckLedgerSparseCheckout_FixRepairsTheCone drives `ox doctor --fix`.
-// Failure prevented: the fix reports the cone repaired while it still lacks
-// data/plans.
+// TestCheckLedgerSparseCheckout_FixRepairsTheCone runs the check with the fix
+// `ox doctor --fix` applies. Failure prevented: the fix reports the cone
+// repaired while it still lacks data/plans.
 func TestCheckLedgerSparseCheckout_FixRepairsTheCone(t *testing.T) {
 	t.Parallel()
 

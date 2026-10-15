@@ -396,13 +396,15 @@ func runPlumbing(ctx context.Context, repoPath string, stdin []byte, extraEnv []
 	return stdout.Bytes(), nil
 }
 
-// ResolveAutostashConflicts clears formatting-only session metadata conflicts
-// left by pull --autostash, which can exit successfully with an unmerged index.
-// It preserves every field from both sides and refuses differing values —
-// except for the small allowlist of ox-owned bookkeeping fields in
-// sessionMetaBookkeepingMerges, whose merge is mechanical rather than a choice
-// between two authors' content. Deletions, other paths, active git operations,
-// and edits made after the conflict are always refused.
+// ResolveAutostashConflicts clears the conflicts pull --autostash can leave
+// behind while exiting successfully with an unmerged index, on two kinds of
+// path. For sessions/<name>/meta.json it preserves every field from both sides
+// and refuses differing values — except for the small allowlist of ox-owned
+// bookkeeping fields in sessionMetaBookkeepingMerges, whose merge is
+// mechanical rather than a choice between two authors' content. For a file
+// `ox plan save` writes (isPlanSaveFile) it keeps the stash's local copy, as a
+// rebase of data/ keeps the local commit. Deletions, other paths, active git
+// operations, and edits made after the conflict are always refused.
 // The caller must hold WithRepoLock. No commits are made or stashes removed.
 func ResolveAutostashConflicts(ctx context.Context, repoPath string, safePrefixes, denyPrefixes []string) (bool, error) {
 	// A pull killed after "Created autostash" strands the change under
@@ -495,7 +497,7 @@ func ResolveAutostashConflicts(ctx context.Context, repoPath string, safePrefixe
 				return err
 			}
 			if !bytes.Equal(current, r.original) {
-				return fmt.Errorf("conflicted metadata changed during recovery: %s", r.path)
+				return fmt.Errorf("conflicted file changed during recovery: %s", r.path)
 			}
 			if err := fileutil.AtomicWriteBytes(fullPath, r.merged, r.mode); err != nil {
 				return err

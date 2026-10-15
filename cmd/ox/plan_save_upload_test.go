@@ -6,6 +6,7 @@ package main
 // reports success, so the lost upload surfaces weeks later as a wedged push.
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -18,6 +19,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/plan"
 )
@@ -168,7 +170,7 @@ func TestPlanSaveFile_StampIsDeterministicAcrossSaves(t *testing.T) {
 // flush, doctor) must leave it out of the commit. Red-first: drop the
 // dehydrate-before-snapshot guard in snapshotPriorRevision and the second save
 // adds a ledger commit holding plan.html; drop the pathspec exclusion in
-// commitPlanLocalCtx and the direct commit tracks plan.html.
+// commitPlanDirLocked and the direct commit tracks plan.html.
 func TestPlanSaveFile_RetryAfterFailedUploadNeverCommitsPlainHTML(t *testing.T) {
 	root := newPlanCaptureTestRepo(t)
 	ledger := initPlanTestLedger(t, root)
@@ -196,8 +198,10 @@ func TestPlanSaveFile_RetryAfterFailedUploadNeverCommitsPlainHTML(t *testing.T) 
 	if err != nil || len(plans) != 1 {
 		t.Fatalf("plan.List: err=%v n=%d", err, len(plans))
 	}
-	if err := commitPlanLocal(ledger, plans[0].Dir, ""); err != nil {
-		t.Fatalf("commitPlanLocal: %v", err)
+	if err := gitutil.WithRepoLock(context.Background(), ledger, func() error {
+		return commitPlanDirLocked(context.Background(), ledger, plans[0].Dir, "")
+	}); err != nil {
+		t.Fatalf("commit plan dir: %v", err)
 	}
 	tracked := runGitInDir(t, ledger, "ls-files", "--", "data/plans")
 	if strings.Contains(tracked, "plan.html") {

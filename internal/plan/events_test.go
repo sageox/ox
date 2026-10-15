@@ -395,6 +395,23 @@ func TestFold(t *testing.T) {
 			},
 		},
 		{
+			name: "a second copy of an event, as a union merge keeps a rewritten line, sets nothing again",
+			events: []Event{
+				{Timestamp: t0, PlanID: "pln_9", Kind: EventCreated, Status: PlanStatusDraft, Topic: "first draft", SessionName: "sess-a"},
+				{Timestamp: t1, PlanID: "pln_9", Kind: EventRevised, Topic: "revised topic", SessionName: "sess-b"},
+				{Timestamp: t2, PlanID: "pln_9", Kind: EventApproved, Status: PlanStatusApproved, SessionName: "sess-b"},
+				{Timestamp: t0, PlanID: "pln_9", Kind: EventCreated, Status: PlanStatusDraft, Topic: "first draft", SessionName: "sess-a", SessionID: "ses_a"},
+			},
+			want: FoldedState{
+				PlanID: "pln_9", Topic: "revised topic", Status: PlanStatusApproved,
+				CreatedAt: t0, UpdatedAt: t2, Visibility: defaultVisibility,
+				Sessions: []SessionRef{
+					{SessionName: "sess-a", SessionID: "ses_a", Kinds: []EventKind{EventCreated}, FirstAt: t0, LastAt: t0},
+					{SessionName: "sess-b", Kinds: []EventKind{EventRevised, EventApproved}, FirstAt: t1, LastAt: t2},
+				},
+			},
+		},
+		{
 			name: "event with neither session_name nor session_id is not attributed to any session",
 			events: []Event{
 				{Timestamp: t0, PlanID: "pln_8", Kind: EventCreated},

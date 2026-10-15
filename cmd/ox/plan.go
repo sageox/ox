@@ -338,9 +338,10 @@ var (
 // planSaveOpts carries the optional, caller-supplied facts about a save that
 // most call sites do not have an opinion about.
 type planSaveOpts struct {
-	kind   string
-	slug   string
-	report *planSaveReport
+	kind       string
+	slug       string
+	report     *planSaveReport
+	companions []plan.CompanionFile
 }
 
 // planSaveReport is what an interactive `ox plan save` tells its caller: where
@@ -373,6 +374,12 @@ func withSlug(s string) saveOpt { return func(o *planSaveOpts) { o.slug = s } }
 
 // withReport asks savePlanArtifacts to fill r with the save's outcome.
 func withReport(r *planSaveReport) saveOpt { return func(o *planSaveOpts) { o.report = r } }
+
+// withCompanions bundles companion pages into the saved plan dir and its
+// meta.json, in the save's commit.
+func withCompanions(c []plan.CompanionFile) saveOpt {
+	return func(o *planSaveOpts) { o.companions = c }
+}
 
 // savePlanArtifacts is savePlanWithProvenance with an explicit primary artifact
 // kind: "" = markdown-primary (html, if any, is a generated render), plan.
@@ -431,7 +438,7 @@ func savePlanArtifacts(gitRoot string, in plan.Input, result plan.Result, html [
 	if pctx, err := config.LoadProjectContext(gitRoot); err == nil && pctx != nil {
 		ledgerPath = pctx.DefaultLedgerPath()
 	}
-	checkout := ledgerPath != "" && gitutil.IsGitRepo(ledgerPath)
+	checkout := gitutil.IsGitRepo(ledgerPath)
 	started := time.Now()
 	var (
 		dir       string
@@ -443,13 +450,22 @@ func savePlanArtifacts(gitRoot string, in plan.Input, result plan.Result, html [
 	)
 	write := func() error {
 		ctx := context.Background()
+		if checkout {
+			if err := ledgerSafeForPlanWrite(ctx, ledgerPath); err != nil {
+				report.Err = fmt.Errorf("nothing was saved (run `%s`, then re-run `ox plan save`): %w", planDoctorFix, err)
+				slog.Warn("plan: save refused, ledger needs repair", "error", err)
+				ended = true
+				return nil
+			}
+		}
 		// A revision overwrites the plan dir in place. If an earlier save of it
 		// never got committed (its push/commit failed), that prior revision exists
 		// only in the working tree — commit it locally first so it stays
-		// recoverable from ledger history. If that snapshot fails (e.g. a held
-		// index.lock), REFUSE the save: overwriting would destroy the only copy of
-		// the prior revision (Sacred tier), while refusing loses nothing — the new
-		// revision is still in its source file and saves once the ledger is fixed.
+		// recoverable from ledger history. If that snapshot fails (e.g. the prior
+		// plan.html still cannot be uploaded), REFUSE the save: overwriting would
+		// destroy the only copy of the prior revision (Sacred tier), while refusing
+		// loses nothing — the new revision is still in its source file and saves
+		// once the ledger is fixed.
 		if target, rerr := plan.ResolveSaveDir(gitRoot, meta); rerr == nil {
 			if _, serr := os.Stat(filepath.Join(target, "meta.json")); serr == nil {
 				if err := snapshotPriorRevision(ctx, gitRoot, ledgerPath, target); err != nil {
@@ -496,6 +512,16 @@ func savePlanArtifacts(gitRoot string, in plan.Input, result plan.Result, html [
 			}
 		}
 
+		// Companions too: the commit's `git add --sparse <dir>` then carries
+		// companions/ with the meta.json list that names them.
+		if len(opts.companions) > 0 {
+			if names, cerr := plan.CopyCompanions(opts.companions, dir); cerr != nil {
+				cli.PrintHint("could not bundle companion(s): " + cerr.Error())
+			} else if rerr := plan.RecordCompanions(dir, names); rerr != nil {
+				cli.PrintHint("could not record companion(s) in plan meta: " + rerr.Error())
+			}
+		}
+
 		// reverse link: record the slug on the live recording so it folds into the
 		// session's meta.json at stop (no-op if there's no live recording). Passes
 		// the state resolved alongside the provenance so both links name the same
@@ -503,8 +529,7 @@ func savePlanArtifacts(gitRoot string, in plan.Input, result plan.Result, html [
 		//
 		// Logged, not discarded. This write failing is precisely how produced_plans
 		// ended up unset on 2887 sessions, and a `_ =` here meant a recurrence would
-		// again be completely silent — while the structurally identical best-effort
-		// call twelve lines down logs at Warn.
+		// again be completely silent.
 		if err := appendProducedPlan(gitRoot, recState, slug); err != nil {
 			slog.Warn("plan: reverse link (produced_plans) failed", "error", err, "slug", slug)
 		}
@@ -565,7 +590,7 @@ func savePlanArtifacts(gitRoot string, in plan.Input, result plan.Result, html [
 	// the outcome. Still best-effort — a push failure leaves the local commit for
 	// the next push / `ox doctor` — but no longer silent: the verdict goes back
 	// to the caller, which tells the human whether teammates can see the plan.
-	share := sharePlanDir(gitRoot, dir, started, commitErr)
+	share := sharePlanDir(ledgerPath, dir, started, commitErr)
 	if !share.Shared {
 		slog.Warn("plan: saved but not shared", "dir", dir, "reason", share.Reason, "ahead", share.Ahead, "behind", share.Behind)
 	}
@@ -1201,17 +1226,10 @@ func runPlanRenderFresh(cmd *cobra.Command, file, outPath string, open, artifact
 			cli.PrintHint(fmt.Sprintf("plan-artifact [%s]: %s", f.Rule, f.Message))
 		}
 	} else if gitRoot != "" && config.PlanSave(gitRoot) {
-		// Persist into the ledger when capture is on, so the render is re-openable.
-		savedDir = savePlanWithProvenance(gitRoot, in, result, htmlBytes)
-		// Bundle companions into the saved plan dir + meta so the plan CARRIES
-		// its interactive deep-dives (re-opens, review loop, teammate clones).
-		if savedDir != "" && len(companions) > 0 {
-			if names, cerr := plan.CopyCompanions(companions, savedDir); cerr != nil {
-				cli.PrintHint("could not bundle companion(s): " + cerr.Error())
-			} else if rerr := plan.RecordCompanions(savedDir, names); rerr != nil {
-				cli.PrintHint("could not record companion(s) in plan meta: " + rerr.Error())
-			}
-		}
+		// Persist into the ledger when capture is on, so the render is
+		// re-openable, with its companions bundled so the plan CARRIES its
+		// interactive deep-dives (re-opens, review loop, teammate clones).
+		savedDir = savePlanArtifacts(gitRoot, in, result, htmlBytes, "", withCompanions(companions))
 	}
 	name := "plan"
 	if in.Path != "" {
@@ -1267,15 +1285,8 @@ func runPlanRenderFreshHTML(cmd *cobra.Command, in plan.Input, outPath string, o
 		// The AUTHORED bytes are canonical in the ledger (plan.md is the derived
 		// projection); chrome is injected per render/serve, never stored — that
 		// is what keeps injection idempotent and --artifact verbatim.
-		if dir := savePlanArtifacts(gitRoot, mdIn, result, authored, plan.PrimaryHTML, withKind(kind)); dir != "" {
+		if dir := savePlanArtifacts(gitRoot, mdIn, result, authored, plan.PrimaryHTML, withKind(kind), withCompanions(companions)); dir != "" {
 			cli.PrintHint("Saved HTML-primary " + savedNoun(kind) + " (markdown derived from the page) — live review loop: `ox plan review " + filepath.Base(dir) + "`.")
-			if len(companions) > 0 {
-				if names, cerr := plan.CopyCompanions(companions, dir); cerr != nil {
-					cli.PrintHint("could not bundle companion(s): " + cerr.Error())
-				} else if rerr := plan.RecordCompanions(dir, names); rerr != nil {
-					cli.PrintHint("could not record companion(s) in plan meta: " + rerr.Error())
-				}
-			}
 		}
 	}
 	emitRenderedHTML(cmd, injected, "", outPath, open, name, companions)
