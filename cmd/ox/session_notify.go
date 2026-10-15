@@ -30,7 +30,7 @@ func notifySessionStartedAsync(projectRoot string, state *session.RecordingState
 	if state == nil || state.SessionID == "" {
 		return
 	}
-	attr := loadResolvedAttribution()
+	attr := loadResolvedAttributionFor(projectRoot)
 	if attr.Session == "" {
 		return
 	}

@@ -132,7 +132,7 @@ func loadPlanRecordingState(gitRoot, agentID string) *session.RecordingState {
 // the lint on provenance warns "the render carries no /c/ link" about renders
 // that were never supposed to carry one.
 func planSessionLink(gitRoot string) (sessionID, url string) {
-	if attr := loadResolvedAttribution(); attr.Session == "" {
+	if attr := loadResolvedAttributionFor(gitRoot); attr.Session == "" {
 		return "", "" // session attribution disabled — no link expected
 	}
 	cfg, err := config.LoadProjectConfig(gitRoot)

@@ -400,7 +400,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	}
 
 	// load attribution from user and project configs
-	attribution := loadResolvedAttribution()
+	attribution := loadResolvedAttributionFor(projectRoot)
 
 	// check if project is initialized (.sageox/ exists)
 	sageoxDir := filepath.Join(projectRoot, ".sageox")
@@ -871,7 +871,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 				// when that turn has since landed, so registration fires here too.
 				notifySessionStartedAsync(projectRoot, state)
 			}
-			output.Session.SessionURL, output.Session.PRDirective = sessionLinkOutputs(projCfg, state, attribution.Session)
+			output.Session.SessionURL, output.Session.PRDirective = sessionLinkOutputs(projectRoot, projCfg, state, attribution.Session)
 		}
 	}
 
@@ -1205,26 +1205,17 @@ func hasAliveRecordingForID(states []*session.RecordingState, agentID string) bo
 	return false
 }
 
-// loadResolvedAttribution loads and merges attribution from user and project configs.
-// Project config takes precedence over user config, which takes precedence over defaults.
-func loadResolvedAttribution() config.ResolvedAttribution {
-	// load project config (ignore errors, use defaults)
-	projectCfg, _, _ := config.GetProjectContext()
-	return mergeResolvedAttribution(projectCfg)
-}
-
-// loadResolvedAttributionFor is loadResolvedAttribution for a project the
-// caller already resolved. loadResolvedAttribution finds the project from the
-// working directory, which is another repo when OX_PROJECT_ROOT selects one, so
-// a gate decided for projectRoot must read projectRoot's setting.
+// loadResolvedAttributionFor loads and merges attribution from the user config
+// and projectRoot's project config. Project config takes precedence over user
+// config, which takes precedence over defaults.
+//
+// It takes the project the caller already resolved rather than finding one from
+// the working directory: that is another repo when OX_PROJECT_ROOT selects one,
+// so a gate decided for projectRoot must read projectRoot's setting.
 func loadResolvedAttributionFor(projectRoot string) config.ResolvedAttribution {
-	// ignore errors, use defaults
+	// load project config (ignore errors, use defaults)
 	projectCfg, _ := config.LoadProjectConfig(projectRoot)
-	return mergeResolvedAttribution(projectCfg)
-}
 
-// mergeResolvedAttribution merges projectCfg's attribution over the user's.
-func mergeResolvedAttribution(projectCfg *config.ProjectConfig) config.ResolvedAttribution {
 	// load user config (ignore errors, use defaults)
 	userCfg, _ := config.LoadUserConfig()
 	var userAttr *config.Attribution

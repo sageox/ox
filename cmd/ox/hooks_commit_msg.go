@@ -111,7 +111,10 @@ func runHooksCommitMsg(cmd *cobra.Command, args []string) error {
 			// to avoid picking a random session from a different worktree
 			state, loadErr = session.LoadRecordingStateForWorkspace(projectRoot, projectRoot)
 		}
-		if loadErr == nil && state != nil {
+		// A session held on this machine is never registered, so its link
+		// would 404 from git history for good. The session still records this
+		// commit (hooks_post_commit.go), which links them if it is uploaded.
+		if loadErr == nil && state != nil && !stopHoldsSession(projectRoot, state) {
 			// durable /c/ link preferred; recordings started under an older
 			// binary carry no start-minted ID — name-based fallback
 			sessionURL := buildConversationURL(cfg, state.SessionID)

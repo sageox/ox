@@ -909,8 +909,8 @@ func sessionStopLocation(projectRoot string, state *session.RecordingState) sess
 		info.RepoID = projCfg.RepoID
 	}
 
-	attribution := loadResolvedAttribution()
-	info.SessionURL, _ = sessionLinkOutputs(projCfg, state, attribution.Session)
+	attribution := loadResolvedAttributionFor(projectRoot)
+	info.SessionURL, _ = sessionLinkOutputs(projectRoot, projCfg, state, attribution.Session)
 	return info
 }
 
