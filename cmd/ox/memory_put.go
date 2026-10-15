@@ -161,17 +161,17 @@ func writeObservation(teamContextPath string, observations []observation) error 
 	relPath := filepath.Join("memory", observationDirName, dateDir, filename)
 	pending := "memory/" + observationDirName
 
+	if err := writeObservationFile(teamContextPath, filePath, header, factSlice); err != nil {
+		return fmt.Errorf("write observation file: %w", err)
+	}
+
 	gitCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	// Under the repo lock the daemon's team-context pull and `ox import` hold
-	// (ADR-030). The file is written under it too, so the commit can take every
-	// pending observation, including one an earlier failed put left, without
-	// catching another put's file half written.
+	// (ADR-030). The commit takes every pending observation, so one an earlier
+	// failed put left is committed by the next.
 	err = gitutil.WithRepoLock(gitCtx, teamContextPath, func() error {
-		if err := facts.WriteFacts(filePath, header, factSlice); err != nil {
-			return fmt.Errorf("write observation file: %w", err)
-		}
 		// git run outside a checkout finds any enclosing repository
 		if !gitutil.IsGitRepo(teamContextPath) {
 			return fmt.Errorf("git add: team context %s is not a git checkout", teamContextPath)
@@ -192,10 +192,6 @@ func writeObservation(teamContextPath string, observations []observation) error 
 		return nil
 	})
 	if gitutil.IsRepoLockBusy(err) {
-		// keep the observation: the next put commits it
-		if werr := facts.WriteFacts(filePath, header, factSlice); werr != nil {
-			return fmt.Errorf("write observation file: %w", werr)
-		}
 		return fmt.Errorf("observation saved but not committed, team context busy: %w", err)
 	}
 	if err != nil {
@@ -204,6 +200,25 @@ func writeObservation(teamContextPath string, observations []observation) error 
 
 	slog.Info("observation recorded", "file", relPath, "count", len(observations))
 	return nil
+}
+
+// writeObservationFile writes the observation complete inside .git/ and then
+// renames it into place, so a commit taking all of memory/.observations never
+// stages one half written. Outside a checkout nothing commits it, and it is
+// written in place.
+func writeObservationFile(teamContextPath, filePath string, header facts.FileHeader, fs []facts.Fact) error {
+	gitDir := filepath.Join(teamContextPath, ".git")
+	if info, err := os.Stat(gitDir); err != nil || !info.IsDir() {
+		return facts.WriteFacts(filePath, header, fs)
+	}
+	tmp := filepath.Join(gitDir, "ox-observation-"+filepath.Base(filePath))
+	if err := facts.WriteFacts(tmp, header, fs); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
+		return err
+	}
+	return os.Rename(tmp, filePath)
 }
 
 // parseObservations parses JSON (single object) or JSONL (one object per line).
