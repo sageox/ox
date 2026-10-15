@@ -24,7 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **An interrupted plan push no longer leaves your Ledger stuck** — when the review page is closed, or a background retry runs out of time, while ox is pushing a plan change, the push now finishes. Before, it could leave the Ledger mid-rebase, and plan changes failed until the daemon or `ox doctor --fix` repaired it.
 - **`ox plan save` never writes into a Ledger that needs repair** — while the Ledger is mid-rebase or has unresolved conflicts, the save writes nothing and tells you to run `ox doctor --fix`. Before, the repair could undo the save.
 - **Companion pages travel with their plan** — `ox plan render` and `ox plan review --file` commit a plan's companion pages with the save, so teammates get them with the plan.
-- **Saving to your Ledger no longer fails when background sync runs at the same moment** — the daemon now waits for ox to finish a commit before it refreshes which Ledger folders are on your disk, and a download that stalls during that refresh gives up after 15 seconds without progress instead of holding up your saves. Before, that commit could fail and leave the change unshared.
+- **Saving to your Ledger no longer fails when background sync runs at the same moment** — the daemon now waits for ox to finish a commit before it refreshes which Ledger folders are on your disk, and a download during that refresh gives up after 15 seconds without progress, or 10 minutes in all, instead of holding up your saves. Before, that commit could fail and leave the change unshared.
 
 ## [0.23.0] - 2026-10-12
 

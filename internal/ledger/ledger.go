@@ -542,6 +542,12 @@ func sparseCheckoutDirs() []string {
 // clone/sparse/pull plumbing but different implementations. See team context's
 // ComputeSparseSet() and manifest-driven approach vs this static list + sliding window.
 func ConfigureSparseCheckout(path string) error {
+	return configureSparseCheckout(context.Background(), path)
+}
+
+// configureSparseCheckout is ConfigureSparseCheckout with ctx bounding the
+// git commands that can fetch.
+func configureSparseCheckout(ctx context.Context, path string) error {
 	if err := DisableSymlinks(path); err != nil {
 		return err
 	}
@@ -555,8 +561,7 @@ func ConfigureSparseCheckout(path string) error {
 	// is sufficient for that.
 	checkCmd := exec.Command("git", "-C", path, "config", "--type=bool", "--get", "core.sparseCheckout")
 	if out, err := checkCmd.CombinedOutput(); err != nil || strings.TrimSpace(string(out)) != "true" {
-		initCmd := exec.Command("git", append(gitutil.GitHTTPTimeoutFlags(), "-C", path, "sparse-checkout", "init", "--cone")...)
-		if output, err := initCmd.CombinedOutput(); err != nil {
+		if output, err := gitutil.RunGit(ctx, path, append(gitutil.GitHTTPTimeoutFlags(), "sparse-checkout", "init", "--cone")...); err != nil {
 			return fmt.Errorf("sparse-checkout init: %w: %s", err, output)
 		}
 	}
@@ -581,10 +586,8 @@ func ConfigureSparseCheckout(path string) error {
 	// In a blobless clone, checking out the paths a cone adds fetches their
 	// blobs, and RefreshSparseCheckout holds the repo lock for this, so a
 	// stalled fetch must fail (GitHTTPTimeoutFlags) rather than hold it.
-	args := append(gitutil.GitHTTPTimeoutFlags(), "-C", path, "sparse-checkout", "set")
-	args = append(args, dirs...)
-	setCmd := exec.Command("git", args...)
-	if output, err := setCmd.CombinedOutput(); err != nil {
+	args := append(gitutil.GitHTTPTimeoutFlags(), "sparse-checkout", "set")
+	if output, err := gitutil.RunGit(ctx, path, append(args, dirs...)...); err != nil {
 		return fmt.Errorf("sparse-checkout set: %w: %s", err, output)
 	}
 
@@ -603,9 +606,19 @@ func ConfigureSparseCheckout(path string) error {
 // lock can fail such a commit on index.lock and leave its files uncommitted.
 func RefreshSparseCheckout(ctx context.Context, path string) error {
 	return gitutil.WithRepoLock(ctx, path, func() error {
-		return ConfigureSparseCheckout(path)
+		// its own bound, not ctx's: the daemon gives a pull cycle 60s, which
+		// would end a first fetch of a large cone on every cycle
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sparseRefreshTimeout)
+		defer cancel()
+		return configureSparseCheckout(ctx, path)
 	})
 }
+
+// sparseRefreshTimeout ends a refresh whose fetch never finishes but never
+// stalls either, which GitHTTPTimeoutFlags cannot catch: every Ledger write
+// waits on the repo lock the refresh holds. A variable so a test can shorten
+// it.
+var sparseRefreshTimeout = 10 * time.Minute
 
 // DisableSymlinks saves core.symlinks=false so git checks Ledger symlinks out
 // as plain files holding the link text. Teammates write this repo, and ox's

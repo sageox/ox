@@ -209,9 +209,10 @@ re-apply no longer conflicts; this needs no per-entry layout, and a reader
 sees the same file format. Lifecycle writes commit under the repo lock and
 refuse while the Ledger needs repair, so they leave no plan file uncommitted
 for a pull to conflict on. H14 is fixed: all three refreshes take the repo
-lock (`ledger.RefreshSparseCheckout`), and the blob fetch a widened cone
-starts in a blobless clone fails on a stalled transfer
-(`gitutil.GitHTTPTimeoutFlags`) instead of holding that lock. Still open:
+lock (`ledger.RefreshSparseCheckout`). The blob fetch a widened cone starts
+in a blobless clone fails on a stalled transfer (`gitutil.GitHTTPTimeoutFlags`),
+and a refresh still running after `sparseRefreshTimeout` (10 minutes) is
+ended, so neither holds that lock for long. Still open:
 
 - `meta.json` stays keep-local on a rebase conflict, so its status can lag
   `events.jsonl`; readers fold the log (`plan.CurrentStatus`) instead of
