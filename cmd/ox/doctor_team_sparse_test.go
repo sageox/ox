@@ -170,7 +170,10 @@ func TestMissingSparseTopLevelDirs_UntrackedContentDoesNotMaskTheOmission(t *tes
 	}
 }
 
-func TestRepairTeamSparseCheckout_MaterializesManifestIncludedDirectory(t *testing.T) {
+// newTeamSparseRepairRepo is a team context whose sparse spec omits agents/,
+// a directory its manifest includes.
+func newTeamSparseRepairRepo(t *testing.T) (string, *manifest.ManifestConfig) {
+	t.Helper()
 	run := func(dir string, args ...string) {
 		t.Helper()
 		cmd := exec.Command("git", args...)
@@ -187,6 +190,7 @@ func TestRepairTeamSparseCheckout_MaterializesManifestIncludedDirectory(t *testi
 		".sageox/sync.manifest": "version 1\ninclude .sageox/\ninclude agents/\ninclude memory/\n",
 		"agents/rules/team.md":  "team rule\n",
 		"memory/MEMORY.md":      "memory\n",
+		"extra/guide.md":        "guide\n",
 		"README.md":             "root\n",
 	} {
 		p := filepath.Join(repo, filepath.FromSlash(rel))
@@ -207,8 +211,32 @@ func TestRepairTeamSparseCheckout_MaterializesManifestIncludedDirectory(t *testi
 	if !strings.Contains(strings.Join(locallyRepairableMissingDirs(cfg, missing), ","), "agents/") {
 		t.Fatalf("fixture did not classify the omitted manifest directory as locally repairable: %v", missing)
 	}
-	// another ox process (the daemon mid-pull) holds the team context: the
-	// repair waits rather than rewrite the index under it
+	return repo, cfg
+}
+
+func TestRepairTeamSparseCheckout_MaterializesManifestIncludedDirectory(t *testing.T) {
+	repo, cfg := newTeamSparseRepairRepo(t)
+	if err := repairTeamSparseCheckout(repo); err != nil {
+		t.Fatalf("repairTeamSparseCheckout: %v", err)
+	}
+	if missing := missingSparseTopLevelDirs(repo, cfg); len(missing) != 0 {
+		t.Fatalf("repair did not materialize the manifest-included directory: %v", missing)
+	}
+	if _, err := os.Stat(filepath.Join(repo, "agents", "rules", "team.md")); err != nil {
+		t.Fatalf("team rule remains absent after repair: %v", err)
+	}
+}
+
+// TestRepairTeamSparseCheckout_WaitsForTheRepoLock: `ox doctor --fix` while
+// the daemon pulls the team context, and the pull brings a new manifest.
+// Failure prevented: the repair rewrites the index under the pull (or an ox
+// commit), failing it on index.lock, or applies the manifest it read before
+// the wait.
+func TestRepairTeamSparseCheckout_WaitsForTheRepoLock(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: waits 500ms on a held repo lock")
+	}
+	repo, _ := newTeamSparseRepairRepo(t)
 	held, release, lockDone := make(chan struct{}), make(chan struct{}), make(chan error, 1)
 	go func() {
 		lockDone <- gitutil.WithRepoLock(context.Background(), repo, func() error {
@@ -230,6 +258,11 @@ func TestRepairTeamSparseCheckout_MaterializesManifestIncludedDirectory(t *testi
 		close(release)
 		t.Fatal("the repair rewrote the sparse checkout while another process held the team context")
 	}
+	manifestPath := filepath.Join(repo, ".sageox", "sync.manifest")
+	if err := os.WriteFile(manifestPath, []byte("version 1\ninclude .sageox/\ninclude agents/\ninclude memory/\ninclude extra/\n"), 0o644); err != nil {
+		close(release)
+		t.Fatal(err)
+	}
 	close(release)
 	if err := <-lockDone; err != nil {
 		t.Fatal(err)
@@ -237,10 +270,7 @@ func TestRepairTeamSparseCheckout_MaterializesManifestIncludedDirectory(t *testi
 	if err := <-repaired; err != nil {
 		t.Fatalf("repairTeamSparseCheckout: %v", err)
 	}
-	if missing := missingSparseTopLevelDirs(repo, cfg); len(missing) != 0 {
-		t.Fatalf("repair did not materialize the manifest-included directory: %v", missing)
-	}
-	if _, err := os.Stat(filepath.Join(repo, "agents", "rules", "team.md")); err != nil {
-		t.Fatalf("team rule remains absent after repair: %v", err)
+	if _, err := os.Stat(filepath.Join(repo, "extra", "guide.md")); err != nil {
+		t.Fatalf("the repair applied the manifest it read before the wait: %v", err)
 	}
 }

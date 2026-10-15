@@ -109,6 +109,9 @@ func TestWriteObservation_ConcurrentPuts(t *testing.T) {
 // team context waits for the pull. Failure prevented: the put's git add and
 // commit run inside the pull and fail on index.lock, or land mid-rebase.
 func TestWriteObservation_WaitsForTheRepoLock(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: waits 500ms on a held repo lock")
+	}
 	dir := t.TempDir()
 	initTestGitRepo(t, dir)
 	head := runGitInDir(t, dir, "rev-parse", "HEAD")
@@ -163,6 +166,22 @@ func TestWriteObservation_SurvivesARebaseAbort(t *testing.T) {
 	require.NoError(t, writeObservation(dir, []observation{{Content: "next put"}}))
 	require.Empty(t, runGitInDir(t, dir, "status", "--porcelain", "--", "memory"), "the next put must commit the earlier observation too")
 	require.FileExists(t, file)
+}
+
+// TestWriteObservation_LeavesNoTempFileWhenTheMoveFails: each observation is
+// written in .git/ and moved into memory/.observations. Failure prevented: a
+// failed move leaves the completed file in .git/, where no put finds it.
+func TestWriteObservation_LeavesNoTempFileWhenTheMoveFails(t *testing.T) {
+	dir := t.TempDir()
+	initTestGitRepo(t, dir)
+	// a file where the observations dir must go fails MkdirAll on every platform
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "memory"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "memory", observationDirName), []byte("x"), 0o644))
+
+	require.Error(t, writeObservation(dir, []observation{{Content: "cannot be placed"}}))
+	leftovers, err := filepath.Glob(filepath.Join(dir, ".git", "ox-observation-*"))
+	require.NoError(t, err)
+	require.Empty(t, leftovers, "the failed move left its file in .git/")
 }
 
 // ---------------------------------------------------------------------------

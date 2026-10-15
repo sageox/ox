@@ -215,10 +215,14 @@ func writeObservationFile(teamContextPath, filePath string, header facts.FileHea
 	if err := facts.WriteFacts(tmp, header, fs); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
-		return err
+	err := os.MkdirAll(filepath.Dir(filePath), 0o755)
+	if err == nil {
+		err = os.Rename(tmp, filePath)
 	}
-	return os.Rename(tmp, filePath)
+	if err != nil {
+		_ = os.Remove(tmp) // no later put would find it in .git/
+	}
+	return err
 }
 
 // parseObservations parses JSON (single object) or JSONL (one object per line).
