@@ -412,6 +412,64 @@ func TestGC_FullCycle_Ledger(t *testing.T) {
 	assert.True(t, os.IsNotExist(err), "cache backup should be cleaned up after restore")
 }
 
+// TestGC_CarriesPlanRetriesIntoTheNewClone: the CLI keeps plan retries under
+// the Ledger clone's .git/, which a reclone replaces. Failure prevented
+// (#1356): the reclone deletes them, or the carry replaces a retry dir the
+// CLI already wrote into the new clone, or fails the reclone over it.
+func TestGC_CarriesPlanRetriesIntoTheNewClone(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
+	isolateCredentials(t)
+
+	tmp := t.TempDir()
+	bareDir := filepath.Join(tmp, "ledger.bare")
+	seedDir := filepath.Join(tmp, "seed")
+	require.NoError(t, exec.Command("git", "init", "--bare", "--initial-branch=main", bareDir).Run())
+	require.NoError(t, exec.Command("git", "clone", bareDir, seedDir).Run())
+	gitConfig(t, seedDir)
+	require.NoError(t, os.MkdirAll(filepath.Join(seedDir, "sessions"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(seedDir, "sessions", ".gitkeep"), []byte(""), 0644))
+	require.NoError(t, exec.Command("git", "-C", seedDir, "add", ".").Run())
+	require.NoError(t, exec.Command("git", "-C", seedDir, "commit", "-m", "initial").Run())
+	require.NoError(t, exec.Command("git", "-C", seedDir, "push", "origin", "HEAD:main").Run())
+
+	cloneDir := filepath.Join(tmp, "ledger")
+	require.NoError(t, exec.Command("git", "clone", "file://"+bareDir, cloneDir).Run())
+	gitConfig(t, cloneDir)
+	pushDir := filepath.Join(".git", "ox-plan-push-pending")
+	reviewDir := filepath.Join(".git", "ox-plan-review-pending")
+	for _, dir := range []string{pushDir, reviewDir} {
+		require.NoError(t, os.MkdirAll(filepath.Join(cloneDir, dir), 0755))
+		require.NoError(t, os.WriteFile(filepath.Join(cloneDir, dir, "old.json"), []byte("old"), 0644))
+	}
+
+	s := gcTestScheduler(t)
+	// stands in for a review retry the CLI writes into the new clone between
+	// the swap and the carry: the hook runs just before the swap, so it writes
+	// into the clone about to be swapped in
+	s.gcSwapWindowTestHook = func() {
+		dir := filepath.Join(cloneDir+".new", reviewDir)
+		require.NoError(t, os.MkdirAll(dir, 0755))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "newer.json"), []byte("newer"), 0644))
+	}
+	ws := WorkspaceState{
+		ID:       "carry-test",
+		Type:     WorkspaceTypeLedger,
+		Path:     cloneDir,
+		CloneURL: "file://" + bareDir,
+		Exists:   true,
+	}
+	require.Equal(t, gcSuccess, s.runBlueGreenGC(context.Background(), ws), "a carry the new clone refuses must not fail the reclone")
+
+	data, err := os.ReadFile(filepath.Join(cloneDir, pushDir, "old.json"))
+	require.NoError(t, err, "a plan retry must survive the reclone")
+	assert.Equal(t, "old", string(data))
+	data, err = os.ReadFile(filepath.Join(cloneDir, reviewDir, "newer.json"))
+	require.NoError(t, err, "the carry must not replace a retry the CLI wrote into the new clone")
+	assert.Equal(t, "newer", string(data))
+}
+
 func TestGC_SkipsWhenLocked(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: git clone operations")

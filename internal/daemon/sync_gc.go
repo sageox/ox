@@ -926,7 +926,17 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 			"path", ws.Path, "error", err)
 	}
 
-	// step 4: cleanup old
+	// step 4: carry the CLI's plan retries into the new clone, then remove
+	// the old one. The retries live under .git/, so the fresh clone does not
+	// have them, and a review entry can hold the only copy of its record
+	// (#1356). Moving them at the swap, rather than copying them in phase 0
+	// like the cache, also carries any written during the clone.
+	for _, dir := range []string{ledger.PlanPushPendingDir, ledger.PlanReviewPendingDir} {
+		err := os.Rename(filepath.Join(oldPath, dir), filepath.Join(ws.Path, dir))
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			s.logger.Error("gc: failed to carry plan retries into the new clone", "dir", dir, "error", err)
+		}
+	}
 	if err := os.RemoveAll(oldPath); err != nil {
 		s.logger.Warn("gc: failed to remove old clone", "path", oldPath, "error", err)
 	}

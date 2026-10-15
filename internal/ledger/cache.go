@@ -8,6 +8,16 @@ import (
 	"github.com/sageox/ox/internal/fileutil"
 )
 
+// PlanPushPendingDir and PlanReviewPendingDir, relative to a Ledger clone's
+// root, hold the CLI's retries for plan work not yet known to be on the remote
+// (cmd/ox/plan_push_pending.go). Being under .git/, they are never tracked, so
+// a fresh clone does not bring them back: the daemon's GC reclone carries them
+// from the clone it replaces.
+const (
+	PlanPushPendingDir   = ".git/ox-plan-push-pending"
+	PlanReviewPendingDir = ".git/ox-plan-review-pending"
+)
+
 // PreserveCache copies the .sageox/cache/ directory from a checkout to a
 // backup location. The cache is gitignored local state that a fresh clone does
 // not bring back, such as codedb indexes and session recordings. Returns nil

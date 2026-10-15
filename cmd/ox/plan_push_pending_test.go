@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -13,7 +14,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/fileutil"
+	"github.com/sageox/ox/internal/gitserver"
+	"github.com/sageox/ox/pkg/planreview"
 )
 
 // writePlanPushMarkerFile drops a raw marker file into a Ledger's pending dir.
@@ -281,6 +286,141 @@ func TestPlanFlushPendingCmd_PushesAndReports(t *testing.T) {
 	}
 	if n := feedbackRoundsOnRemote(t, f.origin); n != 1 {
 		t.Fatalf("round should reach the remote, got %d", n)
+	}
+}
+
+// TestFlushPending_LandsRetriesCarriedByADaemonReclone runs the daemon's GC
+// reclone over a Ledger holding three retries — a review round and a plan
+// edit whose commits a live index.lock refused, and a review entry whose
+// record was never written — and then flush-pending in the new clone.
+// Failure prevented (#1356): the reclone deletes the old clone's .git/ and
+// the retries in it, so `ox agent prime` no longer retries the round or the
+// plan edit, and the unwritten record, held only by its entry, is lost.
+func TestFlushPending_LandsRetriesCarriedByADaemonReclone(t *testing.T) {
+	f := newDurableReviewFixture(t)
+	// the GC accepts a Ledger reclone only once it has a sessions/ dir
+	if err := os.MkdirAll(filepath.Join(f.ledger, "sessions"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.ledger, "sessions", ".gitkeep"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitInDir(t, f.ledger, "add", "sessions")
+	runGitInDir(t, f.ledger, "commit", "-q", "-m", "sessions")
+	runGitInDir(t, f.ledger, "push", "-q")
+	// a fresh clone checks out the remote's HEAD, as it does from a real server
+	runGitInDir(t, f.origin, "symbolic-ref", "HEAD", "refs/heads/main")
+
+	lock := filepath.Join(f.ledger, ".git", "index.lock")
+	if err := os.WriteFile(lock, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code, body := reviewPOSTBody(t, f.srv.URL+"/feedback", "secret", roundBody("round-0001", "h1")); code != http.StatusOK {
+		t.Fatalf("status %d: %s", code, body)
+	}
+	if err := os.WriteFile(filepath.Join(f.planDir, "plan.md"), []byte("# Durable v2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := commitPlanToLedger("root", f.planDir); err == nil {
+		t.Fatal("a plan commit under a live index.lock must fail")
+	}
+	if err := os.Remove(lock); err != nil {
+		t.Fatal(err)
+	}
+	rel, err := ledgerRelPath(f.ledger, f.planDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q, err := planreview.ParseRoundRequest([]byte(roundBody("round-000L", "hL")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err := q.Record("durable", q.Reviewer, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	lost := reviewPending{PlanDir: rel, Plan: filepath.Base(f.planDir), Kind: "round", ID: q.ID, Path: rec.Path, SHA256: sha256Hex(rec.Data), Data: rec.Data}
+	if err := writeReviewPending(lost.path(f.ledger), lost); err != nil {
+		t.Fatal(err)
+	}
+
+	retries := func() map[string]string {
+		t.Helper()
+		got := map[string]string{}
+		for _, dir := range []string{planPushPendingDir, planReviewPendingDir} {
+			entries, err := os.ReadDir(filepath.Join(f.ledger, filepath.FromSlash(dir)))
+			if err != nil && !errors.Is(err, os.ErrNotExist) {
+				t.Fatal(err)
+			}
+			for _, e := range entries {
+				b, err := os.ReadFile(filepath.Join(f.ledger, filepath.FromSlash(dir), e.Name()))
+				if err != nil {
+					t.Fatal(err)
+				}
+				got[dir+"/"+e.Name()] = string(b)
+			}
+		}
+		return got
+	}
+	before := retries()
+	if len(before) != 3 {
+		t.Fatalf("want a plan push marker and two review entries before the reclone, got %v", slices.Sorted(maps.Keys(before)))
+	}
+	oldGit, err := os.Stat(filepath.Join(f.ledger, ".git"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// the daemon's own forced-GC entry point, pointed at this Ledger
+	prevFileTransport := gitserver.TestAllowFileTransport
+	gitserver.TestAllowFileTransport = true
+	t.Cleanup(func() { gitserver.TestAllowFileTransport = prevFileTransport })
+	project := t.TempDir()
+	if err := os.Mkdir(filepath.Join(project, ".sageox"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.SaveLocalConfig(project, &config.LocalConfig{Ledger: &config.LedgerConfig{Path: f.ledger}}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := daemon.DefaultConfig()
+	cfg.ProjectRoot = project
+	scheduler := daemon.NewSyncScheduler(cfg, slog.New(slog.DiscardHandler))
+	if err := scheduler.WorkspaceRegistry().LoadFromConfig(); err != nil {
+		t.Fatal(err)
+	}
+	if !scheduler.WorkspaceRegistry().SetLedgerCloneURL("file://" + f.origin) {
+		t.Fatal("the registry must hold the Ledger from config.local.toml")
+	}
+	if resp := scheduler.TriggerGC(context.Background()); !resp.LedgerTriggered || len(resp.Errors) > 0 {
+		t.Fatalf("the Ledger reclone must succeed: %+v", resp)
+	}
+	if newGit, err := os.Stat(filepath.Join(f.ledger, ".git")); err != nil || os.SameFile(oldGit, newGit) {
+		t.Fatalf("the GC must replace the clone (err %v)", err)
+	}
+	if after := retries(); !maps.Equal(after, before) {
+		t.Fatalf("the new clone must hold every retry byte for byte\nbefore: %v\nafter:  %v",
+			slices.Sorted(maps.Keys(before)), slices.Sorted(maps.Keys(after)))
+	}
+
+	t.Chdir(f.ledger) // flush-pending resolves the project from the cwd's git root
+	var out bytes.Buffer
+	planFlushPendingCmd.SetOut(&out)
+	planFlushPendingCmd.SetContext(context.Background())
+	t.Cleanup(func() { planFlushPendingCmd.SetOut(nil) })
+	if err := planFlushPendingCmd.RunE(planFlushPendingCmd, nil); err != nil {
+		t.Fatalf("flush-pending: %v", err)
+	}
+	if got := strings.TrimSpace(out.String()); got != "plan push retry: 3 pushed, 0 still pending" {
+		t.Fatalf("output = %q", got)
+	}
+	if n := feedbackRoundsOnRemote(t, f.origin); n != 2 || !strings.Contains(remoteFiles(t, f.origin), lost.Path) {
+		t.Fatalf("both review records must reach the remote, %d rounds there", n)
+	}
+	if got := runGitInDir(t, f.origin, "show", "main:"+rel+"/plan.md"); got != "# Durable v2" {
+		t.Fatalf("the plan edit must reach the remote, plan.md = %q", got)
+	}
+	if left := retries(); len(left) != 0 {
+		t.Fatalf("every retry must clear once it lands, left %v", slices.Sorted(maps.Keys(left)))
 	}
 }
 

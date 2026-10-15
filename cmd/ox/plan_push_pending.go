@@ -18,6 +18,7 @@ import (
 
 	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/gitutil"
+	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/proc"
 	"github.com/sageox/ox/internal/selfexec"
 	"github.com/spf13/cobra"
@@ -39,7 +40,7 @@ import (
 // pushLedger — the full CLI gate stack — and clears each marker on success.
 
 // planPushPendingDir is the marker directory, relative to the Ledger root.
-const planPushPendingDir = ".git/ox-plan-push-pending"
+const planPushPendingDir = ledger.PlanPushPendingDir
 
 // planPushFlushTimeout bounds one detached flush. pushLedger retries with
 // backoff and may pull-rebase; a few minutes covers a slow remote while
@@ -51,7 +52,7 @@ const planPushFlushTimeout = 5 * time.Minute
 // for the same reasons. The plan-dir markers retry an author's whole plan dir;
 // these retry exactly one record each and are cleared only by verifying that
 // record (see landReviewRecord), never by another operation's success.
-const planReviewPendingDir = ".git/ox-plan-review-pending"
+const planReviewPendingDir = ledger.PlanReviewPendingDir
 
 // reviewPending is one review operation's recovery entry, removed once its
 // record is verified. It holds the exact record bytes, which never change, so
