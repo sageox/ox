@@ -68,11 +68,30 @@ func TestCheckLedgerSparseCheckout_MissingDataPlans(t *testing.T) {
 	assert.Contains(t, result.detail, "data/plans", "detail should name the missing dir and its impact")
 }
 
-// TestCheckLedgerSparseCheckout_FixRepairsTheCone drives `ox doctor --fix`
-// while another ox process holds the Ledger. Failure prevented: the repair
-// rewrites the index under that process's commit (failing it on index.lock),
-// or reports the cone repaired while it still lacks data/plans.
+// TestCheckLedgerSparseCheckout_FixRepairsTheCone drives `ox doctor --fix`.
+// Failure prevented: the fix reports the cone repaired while it still lacks
+// data/plans.
 func TestCheckLedgerSparseCheckout_FixRepairsTheCone(t *testing.T) {
+	t.Parallel()
+
+	ledgerDir := initBareGitRepo(t)
+	writeSparseCheckout(t, ledgerDir, "/*\n!/*/\n/.sageox/\n/.sync/\n/sessions/\n")
+
+	result := checkLedgerSparseCheckoutAtPath(ledgerDir, true)
+
+	require.True(t, result.passed, result.detail)
+	content, err := os.ReadFile(filepath.Join(ledgerDir, ".git", "info", "sparse-checkout"))
+	require.NoError(t, err)
+	assert.Empty(t, missingSparseConeDirs(string(content)), "the repaired cone must carry every required dir")
+}
+
+// TestCheckLedgerSparseCheckout_FixWaitsForTheRepoLock: `ox doctor --fix`
+// while another ox process holds the Ledger. Failure prevented: the repair
+// rewrites the index under that process's commit, failing it on index.lock.
+func TestCheckLedgerSparseCheckout_FixWaitsForTheRepoLock(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: waits 500ms on a held repo lock")
+	}
 	t.Parallel()
 
 	ledgerDir := initBareGitRepo(t)
@@ -102,12 +121,7 @@ func TestCheckLedgerSparseCheckout_FixRepairsTheCone(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, stale, string(got), "the repair rewrote the cone while a peer held the repo lock")
 	require.NoError(t, <-lockDone)
-
-	result := <-fixed
-	require.True(t, result.passed, result.detail)
-	content, err := os.ReadFile(sparseFile)
-	require.NoError(t, err)
-	assert.Empty(t, missingSparseConeDirs(string(content)), "the repaired cone must carry every required dir")
+	require.True(t, (<-fixed).passed, "the repair must run once the lock is free")
 }
 
 // TestMissingSparseConeDirs covers the pure matcher directly — the surrounding
