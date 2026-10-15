@@ -198,6 +198,8 @@ func commitPlanEvent(ctx context.Context, ledgerPath, planDir string, kind plan.
 // that exist) and commits only them. On failure it unstages them, so no later
 // commit carries what this one refused. The caller holds the repo lock.
 func commitPlanPathsLocked(ctx context.Context, ledgerPath, msg, rel string, files []string) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), lockedCommitTimeout)
+	defer cancel()
 	if err := errIfUnmerged(ctx, ledgerPath); err != nil {
 		return err
 	}
@@ -210,12 +212,7 @@ func commitPlanPathsLocked(ctx context.Context, ledgerPath, msg, rel string, fil
 	if len(paths) == 0 {
 		return nil
 	}
-	unstage := func() {
-		// a canceled ctx (Ctrl-C, a retry's deadline) would skip the reset
-		resetCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-		defer cancel()
-		_, _ = gitutil.RunGit(resetCtx, ledgerPath, append([]string{"reset", "-q", "--"}, paths...)...)
-	}
+	unstage := func() { _, _ = gitutil.RunGit(ctx, ledgerPath, append([]string{"reset", "-q", "--"}, paths...)...) }
 	if out, err := gitutil.RunGit(ctx, ledgerPath, append([]string{"add", "--sparse", "--"}, paths...)...); err != nil {
 		unstage()
 		return fmt.Errorf("git add %s failed: %s: %w", strings.Join(paths, " "), gitutil.SanitizeOutput(out), err)
@@ -241,6 +238,12 @@ func errIfUnmerged(ctx context.Context, ledgerPath string) error {
 	}
 	return nil
 }
+
+// lockedCommitTimeout bounds a plan commit made under the repo lock, which
+// ignores its caller's cancellation: git killed while it holds index.lock can
+// leave the lock behind, and an ownerless lock blocks every commit and pull on
+// the clone until it is an hour old (gitutil.AbandonedLockAge).
+const lockedCommitTimeout = 2 * time.Minute
 
 // commitPlanSnapshot is gitutil.CommitLedgerSnapshot, a variable so a test can
 // fail a plan commit after its files are written and staged.
@@ -472,6 +475,8 @@ func commitReviewRecord(ctx context.Context, ledgerPath string, e reviewPending,
 	path := e.PlanDir + "/" + e.Path
 	var oid string
 	err := gitutil.WithRepoLock(ctx, ledgerPath, func() error {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), lockedCommitTimeout)
+		defer cancel()
 		// git run in a directory that is not a checkout finds any enclosing
 		// repository and would stage the record there
 		if !gitutil.IsGitRepo(ledgerPath) {
@@ -493,10 +498,7 @@ func commitReviewRecord(ctx context.Context, ledgerPath string, e reviewPending,
 			err = errors.New("HEAD does not hold the record's bytes")
 		}
 		if err != nil {
-			// a canceled ctx (a reviewer who closed the page) would skip the reset
-			resetCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-			defer cancel()
-			_, _ = gitutil.RunGit(resetCtx, ledgerPath, "reset", "-q", "--", path)
+			_, _ = gitutil.RunGit(ctx, ledgerPath, "reset", "-q", "--", path)
 			return fmt.Errorf("commit %s: %w", path, err)
 		}
 		return nil
@@ -597,6 +599,8 @@ func commitPlanLocalCtx(ctx context.Context, ledgerPath, planDir, msgPrefix stri
 // commitPlanDirLocked is commitPlanLocalCtx's commit, for a caller that holds
 // the repo lock.
 func commitPlanDirLocked(ctx context.Context, ledgerPath, planDir, msgPrefix string) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), lockedCommitTimeout)
+	defer cancel()
 	rel, err := ledgerRelPath(ledgerPath, planDir)
 	if err != nil {
 		return err

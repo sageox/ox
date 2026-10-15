@@ -309,24 +309,28 @@ func TestPlanLifecycle_AFailedCommitIsUnstagedAndRetried(t *testing.T) {
 	}
 }
 
-// TestPlanLifecycle_ACanceledCommitLeavesNothingStaged: Ctrl-C lands while a
-// lifecycle commit runs. Failure prevented: the cleanup reset runs on the
-// canceled context, so the event's files stay staged for a later commit.
-func TestPlanLifecycle_ACanceledCommitLeavesNothingStaged(t *testing.T) {
+// TestPlanLifecycle_ACanceledCommitStillLands: the caller cancels (Ctrl-C, a
+// reviewer closing the page) while the event's commit holds the repo lock.
+// Failure prevented: the cancellation kills git mid-commit, which can leave
+// index.lock behind and block every commit and pull on the clone for an hour.
+func TestPlanLifecycle_ACanceledCommitStillLands(t *testing.T) {
 	f := lifecycleFixture(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	prev := commitPlanSnapshot
 	t.Cleanup(func() { commitPlanSnapshot = prev })
-	commitPlanSnapshot = func(context.Context, string, string, ...string) (bool, error) {
+	commitPlanSnapshot = func(gctx context.Context, repo, msg string, paths ...string) (bool, error) {
 		cancel()
-		return false, context.Canceled
+		return prev(gctx, repo, msg, paths...)
 	}
-	if _, err := commitPlanEvent(ctx, f.ledger, f.planDir, plan.EventApproved, plan.PlanEventFields{}); !errors.Is(err, errEventNotCommitted) {
-		t.Fatalf("want errEventNotCommitted, got %v", err)
+	if _, err := commitPlanEvent(ctx, f.ledger, f.planDir, plan.EventApproved, plan.PlanEventFields{}); err != nil {
+		t.Fatalf("a commit that already holds the lock must finish: %v", err)
 	}
 	if staged := runGitInDir(t, f.ledger, "diff", "--cached", "--name-only"); staged != "" {
-		t.Fatalf("a canceled commit must leave nothing staged, index has %q", staged)
+		t.Fatalf("index has %q left staged", staged)
+	}
+	if got := runGitInDir(t, f.ledger, "show", "HEAD:data/plans/2026-10-01-durable/events.jsonl"); !strings.Contains(got, `"approved"`) {
+		t.Fatal("the approval is not in the commit")
 	}
 }
 
