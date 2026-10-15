@@ -549,6 +549,9 @@ func savePlanArtifacts(gitRoot string, in plan.Input, result plan.Result, html [
 	}
 	if !checkout {
 		_ = write()
+		// nothing was committed; a clone that finished meanwhile must get a
+		// retry marker, not a push of a commit that does not exist
+		commitErr = fmt.Errorf("ledger %s was not a git checkout when the plan was saved", ledgerPath)
 	} else if err := gitutil.WithRepoLock(context.Background(), ledgerPath, write); err != nil {
 		report.Err = fmt.Errorf("the Ledger stayed busy, so nothing was saved; re-run `ox plan save`: %w", err)
 		slog.Warn("plan: save skipped, ledger lock unavailable", "error", err)

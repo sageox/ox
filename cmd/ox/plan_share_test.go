@@ -363,6 +363,54 @@ func TestSavePlanArtifacts_LedgerNotYetClonedGetsNoGitDir(t *testing.T) {
 	}
 }
 
+// TestSavePlanArtifacts_CloneThatFinishesMidSaveGetsARetry: the daemon's first
+// Ledger clone lands while a save is writing into the Ledger dir. Failure
+// prevented: the save skipped its commit, pushed as if it had committed, and
+// left no retry marker, so nothing ever committed the plan.
+func TestSavePlanArtifacts_CloneThatFinishesMidSaveGetsARetry(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git clone")
+	}
+	root := newPlanCaptureTestRepo(t)
+	pctx, err := config.LoadProjectContext(root)
+	if err != nil || pctx == nil || pctx.DefaultLedgerPath() == "" {
+		t.Fatalf("no ledger path for test repo: %v", err)
+	}
+	ledger := pctx.DefaultLedgerPath()
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	initBareRemote(t, remote, "-b", "main")
+	clone := filepath.Join(t.TempDir(), "clone")
+	mustRunGit(t, filepath.Dir(clone), "clone", "-q", remote, clone)
+	gitConfig(t, clone, "user.name", "Person A")
+	gitConfig(t, clone, "user.email", "person@test.sageox.ai")
+	gitConfig(t, clone, "commit.gpgsign", "false")
+	if err := os.WriteFile(filepath.Join(clone, "README.md"), []byte("ledger\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustRunGit(t, clone, "add", "README.md")
+	mustRunGit(t, clone, "commit", "-q", "-m", "init")
+	mustRunGit(t, clone, "push", "-q", "-u", "origin", "main")
+
+	prev := planDehydrateHTML
+	t.Cleanup(func() { planDehydrateHTML = prev })
+	planDehydrateHTML = func(dir string, c *lfs.Client) (bool, error) {
+		// mid-save, after the checkout was checked: the clone lands
+		if err := os.Rename(filepath.Join(clone, ".git"), filepath.Join(ledger, ".git")); err != nil {
+			t.Fatal(err)
+		}
+		return prev(dir, c)
+	}
+
+	var r planSaveReport
+	in := plan.Parse(plan.ExtractMarkdown([]byte(shareTestPage)))
+	if dir := savePlanArtifacts(root, in, plan.Result{}, []byte(shareTestPage), plan.PrimaryHTML, withReport(&r)); dir == "" || r.Share.Committed {
+		t.Fatalf("want the save written but not committed, got dir=%q %+v", dir, r.Share)
+	}
+	if markers, err := listPlanPushPending(ledger); err != nil || len(markers) != 1 {
+		t.Fatalf("the save must leave a retry marker, got %+v (err %v)", markers, err)
+	}
+}
+
 // TestSavePlanArtifacts_RevisionKeepsUncommittedPriorInHistory verifies a
 // revision never overwrites a prior revision that exists only in the working
 // tree: it is committed first.
