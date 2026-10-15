@@ -954,3 +954,72 @@ func seedAutostashConflict(t *testing.T, rel, base, upstream, local string) (rep
 	require.Error(t, err, "fixture must conflict: %s", out)
 	return repo, path
 }
+
+// TestResolveAutostashConflicts_PlanSaveFilesKeepTheLocalCopy: a save's files
+// were still uncommitted when the daemon pulled a teammate's change to the
+// same plan. Failure prevented: the autostash re-apply conflict stops Ledger
+// sync until a human repairs the clone.
+func TestResolveAutostashConflicts_PlanSaveFilesKeepTheLocalCopy(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git stash conflicts")
+	}
+	for _, tc := range []struct {
+		name, path string
+		deny       []string
+		edit       bool
+		wantError  bool
+	}{
+		{name: "plan.md", path: "data/plans/p/plan.md"},
+		{name: "meta.json", path: "data/plans/p/meta.json"},
+		{name: "companion", path: "data/plans/p/companions/sketch.html"},
+		{name: "events.jsonl is never a side to pick", path: "data/plans/p/events.jsonl", wantError: true},
+		{name: "review records are never a side to pick", path: "data/plans/p/feedback/round-a.json", wantError: true},
+		{name: "a hand edit after the conflict", path: "data/plans/p/plan.md", edit: true, wantError: true},
+		{name: "denied path", path: "data/plans/p/plan.md", deny: []string{"data/plans/"}, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := t.TempDir()
+			gitInRepo(t, repo, "init", "-b", "main")
+			path := filepath.Join(repo, filepath.FromSlash(tc.path))
+			require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+			require.NoError(t, os.WriteFile(path, []byte("base\n"), 0o644))
+			gitInRepo(t, repo, "add", "--sparse", ".")
+			gitInRepo(t, repo, "commit", "-m", "base")
+			require.NoError(t, os.WriteFile(path, []byte("local\n"), 0o644))
+			gitInRepo(t, repo, "stash", "push", "-m", "autostash")
+			require.NoError(t, os.WriteFile(path, []byte("upstream\n"), 0o644))
+			gitInRepo(t, repo, "commit", "-am", "upstream")
+			cmd := exec.Command("git", "stash", "apply")
+			cmd.Dir = repo
+			out, err := cmd.CombinedOutput()
+			require.Error(t, err, "fixture must conflict: %s", out)
+			if tc.edit {
+				data, err := os.ReadFile(path)
+				require.NoError(t, err)
+				require.NoError(t, os.WriteFile(path, append(data, []byte("hand edit\n")...), 0o644))
+			}
+			before, err := os.ReadFile(path)
+			require.NoError(t, err)
+
+			resolved, err := ResolveAutostashConflicts(context.Background(), repo, []string{"data/"}, tc.deny)
+
+			unmerged := gitInRepo(t, repo, "diff", "--name-only", "--diff-filter=U")
+			if tc.wantError {
+				require.Error(t, err)
+				assert.False(t, resolved)
+				after, rerr := os.ReadFile(path)
+				require.NoError(t, rerr)
+				assert.Equal(t, string(before), string(after), "a refused conflict must be left exactly as git left it")
+				assert.Equal(t, tc.path, unmerged)
+				return
+			}
+			require.NoError(t, err)
+			assert.True(t, resolved)
+			after, err := os.ReadFile(path)
+			require.NoError(t, err)
+			assert.Equal(t, "local\n", string(after), "the local, uncommitted copy must win")
+			assert.Empty(t, unmerged, "the conflict must be cleared")
+			assert.NotEmpty(t, gitInRepo(t, repo, "stash", "list"), "nothing is discarded: the autostash stays in the stash list")
+		})
+	}
+}
