@@ -41,6 +41,11 @@ const (
 	// big files.
 	mediaAPITimeout = 2 * time.Minute
 
+	// mediaTokenRefreshBuffer renews a sign-in with less than this many
+	// seconds left, the buffer internal/auth recommends for API callers: it
+	// covers the upload request and the first part URLs with room to spare.
+	mediaTokenRefreshBuffer = 300
+
 	// mediaImportCacheSubdir holds one record per media import, keyed by
 	// content hash, inside the team context's gitignored .sageox/cache/ — the
 	// local-only store that survives the daemon's reclones.
@@ -106,14 +111,11 @@ func runImportMedia(ctx context.Context, cmd *cobra.Command, m mediaImport) erro
 		}
 	}
 
-	storedToken, err := auth.GetTokenForEndpoint(m.ep)
+	accessToken, err := mediaImportAccessToken(ctx, m.ep)
 	if err != nil {
-		return fmt.Errorf("read auth store: %w", err)
+		return err
 	}
-	if storedToken == nil || storedToken.AccessToken == "" {
-		return errkind.Errorf(errkind.NotLoggedIn, "not authenticated — run 'ox login' first")
-	}
-	client := api.NewRepoClientWithEndpoint(m.ep).WithAuthToken(storedToken.AccessToken).WithTimeout(mediaAPITimeout)
+	client := api.NewRepoClientWithEndpoint(m.ep).WithAuthToken(accessToken).WithTimeout(mediaAPITimeout)
 
 	filename := filepath.Base(m.srcPath)
 	title := resolveImportTitle(m.srcPath)
@@ -163,6 +165,15 @@ func runImportMedia(ctx context.Context, cmd *cobra.Command, m mediaImport) erro
 		return fmt.Errorf("upload recording %s: %w", upload.RecordingID, err)
 	}
 
+	// A big upload can outlast the sign-in it started with. WithAuthToken
+	// changes the client in place and the part workers' re-presign shares it,
+	// so the token is swapped only here, after every part has finished.
+	accessToken, err = mediaImportAccessToken(ctx, m.ep)
+	if err != nil {
+		return err
+	}
+	client.WithAuthToken(accessToken)
+
 	// a server that issued no upload_id predates the confirm body and needs none
 	var confirmReq *api.ConfirmRecordingUploadRequest
 	if upload.UploadID != "" {
@@ -204,6 +215,23 @@ func runImportMedia(ctx context.Context, cmd *cobra.Command, m mediaImport) erro
 	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Imported: %s\nRecording: %s\n", title, upload.RecordingID)
 	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "\n  Track progress: ox import --status %s --watch%s\n", upload.RecordingID, importContextFlagHint())
 	return nil
+}
+
+// mediaImportAccessToken returns the sign-in for ep, refreshed when it has run
+// out or runs out within mediaTokenRefreshBuffer.
+func mediaImportAccessToken(ctx context.Context, ep string) (string, error) {
+	token, err := auth.EnsureValidTokenForEndpointContext(ctx, ep, mediaTokenRefreshBuffer)
+	if err != nil {
+		var refreshErr *auth.TokenRefreshError
+		if errors.As(err, &refreshErr) {
+			return "", errkind.Errorf(errkind.NotLoggedIn, "sign-in expired and could not be renewed (%v) — run 'ox login'", err)
+		}
+		return "", fmt.Errorf("load credentials: %w", err)
+	}
+	if token == nil || token.AccessToken == "" {
+		return "", errkind.Errorf(errkind.NotLoggedIn, "not authenticated — run 'ox login' first")
+	}
+	return token.AccessToken, nil
 }
 
 // printAlreadyImported reports a duplicate import, matching the document path's output.
