@@ -37,6 +37,7 @@ var Animations = []string{
 	"blink", "wag", "wag-big", "wave", "laptop", "robot", "float", "think", "chatter", "game", "sleep",
 	"jump", "confetti", "fail",
 	"murmur", "doctor", "prime", "query", "plan-checklist", "plan-flowchart", "plan-kanban",
+	"juggle", "laptop-rage", "laptop-tabs", "laptop-bug", "laptop-deploy", "laptop-loading", "laptop-doze",
 }
 
 // SizeSpec is a named size the mod can switch to, fixed by its height in
@@ -117,8 +118,9 @@ type Size struct {
 }
 
 // Box is one named size: the picture's box in terminal cells, and the
-// half-block grid drawn in that same box (each cell shows two pixels
-// stacked, so the grid is Cells.Columns x 2*Cells.Rows pixels).
+// half-block grid (each cell shows two pixels stacked, so the grid is
+// Cells.Columns x 2*Cells.Rows pixels). Both share the rows; the picture
+// box is a little wider, see pictureCellRatio.
 type Box struct {
 	Size
 	Cells Size `json:"cells"`
@@ -183,15 +185,25 @@ var oxyFrames = sync.OnceValues(func() (*Frames, error) {
 	return frames, nil
 })
 
-// BoxFor is the box a frame of the given aspect fills at a size: as many
-// columns as the rows' height holds at that aspect, never fewer than one. A
-// terminal cell is about twice as tall as wide, so a row holds two columns'
-// worth of height. Half-block cells draw in the same box: each cell shows
-// two pixels stacked, so the grid is the box itself.
+// pictureCellRatio is how many times taller than wide the picture box
+// assumes a terminal cell is. Ghostty's default font draws cells about 2.2
+// times as tall as wide. The terminal fits a picture inside its box and
+// centers whatever is left over, so a box narrower than the art left spare
+// rows above and below Oxy. Assuming a slightly tall cell keeps the art
+// height-limited on common fonts: Oxy fills every row, his feet sit on the
+// caption's row, and any spare space falls at his sides instead.
+const pictureCellRatio = 2.25
+
+// BoxFor is the box a frame of the given aspect fills at a size, never
+// narrower than one column. Half-block cells are exact: each shows two
+// pixels stacked, so the grid holds as many columns as the rows' height at
+// that aspect and the art fills it edge to edge. The picture box is widened
+// to pictureCellRatio, so the terminal's fit leaves no gap under Oxy.
 func BoxFor(aspect float64, s SizeSpec) Box {
-	columns := max(1, int(math.Round(float64(s.Rows)*2*aspect)))
-	size := Size{Columns: columns, Rows: s.Rows}
-	return Box{Size: size, Cells: size}
+	rows := float64(s.Rows)
+	cells := Size{Columns: max(1, int(math.Round(rows*2*aspect))), Rows: s.Rows}
+	picture := Size{Columns: max(1, int(math.Ceil(rows*pictureCellRatio*aspect))), Rows: s.Rows}
+	return Box{Size: picture, Cells: cells}
 }
 
 // BuildFrames slices sheet per m and encodes every frame: the PNG at the

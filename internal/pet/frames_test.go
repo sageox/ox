@@ -97,10 +97,12 @@ func TestOxyFrames_SpriteIsVisible(t *testing.T) {
 
 // TestBoxFor_FollowsTheArtsAspect verifies a size's width is derived from its
 // rows and the frame's aspect, so a tall base image and a near-square atlas
-// both fill their box without stretching, and the half-block grid fills that
-// same box (two pixels per cell, not two cells per pixel).
-// Failure prevented: a sheet swap squashes Oxy into the old box shape, or
-// terminals without pictures draw him twice as big as the size asked for.
+// both fill their box without stretching. The half-block grid holds two
+// pixels per cell, and the picture box is wide enough for a cell 2.25 times
+// as tall as wide.
+// Failure prevented: a sheet swap squashes Oxy into the old box shape,
+// terminals without pictures draw him twice as big as the size asked for, or
+// a picture box narrower than the art leaves a gap under Oxy in Ghostty.
 func TestBoxFor_FollowsTheArtsAspect(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -108,11 +110,11 @@ func TestBoxFor_FollowsTheArtsAspect(t *testing.T) {
 		spec   SizeSpec
 		want   Box
 	}{
-		{"tall base, small", 0.5, SizeSpec{"small", 4}, Box{Size{4, 4}, Size{4, 4}}},
-		{"tall base, large", 0.5, SizeSpec{"large", 8}, Box{Size{8, 8}, Size{8, 8}}},
-		{"codex atlas, small", 192.0 / 208, SizeSpec{"small", 4}, Box{Size{7, 4}, Size{7, 4}}},
-		{"codex atlas, medium", 192.0 / 208, SizeSpec{"medium", 6}, Box{Size{11, 6}, Size{11, 6}}},
-		{"square, large", 1, SizeSpec{"large", 8}, Box{Size{16, 8}, Size{16, 8}}},
+		{"tall base, small", 0.5, SizeSpec{"small", 4}, Box{Size{5, 4}, Size{4, 4}}},
+		{"tall base, large", 0.5, SizeSpec{"large", 8}, Box{Size{9, 8}, Size{8, 8}}},
+		{"codex atlas, small", 192.0 / 208, SizeSpec{"small", 4}, Box{Size{9, 4}, Size{7, 4}}},
+		{"codex atlas, medium", 192.0 / 208, SizeSpec{"medium", 6}, Box{Size{13, 6}, Size{11, 6}}},
+		{"square, large", 1, SizeSpec{"large", 8}, Box{Size{18, 8}, Size{16, 8}}},
 		{"never narrower than a column", 0.01, SizeSpec{"small", 4}, Box{Size{1, 4}, Size{1, 4}}},
 	}
 	for _, tt := range tests {

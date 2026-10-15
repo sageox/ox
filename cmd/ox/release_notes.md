@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### New
 
+- **Oxy does more while Claude works** — seven new animations, and more variety in the ones you see. A test run has him swatting a bug, a push or new PR launches a rocket, a web search pops browser tabs, reads and searches get his magnifying glass, and two failed tool calls in a row end with a smashed laptop. Ordinary tool calls pick from the laptop, robot, soccer juggle, tail wag, handheld, and Mario jump, so the laptop no longer fills the whole turn.
 - **Read a Visual walkthrough as joined moments** — `ox walkthrough` pairs each click, selection and pause with what was said and what happened next, shows zoomed pictures on request, and splits long recordings into chapters you can read one at a time. Recordings without this data read as before.
 
 ### Fixed

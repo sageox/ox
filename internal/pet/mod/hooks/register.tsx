@@ -20,6 +20,7 @@ import {
   isSize,
   passMs,
   pickAnim,
+  RAGE_AFTER_FAILURES,
   type Activity,
   type Anim,
   type Cells,
@@ -52,6 +53,8 @@ const finished = new Map<string, Anim>()
 let oneShot: OneShot | null = null
 let loopStart = 0
 let turnFailed = false
+// Tool calls that failed back to back this turn; a success resets it.
+let failStreak = 0
 let closing: { anim: Anim; start: number } | null = null
 let ticker: { cancel: () => void } | null = null
 // Each animation's half-block cells, read from its cells.json on first use.
@@ -227,6 +230,7 @@ export const register: Register = on => {
     const now = await $.clock.now()
     loopStart = now
     turnFailed = false
+    failStreak = 0
     closing = null
     playOnce('wave', now)
     startTicker($)
@@ -250,8 +254,9 @@ export const register: Register = on => {
       const ran = await next(e)
       const failed = ran.deny === undefined && ran.isError === true
       turnFailed = failed
+      failStreak = failed ? failStreak + 1 : 0
       if (failed) {
-        playOnce('fail', await $.clock.now())
+        playOnce(failStreak >= RAGE_AFTER_FAILURES ? 'laptop-rage' : 'fail', await $.clock.now())
       }
       return ran
     } finally {

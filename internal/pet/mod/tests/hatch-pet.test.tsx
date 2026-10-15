@@ -55,7 +55,23 @@ describe('classifyToolCall', () => {
     ['mcp plan', 'mcp__claude_ai_sageox__EnrichPlan', {}, 'plan-checklist'],
     ['mcp murmur', 'mcp__claude_ai_sageox__PublishMurmur', {}, 'murmur'],
     ['other mcp server', 'mcp__github__Search', {}, null],
-    ['read', 'Read', { file_path: 'a.go' }, null],
+    ['read peers through the glass', 'Read', { file_path: 'a.go' }, 'query'],
+    ['grep peers through the glass', 'Grep', { pattern: 'BoxFor' }, 'query'],
+    ['glob peers through the glass', 'Glob', { pattern: '**/*.go' }, 'query'],
+    ['an unknown tool is left to the spinner', 'TaskStop', {}, null],
+    ['web search pops tabs', 'WebSearch', { query: 'kitty graphics' }, 'laptop-tabs'],
+    ['web fetch pops tabs', 'WebFetch', { url: 'https://example.com' }, 'laptop-tabs'],
+    ['go test swats a bug', 'Bash', { command: 'go test ./internal/pet/...' }, 'laptop-bug'],
+    ['make test swats a bug', 'Bash', { command: 'cd ox && make test' }, 'laptop-bug'],
+    ['make test-preflight swats a bug', 'Bash', { command: 'make test-preflight' }, 'laptop-bug'],
+    ['python -m pytest is left to the spinner', 'Bash', { command: 'python3 -m pytest -q' }, null],
+    ['pytest binary swats a bug', 'Bash', { command: 'pytest -q tests/' }, 'laptop-bug'],
+    ['go build is not a test', 'Bash', { command: 'go build ./...' }, null],
+    ['git push launches', 'Bash', { command: 'git pull --rebase && git push' }, 'laptop-deploy'],
+    ['gh pr create launches', 'Bash', { command: 'gh pr create --fill' }, 'laptop-deploy'],
+    ['gh release create launches', 'Bash', { command: 'gh release create v1.0.0' }, 'laptop-deploy'],
+    ['git status is quiet', 'Bash', { command: 'git status' }, null],
+    ['gh pr view is quiet', 'Bash', { command: 'gh pr view 12' }, null],
   ]
   for (const [name, tool, input, want] of cases) {
     test(name, () => {
@@ -77,12 +93,22 @@ describe('pickAnim', () => {
     ['thinking', {}, 'think'],
     ['requesting', { mode: 'requesting' }, 'think'],
     ['responding', { mode: 'responding' }, 'chatter'],
-    ['generic tool', { mode: 'tool-use', activities: [{ anim: null, since: 99_000 }] }, 'laptop'],
+    ['drafting a tool call wags', { mode: 'tool-input' }, 'wag'],
+    ['an ordinary tool may use the laptop', { mode: 'tool-use', activities: [{ anim: null, since: 99_000 }] }, 'laptop'],
+    ['or the robot', { mode: 'tool-use', activities: [{ anim: null, since: 99_001 }] }, 'robot'],
+    ['or the soccer ball', { mode: 'tool-use', activities: [{ anim: null, since: 99_002 }] }, 'juggle'],
+    ['or a big tail wag', { mode: 'tool-use', activities: [{ anim: null, since: 99_003 }] }, 'wag-big'],
+    ['or the handheld', { mode: 'tool-use', activities: [{ anim: null, since: 99_004 }] }, 'game'],
+    ['or the jump that bumps the ? block', { mode: 'tool-use', activities: [{ anim: null, since: 99_005 }] }, 'jump'],
+    ['a tool in flight with no record yet keeps the laptop', { mode: 'tool-use' }, 'laptop'],
     ['ox query', { mode: 'tool-use', activities: [{ anim: 'query', since: 99_000 }] }, 'query'],
     ['edit', { mode: 'tool-use', activities: [{ anim: 'laptop', since: 99_000 }] }, 'laptop'],
-    ['long tool brings the robot', { mode: 'tool-use', activities: [{ anim: null, since: 100_000 - IDLE_AFTER_MS - 2 }] }, 'robot'],
-    ['or the handheld', { mode: 'tool-use', activities: [{ anim: null, since: 100_000 - IDLE_AFTER_MS - 1 }] }, 'game'],
-    ['a very long tool puts him to sleep', { mode: 'tool-use', activities: [{ anim: null, since: 100_000 - SLEEP_AFTER_MS - 1 }] }, 'sleep'],
+    ['long tool brings the robot', { mode: 'tool-use', activities: [{ anim: null, since: 100_000 - IDLE_AFTER_MS - 4 }] }, 'robot'],
+    ['a long tool may bring the handheld', { mode: 'tool-use', activities: [{ anim: null, since: 100_000 - IDLE_AFTER_MS - 3 }] }, 'game'],
+    ['or the soccer ball while it waits', { mode: 'tool-use', activities: [{ anim: null, since: 100_000 - IDLE_AFTER_MS - 2 }] }, 'juggle'],
+    ['or a stuck progress bar', { mode: 'tool-use', activities: [{ anim: null, since: 100_000 - IDLE_AFTER_MS - 1 }] }, 'laptop-loading'],
+    ['a very long tool puts him to sleep', { mode: 'tool-use', activities: [{ anim: null, since: 100_000 - SLEEP_AFTER_MS - 2 }] }, 'sleep'],
+    ['or dozing at his laptop', { mode: 'tool-use', activities: [{ anim: null, since: 100_000 - SLEEP_AFTER_MS - 1 }] }, 'laptop-doze'],
     ['long ox command keeps its animation', { mode: 'tool-use', activities: [{ anim: 'plan-kanban', since: 0 }] }, 'plan-kanban'],
     ['retrying floats', { message: 'Retrying in 5s' }, 'float'],
     ['a todo is not trouble', { message: 'Running tests' }, 'think'],
@@ -147,9 +173,12 @@ test('sizes grow with the art, in rows', () => {
   const { small, medium, large } = FRAMES.sizes
   expect([small.rows, medium.rows, large.rows]).toEqual([8, 12, 16])
   for (const box of [small, medium, large]) {
-    expect(box.columns).toBe(Math.max(1, Math.round(box.rows * 2 * FRAMES.aspect)))
-    // half-block cells draw in the same box as the picture: two pixels per cell
-    expect(box.cells).toEqual({ columns: box.columns, rows: box.rows })
+    // half-block cells: two pixels per cell, the art edge to edge
+    expect(box.cells).toEqual({ columns: Math.max(1, Math.round(box.rows * 2 * FRAMES.aspect)), rows: box.rows })
+    // the picture box fits a cell 2.25x as tall as wide, so the art fills its
+    // height in Ghostty and no gap is left under Oxy
+    expect(box.columns).toBe(Math.max(1, Math.ceil(box.rows * 2.25 * FRAMES.aspect)))
+    expect(box.columns).toBeGreaterThanOrEqual(box.cells.columns)
   }
 })
 
@@ -205,6 +234,25 @@ test('an ox query plays the query animation in the thinking line', async ($, on)
   expect(raster?.props.cells).toBe(fakeCells('query', 'medium', frameAt(FRAMES.animations.query, 0, 1_000, true)))
   release()
   await call
+  await ui.unmount()
+})
+
+test('one failed tool trips Oxy; a second in a row has him smash his laptop', async ($, on) => {
+  mock.clock(on, { now: 1_000 })
+  mockFrameFiles(on)
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('tool.call', () => ({ result: 'boom', isError: true }))
+  await $.turn.start({ turnId: 't1' } as never)
+  const spinner = { ...SPINNER, props: { word: 'Sautéing', message: null, suffix: '…', mode: 'tool-use' } } as const
+
+  await $.tool.call({ tool: 'Bash', command: 'false' } as never)
+  let ui = await $.ui.mount(spinner)
+  expect((await ui.find({ type: 'Raster', key: 'oxy' }))?.props.cells).toBe(fakeCells('fail', 'medium', 0))
+  await ui.unmount()
+
+  await $.tool.call({ tool: 'Bash', command: 'false' } as never)
+  ui = await $.ui.mount(spinner)
+  expect((await ui.find({ type: 'Raster', key: 'oxy' }))?.props.cells).toBe(fakeCells('laptop-rage', 'medium', 0))
   await ui.unmount()
 })
 

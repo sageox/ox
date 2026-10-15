@@ -25,6 +25,13 @@ export const ANIMS = [
   'plan-checklist',
   'plan-flowchart',
   'plan-kanban',
+  'juggle',
+  'laptop-rage',
+  'laptop-tabs',
+  'laptop-bug',
+  'laptop-deploy',
+  'laptop-loading',
+  'laptop-doze',
 ] as const
 
 export type Anim = (typeof ANIMS)[number]
@@ -67,10 +74,15 @@ export function isAnim(name: string): name is Anim {
 }
 
 // A tool running longer than this has Oxy pass the time: with his robot
-// friend or his handheld, whichever the moment picks; longer still, he naps.
+// friend, his handheld, a soccer ball, or a stuck progress bar, whichever the
+// moment picks; longer still, he naps, curled up or slumped at his laptop.
 export const IDLE_AFTER_MS = 30_000
 export const SLEEP_AFTER_MS = 180_000
-const LONG_TOOL_ANIMS = ['robot', 'game'] as const
+const LONG_TOOL_ANIMS = ['robot', 'game', 'juggle', 'laptop-loading'] as const
+const SLEEP_ANIMS = ['sleep', 'laptop-doze'] as const
+
+// Two tool failures in a row in one turn: Oxy loses it at his laptop.
+export const RAGE_AFTER_FAILURES = 2
 
 // Each ox plan gets one of the three whiteboards.
 const PLAN_ANIMS = ['plan-checklist', 'plan-flowchart', 'plan-kanban'] as const
@@ -89,12 +101,20 @@ const MCP_ANIMS: Record<string, Anim | 'plan'> = {
 }
 
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'NotebookEdit'])
+const WEB_TOOLS = new Set(['WebFetch', 'WebSearch'])
+const LOOKUP_TOOLS = new Set(['Read', 'Grep', 'Glob', 'LSP', 'ToolSearch'])
+
+// What Oxy does while an ordinary tool runs, picked once per call so the
+// laptop is one choice among several rather than the whole turn.
+const BUSY_ANIMS = ['laptop', 'robot', 'juggle', 'wag-big', 'game', 'jump'] as const
 
 /**
  * The animation a tool call earns on its own: an ox command or SageOx MCP
- * tool gets its dedicated animation, a file edit has Oxy at his laptop,
- * anything else `null` (the spinner's mode decides). `pick` in [0, 1) chooses
- * among a command's variants.
+ * tool gets its dedicated animation, a file edit has Oxy at his laptop, a
+ * read or search has him peering through his magnifying glass, a test run
+ * has him swatting a bug, a push or release launches a rocket, and a web
+ * search or fetch pops browser tabs; anything else `null` (the spinner's
+ * mode decides). `pick` in [0, 1) chooses among a command's variants.
  */
 export function classifyToolCall(tool: string, input: Record<string, unknown>, pick = Math.random()): Anim | null {
   if (tool === 'Bash' && typeof input.command === 'string') {
@@ -102,6 +122,12 @@ export function classifyToolCall(tool: string, input: Record<string, unknown>, p
   }
   if (EDIT_TOOLS.has(tool)) {
     return 'laptop'
+  }
+  if (WEB_TOOLS.has(tool)) {
+    return 'laptop-tabs'
+  }
+  if (LOOKUP_TOOLS.has(tool)) {
+    return 'query'
   }
   // mcp__<server>__<tool>; the server name may itself hold underscores.
   const parts = tool.split('__')
@@ -112,7 +138,10 @@ export function classifyToolCall(tool: string, input: Record<string, unknown>, p
   return null
 }
 
-/** The animation for the first `ox` (or `claude doctor`) invocation in a shell command, if any. */
+/**
+ * The animation for the first shell command that earns one: an `ox` command
+ * (or `claude doctor`), a test run, or a push or release.
+ */
 export function classifyCommand(command: string, pick = Math.random()): Anim | null {
   // Blank out quoted text so a separator or "ox" inside a string never counts.
   const bare = command.replace(/'[^']*'|"(?:\\.|[^"\\])*"/g, '""')
@@ -124,6 +153,10 @@ export function classifyCommand(command: string, pick = Math.random()): Anim | n
     const args = positionals(words.slice(1))
     if (/(^|\/)claude$/.test(words[0] ?? '') && args[0] === 'doctor') {
       return 'doctor'
+    }
+    const shell = classifyShell(words[0] ?? '', args)
+    if (shell) {
+      return shell
     }
     if (!/(^|\/)ox$/.test(words[0] ?? '')) {
       continue
@@ -153,6 +186,30 @@ function positionals(words: string[]): string[] {
   return out
 }
 
+// Test runners invoked directly, and the package managers and build tools
+// whose `test` subcommand runs the tests.
+const TEST_RUNNERS = new Set(['pytest', 'jest', 'vitest', 'gotestsum'])
+const TEST_SUBCOMMAND = new Set(['go', 'npm', 'pnpm', 'yarn', 'bun', 'cargo', 'make', 'mix', 'deno'])
+
+/** A test run swats a bug; a push, a new PR, or a release launches a rocket. */
+function classifyShell(cmd: string, args: string[]): Anim | null {
+  const name = cmd.split('/').at(-1) ?? ''
+  const [sub, sub2] = args
+  if (TEST_RUNNERS.has(name) || (TEST_SUBCOMMAND.has(name) && /^test(-|$)/.test(sub ?? ''))) {
+    return 'laptop-bug'
+  }
+  if (name === 'git' && sub === 'push') {
+    return 'laptop-deploy'
+  }
+  if (name === 'gh' && ((sub === 'pr' && sub2 === 'create') || (sub === 'release' && sub2 === 'create'))) {
+    return 'laptop-deploy'
+  }
+  if (name === 'make' && sub === 'release') {
+    return 'laptop-deploy'
+  }
+  return null
+}
+
 function classifyOxArgs(args: string[], pick: number): Anim | null {
   const [sub, sub2] = args
   if (sub === 'prime' || (sub === 'agent' && args.includes('prime'))) {
@@ -178,7 +235,7 @@ const MODE_ANIMS: Record<SpinnerMode, Anim> = {
   requesting: 'think',
   thinking: 'think',
   responding: 'chatter',
-  'tool-input': 'laptop',
+  'tool-input': 'wag',
   'tool-use': 'laptop',
 }
 
@@ -202,6 +259,12 @@ export type SpinnerState = {
   pinned: Anim | null
 }
 
+// A stable pick in [0, n) from a tool's start time, so one long tool keeps
+// one pastime; never negative, whatever the clock says.
+function slot(since: number, n: number): number {
+  return ((Math.floor(since) % n) + n) % n
+}
+
 /** The animation the thinking line plays right now, highest priority first. */
 export function pickAnim(s: SpinnerState): Anim {
   if (s.pinned) {
@@ -219,10 +282,13 @@ export function pickAnim(s: SpinnerState): Anim {
   }
   const oldest = s.activities[0]
   if (oldest && s.now - oldest.since > SLEEP_AFTER_MS) {
-    return 'sleep'
+    return SLEEP_ANIMS[slot(oldest.since, SLEEP_ANIMS.length)]
   }
   if (oldest && s.now - oldest.since > IDLE_AFTER_MS) {
-    return LONG_TOOL_ANIMS[oldest.since % LONG_TOOL_ANIMS.length]
+    return LONG_TOOL_ANIMS[slot(oldest.since, LONG_TOOL_ANIMS.length)]
+  }
+  if (oldest) {
+    return BUSY_ANIMS[slot(oldest.since, BUSY_ANIMS.length)]
   }
   return MODE_ANIMS[s.mode as SpinnerMode] ?? 'blink'
 }
