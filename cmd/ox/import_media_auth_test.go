@@ -158,22 +158,51 @@ func TestImportMedia_SignInExpiringDuringUploadIsRefreshedBeforeConfirm(t *testi
 	assert.Equal(t, []string{"Bearer " + freshAccessToken}, auths["confirm"], "confirm carries the refreshed token")
 }
 
-// TestImportMedia_RefreshFailingAfterUploadStillConfirms: when the refresh
-// before confirm fails, confirm still goes out with the token in hand rather
-// than throwing away the uploaded bytes.
+// TestImportMedia_RefreshFailingAfterUpload: when the refresh before confirm
+// fails, a token that has not run out yet still confirms the upload; one that
+// has run out stops the import with the sign-in error, sending no confirm the
+// server would refuse.
 // Failure prevented: a multi-gigabyte upload discarded because a network blip
-// hit the refresh, while the token it already had would have been accepted.
-func TestImportMedia_RefreshFailingAfterUploadStillConfirms(t *testing.T) {
-	f := newMediaFixture(t, "standup.m4a", 4096)
-	ts := newTokenServer(t, f, "single")
-	ts.status = http.StatusServiceUnavailable
-	ts.onStorage = func() { saveExpiredToken(t, f) }
+// hit the refresh while the token in hand had minutes left — or a dead token
+// sent to confirm and answered with a bare "unauthorized".
+func TestImportMedia_RefreshFailingAfterUpload(t *testing.T) {
+	tests := []struct {
+		name      string
+		expiresIn time.Duration // of the stored sign-in once the bytes are uploaded
+		wantErr   bool
+	}{
+		{"sign-in still has minutes left", 4 * time.Minute, false},
+		{"sign-in ran out during the upload", -time.Minute, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newMediaFixture(t, "standup.m4a", 4096)
+			ts := newTokenServer(t, f, "single")
+			ts.onStorage = func() {
+				// by the time the bytes are stored the sign-in is inside the
+				// refresh buffer (or past it), and the refresh then fails
+				ts.mu.Lock()
+				ts.status = http.StatusServiceUnavailable
+				ts.mu.Unlock()
+				if err := auth.SaveTokenForEndpoint(f.endpoint, &auth.StoredToken{
+					AccessToken: "test-access-token", RefreshToken: "test-refresh", ExpiresAt: time.Now().Add(tt.expiresIn), TokenType: "Bearer",
+				}); err != nil {
+					t.Errorf("save token: %v", err)
+				}
+			}
 
-	stdout, stderr, err := f.importMedia(false, false)
-	require.NoError(t, err, "stderr: %s", stderr)
-	assert.Contains(t, stdout, "Imported: standup")
-
-	refreshes, auths := ts.seen()
-	assert.Equal(t, 1, refreshes, "the refresh before confirm was attempted")
-	assert.Equal(t, []string{"Bearer test-access-token"}, auths["confirm"], "confirm goes out with the token in hand")
+			stdout, stderr, err := f.importMedia(false, false)
+			refreshes, auths := ts.seen()
+			assert.Equal(t, 1, refreshes, "the refresh before confirm was attempted")
+			if tt.wantErr {
+				f.assertNotImported(t, stdout, err)
+				assert.Equal(t, errkind.NotLoggedIn, errkind.Of(err))
+				assert.Empty(t, auths["confirm"], "no confirm with a sign-in that has run out")
+				return
+			}
+			require.NoError(t, err, "stderr: %s", stderr)
+			assert.Contains(t, stdout, "Imported: standup")
+			assert.Equal(t, []string{"Bearer test-access-token"}, auths["confirm"], "confirm goes out with the sign-in that still has time left")
+		})
+	}
 }

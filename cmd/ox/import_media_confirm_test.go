@@ -247,6 +247,9 @@ func TestImportMedia_PendingConfirmJSONOutput(t *testing.T) {
 // Failure prevented: a 5-minute wait that becomes 7 because the last confirm
 // started at 4:59 with a 2-minute limit of its own.
 func TestImportMedia_HangingConfirmIsCutAtBudget(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: waits ~1.5s for the budget to cut a hanging confirm")
+	}
 	f, srv, _ := pendingImport(t, pendingIn("1"), unanswer)
 	prior := mediaConfirmBudget
 	// the 1s wait fits; the recorded sleep takes no time, so the hanging

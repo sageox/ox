@@ -199,15 +199,16 @@ func runImportMedia(ctx context.Context, cmd *cobra.Command, m mediaImport) erro
 	// A big upload can outlast the sign-in it started with. WithAuthToken
 	// changes the client in place and the part workers' re-presign shares it,
 	// so the token is swapped only here, after every part has finished. A
-	// refresh that fails now must not throw away the uploaded bytes: confirm
-	// still goes out with the token in hand, which may have minutes left.
+	// refresh that fails now must not throw away the uploaded bytes while the
+	// stored sign-in still has time left: confirm goes out with it.
 	if fresh, err := mediaImportAccessToken(ctx, m.ep); err == nil {
 		client.WithAuthToken(fresh)
-	} else if ctx.Err() != nil {
-		return err
-	} else {
+	} else if current, _ := auth.GetTokenForEndpoint(m.ep); ctx.Err() == nil && current != nil && current.AccessToken != "" && !current.IsExpired(0) {
 		slog.WarnContext(ctx, "sign-in refresh before confirm failed; confirming with the current token",
 			"recording_id", upload.RecordingID, "error", err)
+		client.WithAuthToken(current.AccessToken)
+	} else {
+		return err
 	}
 
 	// a server that issued no upload_id predates the confirm body and needs none
