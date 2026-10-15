@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Approving a plan no longer publishes its unsaved edits** — the review page's Approve and `ox plan approve`, `realize`, `abandon` and `supersede` commit only the plan's history and status, never a half-written `plan.md`. While the Ledger needs repair they record nothing and say so, instead of leaving files that the next sync could conflict on.
 - **Approvals are no longer lost when two people act on one plan at once** — events recorded on two machines both reach the team, and `ox plan review await` reads the plan's status from them.
 - **Plan saves and approvals that could not reach your team are retried** — `ox plan save` waits for a sync in progress instead of failing, and the next `ox agent prime` retries a save, approval or other lifecycle change that still could not be shared, instead of leaving its files uncommitted.
+- **A plan changed on two machines no longer stops your Ledger from syncing** — when background sync brings in a teammate's change to a plan you were saving, ox keeps your copy (the teammate's stays in the Ledger's history) instead of stopping sync until someone repairs it by hand.
 - **Saving to your Ledger no longer fails when background sync runs at the same moment** — the daemon now waits for ox to finish a commit before it refreshes which Ledger folders are on your disk. Before, that commit could fail and leave the change unshared.
 
 ## [0.23.0] - 2026-10-12

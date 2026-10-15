@@ -152,11 +152,17 @@ The CLI reads and writes review records only through `pkg/planreview`.
   lifecycle push never clears a marker owed for the whole dir, and no success
   clears a failure recorded after its own attempt began. With no Ledger checkout the event is recorded and reported not
   committed, and no git command runs.
-- **Saves** (`sharePlanDir`): a save checks the Ledger, and runs the
-  `.gitignore` guard, under the repo lock, so a sync in progress is waited out
-  instead of failing the save. A save whose commit or push still fails writes
-  a whole-dir marker, which `ox plan flush-pending` retries with the dir as it
-  is then.
+- **Saves** (`savePlanArtifacts`): the prior revision's snapshot, the writes,
+  plan.html's upload and the commit run in one hold of the repo lock, so a
+  daemon pull never finds a save half written; the push follows outside it. A
+  save whose commit or push still fails writes a whole-dir marker, which
+  `ox plan flush-pending` retries with the dir as it is then.
+- **Autostash conflicts on save files** (`gitutil.ResolveAutostashConflicts`):
+  when the daemon's pull re-applies its autostash over a teammate's change to
+  a file a save writes (`plan.md`, `meta.json`, `plan.html`, `annotations.json`,
+  `hero.svg`, `companions/`), the local copy is kept, as a rebase of `data/`
+  keeps the local commit. Upstream's copy stays in history, and the stash entry
+  stays in `git stash list`. `events.jsonl` and review records still refuse.
 - **Event logs merge:** `data/plans/*/events.jsonl` is `merge=union` in each
   clone's `.git/info/attributes` (`kb.MergeUnionPaths`, rewritten before every
   push and pull), so two clones' appends merge, upstream's lines first, in a
@@ -195,8 +201,8 @@ lock (`ledger.RefreshSparseCheckout`). Still open:
 - `meta.json` stays keep-local on a rebase conflict, so its status can lag
   `events.jsonl`; readers fold the log (`plan.CurrentStatus`) instead of
   trusting it.
-- H5 remains for `meta.json`, and for a failed save's files until their
-  marker is retried.
+- H5 remains only where picking a side would drop entries: `events.jsonl`
+  without its union attribute, and review records.
 - An in-place rewrite of an `events.jsonl` line (`BackfillSessionID`) racing an
   append can keep both versions of that line.
 - H10–H12 are unchanged.
