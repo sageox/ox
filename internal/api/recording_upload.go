@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -204,7 +205,9 @@ func (c *RepoClient) ConfirmRecordingUpload(ctx context.Context, contextType, co
 	if status == http.StatusAccepted {
 		out.Pending = true
 		out.RetryAfter = parseRetryAfter(header)
-		out.HasRetryAfter = out.RetryAfter > 0 || strings.TrimSpace(header.Get("Retry-After")) == "0"
+		// parseRetryAfter reads both "0" and a missing header as 0
+		secs, convErr := strconv.Atoi(strings.TrimSpace(header.Get("Retry-After")))
+		out.HasRetryAfter = out.RetryAfter > 0 || (convErr == nil && secs == 0)
 	}
 	return &out, nil
 }

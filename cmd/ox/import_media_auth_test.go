@@ -157,3 +157,23 @@ func TestImportMedia_SignInExpiringDuringUploadIsRefreshedBeforeConfirm(t *testi
 	assert.Equal(t, 1, refreshes, "the sign-in that ran out during the upload is refreshed once")
 	assert.Equal(t, []string{"Bearer " + freshAccessToken}, auths["confirm"], "confirm carries the refreshed token")
 }
+
+// TestImportMedia_RefreshFailingAfterUploadStillConfirms: when the refresh
+// before confirm fails, confirm still goes out with the token in hand rather
+// than throwing away the uploaded bytes.
+// Failure prevented: a multi-gigabyte upload discarded because a network blip
+// hit the refresh, while the token it already had would have been accepted.
+func TestImportMedia_RefreshFailingAfterUploadStillConfirms(t *testing.T) {
+	f := newMediaFixture(t, "standup.m4a", 4096)
+	ts := newTokenServer(t, f, "single")
+	ts.status = http.StatusServiceUnavailable
+	ts.onStorage = func() { saveExpiredToken(t, f) }
+
+	stdout, stderr, err := f.importMedia(false, false)
+	require.NoError(t, err, "stderr: %s", stderr)
+	assert.Contains(t, stdout, "Imported: standup")
+
+	refreshes, auths := ts.seen()
+	assert.Equal(t, 1, refreshes, "the refresh before confirm was attempted")
+	assert.Equal(t, []string{"Bearer test-access-token"}, auths["confirm"], "confirm goes out with the token in hand")
+}

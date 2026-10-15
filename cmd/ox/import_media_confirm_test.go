@@ -1,18 +1,15 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
-	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -21,54 +18,49 @@ import (
 
 const waitingLine = "the server is still checking"
 
+const statusHint = "ox import --status " + fakeRecordingID + " --watch --team " + importRetryTeamID
+
 // confirmWaits stands in for the wait between confirms: it records each wait
 // instead of sleeping, and runs onWait (if set) with the import's context.
+// The sleeper runs only on the import's goroutine and is read after the
+// import returns, so it needs no lock.
 type confirmWaits struct {
-	mu     sync.Mutex
 	waits  []time.Duration
 	onWait func(ctx context.Context) error
 }
 
-func stubConfirmSleep(t *testing.T) *confirmWaits {
+func (cw *confirmWaits) total() time.Duration {
+	var sum time.Duration
+	for _, w := range cw.waits {
+		sum += w
+	}
+	return sum
+}
+
+// pendingImport sets up a media import whose confirm answers follow script,
+// with the wait between confirms recorded instead of slept.
+func pendingImport(t *testing.T, script ...confirmAnswer) (*mediaFixture, *fakeRecordingServer, *confirmWaits) {
 	t.Helper()
+	f := newMediaFixture(t, "standup.m4a", 4096)
+	srv := newFakeRecordingServer(t, f.importRetryFixture, "single")
+	srv.confirmScript = script
+
 	cw := &confirmWaits{}
 	prior := mediaConfirmSleep
 	mediaConfirmSleep = func(ctx context.Context, d time.Duration) error {
-		cw.mu.Lock()
 		cw.waits = append(cw.waits, d)
-		hook := cw.onWait
-		cw.mu.Unlock()
-		if hook != nil {
-			return hook(ctx)
+		if cw.onWait != nil {
+			return cw.onWait(ctx)
 		}
 		return ctx.Err()
 	}
 	t.Cleanup(func() { mediaConfirmSleep = prior })
-	return cw
-}
-
-func (cw *confirmWaits) recorded() []time.Duration {
-	cw.mu.Lock()
-	defer cw.mu.Unlock()
-	return append([]time.Duration(nil), cw.waits...)
-}
-
-// importMediaCtx is importMedia under ctx, the context Ctrl-C cancels.
-func (f *mediaFixture) importMediaCtx(ctx context.Context, jsonOut bool) (stdout, stderr string, err error) {
-	importFlags = importFlagsT{team: importRetryTeamID, date: "2026-09-19", text: f.text}
-	var out, errOut bytes.Buffer
-	cmd := &cobra.Command{}
-	cmd.SetContext(ctx)
-	cmd.Flags().Bool("json", jsonOut, "")
-	cmd.SetOut(&out)
-	cmd.SetErr(&errOut)
-	err = runImport(cmd, []string{f.media})
-	return out.String(), errOut.String(), err
+	return f, srv, cw
 }
 
 // assertNotImported checks the three marks of an import ox did not finish:
-// no error-free exit, no "Imported:" line, and no local record that would turn
-// a retry into "Already imported".
+// an error, no "Imported:" line, and no local record that would turn a retry
+// into "Already imported".
 func (f *mediaFixture) assertNotImported(t *testing.T, stdout string, err error) {
 	t.Helper()
 	require.Error(t, err)
@@ -77,16 +69,20 @@ func (f *mediaFixture) assertNotImported(t *testing.T, stdout string, err error)
 	assert.False(t, found, "an upload the server has not accepted is not recorded as imported")
 }
 
-const statusHint = "ox import --status " + fakeRecordingID + " --watch --team " + importRetryTeamID
+var (
+	pending   = confirmAnswer{status: http.StatusAccepted}
+	accepted  = confirmAnswer{status: http.StatusOK}
+	unanswer  = confirmAnswer{hang: true}
+	pendingIn = func(retryAfter string) confirmAnswer {
+		return confirmAnswer{status: http.StatusAccepted, retryAfter: retryAfter}
+	}
+)
 
 // TestImportMedia_PendingConfirmThenAccepted: a 202 is followed by another
 // confirm, and only the accepting answer makes the import "Imported".
-// Failure prevented: today's import, which treats a 202 as done.
+// Failure prevented: an import that treats a 202 as done.
 func TestImportMedia_PendingConfirmThenAccepted(t *testing.T) {
-	f := newMediaFixture(t, "standup.m4a", 4096)
-	srv := newFakeRecordingServer(t, f.importRetryFixture, "single")
-	srv.confirmScript = []confirmAnswer{{status: http.StatusAccepted, retryAfter: "3"}, {status: http.StatusOK}}
-	cw := stubConfirmSleep(t)
+	f, srv, cw := pendingImport(t, pendingIn("3"), accepted)
 
 	stdout, stderr, err := f.importMedia(false, false)
 	require.NoError(t, err, "stderr: %s", stderr)
@@ -97,7 +93,7 @@ func TestImportMedia_PendingConfirmThenAccepted(t *testing.T) {
 	confirms := srv.snapshot().confirms
 	require.Len(t, confirms, 2, "ox asks again after a 202")
 	assert.Equal(t, confirms[0], confirms[1], "the repeat is the same confirm")
-	assert.Equal(t, []time.Duration{3 * time.Second}, cw.recorded())
+	assert.Equal(t, []time.Duration{3 * time.Second}, cw.waits)
 	_, found := findMediaImportByOID(f.tcPath(), f.sha256Hex())
 	assert.True(t, found, "an accepted upload is recorded")
 }
@@ -108,13 +104,9 @@ func TestImportMedia_PendingConfirmThenAccepted(t *testing.T) {
 // Failure prevented: a file the server later rejects reported as imported,
 // and the record blocking a retry with "Already imported".
 func TestImportMedia_PendingConfirmThenRefused(t *testing.T) {
-	f := newMediaFixture(t, "standup.m4a", 4096)
-	srv := newFakeRecordingServer(t, f.importRetryFixture, "single")
-	srv.confirmScript = []confirmAnswer{
-		{status: http.StatusAccepted, retryAfter: "1"},
-		{status: http.StatusUnprocessableEntity, code: "upload_checksum_mismatch", msg: "stored object does not match the declared checksum"},
-	}
-	stubConfirmSleep(t)
+	f, srv, _ := pendingImport(t, pendingIn("1"), confirmAnswer{
+		status: http.StatusUnprocessableEntity, code: "upload_checksum_mismatch", msg: "stored object does not match the declared checksum",
+	})
 
 	stdout, _, err := f.importMedia(false, false)
 	f.assertNotImported(t, stdout, err)
@@ -125,27 +117,27 @@ func TestImportMedia_PendingConfirmThenRefused(t *testing.T) {
 
 // TestImportMedia_PendingConfirmGivesUpAfterBudget: a server that keeps
 // answering 202 is asked until the budget runs out, never past it; then the
-// person is told the upload was received and how to follow it.
-// Failure prevented: an import that waits forever, or one that gives up
-// without saying the upload arrived and where to look next.
+// person is told the upload was received and how to follow it. With --json
+// the error and hint stay off stdout.
+// Failure prevented: an import that waits forever, one that gives up without
+// saying the upload arrived and where to look next, or a non-JSON stdout.
 func TestImportMedia_PendingConfirmGivesUpAfterBudget(t *testing.T) {
-	f := newMediaFixture(t, "standup.m4a", 4096)
-	srv := newFakeRecordingServer(t, f.importRetryFixture, "single")
-	srv.confirmScript = []confirmAnswer{{status: http.StatusAccepted, retryAfter: "30"}}
-	cw := stubConfirmSleep(t)
+	for _, jsonOut := range []bool{false, true} {
+		t.Run(map[bool]string{false: "text", true: "json"}[jsonOut], func(t *testing.T) {
+			f, srv, cw := pendingImport(t, pendingIn("30"))
 
-	stdout, stderr, err := f.importMedia(false, false)
-	f.assertNotImported(t, stdout, err)
-	assert.Contains(t, err.Error(), "received but not yet accepted")
-	assert.Contains(t, stderr, statusHint)
-
-	var total time.Duration
-	for _, w := range cw.recorded() {
-		total += w
+			stdout, stderr, err := f.importMedia(false, jsonOut)
+			f.assertNotImported(t, stdout, err)
+			assert.Contains(t, err.Error(), "received but not yet accepted")
+			assert.Contains(t, stderr, statusHint)
+			if jsonOut {
+				assert.Empty(t, stdout)
+			}
+			assert.Equal(t, mediaConfirmBudget, cw.total(), "every 30s wait that fits in the budget is taken, and none past it")
+			assert.Len(t, srv.snapshot().confirms, 1+int(mediaConfirmBudget/(30*time.Second)))
+			assert.Equal(t, 1, strings.Count(stderr, waitingLine), "the waiting line is printed once, not per confirm")
+		})
 	}
-	assert.Equal(t, mediaConfirmBudget, total, "every 30s wait that fits in the budget is taken, and none past it")
-	assert.Len(t, srv.snapshot().confirms, 1+int(mediaConfirmBudget/(30*time.Second)))
-	assert.Equal(t, 1, strings.Count(stderr, waitingLine), "the waiting line is printed once, not per confirm")
 }
 
 // TestImportMedia_PendingConfirmWaitIsBounded: the wait follows Retry-After
@@ -165,14 +157,11 @@ func TestImportMedia_PendingConfirmWaitIsBounded(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run("Retry-After="+tt.retryAfter, func(t *testing.T) {
-			f := newMediaFixture(t, "standup.m4a", 4096)
-			srv := newFakeRecordingServer(t, f.importRetryFixture, "single")
-			srv.confirmScript = []confirmAnswer{{status: http.StatusAccepted, retryAfter: tt.retryAfter}, {status: http.StatusOK}}
-			cw := stubConfirmSleep(t)
+			f, _, cw := pendingImport(t, pendingIn(tt.retryAfter), accepted)
 
 			_, stderr, err := f.importMedia(false, false)
 			require.NoError(t, err, "stderr: %s", stderr)
-			assert.Equal(t, []time.Duration{tt.want}, cw.recorded())
+			assert.Equal(t, []time.Duration{tt.want}, cw.waits)
 		})
 	}
 }
@@ -183,10 +172,7 @@ func TestImportMedia_PendingConfirmWaitIsBounded(t *testing.T) {
 // Failure prevented: Ctrl-C ignored until the wait ends, or a cancelled
 // import reported as imported.
 func TestImportMedia_CtrlCWhileWaitingForConfirm(t *testing.T) {
-	f := newMediaFixture(t, "standup.m4a", 4096)
-	srv := newFakeRecordingServer(t, f.importRetryFixture, "single")
-	srv.confirmScript = []confirmAnswer{{status: http.StatusAccepted, retryAfter: "5"}, {status: http.StatusOK}}
-	cw := stubConfirmSleep(t)
+	f, srv, cw := pendingImport(t, pendingIn("5"), accepted)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	cw.onWait = func(ctx context.Context) error {
@@ -194,7 +180,7 @@ func TestImportMedia_CtrlCWhileWaitingForConfirm(t *testing.T) {
 		return ctx.Err()
 	}
 
-	stdout, stderr, err := f.importMediaCtx(ctx, false)
+	stdout, stderr, err := f.importMediaCtx(ctx, false, false)
 	f.assertNotImported(t, stdout, err)
 	assert.ErrorIs(t, err, context.Canceled)
 	assert.Contains(t, stderr, statusHint)
@@ -206,20 +192,17 @@ func TestImportMedia_CtrlCWhileWaitingForConfirm(t *testing.T) {
 // Failure prevented: Ctrl-C reported as a network error with no hint, or held
 // until the call's own 2-minute limit.
 func TestImportMedia_CtrlCDuringRepeatedConfirm(t *testing.T) {
-	f := newMediaFixture(t, "standup.m4a", 4096)
-	srv := newFakeRecordingServer(t, f.importRetryFixture, "single")
-	srv.confirmScript = []confirmAnswer{{status: http.StatusAccepted, retryAfter: "1"}, {hang: true}}
-	cw := stubConfirmSleep(t)
+	f, _, cw := pendingImport(t, pendingIn("1"), unanswer)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	cw.onWait = func(context.Context) error {
-		// the wait ends normally; Ctrl-C lands once the next confirm is in flight
+		// the wait ends normally; Ctrl-C lands while the next confirm hangs
 		time.AfterFunc(200*time.Millisecond, cancel)
 		return nil
 	}
 
 	start := time.Now()
-	stdout, stderr, err := f.importMediaCtx(ctx, false)
+	stdout, stderr, err := f.importMediaCtx(ctx, false, false)
 	f.assertNotImported(t, stdout, err)
 	assert.ErrorIs(t, err, context.Canceled)
 	assert.Contains(t, stderr, statusHint)
@@ -243,10 +226,7 @@ func TestMediaConfirmSleep_EndsOnCancel(t *testing.T) {
 // Failure prevented: a progress line mixed into stdout, breaking every
 // consumer that parses ox import --json.
 func TestImportMedia_PendingConfirmJSONOutput(t *testing.T) {
-	f := newMediaFixture(t, "standup.m4a", 4096)
-	srv := newFakeRecordingServer(t, f.importRetryFixture, "single")
-	srv.confirmScript = []confirmAnswer{{status: http.StatusAccepted}, {status: http.StatusOK}}
-	stubConfirmSleep(t)
+	f, _, _ := pendingImport(t, pending, accepted)
 
 	stdout, stderr, err := f.importMedia(false, true)
 	require.NoError(t, err, "stderr: %s", stderr)
@@ -261,34 +241,17 @@ func TestImportMedia_PendingConfirmJSONOutput(t *testing.T) {
 	assert.Contains(t, stderr, waitingLine)
 }
 
-// TestImportMedia_PendingConfirmTimeoutJSON: with --json, the budget error
-// and the hint reach stderr only; stdout stays empty.
-// Failure prevented: a half-written or non-JSON stdout on a timed-out import.
-func TestImportMedia_PendingConfirmTimeoutJSON(t *testing.T) {
-	f := newMediaFixture(t, "standup.m4a", 4096)
-	srv := newFakeRecordingServer(t, f.importRetryFixture, "single")
-	srv.confirmScript = []confirmAnswer{{status: http.StatusAccepted, retryAfter: "30"}}
-	stubConfirmSleep(t)
-
-	stdout, stderr, err := f.importMedia(false, true)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "received but not yet accepted")
-	assert.Empty(t, stdout)
-	assert.Contains(t, stderr, statusHint)
-}
-
 // TestImportMedia_HangingConfirmIsCutAtBudget: a repeated confirm that does
 // not answer is cut off when the budget runs out, not after the normal
 // per-call limit.
 // Failure prevented: a 5-minute wait that becomes 7 because the last confirm
 // started at 4:59 with a 2-minute limit of its own.
 func TestImportMedia_HangingConfirmIsCutAtBudget(t *testing.T) {
-	f := newMediaFixture(t, "standup.m4a", 4096)
-	srv := newFakeRecordingServer(t, f.importRetryFixture, "single")
-	srv.confirmScript = []confirmAnswer{{status: http.StatusAccepted, retryAfter: "1"}, {hang: true}}
-	stubConfirmSleep(t)
+	f, srv, _ := pendingImport(t, pendingIn("1"), unanswer)
 	prior := mediaConfirmBudget
-	mediaConfirmBudget = 1500 * time.Millisecond // room for the 1s wait, then 0.5s for the hanging confirm
+	// the 1s wait fits; the recorded sleep takes no time, so the hanging
+	// confirm is cut about 1.5s after the first 202
+	mediaConfirmBudget = 1500 * time.Millisecond
 	t.Cleanup(func() { mediaConfirmBudget = prior })
 
 	start := time.Now()

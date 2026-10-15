@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -455,9 +456,15 @@ func newMediaFixture(t *testing.T, name string, size int) *mediaFixture {
 
 // importMedia runs `ox import <media> --team <team> --date 2026-09-19 [--force] [--json]`.
 func (f *mediaFixture) importMedia(force, jsonOut bool) (stdout, stderr string, err error) {
+	return f.importMediaCtx(context.Background(), force, jsonOut)
+}
+
+// importMediaCtx is importMedia under ctx, the context Ctrl-C cancels.
+func (f *mediaFixture) importMediaCtx(ctx context.Context, force, jsonOut bool) (stdout, stderr string, err error) {
 	importFlags = importFlagsT{team: importRetryTeamID, date: "2026-09-19", text: f.text, force: force}
 	var out, errOut bytes.Buffer
 	cmd := &cobra.Command{}
+	cmd.SetContext(ctx)
 	cmd.Flags().Bool("json", jsonOut, "")
 	cmd.SetOut(&out)
 	cmd.SetErr(&errOut)

@@ -198,12 +198,17 @@ func runImportMedia(ctx context.Context, cmd *cobra.Command, m mediaImport) erro
 
 	// A big upload can outlast the sign-in it started with. WithAuthToken
 	// changes the client in place and the part workers' re-presign shares it,
-	// so the token is swapped only here, after every part has finished.
-	accessToken, err = mediaImportAccessToken(ctx, m.ep)
-	if err != nil {
+	// so the token is swapped only here, after every part has finished. A
+	// refresh that fails now must not throw away the uploaded bytes: confirm
+	// still goes out with the token in hand, which may have minutes left.
+	if fresh, err := mediaImportAccessToken(ctx, m.ep); err == nil {
+		client.WithAuthToken(fresh)
+	} else if ctx.Err() != nil {
 		return err
+	} else {
+		slog.WarnContext(ctx, "sign-in refresh before confirm failed; confirming with the current token",
+			"recording_id", upload.RecordingID, "error", err)
 	}
-	client.WithAuthToken(accessToken)
 
 	// a server that issued no upload_id predates the confirm body and needs none
 	var confirmReq *api.ConfirmRecordingUploadRequest
@@ -274,6 +279,10 @@ func confirmUntilAccepted(ctx context.Context, errOut io.Writer, recordingID str
 	budgetErr := errkind.Errorf(errkind.Timeout, "upload received but not yet accepted after %s", mediaConfirmBudget)
 
 	start := time.Now()
+	// each confirm gets the normal call limit or the budget left, whichever
+	// is shorter, so one slow confirm cannot stretch the wait past the budget
+	budgetCtx, cancelBudget := context.WithDeadline(ctx, start.Add(mediaConfirmBudget))
+	defer cancelBudget()
 	var waited time.Duration
 	for resp.Pending {
 		wait := mediaConfirmWait(resp)
@@ -289,21 +298,14 @@ func confirmUntilAccepted(ctx context.Context, errOut io.Writer, recordingID str
 			return unanswered(err)
 		}
 
-		// each call gets the normal call limit or the budget left, whichever
-		// is shorter, so one slow confirm cannot stretch the wait past it
-		limit, cutAtBudget := mediaAPITimeout, false
-		if left := mediaConfirmBudget - time.Since(start); left < limit {
-			limit, cutAtBudget = left, true
-		}
-		callCtx, cancel := context.WithTimeout(ctx, limit)
+		callCtx, cancel := context.WithTimeout(budgetCtx, mediaAPITimeout)
 		resp, err = confirm(callCtx)
-		cutAtBudget = cutAtBudget && errors.Is(callCtx.Err(), context.DeadlineExceeded)
 		cancel()
 		switch {
 		case err == nil:
 		case ctx.Err() != nil:
 			return unanswered(ctx.Err())
-		case cutAtBudget:
+		case budgetCtx.Err() != nil:
 			return unanswered(budgetErr)
 		default:
 			return err
@@ -333,6 +335,10 @@ func mediaConfirmWait(resp *api.ConfirmRecordingUploadResponse) time.Duration {
 func mediaImportAccessToken(ctx context.Context, ep string) (string, error) {
 	token, err := auth.EnsureValidTokenForEndpointContext(ctx, ep, mediaTokenRefreshBuffer)
 	if err != nil {
+		// a refresh cut short by Ctrl-C is a cancellation, not a lost sign-in
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
 		var refreshErr *auth.TokenRefreshError
 		if errors.As(err, &refreshErr) {
 			return "", errkind.Errorf(errkind.NotLoggedIn, "sign-in expired and could not be renewed (%v) — run 'ox login'", err)

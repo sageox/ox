@@ -233,6 +233,7 @@ func TestConfirmRecordingUpload_AcceptedIsPending(t *testing.T) {
 	}{
 		{"202 with Retry-After", http.StatusAccepted, "5", `{"status":"verifying"}`, true, 5 * time.Second, true},
 		{"202 with Retry-After 0", http.StatusAccepted, "0", `{"status":"verifying"}`, true, 0, true},
+		{"202 with Retry-After 00", http.StatusAccepted, "00", `{"status":"verifying"}`, true, 0, true},
 		{"202 without Retry-After", http.StatusAccepted, "", `{"status":"verifying"}`, true, 0, false},
 		{"202 with an empty body", http.StatusAccepted, "3", "", true, 3 * time.Second, true},
 		{"202 with an unreadable Retry-After", http.StatusAccepted, "soon", `{}`, true, 0, false},
