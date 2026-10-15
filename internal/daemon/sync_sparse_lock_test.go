@@ -74,3 +74,27 @@ func TestApplySparseFromManifest_KeepsFreshSparseCheckoutLock(t *testing.T) {
 	require.Error(t, err)
 	assert.FileExists(t, lock)
 }
+
+// TestApplySparseFromManifest_WaitsForTheRepoLock: the per-pull sparse
+// re-apply rewrites the team context's index. Failure prevented: run while an
+// ox commit holds the repo lock (`ox import`, `ox memory put`), it fails that
+// commit on index.lock.
+func TestApplySparseFromManifest_WaitsForTheRepoLock(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git operations")
+	}
+	repo, cfg := newSparseLockRepo(t)
+	sparseFile := filepath.Join(repo, ".git", "info", "sparse-checkout")
+
+	require.NoError(t, gitutil.WithRepoLock(context.Background(), repo, func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		defer cancel()
+		err := applySparseFromManifest(ctx, repo, cfg, manifest.RepoKindTeamContext, nil)
+		assert.True(t, gitutil.IsRepoLockBusy(err), "want the lock-busy error, got %v", err)
+		assert.NoFileExists(t, sparseFile, "the re-apply ran while a peer held the repo lock")
+		return nil
+	}))
+
+	require.NoError(t, applySparseFromManifest(context.Background(), repo, cfg, manifest.RepoKindTeamContext, nil))
+	assert.FileExists(t, sparseFile, "the re-apply must run once the lock is free")
+}

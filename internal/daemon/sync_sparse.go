@@ -39,17 +39,22 @@ func applySparseFromManifest(ctx context.Context, repoPath string, cfg *manifest
 		return nil
 	}
 	args := append([]string{"sparse-checkout", "set", "--no-cone"}, paths...)
-	_, err := gitutil.RunGit(ctx, repoPath, args...)
-	if err != nil && gitutil.IsIndexLockContention(err.Error()) {
-		// clear only locks eligible for automatic recovery and retry once;
-		// ownerless sparse-checkout locks are preserved regardless of age
-		if removed, _ := gitutil.RemoveStaleLockFiles(filepath.Join(repoPath, ".git")); len(removed) > 0 {
-			if logger != nil {
-				logger.Warn("sparse-checkout: removed stale lock files, retrying", "path", repoPath, "removed", removed)
+	// under the repo lock: `git sparse-checkout set` rewrites the index, so a
+	// run outside it can fail an ox commit to this clone on index.lock
+	err := gitutil.WithRepoLock(ctx, repoPath, func() error {
+		_, err := gitutil.RunGit(ctx, repoPath, args...)
+		if err != nil && gitutil.IsIndexLockContention(err.Error()) {
+			// clear only locks eligible for automatic recovery and retry once;
+			// ownerless sparse-checkout locks are preserved regardless of age
+			if removed, _ := gitutil.RemoveStaleLockFiles(filepath.Join(repoPath, ".git")); len(removed) > 0 {
+				if logger != nil {
+					logger.Warn("sparse-checkout: removed stale lock files, retrying", "path", repoPath, "removed", removed)
+				}
+				_, err = gitutil.RunGit(ctx, repoPath, args...)
 			}
-			_, err = gitutil.RunGit(ctx, repoPath, args...)
 		}
-	}
+		return err
+	})
 	if err != nil {
 		if logger != nil {
 			logger.Warn("sparse-checkout set failed", "path", repoPath, "error", err)
