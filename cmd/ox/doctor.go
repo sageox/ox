@@ -899,6 +899,13 @@ func runDoctorChecksWithState(parent context.Context, opts doctorOptions, state 
 	if check := GetDoctorCheck(CheckSlugSessionTrace); check != nil {
 		integrationChecks = append(integrationChecks, check.Run(opts.shouldFix(CheckSlugSessionTrace)))
 	}
+	// Oxy, the opt-in Claude Code pet: refreshed after an ox upgrade, silent
+	// on machines that never enabled it.
+	if check := GetDoctorCheck(CheckSlugPetOxy); check != nil {
+		if res := check.Run(opts.shouldFix(CheckSlugPetOxy)); !res.skipped {
+			integrationChecks = append(integrationChecks, res)
+		}
+	}
 	integrationChecks = append(integrationChecks, checkClaudeSkills(opts.shouldFix(CheckSlugClaudeSkills)))
 	legacyCheck, legacyPending := checkLegacyOxFilesWithPreflight(legacyRoot, legacyFix, legacyPreflight)
 	// The ox-managed inventory: keep ox's own files ignored, report any that are

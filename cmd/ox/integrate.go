@@ -1,7 +1,10 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +12,7 @@ import (
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/constants"
+	"github.com/sageox/ox/internal/pet"
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/internal/tips"
 	"github.com/sageox/ox/internal/ui"
@@ -749,6 +753,16 @@ func uninstallAllIntegrations(force bool) error {
 		installed = append(installed, "Cursor Agents Window (project)")
 	}
 
+	// check the Oxy pet (Claude Code, user scope)
+	petInstaller := newPetInstaller()
+	petEnabled, petErr := petPresent(petInstaller.Dir)
+	if petErr != nil {
+		return fmt.Errorf("check the Oxy pet: %w", petErr)
+	}
+	if petEnabled {
+		installed = append(installed, "Oxy pet (Claude Code, user)")
+	}
+
 	// check git commit hooks
 	gitRoot := findGitRoot()
 	if gitRoot != "" && HasGitHooks(gitRoot) {
@@ -833,6 +847,15 @@ func uninstallAllIntegrations(force bool) error {
 			errors = append(errors, fmt.Sprintf("Cursor Agents Window (project): %v", err))
 		}
 	}
+	var petSteps []string
+	if petEnabled {
+		res, err := petInstaller.Disable(context.Background())
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("Oxy pet: %v", err))
+		} else {
+			petSteps = res.ManualSteps
+		}
+	}
 	if gitRoot != "" {
 		if err := UninstallGitHooks(gitRoot); err != nil {
 			errors = append(errors, fmt.Sprintf("Git commit hooks: %v", err))
@@ -843,6 +866,12 @@ func uninstallAllIntegrations(force bool) error {
 		return fmt.Errorf("some uninstalls failed: %s", strings.Join(errors, "; "))
 	}
 
+	if len(petSteps) > 0 {
+		// Without the claude CLI ox can remove Oxy's files but not
+		// Claude Code's record of the plugin; say what is left.
+		printSteps(os.Stdout, "Integrations uninstalled. To finish removing Oxy, in Claude Code run:", petSteps)
+		return nil
+	}
 	fmt.Println(ui.PassStyle.Render("✓") + " All integrations uninstalled")
 	return nil
 }
@@ -942,4 +971,21 @@ func init() {
 
 	integrateCmd.GroupID = "agent-interface"
 	rootCmd.AddCommand(integrateCmd)
+}
+
+// petPresent reports whether the Oxy mod folder exists. Only "not there"
+// means absent: a folder ox cannot inspect is an error, so bulk uninstall
+// never reports success over a pet it could not see.
+func petPresent(dir string) (bool, error) {
+	if err := pet.RecoverSwap(dir); err != nil {
+		return false, err
+	}
+	_, err := os.Stat(dir)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	return false, err
 }
