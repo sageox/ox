@@ -52,6 +52,37 @@ const (
 	mediaImportCacheSubdir = ".sageox/cache/media-imports"
 )
 
+// The wait after confirm answers 202 (received, still checking).
+const (
+	// mediaConfirmMinWait keeps a Retry-After of 0 from turning the wait
+	// into a stream of back-to-back confirms.
+	mediaConfirmMinWait = time.Second
+	// mediaConfirmMaxWait caps a Retry-After so a wrong header cannot leave a
+	// person watching a silent terminal for minutes between confirms.
+	mediaConfirmMaxWait = 30 * time.Second
+	// mediaConfirmDefaultWait is used when the 202 carries no Retry-After.
+	mediaConfirmDefaultWait = 2 * time.Second
+)
+
+// mediaConfirmBudget bounds the whole wait, from the first 202: long enough
+// for the check on a multi-gigabyte file (one confirm alone may take
+// mediaAPITimeout), short enough that nobody waits without an answer. Past it
+// the person is pointed at ox import --status. A var so tests can shorten it.
+var mediaConfirmBudget = 5 * time.Minute
+
+// mediaConfirmSleep waits between confirms and returns early with ctx's error
+// on Ctrl-C. A var so tests do not sleep.
+var mediaConfirmSleep = func(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
 // isMediaImportFile reports whether path is an audio or video file that
 // imports through the recording upload route.
 func isMediaImportFile(path string) bool {
@@ -179,7 +210,10 @@ func runImportMedia(ctx context.Context, cmd *cobra.Command, m mediaImport) erro
 	if upload.UploadID != "" {
 		confirmReq = &api.ConfirmRecordingUploadRequest{UploadID: upload.UploadID, Parts: parts}
 	}
-	if _, err := client.ConfirmRecordingUpload(ctx, api.ContextTypeTeam, m.tc.TeamID, upload.RecordingID, confirmReq); err != nil {
+	confirm := func(ctx context.Context) (*api.ConfirmRecordingUploadResponse, error) {
+		return client.ConfirmRecordingUpload(ctx, api.ContextTypeTeam, m.tc.TeamID, upload.RecordingID, confirmReq)
+	}
+	if err := confirmUntilAccepted(ctx, cmd.ErrOrStderr(), upload.RecordingID, confirm); err != nil {
 		return fmt.Errorf("confirm recording %s: %w", upload.RecordingID, err)
 	}
 
@@ -215,6 +249,83 @@ func runImportMedia(ctx context.Context, cmd *cobra.Command, m mediaImport) erro
 	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Imported: %s\nRecording: %s\n", title, upload.RecordingID)
 	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "\n  Track progress: ox import --status %s --watch%s\n", upload.RecordingID, importContextFlagHint())
 	return nil
+}
+
+// confirmUntilAccepted sends confirm and, while it answers 202 (received,
+// still checking), waits and sends the same confirm again until it is
+// accepted, refused, or mediaConfirmBudget has passed since the first 202.
+// One line on errOut says the wait has begun; if the wait ends without an
+// answer — budget or Ctrl-C — errOut also gets the --status command, since
+// the upload itself was received.
+func confirmUntilAccepted(ctx context.Context, errOut io.Writer, recordingID string, confirm func(context.Context) (*api.ConfirmRecordingUploadResponse, error)) error {
+	resp, err := confirm(ctx)
+	if err != nil {
+		return err
+	}
+	if !resp.Pending {
+		return nil
+	}
+
+	_, _ = fmt.Fprintln(errOut, "Upload received; the server is still checking it. Waiting for it to be accepted...")
+	unanswered := func(err error) error {
+		_, _ = fmt.Fprintf(errOut, "\n  Track progress: ox import --status %s --watch%s\n", recordingID, importContextFlagHint())
+		return err
+	}
+	budgetErr := errkind.Errorf(errkind.Timeout, "upload received but not yet accepted after %s", mediaConfirmBudget)
+
+	start := time.Now()
+	var waited time.Duration
+	for resp.Pending {
+		wait := mediaConfirmWait(resp)
+		// Two clocks, as in publishBulletinWithRetry: the waits taken (the
+		// cap holds when tests replace the sleeper) and wall time (slow
+		// confirms count too). Asking sooner than the server said only
+		// spends a request, so a wait that does not fit ends the wait.
+		if waited+wait > mediaConfirmBudget || time.Since(start)+wait > mediaConfirmBudget {
+			return unanswered(budgetErr)
+		}
+		waited += wait
+		if err := mediaConfirmSleep(ctx, wait); err != nil {
+			return unanswered(err)
+		}
+
+		// each call gets the normal call limit or the budget left, whichever
+		// is shorter, so one slow confirm cannot stretch the wait past it
+		limit, cutAtBudget := mediaAPITimeout, false
+		if left := mediaConfirmBudget - time.Since(start); left < limit {
+			limit, cutAtBudget = left, true
+		}
+		callCtx, cancel := context.WithTimeout(ctx, limit)
+		resp, err = confirm(callCtx)
+		cutAtBudget = cutAtBudget && errors.Is(callCtx.Err(), context.DeadlineExceeded)
+		cancel()
+		switch {
+		case err == nil:
+		case ctx.Err() != nil:
+			return unanswered(ctx.Err())
+		case cutAtBudget:
+			return unanswered(budgetErr)
+		default:
+			return err
+		}
+	}
+	return nil
+}
+
+// mediaConfirmWait is how long to wait before confirming again: the 202's
+// Retry-After within [mediaConfirmMinWait, mediaConfirmMaxWait], or
+// mediaConfirmDefaultWait when it gave none.
+func mediaConfirmWait(resp *api.ConfirmRecordingUploadResponse) time.Duration {
+	switch {
+	case !resp.HasRetryAfter:
+		return mediaConfirmDefaultWait
+	case resp.RetryAfter < mediaConfirmMinWait:
+		return mediaConfirmMinWait
+	case resp.RetryAfter > mediaConfirmMaxWait:
+		return mediaConfirmMaxWait
+	default:
+		return resp.RetryAfter
+	}
 }
 
 // mediaImportAccessToken returns the sign-in for ep, refreshed when it has run

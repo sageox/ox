@@ -86,6 +86,9 @@ type fakeRecordingServer struct {
 	// confirmStatus/confirmCode: confirm answers with this error envelope
 	confirmStatus int
 	confirmCode   string
+	// confirmScript: each confirm takes the next answer; the last one repeats
+	// once the script runs out. Empty means confirmStatus decides.
+	confirmScript []confirmAnswer
 
 	uploadReqs    []uploadRequestWire
 	uploadBodies  [][]byte
@@ -283,12 +286,47 @@ func (s *fakeRecordingServer) serveConfirm(w http.ResponseWriter, r *http.Reques
 	s.confirmBodies = append(s.confirmBodies, body)
 	s.apiHdrs = append(s.apiHdrs, r.Header.Clone())
 	status, code, msg := s.confirmStatus, s.confirmCode, s.errMsg
+	var scripted *confirmAnswer
+	if n := len(s.confirmScript); n > 0 {
+		a := s.confirmScript[min(len(s.confirmBodies), n)-1]
+		scripted = &a
+	}
 	s.mu.Unlock()
+	if scripted != nil {
+		scripted.serve(w, r)
+		return
+	}
 	if status != 0 {
 		writeJSON(w, status, map[string]any{"error": map[string]string{"code": code, "message": msg}})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"id": fakeRecordingID, "status": "processing"})
+}
+
+// confirmAnswer is one scripted answer to confirm.
+type confirmAnswer struct {
+	status     int    // 202 still checking, 200 accepted, else an error envelope
+	retryAfter string // Retry-After header, sent when set
+	code, msg  string // error envelope for a status >= 400
+	hang       bool   // never answers; holds the request until the client gives up
+}
+
+func (a confirmAnswer) serve(w http.ResponseWriter, r *http.Request) {
+	if a.hang {
+		<-r.Context().Done()
+		return
+	}
+	if a.retryAfter != "" {
+		w.Header().Set("Retry-After", a.retryAfter)
+	}
+	switch {
+	case a.status == http.StatusAccepted:
+		writeJSON(w, a.status, map[string]any{"id": fakeRecordingID, "status": "verifying"})
+	case a.status >= 400:
+		writeJSON(w, a.status, map[string]any{"error": map[string]string{"code": a.code, "message": a.msg}})
+	default:
+		writeJSON(w, a.status, map[string]any{"id": fakeRecordingID, "status": "processing"})
+	}
 }
 
 // fakeSnapshot is a copy of what the server saw, taken under its lock: a part
