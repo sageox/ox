@@ -169,7 +169,7 @@ func TestImportMedia_PendingConfirmWaitIsBounded(t *testing.T) {
 // TestImportMedia_CtrlCWhileWaitingForConfirm: Ctrl-C during the wait stops
 // the import at once with the cancellation error, records nothing, and points
 // at --status because the upload itself was received.
-// Failure prevented: Ctrl-C ignored until the wait ends, or a cancelled
+// Failure prevented: Ctrl-C ignored until the wait ends, or a canceled
 // import reported as imported.
 func TestImportMedia_CtrlCWhileWaitingForConfirm(t *testing.T) {
 	f, srv, cw := pendingImport(t, pendingIn("5"), accepted)
@@ -210,7 +210,7 @@ func TestImportMedia_CtrlCDuringRepeatedConfirm(t *testing.T) {
 }
 
 // TestMediaConfirmSleep_EndsOnCancel: the real wait between confirms returns
-// as soon as the context is cancelled.
+// as soon as the context is canceled.
 // Failure prevented: Ctrl-C held for up to 30 seconds by a plain time.Sleep.
 func TestMediaConfirmSleep_EndsOnCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
