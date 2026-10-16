@@ -108,8 +108,7 @@ func TestServerClient_SyncWithProgress_Integration(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go server.Start(ctx)
-	time.Sleep(100 * time.Millisecond)
+	startIPCServer(ctx, t, server)
 
 	client := &Client{
 		socketPath: SocketPath(),
@@ -161,8 +160,7 @@ func TestServerClient_SyncWithProgress_Error(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go server.Start(ctx)
-	time.Sleep(100 * time.Millisecond)
+	startIPCServer(ctx, t, server)
 
 	client := &Client{
 		socketPath: SocketPath(),
@@ -204,8 +202,7 @@ func TestServerClient_SyncWithProgress_LegacyFallback(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go server.Start(ctx)
-	time.Sleep(100 * time.Millisecond)
+	startIPCServer(ctx, t, server)
 
 	client := &Client{
 		socketPath: SocketPath(),
@@ -259,8 +256,7 @@ func TestSyncWithProgress_IdleTimeoutExtendsOnProgress(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go server.Start(ctx)
-	time.Sleep(100 * time.Millisecond)
+	startIPCServer(ctx, t, server)
 
 	client := &Client{
 		socketPath: SocketPath(),
@@ -305,8 +301,7 @@ func TestSyncWithProgress_IdleTimeoutExpiresWithoutProgress(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go server.Start(ctx)
-	time.Sleep(100 * time.Millisecond)
+	startIPCServer(ctx, t, server)
 
 	client := &Client{
 		socketPath: SocketPath(),

@@ -91,8 +91,7 @@ func startSyncDaemon(t *testing.T, ledgerDir string) (client *Client, cancel con
 
 	ctx, cancelFn := context.WithCancel(context.Background())
 
-	go server.Start(ctx)
-	time.Sleep(100 * time.Millisecond) // wait for socket
+	startIPCServer(ctx, t, server)
 
 	return &Client{
 		socketPath: SocketPath(),

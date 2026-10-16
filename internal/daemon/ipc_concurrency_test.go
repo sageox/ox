@@ -112,8 +112,7 @@ func TestServerClient_ConcurrentRequests(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go server.Start(ctx)
-	time.Sleep(100 * time.Millisecond)
+	startIPCServer(ctx, t, server)
 
 	// send concurrent requests
 	const numRequests = 20
@@ -156,8 +155,7 @@ func TestServer_ConcurrentConnections_RaceDetector(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go server.Start(ctx)
-	time.Sleep(100 * time.Millisecond)
+	startIPCServer(ctx, t, server)
 
 	// spawn many concurrent clients accessing shared server state
 	const numClients = 50
@@ -211,8 +209,7 @@ func TestServerClient_PingDuringSlowStatus(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	go server.Start(ctx)
-	time.Sleep(100 * time.Millisecond)
+	startIPCServer(ctx, t, server)
 
 	// start slow status request in background
 	go func() {
@@ -221,7 +218,7 @@ func TestServerClient_PingDuringSlowStatus(t *testing.T) {
 	}()
 
 	// wait for status handler to be actively running
-	<-statusStarted
+	awaitSignal(t, statusStarted, "the slow status handler to start")
 
 	// ping must complete quickly despite slow status on another connection
 	client := &Client{socketPath: SocketPath(), timeout: 5 * time.Second}

@@ -148,8 +148,7 @@ func TestServerClient_Murmur_Integration(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go server.Start(ctx) //nolint:errcheck
-	time.Sleep(100 * time.Millisecond)
+	startIPCServer(ctx, t, server)
 
 	want := MurmurPayload{
 		TargetDir:  "/ledger/path",
@@ -211,8 +210,7 @@ func TestServerClient_Murmur_EmptyTargetDir_SkipsCallback(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go server.Start(ctx) //nolint:errcheck
-	time.Sleep(100 * time.Millisecond)
+	startIPCServer(ctx, t, server)
 
 	client := &Client{
 		socketPath: SocketPath(),

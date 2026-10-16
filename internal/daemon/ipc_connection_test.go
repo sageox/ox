@@ -275,8 +275,7 @@ func TestServerClient_ConcurrentStatusRequests(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	go server.Start(ctx)
-	time.Sleep(100 * time.Millisecond)
+	startIPCServer(ctx, t, server)
 
 	// send 10 concurrent status requests
 	const numRequests = 10

@@ -161,8 +161,7 @@ func TestServerClient_StatusNonBlocking(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	go server.Start(ctx)
-	time.Sleep(100 * time.Millisecond)
+	startIPCServer(ctx, t, server)
 
 	// start slow sync in background
 	go func() {
@@ -171,7 +170,7 @@ func TestServerClient_StatusNonBlocking(t *testing.T) {
 	}()
 
 	// wait for sync handler to be actively running
-	<-syncStarted
+	awaitSignal(t, syncStarted, "the slow sync handler to start")
 
 	// now send a status request — it must complete quickly despite the slow sync
 	client := &Client{socketPath: SocketPath(), timeout: 5 * time.Second}
@@ -217,8 +216,7 @@ func TestServerClient_StatusDuringSlowHandler(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	go server.Start(ctx)
-	time.Sleep(100 * time.Millisecond)
+	startIPCServer(ctx, t, server)
 
 	// start code_index request in background
 	go func() {
@@ -228,7 +226,7 @@ func TestServerClient_StatusDuringSlowHandler(t *testing.T) {
 	}()
 
 	// wait for index handler to be actively running
-	<-indexStarted
+	awaitSignal(t, indexStarted, "the slow code_index handler to start")
 
 	// status request must complete quickly
 	client := &Client{socketPath: SocketPath(), timeout: 5 * time.Second}

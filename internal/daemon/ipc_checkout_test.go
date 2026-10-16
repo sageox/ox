@@ -94,8 +94,7 @@ func TestServerClient_Checkout_Integration(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go server.Start(ctx)
-	time.Sleep(100 * time.Millisecond)
+	startIPCServer(ctx, t, server)
 
 	// test checkout with progress callback (use socket path matching server)
 	client := &Client{
@@ -154,8 +153,7 @@ func TestServerClient_Checkout_Error(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go server.Start(ctx)
-	time.Sleep(100 * time.Millisecond)
+	startIPCServer(ctx, t, server)
 
 	client := &Client{
 		socketPath: SocketPath(),
@@ -194,8 +192,7 @@ func TestServerClient_Checkout_NoHandler(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go server.Start(ctx)
-	time.Sleep(100 * time.Millisecond)
+	startIPCServer(ctx, t, server)
 
 	// create client with socket path matching server (using XDG_RUNTIME_DIR)
 	client := &Client{
