@@ -304,6 +304,52 @@ func TestSelectAgentsForInit_NonInteractiveSkipsUndetectedAdapters(t *testing.T)
 	assert.False(t, selected["codex"], "undetected Codex must not create project integration files")
 }
 
+func TestSelectAgentsForInit_ExplicitNamesCanonicalizeAliases(t *testing.T) {
+	previousAgentsFlag := initAgentsFlag
+	initAgentsFlag = "claude, CLAUDE CODE, gemini-cli"
+	t.Cleanup(func() { initAgentsFlag = previousAgentsFlag })
+	t.Setenv("OX_ADAPTER_PATH", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+
+	selected, err := selectAgentsForInit(t.TempDir())
+	require.NoError(t, err)
+	assert.Equal(t, map[string]bool{"claude-code": true, "gemini": true}, selected)
+}
+
+func TestSelectAgentsForInit_ExplicitAliasPreservesDynamicAdapterName(t *testing.T) {
+	adapterDir := t.TempDir()
+	createFakeAdapterWithHooks(t, adapterDir, "pi-coding-agent", "0.1.0", "session", ".pi")
+	t.Setenv("OX_ADAPTER_PATH", adapterDir)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+
+	previousAgentsFlag := initAgentsFlag
+	initAgentsFlag = "pi-coding-agent"
+	t.Cleanup(func() { initAgentsFlag = previousAgentsFlag })
+
+	selected, err := selectAgentsForInit(t.TempDir())
+	require.NoError(t, err)
+	assert.Equal(t, map[string]bool{"pi-coding-agent": true}, selected)
+}
+
+func TestSelectAgentsForInit_RejectsUnknownNamesWithValidValues(t *testing.T) {
+	t.Setenv("OX_ADAPTER_PATH", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+
+	previousAgentsFlag := initAgentsFlag
+	initAgentsFlag = "claud"
+	t.Cleanup(func() { initAgentsFlag = previousAgentsFlag })
+
+	selected, err := selectAgentsForInit(t.TempDir())
+	require.ErrorContains(t, err, `invalid agent "claud" in --agents`)
+	assert.ErrorContains(t, err, "valid values:")
+	assert.ErrorContains(t, err, "claude-code")
+	assert.ErrorContains(t, err, "gemini")
+	assert.Nil(t, selected, "an invalid list must not produce a partial selection")
+}
+
 // TestInstallAgentHooks_OpenCodeInstallsOnce verifies OpenCode hooks are
 // installed exactly once when the opencode adapter is selected.
 //
