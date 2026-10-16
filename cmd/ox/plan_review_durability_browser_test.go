@@ -612,10 +612,12 @@ func TestBrowser_LostAnswerAndAnEditDuringSendDeliverOnce(t *testing.T) {
 	markSectionJS(t, ctx, "section#sec-1", " (edited)")
 	release()
 
-	// the page goes offline, sees the server back, reloads and resends
+	// the page goes offline, sees the server back, resends, and reloads; the
+	// count is read once the reloaded page has drawn it
 	fb.waitRequests(t, 2, 20*time.Second)
-	if !waitForNewPage(ctx, jsOutbox+`===''`, 20*time.Second) {
-		t.Fatalf("a reloaded page must resend the round and clear it on its answer, outbox=%q", evalString(t, ctx, jsOutbox))
+	if !waitForNewPage(ctx, jsOutbox+`===''&&`+jsCount+`==='1 unsent'`, 20*time.Second) {
+		t.Fatalf("the reloaded page must show the round cleared and the newer note unsent: outbox=%q count=%q",
+			evalString(t, ctx, jsOutbox), evalString(t, ctx, `(document.querySelector('.rev-count')||{}).textContent`))
 	}
 	raws := fb.rawRequests()
 	for _, r := range raws[1:] {
@@ -626,7 +628,7 @@ func TestBrowser_LostAnswerAndAnEditDuringSendDeliverOnce(t *testing.T) {
 	if strings.Contains(raws[0], "(edited)") {
 		t.Fatalf("the round froze before the edit, so it must not carry it: %s", raws[0])
 	}
-	if marks := evalString(t, ctx, jsMarks); !strings.Contains(marks, "first note (edited)") || evalString(t, ctx, jsCount) != "1 unsent" {
-		t.Fatalf("the answer to the older round must keep the newer note: marks=%q count=%q", marks, evalString(t, ctx, jsCount))
+	if marks := evalString(t, ctx, jsMarks); !strings.Contains(marks, "first note (edited)") {
+		t.Fatalf("the answer to the older round must keep the newer note: marks=%q", marks)
 	}
 }
