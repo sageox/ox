@@ -396,6 +396,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
   function queue(act: Act, build: (id: string, reviewer: string) => string, stamps: Record<string, number>, retry: () => void) {
     if (!who()) { askName('Your name, so teammates know whose feedback this is:', retry); return; }
     const id = newId();
+    // named, never who(): a signed-in host's server stamps the caller itself
     if (!store.freeze(act, id, build(id, named), stamps)) {
       showSync('err', 'Not sent — this browser could not store it, so nothing was sent. Free up browser storage, then try again.');
       return;

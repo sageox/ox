@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/chromedp"
 	"github.com/sageox/ox/internal/plan"
 	"github.com/sageox/ox/pkg/planreview"
@@ -357,6 +358,17 @@ func TestBrowser_LiveReloadWaitsForSubmitResult(t *testing.T) {
 func TestBrowser_LiveReloadWaitsForTheNote(t *testing.T) {
 	base, bc := serveScriptedPlanReview(t, nil, nil)
 	ctx := newChrome(t)
+	// Count the live-reload messages the page hears. The listener is added
+	// before review.js sets its own handler, so it runs first in the same
+	// dispatch: once the count is up, the page's reload is already waiting.
+	countReloads := chromedp.ActionFunc(func(ctx context.Context) error {
+		_, err := page.AddScriptToEvaluateOnNewDocument(`(function(){var E=window.EventSource;window.EventSource=function(u){` +
+			`var es=new E(u);es.addEventListener('message',function(){window.reloads=(window.reloads||0)+1});return es}})()`).Do(ctx)
+		return err
+	})
+	if err := chromedp.Run(ctx, countReloads); err != nil {
+		t.Fatalf("count live reloads: %v", err)
+	}
 	openReviewer(t, ctx, base)
 	// DOM clicks, so the second lands on its section and not on the open note
 	if err := chromedp.Run(ctx, chromedp.Evaluate(`window.oldPage=true;document.querySelector('.rev-toggle').click();`+
@@ -364,10 +376,13 @@ func TestBrowser_LiveReloadWaitsForTheNote(t *testing.T) {
 		t.Fatalf("open a note: %v", err)
 	}
 	bc.broadcast()
-	time.Sleep(700 * time.Millisecond)
+	if !waitJS(ctx, `window.reloads>=1`, 10*time.Second) {
+		t.Fatal("the page never heard the live reload")
+	}
 	if err := chromedp.Run(ctx, chromedp.Evaluate(`document.querySelector('section#sec-2').click()`, nil)); err != nil {
 		t.Fatalf("open another note: %v", err)
 	}
+	// a reload run by mistake would replace the page within this
 	time.Sleep(700 * time.Millisecond)
 	if evalString(t, ctx, `!!window.oldPage&&!!document.querySelector('.rev-pop')&&!document.getElementById('first')`) != "true" {
 		t.Fatal("opening another note must not run the reload waiting for the first to close")
