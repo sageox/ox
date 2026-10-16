@@ -116,7 +116,10 @@ body.rev-on .rev-orphans li:hover{outline:none;cursor:auto}
 .rev-rail-note{font-size:12.5px;color:var(--ink, #f4f2ef);line-height:1.45;overflow-wrap:anywhere}
 .rev-rail-note.muted{color:var(--dim, #b7b6a3)}
 .rev-rail-tag{flex:none;font-size:9px;border-radius:6px;padding:0 5px;border:1px solid var(--hair2, var(--hair, #212620));color:var(--dim, #b7b6a3);text-transform:uppercase;letter-spacing:.02em}
-.rev-rail-tag.unsent{color:var(--gold, #d9b654);border-color:var(--gold, #d9b654)}
+.rev-rail-tag.unsent,.rev-rail-tag.queued{color:var(--gold, #d9b654);border-color:var(--gold, #d9b654)}
+/* queued: submitted and stored in this browser, waiting for the server; unsaved: in this tab only */
+.rev-rail-tag.queued{border-style:dashed}
+.rev-rail-tag.unsaved{color:var(--red, #d77e6c);border-color:var(--red, #d77e6c)}
 .rev-rail-tag.addressed,.rev-rail-tag.verified{color:var(--sage, #99c693);border-color:var(--sage, #99c693)}
 .rev-rail-tag.wontfix{color:var(--faint, #8c8e7e)}
 .rev-rail-quote{font-size:12px;line-height:1.4;color:var(--dim, #b7b6a3);border-left:2px solid var(--hair2, var(--hair, #212620));padding-left:6px;margin:1px 0 3px;overflow-wrap:anywhere}

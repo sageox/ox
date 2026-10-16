@@ -21,17 +21,20 @@ test('an anchor ignores the glyph painted into its element', () => {
 // Failure prevented: a reviewer keeps marking up a dead page believing their
 // feedback is reaching the agent (TestBrowser_UnsentMarkSurvivesReconnect).
 test('a dead server is detected, said plainly, and recovered from', () => {
-  pins('host-controls.ts', [
-    'es.onerror', // SSE drop detection
-    'es.onopen', // recovery detection
-    'setOffline(true)', // a failed POST flips the page offline
-    'NOT being saved', // the banner says it plainly
-    'rev-offline-bar', // sticky banner element
+  pins('local.ts', [
+    'es.onerror = () => { controls.setOffline(true); watch(); }', // SSE drop detection
+    'es.onopen = back', // recovery detection
     "'/healthz'", // recovery probe endpoint
     "'ox plan review ' + slug", // copyable restart command
     'serviceWorker', // offline shell registration
+    "if (!r) return { state: 'offline' };", // a POST that cannot reach the server…
+  ]);
+  pins('host-controls.ts', [
+    "setOffline(r.state === 'offline');", // …flips the page offline, and any answer back
+    'NOT reaching it', // the banner says it plainly
+    'rev-offline-bar', // sticky banner element
     'unsent mark(s) restored', // restored-marks notice after reconnect
-    "if (offline) { offlineNotice(); if (fail) fail('offline', true); return; }", // sends refused while offline
+    'your feedback is queued in this browser', // an unreachable server leaves it queued, and says so
   ]);
 });
 
@@ -44,8 +47,10 @@ test('review mode announces itself, keeps its exit in view, and survives a reloa
     "on ? 'Exit review' : 'Review'", // the button becomes the exit
     'Esc or Exit review to leave', // the entry toast names both exits
     'if (e.defaultPrevented) return;', // a key the page already handled is left alone
-    'if (pop) { closePop(); e.preventDefault(); }', // Esc: the note first…
-    'else if (on) { setReview(false); e.preventDefault(); }', // …then the mode, marked handled
+    'if (pop) { closePop(); return true; }', // Esc: the note first…
+    'if (on) { setReview(false); return true; }', // …then the mode…
+    "if (e.key === 'Escape') { if (escape()) e.preventDefault(); return; }", // …marked handled
+    "if (m.key === 'Escape') escape();", // a framed document's Esc too
     "if (e.key === 'r' && !typing(e)", // r toggles, not from a text field
     "sessionStorage.setItem(ON_KEY, '1')", // kept per tab, not per browser
     'if (sessionStorage.getItem(ON_KEY)) setReview(true, true);', // restored silently after a reload

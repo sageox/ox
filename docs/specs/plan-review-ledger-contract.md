@@ -4,7 +4,8 @@
 and a consuming host passed the §5 probes on its own storage. The three points
 that host raised are settled in 3.2 (identity on retries), 3.6 (per-host
 bounds) and §5 (what a host proves). The CLI adopted the module in #1289
-(§1.1). Follow-up owners: #1291 (browser outbox), #1294 (certification).
+(§1.1), and the browser's outbox in #1291 (3.9). Follow-up owner: #1294
+(certification).
 
 **Goal:** supported concurrent reviewers never lose feedback and never repair
 Git conflicts by hand. This spec records what the CLI does today, names the
@@ -24,6 +25,7 @@ contract choices the shared module implements.
 | `TestReviewContractFixtures` (`internal/plan/feedback_test.go`) | The CLI's reader, `plan.ReadReview`, against every fixture but `oversized` (which sets limits of its own) |
 | `TestPlanReviewDurability_RetryPublishesOnlyTheOriginalRecord` (`cmd/ox/plan_review_durability_test.go`) | 3.7: a failed commit and a failed push, then dirty authoring files, another operation's success and a restarted retry; each review commit carries one record and each entry clears only on its own record |
 | `TestPlanReviewDurability_RacingClonesAndLostResponses` (same file) | Rounds and resolutions from three clones survive the push rebase; a retried round is one logical submission, on the clone that stored it and on one that never saw it |
+| `packages/plan-review/test/state.test.mjs`; in Chrome (`cmd/ox`, tag `browser`) `TestBrowser_UnstorableReviewIsNeverSent`, `…LostAnswerAndAnEditDuringSendDeliverOnce`, `…TwoTabsKeepEachOthersMarks`, `…HostControlsAroundAFramedPlan` | 3.9: the browser's outbox |
 
 The CLI requires the released module (`pkg/planreview v0.1.0`): `go install
 github.com/sageox/ox/cmd/ox@<version>` refuses a `go.mod` with a `replace`
@@ -100,9 +102,9 @@ The CLI reads and writes review records only through `pkg/planreview`.
 
 | Operation | Record | Operation id |
 |---|---|---|
-| `POST /feedback`, `ox plan feedback apply` | round | the request's `id`; else random (`/feedback`) or `ContentRoundID` (`apply`) |
-| `POST /reopen` | round | minted by the server |
-| `POST /accept`, `ox plan feedback resolve` | resolution | minted by the server or the CLI |
+| `POST /feedback` (a submission or a reopen), `ox plan feedback apply` | round | the request's `id`, minted by the page's outbox (3.9); else random (`/feedback`) or `ContentRoundID` (`apply`) |
+| `POST /accept` | resolution, `verified` only | the request's `id`, minted by the page's outbox |
+| `ox plan feedback resolve` | resolution | minted by the CLI |
 | `Save` with HTML (author only) | one remap record per move, `feedback/remaps/` | derived from the move; none written from an incomplete read |
 
 - **Write** (`publishReviewRecord`, `cmd/ox/plan_commit.go`): under a lock per
@@ -242,10 +244,6 @@ today's bugs):
 - **H7:** a rebase stopped at a `break` between two local commits, the second
   re-raising a resolved item. `AssembleReview` shows the item resolved without
   error.
-
-Browser-side hazards (outbox poisoned by a deterministic 400/413, an outbox
-resent unchanged while newer marks wait, `/accept` and `/reopen` with no
-outbox, no reviewer, and no idempotency) belong to #1291.
 
 Two rounds with the same id and the same payload are *not* a hazard on main:
 they assemble once and an acceptance time alone never reopens an item (fixture
@@ -446,6 +444,34 @@ nothing in the bytes says who wrote a record. A resolution's `at` is its
 writer's clock, so one dated far in the future keeps its item closed until
 then. Closing either needs an authority outside the Ledger (push rules, or
 receipts signed by the host); this contract does not provide one.
+
+### 3.9 Browser outbox (#1291)
+
+`mountHostControls` in `@sageox/plan-review` is the one browser writer, on
+ox's page and in a hosted viewer (`packages/plan-review/src/state.ts`):
+
+- **Keys:** one storage key per draft and per operation, under
+  `ox-review:<account>:<plan>:` (`<plan>` as in 3.1), so tabs never rewrite
+  each other's keys and another account never sees or sends them. ox's local
+  review has no sign-in: its account is `local` and the request names the
+  reviewer. A hosted viewer passes its signed-in account and stamps the
+  caller itself.
+- **Freeze before send:** Submit, Reopen and Accept each mint an id and store
+  the frozen request before anything is sent; what storage refuses is never
+  sent.
+- **Delivery:** oldest first, one at a time, the frozen bytes on every
+  attempt, so a mark edited after Submit is stored after the copy Submit
+  froze. It stops at the first operation that fails or finds the host
+  offline; one refused for good (400, 409, 413) is dropped, its drafts kept.
+- **Receipts:** an operation clears only on a receipt naming its id: from
+  ox's server `saved: true` (record and recovery entry on disk, 3.7), from a
+  hosted one its publication. Its drafts clear only where unedited since.
+- **Reopen** is a one-item `request-change` round carrying the item's
+  section, label and words. **Accept** is a `verified` resolution, the only
+  state `/accept` takes.
+- **Upgrade:** drafts and the outbox that pages before 0.3.0 kept under
+  `ox-plan-fb:<slug>` move to the new keys; a waiting submission keeps its
+  bytes, so its resend is the same operation.
 
 ---
 

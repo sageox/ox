@@ -9,8 +9,9 @@ protocol:
   They read no storage and make no request, so they run in an opaque-origin
   frame.
 - **The host** is trusted. It owns review mode, the composer, drafts,
-  identity and submission. Nothing a document sends can submit, approve,
-  resolve or name a reviewer.
+  identity and submission: `mountHostControls` draws them, with an outbox
+  that delivers what a reviewer submits. Nothing a document sends can
+  submit, approve, resolve or name a reviewer.
 
 The ox CLI does not install this package. It builds the same source into
 `internal/plan/assets/review.js` and `review.css`, committed with
@@ -18,7 +19,8 @@ The ox CLI does not install this package. It builds the same source into
 
 | Export | What it is |
 |---|---|
-| `@sageox/plan-review` | `PROTOCOL`, the message types, `parseDocumentMessage`, `parseHostMessage`, and `connectFrame`, the host's end of a framed plan |
+| `@sageox/plan-review` | `PROTOCOL`, the message types, `parseDocumentMessage`, `parseHostMessage`, `connectFrame` (the host's end of a framed plan), and `mountHostControls` (the review controls and their outbox) |
+| `@sageox/plan-review/host.css` | The review controls' styles |
 | `@sageox/plan-review/document-tools-script` | The document tools for a framed plan, as a string to inline (default export) |
 | `@sageox/plan-review/document-tools.iife.js` | The same script, as a file |
 | `@sageox/plan-review/frame-plan` | `framePlan`: a stored plan, ready to frame, with the document tools and, for a plan with a diagram, ox's vendored Mermaid build inlined |
@@ -44,7 +46,7 @@ settings grant your repository read access.
 Pin the exact version and commit your lockfile:
 
 ```sh
-npm install --save-exact @sageox/plan-review@0.2.0
+npm install --save-exact @sageox/plan-review@0.3.0
 ```
 
 Pinning matters because the host end and the document script must come from
@@ -133,6 +135,46 @@ protocol a build speaks.
    painted; a message carrying any other is dropped whole, so list the rest
    (drawings, say) only in your own UI. See `src/protocol.ts`.
 
+## Mount the review controls
+
+Mount them in your page, never in the plan's frame: they hold notes, identity
+and credentials.
+
+```js
+import { connectFrame, mountHostControls } from '@sageox/plan-review';
+import '@sageox/plan-review/host.css';
+
+const port = connectFrame(iframe, instance);
+const controls = mountHostControls(port, {
+  account: user.id,          // drafts and the outbox are kept per account…
+  plan: plan.id,             // …and per plan: its id, not a slug two plans share
+  slug: plan.slug,           // shown to the reviewer
+  committed: review.items,   // CommittedItem[]: what the Ledger holds
+  problems: review.problems, // records it could not read, and operations stored with differing content
+  reviewer: user.name,       // signed in: shown on the bar; your server stamps identity
+  frame: iframe,             // target rects are in the frame's viewport
+  transport: { send },
+});
+controls.update(items, problems); // after you read the review again
+controls.destroy(); // before another account signs in, or another plan mounts
+```
+
+`send(op)` stores one operation with your server. `op` carries `account`
+(never send it with another account's credentials), `id` (the same on every
+attempt: your idempotency key), `kind` (`round` for a submission or a reopen,
+`resolution` for an accept) and `body`, the frozen request to send unchanged.
+
+| Receipt | When | The outbox |
+|---|---|---|
+| `{state:'owned', id, synced}` | Your server holds the record for `id`; a hosted one, once it is published | clears the operation, and the drafts it carried unless edited since |
+| `{state:'refused', message}` | It refuses these bytes on every attempt: malformed, too large, the id stored with other content | drops the operation; its drafts stay |
+| `{state:'failed', message}` | Not stored this time | keeps it and offers Retry |
+| `{state:'offline'}` | Unreachable | keeps it, and resends it on the next Submit, `setOffline(false)`, the browser coming back online, or the next mount |
+
+Each draft and operation is one `localStorage` key under
+`ox-review:<account>:<plan>:`, stored before anything is sent; what storage
+refuses is never sent. Operations go out oldest first, one at a time.
+
 ## A plan in your own window
 
 This is how the CLI's review page runs:
@@ -145,6 +187,10 @@ const { host, document: tools } = localPorts();
 host.listen(onDocumentMessage); // before starting: the tools say ready once
 startDocumentTools(tools);
 ```
+
+ox's page passes `host` to `mountHostControls` instead of listening itself,
+with no `frame` and no `reviewer`: it asks for a name and sends it with each
+request.
 
 Messages between local ports are plain function calls, so a click has opened
 your composer by the time its handler returns.

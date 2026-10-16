@@ -56,6 +56,9 @@
     return labelOf(anchorText(el));
   }
 
+  // src/protocol.ts
+  var STATUSES = ["approve", "request-change", "flag", "comment"];
+
   // src/ports.ts
   function localPorts() {
     let toHost = null;
@@ -383,65 +386,202 @@
   }
 
   // src/state.ts
-  function stampOf(m) {
-    return m && +(m.updated_at || 0) || 0;
+  var ACTS = ["submit", "reopen", "accept"];
+  var DRAFT = "draft:";
+  var OP = "op:";
+  var EXPORT = "export";
+  var enc = encodeURIComponent;
+  var has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+  function obj(v) {
+    return typeof v === "object" && v !== null && !Array.isArray(v);
   }
-  function mergeState(x, y) {
-    const out = { marks: {}, tombs: {} };
-    const keys = {};
-    [x, y].forEach((s) => {
-      Object.keys(s.marks || {}).forEach((k) => {
-        keys[k] = 1;
-      });
-      Object.keys(s.tombs || {}).forEach((k) => {
-        keys[k] = 1;
-      });
-    });
-    Object.keys(keys).forEach((k) => {
-      let best = null;
-      [x, y].forEach((s) => {
-        const m = (s.marks || {})[k];
-        if (m && (!best || stampOf(m) > stampOf(best))) best = m;
-      });
-      const tomb = Math.max(+(x.tombs || {})[k] || 0, +(y.tombs || {})[k] || 0);
-      if (best && (!tomb || stampOf(best) > tomb)) out.marks[k] = best;
-      else if (tomb) out.tombs[k] = tomb;
-    });
+  function read(storage, key) {
+    try {
+      const s = storage.getItem(key);
+      return s === null ? null : JSON.parse(s);
+    } catch (e) {
+      return null;
+    }
+  }
+  function write(storage, key, v) {
+    const s = JSON.stringify(v);
+    try {
+      storage.setItem(key, s);
+      return storage.getItem(key) === s;
+    } catch (e) {
+      return false;
+    }
+  }
+  function unset(storage, key) {
+    try {
+      storage.removeItem(key);
+    } catch (e) {
+    }
+  }
+  function keysUnder(storage, prefix) {
+    const out = [];
+    try {
+      for (let i = 0; i < storage.length; i++) {
+        const k = storage.key(i);
+        if (k !== null && k.indexOf(prefix) === 0) out.push(k);
+      }
+    } catch (e) {
+    }
     return out;
   }
-  function pruneTombs(t, now, ttl) {
-    const out = {};
-    Object.keys(t).forEach((k) => {
-      if (now - t[k] < ttl) out[k] = t[k];
+  function asMark(v) {
+    if (!obj(v) || typeof v.anchor !== "string" || STATUSES.indexOf(v.status) < 0 || typeof v.at !== "number") return null;
+    const m = { anchor: v.anchor, status: v.status, at: v.at };
+    ["section", "label", "note", "quote"].forEach((k) => {
+      if (typeof v[k] === "string") m[k] = v[k];
     });
-    return out;
-  }
-  function ackState(s, box) {
-    const out = { marks: { ...s.marks }, tombs: { ...s.tombs } };
-    (box.items || []).forEach((it) => {
-      const at = Math.max(+(box.stamps || {})[it.anchor] || 0, 1);
-      if (out.marks[it.anchor] && stampOf(out.marks[it.anchor]) <= at) delete out.marks[it.anchor];
-      if (!out.marks[it.anchor]) out.tombs[it.anchor] = Math.max(out.tombs[it.anchor] || 0, at);
-    });
-    return out;
-  }
-  function roundAcked(box, data) {
-    return !data || data.round_id === void 0 || data.round_id === box.id;
-  }
-  function syncMessage(verb, data) {
-    data = data || {};
-    let m;
-    if (data.saved === void 0) m = { kind: "ok", text: verb + " · received by the author’s machine" };
-    else if (data.saved === false) m = { kind: "err", text: "Not saved — the author’s machine could not store it" };
-    else if (data.pushed) m = { kind: "ok", text: verb + " · synced to your team" };
-    else m = { kind: "warn", text: "Saved on the author’s machine · not yet synced (will retry)" };
-    if (data.notified === false && !data.duplicate) m.text += " · the plan’s authoring coworker was not notified automatically — tell them directly";
     return m;
   }
-  function sameItems(a, b) {
-    return JSON.stringify(a) === JSON.stringify(b);
+  function asEntry(v) {
+    if (!obj(v) || typeof v.id !== "string" || ACTS.indexOf(v.act) < 0 || typeof v.body !== "string" || typeof v.at !== "number" || !obj(v.stamps)) return null;
+    const stamps = /* @__PURE__ */ Object.create(null);
+    Object.keys(v.stamps).forEach((a) => {
+      const s = v.stamps[a];
+      if (typeof s === "number") stamps[a] = s;
+    });
+    return { id: v.id, act: v.act, body: v.body, at: v.at, stamps };
   }
-  function newRoundId() {
+  function openStore(storage, account, plan) {
+    const prefix = "ox-review:" + enc(account) + ":" + enc(plan) + ":";
+    const memory = /* @__PURE__ */ Object.create(null);
+    let last = 0;
+    function stored(anchor) {
+      const m = asMark(read(storage, prefix + DRAFT + enc(anchor)));
+      return m && m.anchor === anchor ? m : null;
+    }
+    function entries() {
+      const out = [];
+      keysUnder(storage, prefix + OP).forEach((k) => {
+        const e = asEntry(read(storage, k));
+        if (e && prefix + OP + enc(e.id) === k) out.push(e);
+      });
+      return out.sort((x, y) => x.at - y.at || (x.id < y.id ? -1 : x.id > y.id ? 1 : 0));
+    }
+    function now() {
+      last = Math.max(Date.now(), last + 1);
+      return last;
+    }
+    return {
+      account,
+      prefix,
+      drafts() {
+        const out = /* @__PURE__ */ Object.create(null);
+        keysUnder(storage, prefix + DRAFT).forEach((k) => {
+          const m = asMark(read(storage, k));
+          if (m && prefix + DRAFT + enc(m.anchor) === k) out[m.anchor] = m;
+        });
+        Object.keys(memory).forEach((a) => {
+          if (!out[a] || memory[a].at > out[a].at) out[a] = memory[a];
+        });
+        return Object.keys(out).map((a) => out[a]).sort((x, y) => x.at - y.at);
+      },
+      save(m) {
+        let at = now();
+        const prev = stored(m.anchor);
+        if (prev) at = Math.max(at, prev.at + 1);
+        if (memory[m.anchor]) at = Math.max(at, memory[m.anchor].at + 1);
+        entries().forEach((e) => {
+          if (has(e.stamps, m.anchor)) at = Math.max(at, e.stamps[m.anchor] + 1);
+        });
+        last = at;
+        const mark = { anchor: m.anchor, status: m.status, at };
+        ["section", "label", "note", "quote"].forEach((k) => {
+          if (m[k] !== void 0) mark[k] = m[k];
+        });
+        if (write(storage, prefix + DRAFT + enc(m.anchor), mark)) {
+          delete memory[m.anchor];
+          return true;
+        }
+        memory[m.anchor] = mark;
+        return false;
+      },
+      remove(anchor) {
+        unset(storage, prefix + DRAFT + enc(anchor));
+        delete memory[anchor];
+      },
+      unsaved(anchor) {
+        if (!memory[anchor]) return false;
+        const s = stored(anchor);
+        return !s || memory[anchor].at > s.at;
+      },
+      entries,
+      freeze(act, id, body, stamps) {
+        const e = { id, act, body, at: now(), stamps };
+        return write(storage, prefix + OP + enc(id), e) ? e : null;
+      },
+      owned(e) {
+        Object.keys(e.stamps).forEach((a) => {
+          const s = stored(a);
+          if (s && s.at <= e.stamps[a]) unset(storage, prefix + DRAFT + enc(a));
+          if (memory[a] && memory[a].at <= e.stamps[a]) delete memory[a];
+        });
+        unset(storage, prefix + OP + enc(e.id));
+      },
+      drop(e) {
+        unset(storage, prefix + OP + enc(e.id));
+      },
+      exportId(items) {
+        const prev = read(storage, prefix + EXPORT);
+        const id = obj(prev) && typeof prev.id === "string" && JSON.stringify(prev.items) === JSON.stringify(items) ? prev.id : newId();
+        write(storage, prefix + EXPORT, { id, items });
+        return id;
+      }
+    };
+  }
+  function queued(entries, m) {
+    return entries.some((e) => has(e.stamps, m.anchor) && e.stamps[m.anchor] === m.at);
+  }
+  function wireItem(m) {
+    const o = { anchor: m.anchor, section: m.section || "", label: m.label || "" };
+    if (m.quote) o.quote = m.quote;
+    o.status = m.status;
+    o.note = m.note || "";
+    return o;
+  }
+  function request(id, reviewer, rest) {
+    const o = { id };
+    if (reviewer) o.reviewer = reviewer;
+    return JSON.stringify(Object.assign(o, rest));
+  }
+  function submitBody(id, reviewer, marks) {
+    return request(id, reviewer, { items: marks.map(wireItem) });
+  }
+  function reopenBody(id, reviewer, item, note) {
+    return request(id, reviewer, { items: [wireItem({ ...item, status: "request-change", note: note || "reopened by reviewer" })] });
+  }
+  function acceptBody(id, reviewer, anchor) {
+    return request(id, reviewer, { anchor, state: "verified", note: "accepted by reviewer" });
+  }
+  async function deliver(store, transport, report, stopped) {
+    const tried = /* @__PURE__ */ Object.create(null);
+    for (; ; ) {
+      const e = store.entries().filter((x) => !tried[x.id])[0];
+      if (!e || stopped()) return;
+      tried[e.id] = true;
+      let r;
+      try {
+        r = await transport.send({ account: store.account, id: e.id, kind: e.act === "accept" ? "resolution" : "round", body: e.body });
+      } catch (err) {
+        r = { state: "failed", message: err instanceof Error ? err.message : String(err) };
+      }
+      if (r.state === "owned" && r.id !== e.id) r = { state: "failed", message: "the server acknowledged a different operation" };
+      if (r.state === "owned") store.owned(e);
+      else if (r.state === "refused") store.drop(e);
+      report(e, r);
+      if (r.state === "failed" || r.state === "offline") return;
+    }
+  }
+  function syncMessage(verb, r) {
+    const m = r.synced ? { kind: "ok", text: verb + " · synced to your team" } : { kind: "warn", text: "Saved on the author’s machine · not yet synced (will retry)" };
+    if (r.warning) m.text += " · " + r.warning;
+    return m;
+  }
+  function newId() {
     const c = typeof crypto !== "undefined" ? crypto : null;
     if (c && c.randomUUID) return c.randomUUID();
     const b = new Uint8Array(16);
@@ -450,6 +590,33 @@
     else for (let i = 0; i < 16; i++) b[i] = Math.floor(Math.random() * 256);
     for (let j = 0; j < 16; j++) s += ("0" + b[j].toString(16)).slice(-2);
     return s;
+  }
+  function migrateLegacy(storage, slug, store) {
+    const KEY = "ox-plan-fb:" + slug;
+    const marks = read(storage, KEY), box = read(storage, KEY + ":outbox"), exp = read(storage, KEY + ":export");
+    if (marks === null && box === null && exp === null) return;
+    let ok = true;
+    const current = store.drafts();
+    if (obj(marks)) {
+      Object.keys(marks).forEach((a) => {
+        const v = marks[a];
+        const m = asMark(obj(v) ? { ...v, anchor: a, at: Math.max(+v.updated_at || 0, 1) } : null);
+        if (!m || current.some((d) => d.anchor === a && d.at >= m.at)) return;
+        ok = write(storage, store.prefix + DRAFT + enc(a), m) && ok;
+      });
+    }
+    if (obj(box) && typeof box.id === "string" && Array.isArray(box.items)) {
+      const stamps = /* @__PURE__ */ Object.create(null);
+      const s = obj(box.stamps) ? box.stamps : {};
+      box.items.forEach((it) => {
+        if (obj(it) && typeof it.anchor === "string") stamps[it.anchor] = Math.max(+s[it.anchor] || 0, 1);
+      });
+      const body = JSON.stringify({ id: box.id, slug, reviewer: box.reviewer, items: box.items });
+      const e = { id: box.id, act: "submit", body, at: Date.parse(box.created_at) || Date.now(), stamps };
+      ok = write(storage, store.prefix + OP + enc(e.id), e) && ok;
+    }
+    if (obj(exp)) ok = write(storage, store.prefix + EXPORT, exp) && ok;
+    if (ok) ["", ":tombs", ":outbox", ":export"].forEach((k) => unset(storage, KEY + k));
   }
 
   // src/host-controls.ts
@@ -460,7 +627,6 @@
     { id: "comment", glyph: "◌" }
   ];
   var HL_TINT = { "approve": "sage", "request-change": "amber", "flag": "red", "comment": "gold" };
-  var TOMB_TTL = 7 * 24 * 3600 * 1e3;
   var BUBBLE = '<svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 2.5h10A1.5 1.5 0 0 1 14.5 4v6a1.5 1.5 0 0 1-1.5 1.5H7.5L4 14.5v-3H3A1.5 1.5 0 0 1 1.5 10V4A1.5 1.5 0 0 1 3 2.5z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>';
   function esc(s) {
     return (s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
@@ -484,123 +650,51 @@
   function mountHostControls(port, opts) {
     const body = document.body;
     const slug = opts.slug;
-    const base = opts.endpoint;
-    const token = opts.token;
-    const problems = opts.problems || 0;
-    const live = base !== "";
-    const KEY = "ox-plan-fb:" + slug;
-    const ON_KEY = "ox-plan-rev-on:" + slug;
-    const MIN_KEY = "ox-plan-rail-min:" + slug;
-    const TOMB_KEY = KEY + ":tombs";
-    const OUTBOX_KEY = KEY + ":outbox";
-    const EXPORT_KEY = KEY + ":export";
-    const SYNC_KEY = "ox-plan-fb-sync:" + slug;
-    const stored = readStored();
-    let marks = stored.marks;
-    let tombs = stored.tombs;
-    const committed = /* @__PURE__ */ Object.create(null);
-    opts.committed.forEach((x) => {
-      (committed[x.anchor] = committed[x.anchor] || []).push(x);
-    });
-    let reviewer = (localStorage.getItem("ox-plan-reviewer") || "").trim();
-    let on = false;
-    let pendingReload = false;
-    let offline = false;
-    let probeTimer = null;
-    let posting = 0;
-    let reloadAfterPost = false;
-    let sending = false;
-    let placed = [];
-    let unplaced = [];
-    let lastStamp = 0;
-    function nextStamp() {
-      const n = Date.now();
-      lastStamp = n > lastStamp ? n : lastStamp + 1;
-      return lastStamp;
-    }
-    function readJSON(k) {
-      try {
-        return JSON.parse(localStorage.getItem(k)) || null;
-      } catch (e) {
-        return null;
-      }
-    }
-    function readStored() {
-      return { marks: readJSON(KEY) || {}, tombs: readJSON(TOMB_KEY) || {} };
-    }
-    function save() {
-      const m = mergeState({ marks, tombs }, readStored());
-      marks = m.marks;
-      tombs = pruneTombs(m.tombs, Date.now(), TOMB_TTL);
-      try {
-        localStorage.setItem(KEY, JSON.stringify(marks));
-        localStorage.setItem(TOMB_KEY, JSON.stringify(tombs));
-      } catch (e) {
-      }
-    }
-    function removeMark(a) {
-      delete marks[a];
-      tombs[a] = nextStamp();
-    }
-    function draft(a) {
-      return Object.prototype.hasOwnProperty.call(marks, a) ? marks[a] : void 0;
-    }
-    function readOutbox() {
-      const o = readJSON(OUTBOX_KEY);
-      return o && o.id && o.items ? o : null;
-    }
-    function writeOutbox(o) {
-      try {
-        if (o) localStorage.setItem(OUTBOX_KEY, JSON.stringify(o));
-        else localStorage.removeItem(OUTBOX_KEY);
-        return true;
-      } catch (e) {
-        return false;
-      }
-    }
-    function post(path, payload, ok, fail) {
-      if (offline) {
-        offlineNotice();
-        if (fail) fail("offline", true);
-        return;
-      }
-      posting++;
-      fetch(base + path, { method: "POST", headers: { "Content-Type": "application/json", "X-Review-Token": token }, body: JSON.stringify(payload) }).then((r) => {
-        if (!r.ok) {
-          return r.text().catch(() => "").then((t) => {
-            throw new Error("HTTP " + r.status + (t.trim() ? " — " + clip(t.trim(), 120) : ""));
-          });
-        }
-        return r.json().catch(() => ({}));
-      }).then((data) => {
-        if (ok) ok(data || {});
-      }).catch((e) => {
-        if (e instanceof TypeError) {
-          setOffline(true);
-          offlineNotice();
-          if (fail) fail("offline", true);
-          return;
-        }
-        if (fail) fail(e.message, false);
-        else showSync("err", "Request failed: " + e.message);
-      }).then(() => {
-        posting--;
-        if (!posting && reloadAfterPost) {
-          reloadAfterPost = false;
-          reloadWhenIdle();
-        }
+    const transport = opts.transport;
+    const live = !!transport;
+    const store = openStore(window.localStorage, opts.account, opts.plan);
+    const tab = encodeURIComponent(opts.plan);
+    const ON_KEY = "ox-plan-rev-on:" + tab;
+    const MIN_KEY = "ox-plan-rail-min:" + tab;
+    const SYNC_KEY = "ox-plan-fb-sync:" + tab;
+    const off = new AbortController();
+    const signal = off.signal;
+    let problems = opts.problems || 0;
+    let committed = /* @__PURE__ */ Object.create(null);
+    function setCommitted(items) {
+      committed = /* @__PURE__ */ Object.create(null);
+      items.forEach((x) => {
+        (committed[x.anchor] = committed[x.anchor] || []).push(x);
       });
     }
+    setCommitted(opts.committed);
+    let named = "";
+    if (!opts.reviewer) try {
+      named = (localStorage.getItem("ox-plan-reviewer") || "").trim();
+    } catch (e) {
+    }
+    function who() {
+      return opts.reviewer || named;
+    }
+    let on = false;
+    let offline = false;
+    let destroyed = false;
+    let inflight = 0;
+    let flushing = false, again = false;
+    let waiter = null;
+    let ds = /* @__PURE__ */ Object.create(null);
+    let placed = [];
+    let unplaced = [];
     function committedState(a) {
       const arr = committed[a] || [];
       return arr.length ? repOf(arr).state : "";
     }
     function paintItems() {
       const out = [];
-      Object.keys(committed).concat(Object.keys(marks)).forEach((a, i, all) => {
+      Object.keys(committed).concat(Object.keys(ds)).forEach((a, i, all) => {
         if (all.indexOf(a) !== i || !/^[hq][0-9a-f]{8}$/.test(a)) return;
         const carr = committed[a] || [];
-        const c = carr.length ? repOf(carr) : null, m = draft(a);
+        const c = carr.length ? repOf(carr) : null, m = ds[a];
         let it;
         if (m) {
           it = { anchor: a, kind: "unsent", status: m.status, glyph: glyphFor(m.status), tint: HL_TINT[m.status] || "gold" };
@@ -625,7 +719,12 @@
       return out;
     }
     function paint() {
-      const n = Object.keys(marks).length;
+      if (destroyed) return;
+      ds = /* @__PURE__ */ Object.create(null);
+      store.drafts().forEach((m) => {
+        ds[m.anchor] = m;
+      });
+      const n = Object.keys(ds).length;
       countEl.textContent = n ? n + " unsent" : "";
       port.send({ type: "paint", items: paintItems() });
     }
@@ -635,7 +734,7 @@
       placed.forEach((p) => {
         seen[p.anchor] = true;
       });
-      unplaced = Object.keys(committed).concat(Object.keys(marks)).filter((a, i, all) => !seen[a] && all.indexOf(a) === i);
+      unplaced = Object.keys(committed).concat(Object.keys(ds)).filter((a, i, all) => !seen[a] && all.indexOf(a) === i);
       const orphans = [];
       Object.keys(committed).forEach((a) => {
         if (!seen[a]) committed[a].forEach((x) => orphans.push(x));
@@ -653,13 +752,13 @@
       if (!open.length && !problems) return;
       const bar2 = orphanBar = document.createElement("div");
       bar2.className = "rev-orphans";
-      let html = problems ? '<div class="rev-orphans-h">⚠ This review could not be fully read or holds conflicting copies (' + problems + " problem(s)): notes may be missing or shown resolved. <code>ox plan feedback show " + esc(slug) + "</code> lists them.</div>" : "";
+      let html = problems ? '<div class="rev-orphans-h">⚠ This review could not be fully read or holds conflicting copies (' + problems + " problem(s)): notes may be missing or shown resolved.</div>" : "";
       if (open.length) {
         const items = open.map((o) => "<li><strong>" + esc(o.status) + "</strong> " + esc(o.label || o.anchor) + (o.note ? " — " + esc(o.note) : "") + "</li>").join("");
         html += '<div class="rev-orphans-h">⚠ ' + open.length + " review note(s) no longer anchored (the text changed) — still open:</div><ul>" + items + "</ul>";
       }
       bar2.innerHTML = html + '<button class="rev-orphans-x">dismiss</button>';
-      document.body.appendChild(bar2);
+      body.appendChild(bar2);
       bar2.querySelector(".rev-orphans-x").onclick = () => {
         bar2.remove();
         if (orphanBar === bar2) orphanBar = null;
@@ -682,6 +781,7 @@
       rail.querySelector(".rev-rail-show, .rev-rail-hide").focus();
     }
     function railRows() {
+      const waiting = store.entries();
       const rows = [];
       function add(at, a, section, label, quote) {
         (committed[a] || []).forEach((c) => {
@@ -695,10 +795,10 @@
             label: c.label || label,
             state: c.state,
             reviewer: c.reviewer || "",
-            unsent: false
+            tag: ""
           });
         });
-        const m = draft(a);
+        const m = ds[a];
         if (m) {
           rows.push({
             at,
@@ -709,8 +809,8 @@
             section: m.section || section,
             label: m.label || label,
             state: "",
-            reviewer: reviewer || "(you)",
-            unsent: true
+            reviewer: who() || "(you)",
+            tag: store.unsaved(a) ? "unsaved" : queued(waiting, m) ? "queued" : "unsent"
           });
         }
       }
@@ -720,7 +820,7 @@
         add({ anchor: p.anchor, nth: k }, p.anchor, p.section, p.label, p.quote || "");
       });
       unplaced.forEach((a) => {
-        const m = draft(a);
+        const m = ds[a];
         const its = (committed[a] || []).concat(m ? [m] : []);
         const q = its.filter((x) => x.quote)[0];
         const any = q || its.filter((x) => x.label)[0] || its[0];
@@ -732,7 +832,7 @@
       if (!rail) {
         rail = document.createElement("aside");
         rail.className = "rev-rail";
-        document.body.appendChild(rail);
+        body.appendChild(rail);
         rail.addEventListener("click", (ev) => {
           if (ev.target.closest(".rev-rail-show, .rev-rail-hide")) toggleRail();
         });
@@ -758,7 +858,7 @@
       let html = '<div class="rev-rail-h">Comments <span class="rev-rail-n">' + rows.length + "</span>" + hide + '</div><ul class="rev-rail-list">';
       rows.forEach((row, i) => {
         let tag = "";
-        if (row.unsent) tag = '<span class="rev-rail-tag unsent">unsent</span>';
+        if (row.tag) tag = '<span class="rev-rail-tag ' + row.tag + '">' + row.tag + "</span>";
         else if (row.state && row.state !== "open") tag = '<span class="rev-rail-tag ' + esc(row.state) + '">' + esc(row.state) + "</span>";
         if (!row.at) tag += '<span class="rev-rail-tag">text changed</span>';
         const content = (row.quote ? '<div class="rev-rail-quote">' + esc(row.label) + "</div>" : "") + (row.note ? '<div class="rev-rail-note">' + esc(row.note) + "</div>" : row.quote ? "" : '<div class="rev-rail-note muted">' + esc(row.label) + "</div>");
@@ -791,10 +891,7 @@
         sendMode();
       }
       port.send({ type: "focus", anchor: null });
-      if (pendingReload) {
-        pendingReload = false;
-        location.reload();
-      }
+      idle();
     }
     function openPop(t, rect) {
       closePop();
@@ -808,20 +905,14 @@
         p.innerHTML = quote + '<div class="rev-cap">Agent marked this ' + cstate + '.</div><textarea class="rev-note" placeholder="reopen note (optional)"></textarea><div class="rev-row"><button class="rev-accept">Accept</button><button class="rev-reopen">Reopen</button></div>';
         placePop(rect);
         p.querySelector(".rev-accept").onclick = () => {
-          post("/accept", { anchor: a }, (data) => {
-            closePop();
-            reportSync(syncMessage("Accepted", data));
-          });
+          accept(a);
         };
         p.querySelector(".rev-reopen").onclick = () => {
-          post("/reopen", { anchor: a, note: p.querySelector(".rev-note").value.trim() }, (data) => {
-            closePop();
-            reportSync(syncMessage("Reopened", data));
-          });
+          reopen(a, p.querySelector(".rev-note").value.trim());
         };
         return;
       }
-      const existing = draft(a) || { status: "request-change", note: "" };
+      const existing = ds[a] || { status: "request-change", note: "" };
       const btns = STATUS.map((s) => '<button data-s="' + s.id + '" class="rev-s' + (existing.status === s.id ? " on" : "") + '">' + s.glyph + " " + s.id + "</button>").join("");
       p.innerHTML = quote + '<div class="rev-row">' + btns + '</div><textarea class="rev-note" placeholder="note (optional)">' + esc(existing.note || "") + '</textarea><div class="rev-row"><button class="rev-save">Save</button><button class="rev-del">Delete</button></div>';
       placePop(rect);
@@ -834,23 +925,22 @@
         };
       });
       p.querySelector(".rev-save").onclick = () => {
-        const m = { anchor: a, section: t.section, label: t.label, status, note: p.querySelector(".rev-note").value.trim(), updated_at: nextStamp() };
+        const m = { anchor: a, section: t.section, label: t.label, status, note: p.querySelector(".rev-note").value.trim() };
         if (t.quote) m.quote = t.quote;
-        marks[a] = m;
-        save();
+        const kept = store.save(m);
         paint();
         closePop();
+        if (!kept) showSync("err", "This browser could not save your note: it lives in this tab only and is lost when the tab closes. Free up browser storage, then save it again.");
       };
       p.querySelector(".rev-del").onclick = () => {
-        removeMark(a);
-        save();
+        store.remove(a);
         paint();
         closePop();
       };
     }
     function placePop(rect) {
       const p = pop;
-      document.body.appendChild(p);
+      body.appendChild(p);
       p.style.top = window.scrollY + rect.bottom + 8 + "px";
       p.style.left = window.scrollX + Math.min(rect.left, window.innerWidth - 300) + "px";
       sendMode();
@@ -859,92 +949,112 @@
       const t = ev.target;
       if (pop && pop.contains(t)) return;
       if (t.closest && t.closest(CHROME) && (on || pop)) closePop();
-    }, true);
-    function submit() {
-      if (sending) return;
-      let box = live ? readOutbox() : null;
-      if (!box) {
-        const items = Object.keys(marks).map((k) => wireItem(marks[k]));
-        if (!items.length) {
-          showSync("info", "No marks yet. Toggle Review, click a section, leave a note.");
-          return;
-        }
-        if (!reviewer) {
-          askName("Your name, so teammates know whose feedback this is:", submit);
-          return;
-        }
-        const stamps = {};
-        Object.keys(marks).forEach((k) => {
-          stamps[k] = stampOf(marks[k]);
-        });
-        box = { id: newRoundId(), items, reviewer, created_at: (/* @__PURE__ */ new Date()).toISOString(), stamps };
-        if (!live) {
-          exportJSON(box);
-          return;
-        }
-        writeOutbox(box);
-      }
-      send(box);
-    }
-    function wireItem(m) {
-      const o = {};
-      Object.keys(m).forEach((k) => {
-        if (k !== "updated_at") o[k] = m[k];
-      });
-      return o;
-    }
-    function send(box) {
-      sending = true;
-      paintSubmit();
-      showSync("pending", "Sending…");
-      post("/feedback", { id: box.id, slug, reviewer: box.reviewer, items: box.items }, (data) => {
-        sending = false;
-        if (!roundAcked(box, data)) {
-          paintSubmit();
-          showSync("err", "Not confirmed — the server acknowledged a different round. Your marks are kept.", [{ label: "Retry", fn: submit }]);
-          return;
-        }
-        const acked = ackState(mergeState({ marks, tombs }, readStored()), box);
-        marks = acked.marks;
-        tombs = acked.tombs;
-        save();
-        const cur = readOutbox();
-        if (cur && cur.id === box.id) writeOutbox(null);
-        paint();
-        paintSubmit();
-        reportSync(syncMessage("Sent", data));
-      }, (msg, isOffline) => {
-        sending = false;
-        paintSubmit();
-        if (isOffline) showSync("warn", "Review server offline — your feedback is queued in this browser and sends when the server is back.");
-        else showSync("err", "Not sent (" + msg + "). Your marks are kept.", [{ label: "Retry", fn: submit }]);
-      });
-    }
-    function approve() {
-      if (!live) {
-        showSync("info", "Approve is available in the live `ox plan review` loop.");
+    }, { capture: true, signal });
+    function queue(act, build, stamps, retry) {
+      if (!who()) {
+        askName("Your name, so teammates know whose feedback this is:", retry);
         return;
       }
+      const id = newId();
+      if (!store.freeze(act, id, build(id, named), stamps)) {
+        showSync("err", "Not sent — this browser could not store it, so nothing was sent. Free up browser storage, then try again.");
+        return;
+      }
+      closePop();
+      flush();
+    }
+    function submit() {
+      if (!live) {
+        exportJSON();
+        return;
+      }
+      const waiting = store.entries();
+      const fresh = store.drafts().filter((m) => !queued(waiting, m));
+      if (!fresh.length) {
+        if (waiting.length) flush();
+        else showSync("info", "No marks yet. Toggle Review, click a section, leave a note.");
+        return;
+      }
+      const stamps = /* @__PURE__ */ Object.create(null);
+      fresh.forEach((m) => {
+        stamps[m.anchor] = m.at;
+      });
+      queue("submit", (id, r) => submitBody(id, r, fresh), stamps, submit);
+    }
+    function accept(a) {
+      queue("accept", (id, r) => acceptBody(id, r, a), {}, () => accept(a));
+    }
+    function reopen(a, note) {
+      const c = (committed[a] || []).filter((x) => x.label || x.quote)[0];
+      const item = c ? { anchor: a, section: c.section, label: c.label, quote: c.quote } : { anchor: a };
+      queue("reopen", (id, r) => reopenBody(id, r, item, note), {}, () => reopen(a, note));
+    }
+    function flush() {
+      if (!transport || destroyed) return;
+      if (flushing) {
+        again = true;
+        return;
+      }
+      if (!store.entries().length) return;
+      flushing = true;
+      inflight++;
+      paintSubmit();
+      showSync("pending", "Sending…");
+      deliver(store, transport, report, () => destroyed).finally(() => {
+        flushing = false;
+        inflight--;
+        paintSubmit();
+        if (again && !destroyed) {
+          again = false;
+          flush();
+        }
+        idle();
+      });
+    }
+    function report(e, r) {
+      if (destroyed) return;
+      paint();
+      setOffline(r.state === "offline");
+      const verb = e.act === "accept" ? "Accepted" : e.act === "reopen" ? "Reopened" : "Sent";
+      if (r.state === "owned") reportSync(syncMessage(verb, r));
+      else if (r.state === "refused") showSync("err", "Not saved — the server refused it (" + r.message + ")." + (e.act === "submit" ? " Your marks are kept: Submit sends them as a new review." : ""));
+      else if (r.state === "failed") showSync("err", "Not sent (" + r.message + "). " + (e.act === "submit" ? "Your marks are kept." : "It stays queued in this browser."), [{ label: "Retry", fn: flush }]);
+      else showSync("warn", "Review server offline — your feedback is queued in this browser and sends when the server is back.");
+    }
+    function approve() {
+      const send = opts.approve;
       showSync("ask", "Approve this plan? This stamps it approved and closes the review loop.", [
         { label: "Approve", fn: () => {
           showSync("pending", "Approving…");
-          post("/approve", {}, (data) => {
-            const m = syncMessage("Approved", data);
-            if (m.kind !== "err") m.text += " — you can close this tab.";
-            reportSync(m);
+          inflight++;
+          Promise.resolve().then(send).catch((err) => ({ state: "failed", message: err instanceof Error ? err.message : String(err) })).then((r) => {
+            inflight--;
+            if (!destroyed) {
+              setOffline(r.state === "offline");
+              if (r.state === "owned") {
+                const m = syncMessage("Approved", r);
+                m.text += " — you can close this tab.";
+                reportSync(m);
+              } else if (r.state === "offline") showSync("err", "The review server is offline — Approve can’t be sent right now.");
+              else showSync("err", "Not approved (" + r.message + ").", [{ label: "Retry", fn: approve }]);
+            }
+            idle();
           });
         } },
         { label: "Cancel", fn: hideSync }
       ]);
     }
-    function exportJSON(box) {
-      const prev = readJSON(EXPORT_KEY);
-      const id = prev && prev.id && sameItems(prev.items, box.items) ? prev.id : box.id;
-      try {
-        localStorage.setItem(EXPORT_KEY, JSON.stringify({ id, items: box.items }));
-      } catch (e) {
+    function exportJSON() {
+      const items = store.drafts().map(wireItem);
+      if (!items.length) {
+        showSync("info", "No marks yet. Toggle Review, click a section, leave a note.");
+        return;
       }
-      const json = JSON.stringify({ id, slug, reviewer: box.reviewer, items: box.items }, null, 2);
+      if (!who()) {
+        askName("Your name, so teammates know whose feedback this is:", exportJSON);
+        return;
+      }
+      const json = JSON.stringify({ id: store.exportId(items), slug, reviewer: who(), items }, null, 2);
       const blob = new Blob([json], { type: "application/json" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -1000,7 +1110,7 @@
         x.onclick = hideSync;
         el.appendChild(x);
       }
-      document.body.appendChild(el);
+      body.appendChild(el);
       if (field) {
         const f = field;
         f.focus();
@@ -1035,9 +1145,9 @@
       showSync("ask", q, [
         { label: "Save", fn: (n) => {
           if (!n) return;
-          reviewer = n;
+          named = n;
           try {
-            localStorage.setItem("ox-plan-reviewer", reviewer);
+            localStorage.setItem("ox-plan-reviewer", named);
           } catch (e) {
           }
           hideSync();
@@ -1046,99 +1156,70 @@
           if (then) then();
         } },
         { label: "Cancel", fn: hideSync }
-      ], reviewer);
+      ], named);
     }
     let connEl = null, offlineBar = null, toastEl = null;
-    function restartCmd() {
-      return "ox plan review " + slug;
-    }
     function paintConn() {
       if (!connEl) return;
       connEl.textContent = offline ? "● offline" : "● live";
       connEl.className = "rev-conn " + (offline ? "off" : "ok");
-      connEl.title = offline ? "Review server unreachable — feedback is NOT being saved" : "Connected to the review server";
+      connEl.title = offline ? "Review server unreachable — feedback is NOT reaching it" : "Connected to the review server";
     }
     function setOffline(down) {
-      if (offline === down) return;
+      if (offline === down || destroyed) return;
       offline = down;
       body.classList.toggle("rev-offline", down);
       paintConn();
-      if (down) {
-        showOfflineBar();
-        startProbe();
-      } else {
-        hideOfflineBar();
-        stopProbe();
-      }
-    }
-    function showOfflineBar() {
-      hideOfflineBar();
-      const n = Object.keys(marks).length;
-      const bar2 = offlineBar = document.createElement("div");
-      bar2.className = "rev-offline-bar";
-      bar2.innerHTML = "<strong>⚠ Review server offline</strong> — new feedback is NOT being saved. " + (n ? n + " unsent mark(s) are" : "Your marks are") + " kept in this browser and restored on reconnect. Restart: <code>" + esc(restartCmd()) + '</code> <button class="rev-offline-copy">copy</button>';
-      document.body.appendChild(bar2);
-      const copy = bar2.querySelector(".rev-offline-copy");
-      copy.onclick = () => {
-        if (navigator.clipboard) navigator.clipboard.writeText(restartCmd()).then(() => {
-          copy.textContent = "copied ✓";
-        }).catch(() => {
-        });
-      };
-    }
-    function hideOfflineBar() {
       if (offlineBar) {
         offlineBar.remove();
         offlineBar = null;
       }
-    }
-    function offlineNotice() {
-      const n = Object.keys(marks).length;
-      showSync("err", "The review server is offline — feedback can NOT be saved right now. " + (n ? "Your " + n + " unsent mark(s) stay in this browser and will be restored. " : "") + "Restart the loop with: " + restartCmd());
+      if (!down) {
+        flush();
+        return;
+      }
+      const n = Object.keys(ds).length;
+      const cmd = opts.restartCommand;
+      const bar2 = offlineBar = document.createElement("div");
+      bar2.className = "rev-offline-bar";
+      bar2.innerHTML = "<strong>⚠ Review server offline</strong> — feedback is NOT reaching it. " + (n ? n + " unsent mark(s) are" : "Your marks are") + " kept in this browser and sent on reconnect." + (cmd ? " Restart: <code>" + esc(cmd) + '</code> <button class="rev-offline-copy">copy</button>' : "");
+      body.appendChild(bar2);
+      const copy = bar2.querySelector(".rev-offline-copy");
+      if (copy) copy.onclick = () => {
+        if (navigator.clipboard) navigator.clipboard.writeText(cmd || "").then(() => {
+          copy.textContent = "copied ✓";
+        }).catch(() => {
+        });
+      };
     }
     function toast(msg) {
       if (toastEl) toastEl.remove();
       const el = toastEl = document.createElement("div");
       el.className = "rev-toast";
       el.textContent = msg;
-      document.body.appendChild(el);
+      body.appendChild(el);
       setTimeout(() => {
         el.remove();
         if (toastEl === el) toastEl = null;
       }, 8e3);
     }
-    function startProbe() {
-      if (probeTimer) return;
-      probeTimer = setInterval(() => {
-        fetch(base + "/healthz", { cache: "no-store" }).then((r) => r.ok ? r.json() : null).then((j) => {
-          if (j && j.app === "ox-plan-review") reloadWhenIdle();
-        }).catch(() => {
-        });
-      }, 3e3);
-    }
-    function stopProbe() {
-      if (probeTimer) {
-        clearInterval(probeTimer);
-        probeTimer = null;
+    function idle() {
+      if (waiter && !inflight && !pop) {
+        const fn = waiter;
+        waiter = null;
+        fn();
       }
-    }
-    function reloadWhenIdle() {
-      if (pop) {
-        pendingReload = true;
-        return;
-      }
-      location.reload();
     }
     const bar = document.createElement("div");
     bar.className = "rev-bar";
-    bar.innerHTML = (live ? '<span class="rev-conn"></span>' : "") + '<button class="rev-toggle" title="Toggle review mode">Review</button><span class="rev-count"></span>' + (live ? '<button class="rev-who" title="Set the name teammates see on your comments"></button>' : "") + '<button class="rev-submit" title="Send feedback to the agent">' + (live ? "Submit" : "Export") + "</button>" + (live ? '<button class="rev-approve" title="Approve and close the loop">Approve</button>' : "");
-    document.body.appendChild(bar);
+    bar.innerHTML = (live ? '<span class="rev-conn"></span>' : "") + '<button class="rev-toggle" title="Toggle review mode">Review</button><span class="rev-count"></span>' + (live && !opts.reviewer ? '<button class="rev-who" title="Set the name teammates see on your comments"></button>' : "") + '<button class="rev-submit" title="Send feedback to the agent">' + (live ? "Submit" : "Export") + "</button>" + (opts.approve ? '<button class="rev-approve" title="Approve and close the loop">Approve</button>' : "");
+    body.appendChild(bar);
     const countEl = bar.querySelector(".rev-count");
     connEl = bar.querySelector(".rev-conn");
     paintConn();
     const whoEl = bar.querySelector(".rev-who");
     function updateWho() {
-      if (whoEl) whoEl.textContent = reviewer ? "You: " + reviewer : "Set name";
+      if (whoEl) whoEl.textContent = named ? "You: " + named : "Set name";
     }
     updateWho();
     if (whoEl) whoEl.onclick = () => {
@@ -1146,15 +1227,16 @@
     };
     const submitEl = bar.querySelector(".rev-submit");
     function paintSubmit() {
-      if (!live) return;
-      submitEl.disabled = sending;
-      submitEl.textContent = sending ? "Sending…" : "Submit";
+      if (!live || destroyed) return;
+      submitEl.disabled = flushing;
+      submitEl.textContent = flushing ? "Sending…" : "Submit";
     }
     const toggleEl = bar.querySelector(".rev-toggle");
     let hintBubble = null;
     function setReview(next, silent) {
       on = next;
       toggleEl.classList.toggle("on", on);
+      body.classList.toggle("rev-on", on);
       sendMode();
       toggleEl.textContent = on ? "Exit review" : "Review";
       toggleEl.title = on ? "Leave review mode (Esc)" : "Enter review mode (r)";
@@ -1185,30 +1267,35 @@
       setReview(!on);
     };
     submitEl.onclick = submit;
-    if (live) bar.querySelector(".rev-approve").onclick = approve;
+    if (opts.approve) bar.querySelector(".rev-approve").onclick = approve;
+    function escape() {
+      if (pop) {
+        closePop();
+        return true;
+      }
+      if (on) {
+        setReview(false);
+        return true;
+      }
+      return false;
+    }
     document.addEventListener("keydown", (e) => {
       if (e.defaultPrevented) return;
       if (e.key === "Escape") {
-        if (pop) {
-          closePop();
-          e.preventDefault();
-        } else if (on) {
-          setReview(false);
-          e.preventDefault();
-        }
+        if (escape()) e.preventDefault();
         return;
       }
       if (e.key === "r" && !typing(e) && !e.metaKey && !e.ctrlKey && !e.altKey) {
         setReview(!on);
         e.preventDefault();
       }
-    });
+    }, { signal });
     try {
       if (!localStorage.getItem("ox-plan-rev-seen")) {
         const hint = hintBubble = document.createElement("div");
         hint.className = "rev-hint";
         hint.textContent = "← Click Review to mark up this plan";
-        document.body.appendChild(hint);
+        body.appendChild(hint);
         setTimeout(() => {
           if (hintBubble === hint) {
             hint.remove();
@@ -1218,65 +1305,22 @@
       }
     } catch (e) {
     }
-    if (live && window.EventSource) {
-      try {
-        const es = new EventSource(base + "/events?t=" + encodeURIComponent(token));
-        es.onopen = () => {
-          if (offline) {
-            setOffline(false);
-            reloadWhenIdle();
-            return;
-          }
-          paintConn();
-        };
-        es.onerror = () => {
-          setOffline(true);
-        };
-        es.onmessage = () => {
-          if (posting) {
-            reloadAfterPost = true;
-            return;
-          }
-          if (pop) {
-            pendingReload = true;
-            return;
-          }
-          location.reload();
-        };
-      } catch (e) {
-      }
-    }
-    if (live && "serviceWorker" in navigator) {
-      try {
-        navigator.serviceWorker.register("/sw.js").catch(() => {
-        });
-      } catch (e) {
-      }
-    }
+    let repaint;
     window.addEventListener("storage", (e) => {
-      if (e.key === null || e.key === KEY || e.key === TOMB_KEY) {
-        const m = mergeState({ marks, tombs }, readStored());
-        marks = m.marks;
-        tombs = m.tombs;
-        paint();
+      if (e.key === null || e.key.indexOf(store.prefix) === 0) {
+        clearTimeout(repaint);
+        repaint = setTimeout(paint, 50);
       }
-    });
-    const pendingBox = live ? readOutbox() : null;
-    if (live && Object.keys(marks).length && !pendingBox) {
-      toast(Object.keys(marks).length + " unsent mark(s) restored — Submit to send them.");
-    }
+    }, { signal });
+    window.addEventListener("online", flush, { signal });
     let started = false;
     port.listen((m) => {
       switch (m.type) {
         case "ready":
           paint();
-          if (started) {
-            sendMode();
-            return;
-          }
+          sendMode();
+          if (started) return;
           started = true;
-          restoreSync();
-          if (pendingBox) send(pendingBox);
           try {
             if (sessionStorage.getItem(ON_KEY)) setReview(true, true);
           } catch (e) {
@@ -1285,9 +1329,14 @@
         case "placed":
           onPlaced(m.items);
           break;
-        case "target":
-          openPop({ a: m.target.anchor, section: m.target.section, label: m.target.label, quote: m.target.quote }, m.target.rect);
+        case "target": {
+          const f = opts.frame ? opts.frame.getBoundingClientRect() : { left: 0, top: 0 };
+          openPop(
+            { a: m.target.anchor, section: m.target.section, label: m.target.label, quote: m.target.quote },
+            { left: m.target.rect.left + f.left, bottom: m.target.rect.bottom + f.top }
+          );
           break;
+        }
         case "refused":
           closePop();
           toast(m.reason === "repeated" ? "“" + clip(m.quote, 40) + "” appears " + m.count + " times in this section — highlight a longer phrase so the comment points at one place." : "Highlight text within one section to comment on it.");
@@ -1295,18 +1344,62 @@
         case "dismiss":
           if (on || pop) closePop();
           break;
+        case "key":
+          if (m.key === "Escape") escape();
+          else setReview(!on);
+          break;
       }
     });
+    restoreSync();
+    paint();
+    const restored = Object.keys(ds).length;
+    if (live && restored && !store.entries().length) toast(restored + " unsent mark(s) restored — Submit to send them.");
+    flush();
+    return {
+      update(items, n) {
+        setCommitted(items);
+        problems = n || 0;
+        paint();
+      },
+      setOffline,
+      whenIdle(fn) {
+        waiter = fn;
+        idle();
+      },
+      destroy() {
+        if (destroyed) return;
+        waiter = null;
+        closePop();
+        destroyed = true;
+        off.abort();
+        clearTimeout(repaint);
+        port.listen(() => {
+        });
+        port.send({ type: "mode", on: false, open: false });
+        port.send({ type: "paint", items: [] });
+        [bar, rail, orphanBar, syncEl, toastEl, offlineBar, hintBubble].forEach((el) => {
+          if (el) el.remove();
+        });
+        body.classList.remove("rev-on", "rev-offline");
+      }
+    };
   }
 
   // src/local.ts
+  var ACCOUNT = "local";
   (function() {
+    let storage;
     try {
-      if (!window.localStorage) return;
+      storage = window.localStorage;
+      if (!storage) return;
     } catch (e) {
       return;
     }
     const body = document.body;
+    const slug = (body.getAttribute("data-slug") || document.title || "plan").trim();
+    const plan = body.getAttribute("data-review-plan") || slug;
+    const base = body.getAttribute("data-review-endpoint") || "";
+    const token = body.getAttribute("data-review-token") || "";
     let committed = [];
     try {
       const el = document.getElementById("ox-review-state");
@@ -1315,14 +1408,93 @@
     } catch (e) {
       committed = [];
     }
+    migrateLegacy(storage, slug, openStore(storage, ACCOUNT, plan));
+    let probe = null;
+    function reload() {
+      controls.whenIdle(() => location.reload());
+    }
+    function watch() {
+      if (probe) return;
+      probe = setInterval(() => {
+        fetch(base + "/healthz", { cache: "no-store" }).then((r) => r.ok ? r.json() : null).then((j) => {
+          if (j && j.app === "ox-plan-review") back();
+        }).catch(() => {
+        });
+      }, 3e3);
+    }
+    function back() {
+      if (!probe) return;
+      clearInterval(probe);
+      probe = null;
+      controls.setOffline(false);
+      reload();
+    }
+    function post(path, payload) {
+      return fetch(base + path, { method: "POST", headers: { "Content-Type": "application/json", "X-Review-Token": token }, body: payload }).catch(() => {
+        watch();
+        return null;
+      });
+    }
+    async function failure(r) {
+      const t = (await r.text().catch(() => "")).trim();
+      return "HTTP " + r.status + (t ? " — " + clip(t, 120) : "");
+    }
+    async function send(op) {
+      const r = await post(op.kind === "round" ? "/feedback" : "/accept", op.body);
+      if (!r) return { state: "offline" };
+      if (!r.ok) {
+        const message = await failure(r);
+        if (r.status === 400 || r.status === 409 || r.status === 413) return { state: "refused", message };
+        return { state: "failed", message };
+      }
+      const d = await r.json().catch(() => ({}));
+      if (d.saved !== true) return { state: "failed", message: "the server did not say it stored this" };
+      return {
+        state: "owned",
+        id: op.kind === "round" ? d.round_id : d.resolution_id,
+        synced: !!d.pushed,
+        // a duplicate is a resend of an operation whose first save already notified (or tried to)
+        warning: d.notified === false && !d.duplicate ? "the plan’s authoring coworker was not notified automatically — tell them directly" : void 0
+      };
+    }
+    async function approve() {
+      const r = await post("/approve", "{}");
+      if (!r) return { state: "offline" };
+      if (!r.ok) return { state: "failed", message: await failure(r) };
+      const d = await r.json().catch(() => ({}));
+      return { state: "owned", synced: !!d.pushed };
+    }
     const ports = localPorts();
-    mountHostControls(ports.host, {
-      slug: (body.getAttribute("data-slug") || document.title || "plan").trim(),
-      endpoint: body.getAttribute("data-review-endpoint") || "",
-      token: body.getAttribute("data-review-token") || "",
+    const controls = mountHostControls(ports.host, {
+      account: ACCOUNT,
+      plan,
+      slug,
       committed,
-      problems: Number(body.getAttribute("data-review-problems")) || 0
+      problems: Number(body.getAttribute("data-review-problems")) || 0,
+      transport: base ? { send } : void 0,
+      approve: base ? approve : void 0,
+      restartCommand: "ox plan review " + slug
     });
     startDocumentTools(ports.document);
+    if (!base) return;
+    if (window.EventSource) {
+      try {
+        const es = new EventSource(base + "/events?t=" + encodeURIComponent(token));
+        es.onopen = back;
+        es.onerror = () => {
+          controls.setOffline(true);
+          watch();
+        };
+        es.onmessage = reload;
+      } catch (e) {
+      }
+    }
+    if ("serviceWorker" in navigator) {
+      try {
+        navigator.serviceWorker.register("/sw.js").catch(() => {
+        });
+      } catch (e) {
+      }
+    }
   })();
 })();

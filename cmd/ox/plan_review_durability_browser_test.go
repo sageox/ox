@@ -13,6 +13,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -26,11 +27,13 @@ import (
 )
 
 // scriptedPost records every POST the page makes to one endpoint and answers
-// each with the next scripted reply. A reply with hold set blocks until the
-// test closes hold, standing in for a slow commit+push.
+// each with the next scripted reply. A reply with hold set (see held) blocks
+// until the test releases it; one with drop set then closes the connection
+// unanswered, as a response lost after the server stored the request.
 type scriptedPost struct {
 	mu      sync.Mutex
 	bodies  []map[string]any
+	raws    []string
 	replies []scriptedReply
 	got     chan struct{}
 }
@@ -39,6 +42,7 @@ type scriptedReply struct {
 	status int
 	body   func(id string) string // id: the request's round id
 	hold   chan struct{}
+	drop   bool
 }
 
 func newScriptedPost(replies ...scriptedReply) *scriptedPost {
@@ -56,6 +60,7 @@ func (s *scriptedPost) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	n := len(s.bodies)
 	s.bodies = append(s.bodies, body)
+	s.raws = append(s.raws, string(raw))
 	reply := scriptedReply{status: 500, body: func(string) string { return "no scripted reply" }}
 	if n < len(s.replies) {
 		reply = s.replies[n]
@@ -64,6 +69,12 @@ func (s *scriptedPost) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.got <- struct{}{}
 	if reply.hold != nil {
 		<-reply.hold
+	}
+	if reply.drop {
+		if conn, _, err := http.NewResponseController(w).Hijack(); err == nil {
+			_ = conn.Close()
+		}
+		return
 	}
 	id, _ := body["id"].(string)
 	if reply.status != http.StatusOK {
@@ -78,6 +89,13 @@ func (s *scriptedPost) requests() []map[string]any {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]map[string]any(nil), s.bodies...)
+}
+
+// rawRequests are the request bodies byte for byte.
+func (s *scriptedPost) rawRequests() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.raws...)
 }
 
 func (s *scriptedPost) waitRequests(t *testing.T, n int, within time.Duration) []map[string]any {
@@ -97,11 +115,22 @@ func reply(body string) scriptedReply {
 	return scriptedReply{status: http.StatusOK, body: func(id string) string { return strings.ReplaceAll(body, "$ID", id) }}
 }
 
+// held is r answered only once the test calls release, standing in for a slow
+// commit+push. Cleanup releases it too, so a failed test never leaves the
+// handler blocked.
+func held(t *testing.T, r scriptedReply) (scriptedReply, func()) {
+	t.Helper()
+	hold := make(chan struct{})
+	release := sync.OnceFunc(func() { close(hold) })
+	t.Cleanup(release)
+	r.hold = hold
+	return r, release
+}
+
 const (
 	replyPushed   = `{"ok":true,"saved":true,"round_id":"$ID","duplicate":false,"committed":true,"pushed":true,"notified":true}`
 	replyDupe     = `{"ok":true,"saved":true,"round_id":"$ID","duplicate":true,"committed":true,"pushed":true,"notified":false}`
 	replyUnpushed = `{"ok":true,"saved":true,"round_id":"$ID","duplicate":false,"committed":true,"pushed":false,"notified":true}`
-	replyOld      = `{"ok":true,"notified":true}`
 	replyWrongID  = `{"ok":true,"saved":true,"round_id":"someone-elses-round","committed":true,"pushed":true}`
 )
 
@@ -126,7 +155,12 @@ func serveScriptedPlanReview(t *testing.T, feedback, approve *scriptedPost) (bas
 	if approve != nil {
 		mux.Handle("/approve", approve)
 	}
-	go serveUntilClosed(t, ln, mux)
+	// No connection is reused: Chrome itself resends a request whose reused
+	// connection closes unanswered, which would hide a lost answer from the page.
+	go serveUntilClosed(t, ln, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Connection", "close")
+		mux.ServeHTTP(w, r)
+	}))
 	return base, bc
 }
 
@@ -214,10 +248,15 @@ func evalString(t *testing.T, ctx context.Context, expr string) string {
 	return s
 }
 
-const (
+// jsStored joins every value the page stores under one kind of key: the
+// review controls keep one key per draft and one per frozen operation.
+const jsStored = `Object.keys(localStorage).filter(function(k){return k.indexOf('ox-review:local:')===0&&k.indexOf(%q)>0;}).map(function(k){return localStorage.getItem(k);}).join('\n')`
+
+var (
 	jsSyncText = `((document.querySelector('.rev-sync .rev-sync-msg')||{}).textContent||'')`
-	jsOutbox   = `(localStorage.getItem('ox-plan-fb:durable-review:outbox')||'')`
-	jsMarks    = `(localStorage.getItem('ox-plan-fb:durable-review')||'')`
+	jsOutbox   = fmt.Sprintf(jsStored, ":op:")
+	jsMarks    = fmt.Sprintf(jsStored, ":draft:")
+	jsCount    = `document.querySelector('.rev-count').textContent`
 )
 
 // TestBrowser_SubmitResendsSameRoundAfterReloadMidFlight: the reviewer
@@ -228,15 +267,8 @@ const (
 // Failure prevented: a reload racing a slow commit+push restores the marks,
 // and the next Submit lands a duplicate round on the author's plan.
 func TestBrowser_SubmitResendsSameRoundAfterReloadMidFlight(t *testing.T) {
-	hold := make(chan struct{})
-	t.Cleanup(func() {
-		select {
-		case <-hold:
-		default:
-			close(hold)
-		}
-	})
-	fb := newScriptedPost(scriptedReply{status: http.StatusOK, body: func(id string) string { return strings.ReplaceAll(replyPushed, "$ID", id) }, hold: hold}, reply(replyDupe))
+	slow, release := held(t, reply(replyPushed))
+	fb := newScriptedPost(slow, reply(replyDupe))
 	base, _ := serveScriptedPlanReview(t, fb, nil)
 	ctx := newChrome(t)
 	openReviewer(t, ctx, base)
@@ -277,10 +309,10 @@ func TestBrowser_SubmitResendsSameRoundAfterReloadMidFlight(t *testing.T) {
 	if ob := evalString(t, ctx, jsOutbox); ob != "" {
 		t.Fatalf("an acked round must clear the outbox, got %q", ob)
 	}
-	if c := evalString(t, ctx, `document.querySelector('.rev-count').textContent`); c != "" {
+	if c := evalString(t, ctx, jsCount); c != "" {
 		t.Fatalf("acked marks must be cleared, counter=%q", c)
 	}
-	close(hold) // the first answer reaches a page that is gone; nothing more is sent
+	release() // the first answer reaches a page that is gone; nothing more is sent
 	time.Sleep(300 * time.Millisecond)
 	if n := len(fb.requests()); n != 2 {
 		t.Fatalf("expected exactly 2 POSTs of one round, got %d", n)
@@ -294,8 +326,8 @@ func TestBrowser_SubmitResendsSameRoundAfterReloadMidFlight(t *testing.T) {
 // Failure prevented: the reload wipes the in-flight request, and the reviewer
 // never learns whether their feedback was saved.
 func TestBrowser_LiveReloadWaitsForSubmitResult(t *testing.T) {
-	hold := make(chan struct{})
-	fb := newScriptedPost(scriptedReply{status: http.StatusOK, body: func(id string) string { return strings.ReplaceAll(replyPushed, "$ID", id) }, hold: hold})
+	slow, release := held(t, reply(replyPushed))
+	fb := newScriptedPost(slow)
 	base, bc := serveScriptedPlanReview(t, fb, nil)
 	ctx := newChrome(t)
 	openReviewer(t, ctx, base)
@@ -309,7 +341,7 @@ func TestBrowser_LiveReloadWaitsForSubmitResult(t *testing.T) {
 	if evalString(t, ctx, `!!window.oldPage`) != "true" {
 		t.Fatal("an SSE reload must wait for the in-flight Submit to answer")
 	}
-	close(hold)
+	release()
 	if !waitForNewPage(ctx, jsSyncText+`==='Sent · synced to your team'`, 10*time.Second) {
 		t.Fatalf("after the held reload the result must still show, status=%q", evalString(t, ctx, jsSyncText))
 	}
@@ -318,10 +350,11 @@ func TestBrowser_LiveReloadWaitsForSubmitResult(t *testing.T) {
 	}
 }
 
-// TestBrowser_SyncStatusTellsTheTruth: each server outcome reads as what it is.
-// Failure prevented: the page says "sent" when the feedback only sits on the
-// author's laptop, or an error alert() that the web app's iframe swallows
-// leaves the reviewer believing it went through.
+// TestBrowser_SyncStatusTellsTheTruth: each server outcome reads as what it
+// is, and only an answer naming the round clears it. Failure prevented: the
+// page says "sent" when the feedback only sits on the author's laptop, an
+// answer for another round clears this one, or an error alert() that the web
+// app's iframe swallows leaves the reviewer believing it went through.
 func TestBrowser_SyncStatusTellsTheTruth(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -332,8 +365,7 @@ func TestBrowser_SyncStatusTellsTheTruth(t *testing.T) {
 	}{
 		{"pushed", reply(replyPushed), "Sent · synced to your team", "ok", true},
 		{"saved-not-pushed", reply(replyUnpushed), "Saved on the author’s machine · not yet synced (will retry)", "warn", true},
-		{"old-server", reply(replyOld), "Sent · received by the author’s machine", "ok", true},
-		{"mismatched-round", reply(replyWrongID), "Not confirmed — the server acknowledged a different round. Your marks are kept.", "err", false},
+		{"mismatched-round", reply(replyWrongID), "Not sent (the server acknowledged a different operation). Your marks are kept.", "err", false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -381,7 +413,7 @@ func TestBrowser_SubmitErrorKeepsMarksAndRetriesSameRound(t *testing.T) {
 	if s := evalString(t, ctx, jsSyncText); !strings.Contains(s, "Not sent") || !strings.Contains(s, "HTTP 500") {
 		t.Fatalf("error status must say it was not sent and why, got %q", s)
 	}
-	if c := evalString(t, ctx, `document.querySelector('.rev-count').textContent`); c != "1 unsent" {
+	if c := evalString(t, ctx, jsCount); c != "1 unsent" {
 		t.Fatalf("marks must be kept after an error, counter=%q", c)
 	}
 	if err := chromedp.Run(ctx, chromedp.Click(".rev-sync.err .rev-sync-act", chromedp.ByQuery)); err != nil {
@@ -398,11 +430,15 @@ func TestBrowser_SubmitErrorKeepsMarksAndRetriesSameRound(t *testing.T) {
 
 // TestBrowser_TwoTabsKeepEachOthersMarks: two tabs on one plan each leave a
 // mark; both survive in storage and each tab shows both. A mark deleted in
-// one tab is not brought back when the other tab saves.
+// one tab is not brought back when the other tab saves. Tab A submits, and
+// while its answer is pending tab B submits too: B resends A's operation
+// rather than freezing the same marks again, so the server sees one round.
 // Failure prevented: last writer wins — the other tab's unsent marks vanish,
-// or a deleted mark reappears.
+// a deleted mark reappears, or two tabs turn the same marks into two rounds.
 func TestBrowser_TwoTabsKeepEachOthersMarks(t *testing.T) {
-	base, _ := serveScriptedPlanReview(t, nil, nil)
+	slow, release := held(t, reply(replyPushed))
+	fb := newScriptedPost(slow, reply(replyDupe))
+	base, _ := serveScriptedPlanReview(t, fb, nil)
 	tabA := newChrome(t)
 	openReviewer(t, tabA, base)
 	tabB, cancelB := chromedp.NewContext(tabA) // a second tab in the same browser profile
@@ -417,8 +453,8 @@ func TestBrowser_TwoTabsKeepEachOthersMarks(t *testing.T) {
 	if !strings.Contains(stored, "from tab A") || !strings.Contains(stored, "from tab B") {
 		t.Fatalf("both tabs' marks must be in storage, got %s", stored)
 	}
-	if !waitJS(tabA, `document.querySelector('.rev-count').textContent==='2 unsent'`, 5*time.Second) {
-		t.Fatalf("tab A must pick up tab B's mark, counter=%q", evalString(t, tabA, `document.querySelector('.rev-count').textContent`))
+	if !waitJS(tabA, jsCount+`==='2 unsent'`, 5*time.Second) {
+		t.Fatalf("tab A must pick up tab B's mark, counter=%q", evalString(t, tabA, jsCount))
 	}
 
 	// tab A deletes its mark; tab B then edits its own and saves
@@ -435,8 +471,30 @@ func TestBrowser_TwoTabsKeepEachOthersMarks(t *testing.T) {
 	if !strings.Contains(stored, "(edited)") {
 		t.Fatalf("tab B's edit must be saved: %s", stored)
 	}
-	if !strings.Contains(evalString(t, tabB, `localStorage.getItem('ox-plan-fb:durable-review:tombs')`), `"`) {
-		t.Fatal("the delete must leave a tombstone")
+
+	if err := chromedp.Run(tabA, chromedp.Evaluate(`document.querySelector('.rev-submit').click()`, nil)); err != nil {
+		t.Fatalf("submit in tab A: %v", err)
+	}
+	fb.waitRequests(t, 1, 10*time.Second)
+	if err := chromedp.Run(tabB, chromedp.Evaluate(`document.querySelector('.rev-submit').click()`, nil)); err != nil {
+		t.Fatalf("submit in tab B: %v", err)
+	}
+	reqs := fb.waitRequests(t, 2, 10*time.Second)
+	raws := fb.rawRequests()
+	if raws[0] != raws[1] || reqs[0]["id"] == nil {
+		t.Fatalf("tab B must resend tab A's round, not freeze the marks again:\n%s\n%s", raws[0], raws[1])
+	}
+	if items, _ := reqs[0]["items"].([]any); len(items) != 1 || !strings.Contains(raws[0], "from tab B (edited)") {
+		t.Fatalf("the round must carry tab B's edited mark once and nothing deleted: %s", raws[0])
+	}
+	release()
+	for _, tab := range []context.Context{tabA, tabB} {
+		if !waitJS(tab, jsCount+`===''&&`+jsOutbox+`===''`, 10*time.Second) {
+			t.Fatalf("once answered, no tab may keep the round or its mark: count=%q outbox=%q", evalString(t, tab, jsCount), evalString(t, tab, jsOutbox))
+		}
+	}
+	if n := len(fb.requests()); n != 2 {
+		t.Fatalf("one round, sent twice at most, got %d POSTs", n)
 	}
 }
 
@@ -487,5 +545,88 @@ func TestBrowser_ReservedAnchorNoteStaysVisible(t *testing.T) {
 	}
 	if !strings.Contains(orphans, "reserved anchor note") {
 		t.Errorf("the orphan banner lost the note: %q", orphans)
+	}
+}
+
+// TestBrowser_UnstorableReviewIsNeverSent: the browser refuses every write,
+// as a full or denied storage does. Devon's note stays on the page, marked
+// unsaved, and Submit sends nothing and says so; once storage works again,
+// Submit sends it. Failure prevented: a draft vanishes silently, or a review
+// goes out that a reload or a lost answer could never resend.
+func TestBrowser_UnstorableReviewIsNeverSent(t *testing.T) {
+	fb := newScriptedPost(reply(replyPushed))
+	base, _ := serveScriptedPlanReview(t, fb, nil)
+	ctx := newChrome(t)
+	openReviewer(t, ctx, base)
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`window.realSet=Storage.prototype.setItem;`+
+		`Storage.prototype.setItem=function(){throw new DOMException('full','QuotaExceededError')}`, nil)); err != nil {
+		t.Fatalf("fill storage: %v", err)
+	}
+	markSection(t, ctx, "section#sec-1", "kept in this tab")
+	if s := evalString(t, ctx, jsSyncText); !strings.Contains(s, "could not save your note") {
+		t.Fatalf("a note storage refused must say so, status=%q", s)
+	}
+	if tag := evalString(t, ctx, `(document.querySelector('.rev-rail-tag.unsaved')||{}).textContent||''`); tag != "unsaved" {
+		t.Fatalf("the rail must mark the note unsaved, got %q", tag)
+	}
+	if err := chromedp.Run(ctx, chromedp.Click(".rev-submit", chromedp.ByQuery)); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	if !waitJS(ctx, jsSyncText+`.indexOf('nothing was sent')>=0`, 5*time.Second) {
+		t.Fatalf("Submit must say nothing was sent, status=%q", evalString(t, ctx, jsSyncText))
+	}
+	time.Sleep(300 * time.Millisecond)
+	if n := len(fb.requests()); n != 0 {
+		t.Fatalf("a review the browser could not store must not be sent, got %d POSTs", n)
+	}
+
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`Storage.prototype.setItem=window.realSet`, nil), chromedp.Click(".rev-submit", chromedp.ByQuery)); err != nil {
+		t.Fatalf("submit with storage back: %v", err)
+	}
+	if req := fb.waitRequests(t, 1, 10*time.Second)[0]; !strings.Contains(fb.rawRequests()[0], "kept in this tab") || req["reviewer"] != "Devon" {
+		t.Fatalf("with storage back, Submit must send Devon's note: %s", fb.rawRequests()[0])
+	}
+	if !waitJS(ctx, jsSyncText+`==='Sent · synced to your team'&&`+jsCount+`===''`, 10*time.Second) {
+		t.Fatalf("the sent note must clear, status=%q count=%q", evalString(t, ctx, jsSyncText), evalString(t, ctx, jsCount))
+	}
+}
+
+// TestBrowser_LostAnswerAndAnEditDuringSendDeliverOnce: Devon submits, edits
+// his note while the send is in flight, and the answer never arrives: the
+// connection drops after the server read the round. The page resends the same
+// operation byte for byte, the server's duplicate answer clears it, and
+// Devon's edit stays as his next draft. Failure prevented: a lost answer
+// becomes a second round, or the answer to the older submission wipes the
+// newer note.
+func TestBrowser_LostAnswerAndAnEditDuringSendDeliverOnce(t *testing.T) {
+	lost, release := held(t, scriptedReply{drop: true})
+	fb := newScriptedPost(lost, reply(replyDupe), reply(replyDupe))
+	base, _ := serveScriptedPlanReview(t, fb, nil)
+	ctx := newChrome(t)
+	openReviewer(t, ctx, base)
+	markSection(t, ctx, "section#sec-1", "first note")
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`window.oldPage=true`, nil), chromedp.Click(".rev-submit", chromedp.ByQuery)); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	fb.waitRequests(t, 1, 10*time.Second)
+	markSectionJS(t, ctx, "section#sec-1", " (edited)")
+	release()
+
+	// the page goes offline, sees the server back, reloads and resends
+	fb.waitRequests(t, 2, 20*time.Second)
+	if !waitForNewPage(ctx, jsOutbox+`===''`, 20*time.Second) {
+		t.Fatalf("a reloaded page must resend the round and clear it on its answer, outbox=%q", evalString(t, ctx, jsOutbox))
+	}
+	raws := fb.rawRequests()
+	for _, r := range raws[1:] {
+		if r != raws[0] {
+			t.Fatalf("a resend must carry the frozen bytes:\n%s\n%s", raws[0], r)
+		}
+	}
+	if strings.Contains(raws[0], "(edited)") {
+		t.Fatalf("the round froze before the edit, so it must not carry it: %s", raws[0])
+	}
+	if marks := evalString(t, ctx, jsMarks); !strings.Contains(marks, "first note (edited)") || evalString(t, ctx, jsCount) != "1 unsent" {
+		t.Fatalf("the answer to the older round must keep the newer note: marks=%q count=%q", marks, evalString(t, ctx, jsCount))
 	}
 }

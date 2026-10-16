@@ -27,7 +27,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { PROTOCOL, connectFrame, parseDocumentMessage } from '@sageox/plan-review';
+import { PROTOCOL, connectFrame, mountHostControls, parseDocumentMessage } from '@sageox/plan-review';
 import { localPorts, startDocumentTools } from '@sageox/plan-review/document-tools';
 import script from '@sageox/plan-review/document-tools-script';
 import { framePlan } from '@sageox/plan-review/frame-plan';
@@ -36,11 +36,13 @@ import manifest from '@sageox/plan-review/manifest.json' with { type: 'json' };
 const require = createRequire(import.meta.url);
 assert.equal(manifest.protocol, PROTOCOL);
 assert.equal(typeof connectFrame, 'function');
+assert.equal(typeof mountHostControls, 'function');
 assert.equal(typeof startDocumentTools, 'function');
 assert.equal(parseDocumentMessage({ ox: 'review', v: PROTOCOL, instance: 'i-000001', type: 'ready' }, 'i-000001').type, 'ready');
 assert.ok(localPorts().host);
 assert.equal(script, readFileSync(require.resolve('@sageox/plan-review/document-tools.iife.js'), 'utf8'));
 require.resolve('@sageox/plan-review/document-tools.css');
+require.resolve('@sageox/plan-review/host.css');
 // the real build and script: an ES-module page keeps the tools before its own
 // </body>, ahead of the appended build, whose text has a </body> of its own
 const page = "<body><pre class='mermaid'>graph TD; A--&gt;B</pre><script type='module'>import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';</script></body></html>";
@@ -56,7 +58,7 @@ for (const [f, sum] of Object.entries(manifest.files)) {
 `;
 
 const consumerTS = `
-import { PROTOCOL, connectFrame, type DocumentMessage, type HostMessage } from '@sageox/plan-review';
+import { PROTOCOL, connectFrame, mountHostControls, type DocumentMessage, type HostMessage, type Receipt, type Transport } from '@sageox/plan-review';
 import { localPorts, startDocumentTools } from '@sageox/plan-review/document-tools';
 import script from '@sageox/plan-review/document-tools-script';
 import { framePlan, type FramePlanOptions } from '@sageox/plan-review/frame-plan';
@@ -67,6 +69,10 @@ port.listen((m: DocumentMessage) => {
 });
 const mode: HostMessage = { type: 'mode', on: true, open: false };
 port.send(mode);
+const transport: Transport = { send: async (op): Promise<Receipt> => ({ state: 'owned', id: op.id, synced: true }) };
+const controls = mountHostControls(port, { account: 'acct', plan: 'pln_1', slug: 'plan', committed: [], transport, reviewer: 'Devon', frame: document.createElement('iframe') });
+controls.update([{ anchor: 'h1234abcd', status: 'flag', state: 'open' }], 0);
+controls.destroy();
 port.close();
 startDocumentTools(localPorts().document, { forwardKeys: false });
 const opts: FramePlanOptions = { documentTools: true, instance: 'instance-1' };

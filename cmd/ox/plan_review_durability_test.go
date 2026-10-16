@@ -32,17 +32,18 @@ import (
 // and records from racing clones and retried requests all survive as one
 // logical submission each.
 
-// reviewDurabilityResp is the /feedback (and /accept, /reopen, /approve)
-// response decoded strictly, so a renamed or extra field fails the test
-// instead of silently passing a substring match.
+// reviewDurabilityResp is the /feedback (and /accept, /approve) response
+// decoded strictly, so a renamed or extra field fails the test instead of
+// silently passing a substring match.
 type reviewDurabilityResp struct {
-	OK        bool    `json:"ok"`
-	Saved     bool    `json:"saved"`
-	RoundID   *string `json:"round_id,omitempty"`
-	Duplicate *bool   `json:"duplicate,omitempty"`
-	Committed bool    `json:"committed"`
-	Pushed    bool    `json:"pushed"`
-	Notified  *bool   `json:"notified,omitempty"`
+	OK           bool    `json:"ok"`
+	Saved        bool    `json:"saved"`
+	RoundID      *string `json:"round_id,omitempty"`
+	ResolutionID *string `json:"resolution_id,omitempty"`
+	Duplicate    *bool   `json:"duplicate,omitempty"`
+	Committed    bool    `json:"committed"`
+	Pushed       bool    `json:"pushed"`
+	Notified     *bool   `json:"notified,omitempty"`
 }
 
 func decodeReviewResp(t *testing.T, body string) reviewDurabilityResp {
@@ -153,11 +154,11 @@ func TestPlanReviewDurability_FeedbackCommittedAndPushed(t *testing.T) {
 	}
 
 	// /accept reports the same durability fields and also resets idle
-	code, body = reviewPOSTBody(t, f.srv.URL+"/accept", "secret", `{"anchor":"h1"}`)
+	code, body = reviewPOSTBody(t, f.srv.URL+"/accept", "secret", acceptBody)
 	if code != http.StatusOK {
 		t.Fatalf("accept status %d: %s", code, body)
 	}
-	if a := decodeReviewResp(t, body); !a.Saved || !a.Committed || !a.Pushed {
+	if a := decodeReviewResp(t, body); !a.Saved || !a.Committed || !a.Pushed || a.ResolutionID == nil || *a.ResolutionID != "accept-0001" {
 		t.Fatalf("accept durability fields: %+v", a)
 	}
 	select {

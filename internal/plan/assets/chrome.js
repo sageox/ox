@@ -2,9 +2,10 @@
 // developer-hand-built page ox did not generate). Runs BEFORE assets/review.js
 // in the injected bundle — script tags execute in document order, and that
 // ordering is load-bearing: review.js reads its config off document.body's
-// data-slug / data-review-endpoint / data-review-token attributes, which this
-// script must set FIRST. Vanilla, zero deps, file://-safe: an authored page
-// carries no bundler, so this has to run standalone in any browser.
+// data-slug / data-review-plan / data-review-endpoint / data-review-token
+// attributes, which this script must set FIRST. Vanilla, zero deps,
+// file://-safe: an authored page carries no bundler, so this has to run
+// standalone in any browser.
 (function () {
   var body = document.body;
   if (!body) return;
@@ -23,6 +24,7 @@
     if (data.slug) body.setAttribute('data-slug', data.slug);
     if (data.endpoint) body.setAttribute('data-review-endpoint', data.endpoint);
     if (data.token) body.setAttribute('data-review-token', data.token);
+    if (data.plan) body.setAttribute('data-review-plan', data.plan);
     if (data.review_problems) body.setAttribute('data-review-problems', String(data.review_problems));
   } catch (e) {}
 

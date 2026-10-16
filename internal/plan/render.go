@@ -63,6 +63,10 @@ type RenderOptions struct {
 	// with the token. Empty for a static file:// render (clipboard fallback).
 	ReviewEndpoint string
 	ReviewToken    string
+	// ReviewPlan names the plan the page keeps a reviewer's drafts and outbox
+	// under: its plan id, else its directory, since two plans can share a
+	// slug. Empty: the page keys them by Slug.
+	ReviewPlan string
 	// PriorArtURL resolves a prior-art source (its kind + ref/slug) to a SageOx
 	// web URL, opened in a new tab from the enrichment panel. Nil-safe: when nil
 	// or when it returns "", the prior-art entry renders as crisp text with no
@@ -190,6 +194,7 @@ type renderData struct {
 	ReviewJSON     template.JS // JSON island: merged review state for the page
 	ReviewEndpoint string      // set only when served by `ox plan review`
 	ReviewToken    string
+	ReviewPlan     string
 	ReviewProblems int
 	Review         reviewSummary
 	TOC            []tocEntry
@@ -274,6 +279,7 @@ func RenderHTMLOpts(in Input, res Result, opts RenderOptions) ([]byte, error) {
 		ReviewJS:       template.JS(reviewJS),
 		ReviewEndpoint: opts.ReviewEndpoint,
 		ReviewToken:    opts.ReviewToken,
+		ReviewPlan:     opts.ReviewPlan,
 		ReviewProblems: opts.ReviewProblems,
 		FooterCredit:   len(res.Annotations) > 0 || len(res.Context) > 0,
 		SessionURL:     opts.SessionURL,

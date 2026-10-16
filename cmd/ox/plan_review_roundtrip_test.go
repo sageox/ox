@@ -7,7 +7,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -252,7 +251,8 @@ func TestBrowserRoundTrip_AcceptClearsAndReopenReturnsToAgent(t *testing.T) {
 	// Devon accepts the fix — a verified resolution is recorded (asserted first and
 	// unconditionally: the addressed resolution above already cleared open, so an
 	// open-count check alone would pass even if /accept persisted nothing).
-	if code := reviewPOST(t, srv.URL+"/accept", "secret", `{"anchor":"hitem1"}`); code != http.StatusOK {
+	accept := `{"id":"accept-0001","reviewer":"Devon","anchor":"hitem1","state":"verified","note":"accepted by reviewer"}`
+	if code := reviewPOST(t, srv.URL+"/accept", "secret", accept); code != http.StatusOK {
 		t.Fatalf("accept: %d", code)
 	}
 	if items := plan.ReadReview(planDir).Items; len(items) != 1 || items[0].Resolution == nil || items[0].Resolution.State != planreview.StateVerified {
@@ -262,8 +262,8 @@ func TestBrowserRoundTrip_AcceptClearsAndReopenReturnsToAgent(t *testing.T) {
 		t.Error("an accepted item must not remain open work for the agent")
 	}
 
-	// Devon changes his mind and reopens it — it returns to Avery as work to do
-	if code := reviewPOST(t, srv.URL+"/reopen", "secret", `{"anchor":"hitem1","note":"still wrong"}`); code != http.StatusOK {
+	// Devon changes his mind and reopens it — a round that returns it to Avery as work to do
+	if code := browserSubmit(t, srv.URL, "Devon", "hitem1", "Risks", "request-change", "still wrong"); code != http.StatusOK {
 		t.Fatalf("reopen: %d", code)
 	}
 	res, done := awaitSnapshot(planDir)
@@ -273,36 +273,6 @@ func TestBrowserRoundTrip_AcceptClearsAndReopenReturnsToAgent(t *testing.T) {
 	// reopen must re-notify the authoring coworker (submit + reopen dedupe to one task)
 	if n := len(activeTasks(t, gitRoot)); n != 1 {
 		t.Errorf("reopen must leave the authoring coworker notified, got %d tasks", n)
-	}
-}
-
-// TestBrowserRoundTrip_ReopenedHighlightKeepsItsWords proves a reopen names
-// what it reopens: Devon reopens an addressed highlight, and the item that
-// returns to Avery carries the highlight's words and section — the digest Avery
-// reads quotes them. Failure prevented: the reopened highlight reaches the agent
-// as a bare anchor, which nothing can turn back into the words it was about.
-func TestBrowserRoundTrip_ReopenedHighlightKeepsItsWords(t *testing.T) {
-	srv, _, planDir := newNotifyingReviewServer(t)
-	const anchor, quote = "q1a2b3c4d", "double-fire under load"
-	round := fmt.Sprintf(`{"reviewer":"Devon","items":[{"anchor":%q,"section":"Risks","label":%q,"quote":%q,"status":"request-change","note":"why twice?"}]}`,
-		anchor, quote, quote)
-	if code := reviewPOST(t, srv.URL+"/feedback", "secret", round); code != http.StatusOK {
-		t.Fatalf("submit: %d", code)
-	}
-	resolveForTest(t, planDir, anchor, planreview.StateAddressed, "done")
-	if code := reviewPOST(t, srv.URL+"/reopen", "secret", `{"anchor":"`+anchor+`","note":"still fires twice"}`); code != http.StatusOK {
-		t.Fatalf("reopen: %d", code)
-	}
-
-	res, done := awaitSnapshot(planDir)
-	if !done || len(res.Open) != 1 {
-		t.Fatalf("the reopened highlight must return to the agent as open, got done=%v %+v", done, res.Open)
-	}
-	if it := res.Open[0]; it.Quote != quote || it.Section != "Risks" || it.Note != "still fires twice" {
-		t.Fatalf("the reopened highlight must carry its words and section: %+v", it)
-	}
-	if d := plan.FeedbackDigest(plan.ReadReview(planDir).Items); !strings.Contains(d, "“"+quote+"”") {
-		t.Fatalf("the agent's digest must quote the reopened highlight's words:\n%s", d)
 	}
 }
 

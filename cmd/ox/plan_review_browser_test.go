@@ -295,7 +295,7 @@ func TestBrowser_UnsentMarkSurvivesReconnect(t *testing.T) {
 		chromedp.Reload(),
 		chromedp.WaitVisible(".rev-toggle", chromedp.ByQuery),
 		chromedp.Text(".rev-count", &unsentAfter, chromedp.ByQuery),
-		chromedp.Evaluate(`(localStorage.getItem('ox-plan-fb:'+(document.body.getAttribute('data-slug')||''))||'')`, &draftAfter),
+		chromedp.Evaluate(jsMarks, &draftAfter),
 	); err != nil {
 		t.Fatalf("reload after reconnect failed: %v", err)
 	}
@@ -1493,4 +1493,55 @@ func waitForOneRound(t *testing.T, planDir string, within time.Duration) planrev
 	}
 	t.Fatalf("browser Submit never reached the ledger (last read failures: %+v)", last.Failures)
 	return planreview.Item{}
+}
+
+// TestBrowser_ReopenedHighlightKeepsItsWords proves a reopen names what it
+// reopens: Avery addressed Devon's highlight, Devon reopens it on the page
+// with a note, and the item that returns to Avery quotes the highlighted
+// words, in their section, under Devon's name. Failure prevented: the reopened
+// highlight reaches the agent as a bare anchor, which nothing can turn back
+// into the words it was about.
+func TestBrowser_ReopenedHighlightKeepsItsWords(t *testing.T) {
+	ctx := frameBrowser(t)
+	gitRoot := newPlanStatusTestRepo(t)
+	md := "# Reopen\n\nShip it.\n\n## Risks\n\nThe retry path can double-fire under load.\n\n## Rollout\n\nShip behind a flag.\n"
+	dir, _, err := plan.Save(gitRoot, plan.Input{Raw: md}, plan.Result{}, nil, plan.Meta{Topic: "Reopen", Slug: "reopen"})
+	if err != nil {
+		t.Fatalf("save plan: %v", err)
+	}
+	const phrase = "double-fire under load"
+	anchor := "q" + strings.TrimPrefix(planreview.AnchorFor("Risks", phrase), "h")
+	roundForTest(t, dir, time.Now(), planreview.Item{Anchor: anchor, Section: "Risks", Label: phrase, Quote: phrase, Status: planreview.StatusRequestChange, Note: "why twice?"})
+	resolveForTest(t, dir, anchor, planreview.StateAddressed, "done")
+	base, planDir, _ := serveSavedPlanReview(t, gitRoot, "reopen", dir)
+	openReviewer(t, ctx, base)
+
+	var words struct{ X1, Y1, X2, Y2 float64 }
+	if err := chromedp.Run(ctx,
+		chromedp.Click(".rev-toggle", chromedp.ByQuery),
+		chromedp.Evaluate(fmt.Sprintf(phraseBox, "section#sec-1", phrase), &words),
+	); err != nil {
+		t.Fatalf("enter review mode: %v", err)
+	}
+	if err := chromedp.Run(ctx,
+		chromedp.MouseClickXY((words.X1+words.X2)/2, words.Y1),
+		chromedp.WaitVisible(".rev-pop .rev-reopen", chromedp.ByQuery),
+		chromedp.SendKeys(".rev-pop .rev-note", "still fires twice", chromedp.ByQuery),
+		chromedp.Click(".rev-pop .rev-reopen", chromedp.ByQuery),
+	); err != nil {
+		t.Fatalf("reopen the addressed highlight: %v", err)
+	}
+
+	var it plan.MergedItem
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline) && it.Anchor == ""; time.Sleep(100 * time.Millisecond) {
+		if res, done := awaitSnapshot(planDir); done && len(res.Open) == 1 {
+			it = res.Open[0]
+		}
+	}
+	if it.Quote != phrase || it.Section != "Risks" || it.Note != "still fires twice" || it.Reviewer != "Devon" {
+		t.Fatalf("the reopened highlight must return to Avery with its words, section and Devon's note: %+v", it)
+	}
+	if d := plan.FeedbackDigest(plan.ReadReview(planDir).Items); !strings.Contains(d, "“"+phrase+"”") {
+		t.Fatalf("the agent's digest must quote the reopened highlight's words:\n%s", d)
+	}
 }

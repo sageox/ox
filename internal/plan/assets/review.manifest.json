@@ -1,10 +1,10 @@
 {
   "package": "@sageox/plan-review",
-  "version": "0.2.0",
-  "protocol": 1,
-  "source_sha256": "49b3090779bc121889f2237dcc1d8952bddb762ebc90e028f5749f9208254efb",
+  "version": "0.3.0",
+  "protocol": 2,
+  "source_sha256": "72285027cf81d68a83222cf2198d20d19f7a37ecc1fd6ee2d9da21bd29d8ac8b",
   "files": {
-    "review.css": "c06ef083748d4054810db148c3dc76755f7ce1fcfcd6db48797329343fbeee1a",
-    "review.js": "1553a40bef39e5e2f5a69247f66ec0def65feec5fdadb2ce65c052995c5dcaf8"
+    "review.css": "8a3f1570427c508addfe54bd06c13c592215cd619b8299ae1a1187e012123730",
+    "review.js": "a0588369bbea0630256155defacd61a18be4aa74e3a54c5391e78cd2684aab88"
   }
 }

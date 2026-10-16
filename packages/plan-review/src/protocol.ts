@@ -11,8 +11,8 @@
 // So a paint names what to mark and how, never who marked it or what they
 // wrote.
 
-/** Version of these messages and of the review requests the package sends. */
-export const PROTOCOL = 1;
+/** Version of these messages and of the review requests the package freezes. */
+export const PROTOCOL = 2;
 
 export type Status = 'approve' | 'request-change' | 'flag' | 'comment';
 export type State = 'open' | 'addressed' | 'verified' | 'wontfix';
@@ -79,7 +79,8 @@ const MAX_TEXT = 65536; // UTF-16 units in any one string
 const MAX_ITEMS = 10000;
 // what the document tools compute and can place: "h" or "q" plus eight hex digits
 const ANCHOR = /^[hq][0-9a-f]{8}$/;
-const STATUSES = ['approve', 'request-change', 'flag', 'comment'];
+/** Every Status, for validating one read back from storage or a message. */
+export const STATUSES: readonly Status[] = ['approve', 'request-change', 'flag', 'comment'];
 const STATES = ['open', 'addressed', 'verified', 'wontfix'];
 const TINTS = ['sage', 'amber', 'red', 'gold', 'faint'];
 
@@ -97,7 +98,7 @@ function optText(v: unknown): boolean {
 function num(v: unknown): v is number {
   return typeof v === 'number' && isFinite(v);
 }
-function oneOf(v: unknown, list: string[]): boolean {
+function oneOf(v: unknown, list: readonly string[]): boolean {
   return typeof v === 'string' && list.indexOf(v) >= 0;
 }
 function list(v: unknown): v is unknown[] {

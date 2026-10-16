@@ -317,10 +317,7 @@ func saveReviewRecord(ctx context.Context, ledgerPath, rel, planDir string, rec 
 	if strings.HasPrefix(rec.Path, "feedback/resolutions/") {
 		kind = "resolution"
 	}
-	planKey := planIDForDir(planDir)
-	if planKey == "" {
-		planKey = filepath.Base(planDir)
-	}
+	planKey := reviewPlanKey(planDir)
 	entryPath := reviewPendingPath(ledgerPath, planKey, kind, op.ID)
 	entryFor := func(f planreview.File) reviewPending {
 		return reviewPending{PlanDir: rel, Plan: planKey, Kind: kind, ID: op.ID, Path: f.Path, SHA256: sha256Hex(f.Data), Data: f.Data}
@@ -390,6 +387,16 @@ func saveReviewRecord(ctx context.Context, ledgerPath, rel, planDir string, rec 
 		return nil
 	})
 	return e, duplicate, err
+}
+
+// reviewPlanKey names a plan's review operations, in this clone's recovery
+// entries and in the review page's drafts and outbox: its plan id, else its
+// directory, never its slug, which two plans can share.
+func reviewPlanKey(planDir string) string {
+	if id := planIDForDir(planDir); id != "" {
+		return id
+	}
+	return filepath.Base(planDir)
 }
 
 // storedRecord is the stored copy of an operation as it must be published: the

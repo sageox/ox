@@ -36,7 +36,7 @@ const frameInstance = "frame-test-0001"
 // test can click them, and when pointer input first reaches it; and it
 // navigates the frame when told to, as a hostile plan would. It is the
 // test's, not a hook in the package.
-const frameProbe = `<script>document.addEventListener('mousemove',function m(){document.removeEventListener('mousemove',m,true);parent.postMessage({input:true},'*')},true);
+const frameProbe = `<script>new MutationObserver(function(){parent.postMessage({revOn:document.body.classList.contains('rev-on')},'*')}).observe(document.body,{attributes:true});document.addEventListener('mousemove',function m(){document.removeEventListener('mousemove',m,true);parent.postMessage({input:true},'*')},true);
 window.addEventListener('message',function(e){if(e.source===parent&&e.data&&e.data.navigate)location.href=e.data.navigate});window.addEventListener('load',function(){var p={origin:self.origin,bar:!!document.querySelector('.rev-bar'),rects:{}};
 try{localStorage.length;p.storage='allowed'}catch(e){p.storage='denied'}
 function box(r){return{x:r.left+r.width/2,y:r.top+r.height/2,left:r.left,right:r.right}}
@@ -51,6 +51,21 @@ parent.postMessage({probe:p},'*')})</script>`
 // accepts in window.got, and exposes window.send.
 func serveFramedPlan(t *testing.T, doc []byte) string {
 	t.Helper()
+	host := `<!doctype html><html><body style="margin:0">` +
+		`<iframe id="doc" sandbox="allow-scripts" style="position:absolute;left:0;top:0;width:1000px;height:1000px;border:0"></iframe>` +
+		`<script type="module">import { connectFrame } from '/index.js';` +
+		`const frame = document.getElementById('doc'); const port = connectFrame(frame, '` + frameInstance + `');` +
+		`window.got = []; port.listen((m) => window.got.push(m)); window.send = (m) => port.send(m);` +
+		`window.leaks = []; window.addEventListener('message', (e) => { const d = e.data || {}; if (d.probe) window.probe = d.probe; if (d.input) window.input = true;` +
+		` if (d.evil) window.evil = true; if (d.pong) window.pong = true; if (d.leak) window.leaks.push(d.leak); });` +
+		`frame.src = '/doc';</script></body></html>`
+	return serveFrameHost(t, doc, host)
+}
+
+// serveFrameHost serves host at /, the npm build's index.js and host.css, and
+// at /doc the plan doc with the document tools injected, under frameCSP.
+func serveFrameHost(t *testing.T, doc []byte, host string) string {
+	t.Helper()
 	dist := filepath.Join(packageDir, "..", "..", "packages", "plan-review", "dist")
 	script, err := os.ReadFile(filepath.Join(dist, "document-tools.iife.js"))
 	if err != nil {
@@ -59,6 +74,10 @@ func serveFramedPlan(t *testing.T, doc []byte) string {
 	index, err := os.ReadFile(filepath.Join(dist, "index.js"))
 	if err != nil {
 		t.Fatalf("read dist/index.js: %v", err)
+	}
+	css, err := os.ReadFile(filepath.Join(dist, "host.css"))
+	if err != nil {
+		t.Fatalf("read dist/host.css: %v", err)
 	}
 	injected := strings.Replace(string(doc), "</body>",
 		`<script data-instance="`+frameInstance+`">`+string(script)+`</script>`+frameProbe+"</body>", 1)
@@ -70,17 +89,9 @@ func serveFramedPlan(t *testing.T, doc []byte) string {
 	evil := `<!doctype html><html><body><script>var i=location.hash.slice(3),c=new MessageChannel();` +
 		`c.port1.onmessage=function(e){parent.postMessage({leak:e.data},'*')};` +
 		`window.addEventListener('message',function(e){parent.postMessage(e.data&&e.data.ping?{pong:true}:{leak:e.data},'*')});` +
-		`parent.postMessage({ox:'review',v:1,instance:i,type:'ready'},'*',[c.port2]);` +
-		`parent.postMessage({ox:'review',v:1,instance:i,type:'target',target:{anchor:'h00000000',section:'',label:'forged',rect:{left:1,bottom:1}}},'*');` +
+		`parent.postMessage({ox:'review',v:2,instance:i,type:'ready'},'*',[c.port2]);` +
+		`parent.postMessage({ox:'review',v:2,instance:i,type:'target',target:{anchor:'h00000000',section:'',label:'forged',rect:{left:1,bottom:1}}},'*');` +
 		`parent.postMessage({evil:true},'*')</script></body></html>`
-	host := `<!doctype html><html><body style="margin:0">` +
-		`<iframe id="doc" sandbox="allow-scripts" style="position:absolute;left:0;top:0;width:1000px;height:1000px;border:0"></iframe>` +
-		`<script type="module">import { connectFrame } from '/index.js';` +
-		`const frame = document.getElementById('doc'); const port = connectFrame(frame, '` + frameInstance + `');` +
-		`window.got = []; port.listen((m) => window.got.push(m)); window.send = (m) => port.send(m);` +
-		`window.leaks = []; window.addEventListener('message', (e) => { const d = e.data || {}; if (d.probe) window.probe = d.probe; if (d.input) window.input = true;` +
-		` if (d.evil) window.evil = true; if (d.pong) window.pong = true; if (d.leak) window.leaks.push(d.leak); });` +
-		`frame.src = '/doc';</script></body></html>`
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -90,6 +101,10 @@ func serveFramedPlan(t *testing.T, doc []byte) string {
 	mux.HandleFunc("/index.js", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/javascript")
 		_, _ = w.Write(index)
+	})
+	mux.HandleFunc("/host.css", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/css")
+		_, _ = w.Write(css)
 	})
 	mux.HandleFunc("/evil", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -377,5 +392,167 @@ func TestBrowser_NavigatedFrameIsNotHeard(t *testing.T) {
 	}
 	if leaks != `[]` {
 		t.Errorf("the page the frame navigated to received the host's messages: %s", leaks)
+	}
+}
+
+// TestBrowser_HostControlsAroundAFramedPlan mounts the package's review
+// controls in a host page around a plan framed in an opaque origin, as a
+// hosted viewer does, with a transport that stands in for the host's server.
+// Devon presses r inside the plan and review mode turns on in the host; his
+// click inside the plan opens the composer in the host, below the click; his
+// notes are kept under his account, and each Submit freezes them and sends
+// them as his. While they wait for the server, Avery signs in on the same
+// browser: she sees none of it and sends none of it, even when she signs in
+// while one of Devon's operations is in flight. When Devon is back, his
+// operations go out with the bytes they were frozen with, and clear.
+// Failure prevented: the shared controls only work in ox's own page, keys
+// pressed in the plan are lost, or a reviewer's queued feedback is shown to or
+// sent as whoever signs in next.
+func TestBrowser_HostControlsAroundAFramedPlan(t *testing.T) {
+	ctx := frameBrowser(t)
+	md := "# Framed\n\nShip the fix this week.\n\n## Risks\n\nThe retry path can double-fire under load.\n\n- Retry budget is three\n- Backoff doubles\n"
+	page, err := plan.RenderHTMLOpts(plan.Parse(md), plan.Result{}, plan.RenderOptions{Slug: "framed"})
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	page = []byte(strings.NewReplacer("<li>Retry budget is three</li>", `<li data-probe="item">Retry budget is three</li>`,
+		"<li>Backoff doubles</li>", `<li data-probe="item2">Backoff doubles</li>`).Replace(string(page)))
+	// the frame sits away from the page's corner, so the composer must add its offset
+	const left, top = 40, 60
+	// window.answer picks the stand-in server's reply; 'hold' keeps the send
+	// in flight until window.release(reply)
+	host := `<!doctype html><html><head><link rel="stylesheet" href="/host.css"></head><body style="margin:0">` +
+		fmt.Sprintf(`<iframe id="doc" sandbox="allow-scripts" style="position:absolute;left:%dpx;top:%dpx;width:1000px;height:900px;border:0"></iframe>`, left, top) +
+		`<script type="module">import { connectFrame, mountHostControls } from '/index.js';` +
+		`const frame = document.getElementById('doc'); const port = connectFrame(frame, '` + frameInstance + `');` +
+		`window.sent = []; window.answer = 'offline';` +
+		`const reply = (op, a) => a === 'owned' ? { state: 'owned', id: op.id, synced: true } : { state: 'offline' };` +
+		`const transport = { send: (op) => { window.sent.push(op); if (window.answer !== 'hold') return Promise.resolve(reply(op, window.answer));` +
+		` return new Promise((done) => { window.release = (a) => done(reply(op, a)); }); } };` +
+		`window.mount = (account, reviewer) => mountHostControls(port, { account, plan: 'pln_framed', slug: 'framed', committed: [], transport, reviewer, frame });` +
+		`window.controls = window.mount('acct-devon', 'Devon');` +
+		`window.addEventListener('message', (e) => { const d = e.data || {}; if (d.probe) window.probe = d.probe; if (d.input) window.input = true; if ('revOn' in d) window.frameOn = d.revOn; });` +
+		`frame.src = '/doc';</script></body></html>`
+	base := serveFrameHost(t, page, host)
+
+	var probe struct {
+		Rects map[string]struct{ X, Y float64 }
+	}
+	var probeJSON string
+	if err := chromedp.Run(ctx, chromedp.Navigate(base), chromedp.Poll(`window.probe && JSON.stringify(window.probe)`, &probeJSON, chromedp.WithPollingTimeout(10*time.Second))); err != nil {
+		t.Fatalf("load the framed plan: %v", err)
+	}
+	if err := json.Unmarshal([]byte(probeJSON), &probe); err != nil {
+		t.Fatalf("decode probe: %v", err)
+	}
+	x, y := probe.Rects["item"].X+left, probe.Rects["item"].Y+top
+	var reached bool
+	for deadline := time.Now().Add(10 * time.Second); !reached && time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+		if err := chromedp.Run(ctx, chromedp.MouseEvent("mouseMoved", x, y), chromedp.Evaluate(`!!window.input`, &reached)); err != nil {
+			t.Fatalf("move over the frame: %v", err)
+		}
+	}
+	if !reached {
+		t.Fatal("pointer input never reached the framed page")
+	}
+
+	// r pressed inside the plan turns review mode on in the host
+	if err := chromedp.Run(ctx, chromedp.MouseClickXY(x, y), chromedp.KeyEvent("r")); err != nil {
+		t.Fatalf("press r in the frame: %v", err)
+	}
+	// the frame's own report: Chrome can deliver the next click before the host's message
+	if !waitJS(ctx, `document.querySelector('.rev-toggle').textContent==='Exit review'&&window.frameOn===true`, 5*time.Second) {
+		t.Fatal("r pressed inside the framed plan must turn review mode on in the host and in the plan")
+	}
+	// a click inside the plan opens the composer in the host, just below it
+	var popTop, popLeft float64
+	if err := chromedp.Run(ctx,
+		chromedp.MouseClickXY(x, y),
+		chromedp.WaitVisible(".rev-pop .rev-save", chromedp.ByQuery),
+		chromedp.Evaluate(`document.querySelector('.rev-pop').getBoundingClientRect().top`, &popTop),
+		chromedp.Evaluate(`document.querySelector('.rev-pop').getBoundingClientRect().left`, &popLeft),
+		chromedp.SendKeys(".rev-pop .rev-note", "bound the budget", chromedp.ByQuery),
+		chromedp.Click(".rev-pop .rev-save", chromedp.ByQuery),
+	); err != nil {
+		t.Fatalf("mark the item from the host: %v", err)
+	}
+	if popTop < y+4 || popTop > y+12 || popLeft < x-2 || popLeft > x+2 {
+		t.Fatalf("the composer must open just below the click in the host's coordinates (%v,%v), opened at (%v,%v)", x, y, popLeft, popTop)
+	}
+	anchor := planreview.AnchorFor("Risks", "Retry budget is three")
+	if !waitJS(ctx, `localStorage.getItem('ox-review:acct-devon:pln_framed:draft:`+anchor+`')`, 5*time.Second) {
+		t.Fatal("Devon's note must be stored under his account and the plan")
+	}
+
+	// Submit freezes it and sends it as Devon; the server is unreachable. A
+	// second note's Submit waits behind the first.
+	if err := chromedp.Run(ctx, chromedp.Click(".rev-submit", chromedp.ByQuery)); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	if !waitJS(ctx, `window.sent.length===1&&!!document.querySelector('.rev-offline-bar')`, 5*time.Second) {
+		t.Fatalf("Submit must send once and say the server is offline, sent=%s", evalString(t, ctx, `JSON.stringify(window.sent)`))
+	}
+	first := evalString(t, ctx, `JSON.stringify(window.sent[0])`)
+	if !strings.Contains(first, `"account":"acct-devon"`) || !strings.Contains(first, "bound the budget") || strings.Contains(first, `\"reviewer\"`) {
+		t.Fatalf("the operation must go as Devon's, carrying his note and no name of its own: %s", first)
+	}
+	x2, y2 := probe.Rects["item2"].X+left, probe.Rects["item2"].Y+top
+	if err := chromedp.Run(ctx,
+		chromedp.MouseClickXY(x2, y2),
+		chromedp.WaitVisible(".rev-pop .rev-save", chromedp.ByQuery),
+		chromedp.SendKeys(".rev-pop .rev-note", "cap the backoff", chromedp.ByQuery),
+		chromedp.Click(".rev-pop .rev-save", chromedp.ByQuery),
+		chromedp.Click(".rev-submit", chromedp.ByQuery),
+	); err != nil {
+		t.Fatalf("mark and submit a second note: %v", err)
+	}
+	if !waitJS(ctx, `window.sent.length===2&&window.sent[1].id===window.sent[0].id&&Object.keys(localStorage).filter(function(k){return k.indexOf(':op:')>0}).length===2`, 5*time.Second) {
+		t.Fatalf("the second Submit must wait behind the first, sent=%s", evalString(t, ctx, `JSON.stringify(window.sent)`))
+	}
+
+	// Avery signs in on this browser: none of Devon's review is hers
+	switchTo := func(account, reviewer, answer string) {
+		t.Helper()
+		js := fmt.Sprintf(`window.answer = %q; window.controls.destroy(); window.controls = window.mount(%q, %q)`, answer, account, reviewer)
+		if err := chromedp.Run(ctx, chromedp.Evaluate(js, nil)); err != nil {
+			t.Fatalf("sign in as %s: %v", reviewer, err)
+		}
+	}
+	// a mount sends synchronously, before Evaluate returns, so no wait is needed
+	switchTo("acct-avery", "Avery", "owned")
+	if n := evalString(t, ctx, `window.sent.length`); n != "2" {
+		t.Fatalf("Avery's controls must not send Devon's queued review, sent %s", evalString(t, ctx, `JSON.stringify(window.sent)`))
+	}
+	if got := evalString(t, ctx, `document.querySelectorAll('.rev-bar').length+'/'+`+jsCount+`+'/'+((document.querySelector('.rev-rail')||{}).textContent||'')`); got != "1//" {
+		t.Fatalf("Avery must see one bar and none of Devon's drafts (bars/count/rail): %q", got)
+	}
+
+	// Devon is back, and Avery signs in again while his first operation is in
+	// flight: once it is answered, his second is not sent under her session
+	switchTo("acct-devon", "Devon", "hold")
+	if !waitJS(ctx, `window.sent.length===3`, 5*time.Second) {
+		t.Fatalf("Devon's controls must resend his first operation, sent=%s", evalString(t, ctx, `JSON.stringify(window.sent)`))
+	}
+	switchTo("acct-avery", "Avery", "owned")
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`window.release('owned')`, nil)); err != nil {
+		t.Fatalf("answer the held send: %v", err)
+	}
+	if n := evalString(t, ctx, `window.sent.length`); n != "3" {
+		t.Fatalf("controls taken down mid-delivery must send nothing more, sent %s", evalString(t, ctx, `JSON.stringify(window.sent)`))
+	}
+
+	// Devon again: his second operation goes out, and nothing of his is left
+	switchTo("acct-devon", "Devon", "owned")
+	if !waitJS(ctx, `window.sent.length===4&&`+jsCount+`===''`, 5*time.Second) {
+		t.Fatalf("Devon's queued review must go out and clear, sent=%s", evalString(t, ctx, `JSON.stringify(window.sent)`))
+	}
+	if again := evalString(t, ctx, `JSON.stringify(window.sent[2])`); again != first {
+		t.Fatalf("a resend must be the operation as frozen:\n%s\n%s", first, again)
+	}
+	if last := evalString(t, ctx, `JSON.stringify(window.sent[3])`); !strings.Contains(last, "cap the backoff") || !strings.Contains(last, `"account":"acct-devon"`) {
+		t.Fatalf("the last send must be Devon's second operation: %s", last)
+	}
+	if left := evalString(t, ctx, `Object.keys(localStorage).filter(function(k){return k.indexOf('ox-review:acct-devon:')===0}).join(',')`); left != "" {
+		t.Fatalf("owned operations must leave nothing of Devon's behind: %s", left)
 	}
 }

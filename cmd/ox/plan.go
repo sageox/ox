@@ -1357,7 +1357,7 @@ func runPlanRenderSaved(cmd *cobra.Command, slug, outPath string, open, artifact
 	for _, c := range companions {
 		companionNames = append(companionNames, c.Name)
 	}
-	htmlBytes, err := plan.RenderHTMLOpts(in, res, plan.RenderOptions{Slug: slug, Review: rev.Items, ReviewProblems: rev.Problems(), PriorArtURL: priorArtURLResolver(gitRoot), Artifact: artifact, Companions: plan.CompanionRefs(companionNames)})
+	htmlBytes, err := plan.RenderHTMLOpts(in, res, plan.RenderOptions{Slug: slug, ReviewPlan: reviewPlanKey(info.Dir), Review: rev.Items, ReviewProblems: rev.Problems(), PriorArtURL: priorArtURLResolver(gitRoot), Artifact: artifact, Companions: plan.CompanionRefs(companionNames)})
 	if err != nil {
 		return fmt.Errorf("render plan: %w", err)
 	}
@@ -1400,6 +1400,7 @@ func runPlanRenderSavedHTML(cmd *cobra.Command, gitRoot, slug string, info plan.
 	rev := plan.ReadReview(info.Dir)
 	opts := plan.RenderOptions{
 		Slug:           slug,
+		ReviewPlan:     reviewPlanKey(info.Dir),
 		Review:         rev.Items,
 		ReviewProblems: rev.Problems(),
 		PriorArtURL:    priorArtURLResolver(gitRoot),

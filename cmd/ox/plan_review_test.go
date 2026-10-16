@@ -102,7 +102,7 @@ func reviewPOST(t *testing.T, url, token, body string) int {
 }
 
 // reviewPOSTBody is reviewPOST plus the response body, for handlers (like
-// /feedback and /reopen) whose JSON carries more than the bare {"ok":true}.
+// /feedback and /accept) whose JSON carries more than the bare {"ok":true}.
 func reviewPOSTBody(t *testing.T, url, token, body string) (int, string) {
 	t.Helper()
 	req, _ := http.NewRequest(http.MethodPost, url, bytes.NewBufferString(body))
@@ -296,40 +296,33 @@ func TestReviewLoop_FeedbackEndpointTokenGated(t *testing.T) {
 	}
 }
 
-// TestReviewLoop_AcceptAndReopen verifies the human close-the-loop actions:
-// Accept writes a verified resolution; Reopen raises a new round that reopens the
-// item. Failure prevented: the human can't close or re-raise an addressed item.
-func TestReviewLoop_AcceptAndReopen(t *testing.T) {
-	dir := reviewTestPlanDir(t)
-	srv, rounds, _ := newTestReviewServer(t, dir)
+// acceptBody is the request the review page's outbox freezes for an Accept.
+const acceptBody = `{"id":"accept-0001","reviewer":"Devon","anchor":"h1","state":"verified","note":"accepted by reviewer"}`
 
-	if code := reviewPOST(t, srv.URL+"/accept", "secret", `{"anchor":"h1"}`); code != http.StatusOK {
-		t.Fatalf("accept should be 200, got %d", code)
+// TestReviewLoop_AcceptIsStoredOnce verifies an Accept stores the reviewer's
+// verified resolution under the page's operation id, once however often it is
+// resent. Failure prevented: a retried Accept whose answer was lost stores a
+// second resolution.
+func TestReviewLoop_AcceptIsStoredOnce(t *testing.T) {
+	dir := reviewTestPlanDir(t)
+	srv, _, _ := newTestReviewServer(t, dir)
+
+	for _, wantDuplicate := range []bool{false, true} {
+		code, body := reviewPOSTBody(t, srv.URL+"/accept", "secret", acceptBody)
+		if code != http.StatusOK {
+			t.Fatalf("accept: %d %s", code, body)
+		}
+		if r := decodeReviewResp(t, body); r.ResolutionID == nil || *r.ResolutionID != "accept-0001" || r.Duplicate == nil || *r.Duplicate != wantDuplicate {
+			t.Fatalf("accept answered %s, want resolution_id accept-0001 and duplicate %v", body, wantDuplicate)
+		}
 	}
 	files, _ := filepath.Glob(filepath.Join(dir, "feedback", "resolutions", "*.json"))
 	var res planreview.Resolution
 	if len(files) != 1 {
-		t.Fatalf("accept must store one resolution record, got %v", files)
+		t.Fatalf("a resent accept must store one resolution record, got %v", files)
 	}
-	if b, err := os.ReadFile(files[0]); err != nil || json.Unmarshal(b, &res) != nil || res.State != planreview.StateVerified || res.Anchor != "h1" {
-		t.Errorf("accept must store a verified resolution, got %+v (err %v)", res, err)
-	}
-
-	if code := reviewPOST(t, srv.URL+"/reopen", "secret", `{"anchor":"h1","note":"still broken"}`); code != http.StatusOK {
-		t.Fatalf("reopen should be 200, got %d", code)
-	}
-	select {
-	case <-rounds:
-	default:
-		t.Error("reopen must signal a round")
-	}
-	rev := plan.ReadReview(dir)
-	if len(rev.Rounds) != 1 || rev.Rounds[0].Items[0].Status != planreview.StatusRequestChange {
-		t.Errorf("reopen must raise a request-change round, got %+v", rev.Rounds)
-	}
-	// merged view: the item is open again (re-raised after the resolution)
-	if items := rev.Items; len(items) != 1 || !items[0].Open {
-		t.Errorf("re-raised item must be open, got %+v", items)
+	if b, err := os.ReadFile(files[0]); err != nil || json.Unmarshal(b, &res) != nil || res.State != planreview.StateVerified || res.Anchor != "h1" || res.Reviewer != "Devon" {
+		t.Errorf("accept must store Devon's verified resolution, got %+v (err %v)", res, err)
 	}
 }
 
@@ -403,20 +396,27 @@ func TestReviewLoop_RejectsBadJSON(t *testing.T) {
 	}
 }
 
-// TestReviewLoop_MissingAnchorIsBadRequest verifies /accept and /reopen both
-// reject a body with no anchor as 400, not a panic or a silent no-op.
-func TestReviewLoop_MissingAnchorIsBadRequest(t *testing.T) {
+// TestReviewLoop_AcceptRefusesWhatAReviewerCannotSend: an accept needs an
+// anchor and an operation id, and a reviewer may only verify an item, never
+// mark it addressed or won't-fix. Failure prevented: a retry that cannot be
+// recognized stores a second resolution, or the page closes items as the
+// author would.
+func TestReviewLoop_AcceptRefusesWhatAReviewerCannotSend(t *testing.T) {
 	dir := t.TempDir()
 	srv, _, _ := newTestReviewServer(t, dir)
-	for _, path := range []string{"/accept", "/reopen"} {
-		if code := reviewPOST(t, srv.URL+path, "secret", "{}"); code != http.StatusBadRequest {
-			t.Errorf("%s with no anchor should be 400, got %d", path, code)
+	for _, body := range []string{
+		`{}`,
+		`{"anchor":"h1","state":"verified"}`,
+		`{"id":"accept-0001","anchor":"h1","state":"addressed"}`,
+	} {
+		if code := reviewPOST(t, srv.URL+"/accept", "secret", body); code != http.StatusBadRequest {
+			t.Errorf("accept %s should be 400, got %d", body, code)
 		}
 	}
 }
 
-// TestReviewLoop_WritesSurfaceSaveFailure verifies /feedback, /reopen and
-// /accept report 500 — not a false 200 — when the record cannot be written,
+// TestReviewLoop_WritesSurfaceSaveFailure verifies /feedback and /accept
+// report 500 — not a false 200 — when the record cannot be written,
 // and leave no recovery entry behind, so a human is never told a review was
 // saved when it wasn't.
 func TestReviewLoop_WritesSurfaceSaveFailure(t *testing.T) {
@@ -430,8 +430,7 @@ func TestReviewLoop_WritesSurfaceSaveFailure(t *testing.T) {
 	srv, _, _ := newTestReviewServer(t, dir)
 	for path, body := range map[string]string{
 		"/feedback": `{"id":"round-0001","items":[{"anchor":"h1","status":"comment"}]}`,
-		"/reopen":   `{"anchor":"h1"}`,
-		"/accept":   `{"anchor":"h1"}`,
+		"/accept":   acceptBody,
 	} {
 		if code := reviewPOST(t, srv.URL+path, "secret", body); code != http.StatusInternalServerError {
 			t.Errorf("%s with a blocked feedback dir should be 500, got %d", path, code)
@@ -507,18 +506,6 @@ func TestReviewLoop_FeedbackEnqueuesAuthorTask(t *testing.T) {
 	}
 }
 
-// TestReviewLoop_ReopenEnqueuesAuthorTask verifies reopening an item ALSO
-// re-notifies — feedback raised after the coworker's session ended must not strand.
-func TestReviewLoop_ReopenEnqueuesAuthorTask(t *testing.T) {
-	srv, gitRoot, _ := newNotifyingReviewServer(t)
-	if code := reviewPOST(t, srv.URL+"/reopen", "secret", `{"anchor":"h1","note":"again"}`); code != http.StatusOK {
-		t.Fatalf("reopen: %d", code)
-	}
-	if n := len(activeTasks(t, gitRoot)); n != 1 {
-		t.Errorf("reopen must enqueue a notify task, got %d", n)
-	}
-}
-
 // TestReviewLoop_FeedbackPersistsWhenNotifyIsNoop verifies the round is saved and
 // signaled even when there's no authoring coworker to notify (an unlinked plan):
 // the ledger write (step N-1) survives the notify (step N) being a no-op.
@@ -564,7 +551,7 @@ func TestReviewLoop_FeedbackReportsNotifiedTrueOnSuccess(t *testing.T) {
 }
 
 // TestReviewLoop_FeedbackReportsNotifiedFalseOnEnqueueFailure verifies the
-// /feedback and /reopen responses tell the browser when the authoring
+// /feedback response tells the browser when the authoring
 // coworker could NOT be notified, so the review page can warn the human
 // instead of looking like the loop is fully closed.
 // Failure prevented: a human submits feedback, the round is saved, the
@@ -596,14 +583,6 @@ func TestReviewLoop_FeedbackReportsNotifiedFalseOnEnqueueFailure(t *testing.T) {
 	}
 	if sets := plan.ReadReview(planDir).Rounds; len(sets) != 1 {
 		t.Errorf("the round must still persist even though notify failed, got %d", len(sets))
-	}
-
-	code, body = reviewPOSTBody(t, srv.URL+"/reopen", "secret", `{"anchor":"h1","note":"again"}`)
-	if code != http.StatusOK {
-		t.Fatalf("reopen: %d", code)
-	}
-	if !strings.Contains(body, `"notified":false`) {
-		t.Errorf("reopen response must report notified:false when enqueue fails, got %q", body)
 	}
 }
 

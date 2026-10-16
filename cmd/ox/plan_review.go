@@ -198,7 +198,7 @@ func runPlanReview(cmd *cobra.Command, slug string, noServe bool, idleTimeout ti
 			printPlanReviewDigest(cmd, info.Dir)
 			idle.Reset(idleTimeout) // idle, not total: a live session can run long
 		case <-activity:
-			// any accepted POST (accept/reopen too, not just rounds) is a
+			// any accepted POST (an accept too, not just rounds) is a
 			// reviewer at work — never close the loop under them
 			idle.Reset(idleTimeout)
 		case <-approved:
@@ -251,7 +251,7 @@ func reportReviewSession(planDir string, since time.Time, ending string) {
 }
 
 // liveReviewHandler serves the plan (re-rendered live from the ledger on every
-// GET, so reloads show the latest state) and the round/accept/reopen/approve
+// GET, so reloads show the latest state) and the round/accept/approve
 // endpoints, plus an SSE stream that pushes reloads.
 func liveReviewHandler(gitRoot, slug, planDir, base, token string, bc *broadcaster, rounds chan<- int, approved chan<- struct{}) http.Handler {
 	return liveReviewHandlerWithActivity(gitRoot, slug, planDir, base, token, bc, rounds, approved, nil)
@@ -263,9 +263,8 @@ func liveReviewHandler(gitRoot, slug, planDir, base, token string, bc *broadcast
 // truncated round would fail to parse and surface as a misleading 400.
 const reviewBodyLimit = 1 << 20
 
-// notifyReviewFeedback is the agent-notification leg of /feedback and
-// /reopen, a variable so tests can count notifications without a real task
-// queue.
+// notifyReviewFeedback is the agent-notification leg of /feedback, a
+// variable so tests can count notifications without a real task queue.
 var notifyReviewFeedback = enqueuePlanFeedbackTask
 
 // liveReviewHandlerWithActivity is liveReviewHandler plus an activity signal:
@@ -473,75 +472,30 @@ func liveReviewHandlerWithActivity(gitRoot, slug, planDir, base, token string, b
 		return resp, 0, nil
 	})
 
+	// /accept: the reviewer verifies an item the author addressed. The body is
+	// the frozen resolution request the page's outbox minted its id for, so a
+	// retry is the same operation; a reviewer may only verify, never mark an
+	// item addressed or won't-fix. A reopen is a round, sent to /feedback.
+	// Response: {"saved","resolution_id","duplicate","committed","pushed"}.
 	post("/accept", func(ctx context.Context, body []byte) (map[string]any, int, error) {
-		anchor, err := anchorFromBody(body)
+		q, err := planreview.ParseResolutionRequest(body)
 		if err != nil {
 			return nil, http.StatusBadRequest, err
 		}
-		rec, err := newResolutionRecord(anchor, planreview.StateVerified, "", "accepted by reviewer", time.Now())
+		if q.State != planreview.StateVerified {
+			return nil, http.StatusBadRequest, fmt.Errorf("a reviewer can only verify an item, not mark it %q", q.State)
+		}
+		rec, err := q.Record(q.Reviewer, time.Now())
 		if err != nil {
 			return nil, http.StatusBadRequest, err
 		}
-		st, _, err := publishReviewRecord(ctx, gitRoot, planDir, rec)
-		if err != nil {
-			return nil, reviewWriteErrorCode(err), err
-		}
-		return planCommitFields(st), 0, nil
-	})
-
-	post("/reopen", func(ctx context.Context, body []byte) (map[string]any, int, error) {
-		var in struct {
-			Anchor string `json:"anchor"`
-			Note   string `json:"note"`
-		}
-		if err := json.Unmarshal(body, &in); err != nil || in.Anchor == "" {
-			return nil, http.StatusBadRequest, fmt.Errorf("reopen needs an anchor")
-		}
-		note := in.Note
-		if note == "" {
-			note = "reopened by reviewer"
-		}
-		item := planreview.Item{Anchor: in.Anchor, Status: planreview.StatusRequestChange, Note: note}
-		// carry what is being reopened — its section, label, and a highlight's
-		// words — or the agent's digest names it by anchor alone, and a
-		// highlight's anchor cannot be turned back into its words
-		for _, p := range plan.ReadReview(planDir).Items {
-			if p.Anchor == in.Anchor && (p.Label != "" || p.Quote != "") {
-				item.Section, item.Label, item.Quote = p.Section, p.Label, p.Quote
-				break
-			}
-		}
-		id, err := randomToken()
-		if err != nil {
-			return nil, http.StatusInternalServerError, err
-		}
-		frozen, err := json.Marshal(struct {
-			ID    string            `json:"id"`
-			Items []planreview.Item `json:"items"`
-		}{id, []planreview.Item{item}})
-		if err != nil {
-			return nil, http.StatusInternalServerError, err
-		}
-		q, err := planreview.ParseRoundRequest(frozen)
-		if err != nil {
-			return nil, http.StatusBadRequest, err
-		}
-		rec, err := q.Record(slug, "", time.Now())
-		if err != nil {
-			return nil, http.StatusBadRequest, err
-		}
-		st, _, err := publishReviewRecord(ctx, gitRoot, planDir, rec)
+		st, receipt, err := publishReviewRecord(ctx, gitRoot, planDir, rec)
 		if err != nil {
 			return nil, reviewWriteErrorCode(err), err
 		}
 		resp := planCommitFields(st)
-		// a reopen is a fresh open item — re-notify, so feedback isn't stranded if
-		// the authoring coworker's session already ended between rounds.
-		resp["notified"] = notifyReviewFeedback(gitRoot, planDir, slug, 1) == nil
-		select {
-		case rounds <- 1:
-		default:
-		}
+		resp["resolution_id"] = q.ID
+		resp["duplicate"] = receipt.State == planreview.ReceiptAlreadyPublished
 		return resp, 0, nil
 	})
 
@@ -595,6 +549,7 @@ func renderLive(gitRoot, slug, base, token string) ([]byte, error) {
 // not mark primary, while continuing to regenerate known markdown projections.
 func renderSavedReviewPage(gitRoot, slug, planDir string, in plan.Input, res plan.Result, rev plan.Review, opts plan.RenderOptions) ([]byte, error) {
 	opts.Slug = slug
+	opts.ReviewPlan = reviewPlanKey(planDir)
 	opts.Review = rev.Items
 	opts.ReviewProblems = rev.Problems()
 	opts.PriorArtURL = priorArtURLResolver(gitRoot)
@@ -614,16 +569,6 @@ func renderSavedReviewPage(gitRoot, slug, planDir string, in plan.Input, res pla
 		opts.Companions = plan.CompanionRefs(meta.Companions)
 	}
 	return plan.RenderHTMLOpts(in, res, opts)
-}
-
-func anchorFromBody(body []byte) (string, error) {
-	var in struct {
-		Anchor string `json:"anchor"`
-	}
-	if err := json.Unmarshal(body, &in); err != nil || in.Anchor == "" {
-		return "", fmt.Errorf("missing anchor")
-	}
-	return in.Anchor, nil
 }
 
 // reviewWriteErrorCode is the status for a review write that saved nothing: a

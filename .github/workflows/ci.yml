@@ -499,17 +499,19 @@ jobs:
         with:
           go-version-file: 'go.mod'
 
-      # The built document tools in real Chrome, against the anchors Go
-      # computes for the same pages (pkg/planreview/testdata/anchors.json).
-      # These tests skip without Chrome or dist/, so a skip has to fail here.
-      - name: Document tools anchor what Go anchors
+      # The built package in real Chrome: the document tools against the
+      # anchors Go computes for the same pages
+      # (pkg/planreview/testdata/anchors.json), and the review controls and
+      # outbox, on ox's page and around a framed plan. These tests skip
+      # without Chrome or dist/, so a skip has to fail here.
+      - name: Document tools anchor what Go anchors; the outbox sends once
         shell: bash
         env:
           # no session bus on the runner: Chrome fails fast instead of waiting on one
           DBUS_SESSION_BUS_ADDRESS: /dev/null
         run: |
-          go test -tags=browser -count=1 -v -run 'TestBrowser_(DocumentToolsMatchSharedPageVectors|DocumentToolsAnchorADiagramOnceItDraws|ReviewClicksWaitForDiagrams)$' ./cmd/ox/ | tee browser.log
-          test "$(grep -c -E '^--- PASS: TestBrowser_(DocumentTools|ReviewClicksWaitForDiagrams)' browser.log)" -eq 3
+          go test -tags=browser -count=1 -v -run 'TestBrowser_(DocumentToolsMatchSharedPageVectors|DocumentToolsAnchorADiagramOnceItDraws|ReviewClicksWaitForDiagrams|HostControlsAroundAFramedPlan|UnstorableReviewIsNeverSent|LostAnswerAndAnEditDuringSendDeliverOnce|TwoTabsKeepEachOthersMarks|ReopenedHighlightKeepsItsWords)$' ./cmd/ox/ | tee browser.log
+          test "$(grep -c -E '^--- PASS: TestBrowser_' browser.log)" -eq 8
 
   # The skill installer is the one subsystem where Windows is a first-class
   # target rather than an aspiration: copy materialization IS what Windows gets,

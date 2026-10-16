@@ -299,7 +299,7 @@ style was needed.
 denied. A host instead injects the package's document tools, which need no
 storage and talk to the host by `postMessage`
 (`TestBrowser_DocumentToolsInOpaqueFrame` in `cmd/ox`). Drafts and the outbox
-for hosted review live in the host (#1291).
+live in the host's review controls, `mountHostControls` (#1291).
 
 ## 7. Released readers and writers
 
@@ -377,9 +377,8 @@ outside this repository is private-owner follow-up.
 
 ## 9. Not covered
 
-- **Writers, the toolbar and the outbox:** #1291, #1293. `draw.js` is a
-  prototype: it sits in the module's testdata for hosts to qualify with, and
-  no ox binary or module code runs it.
+- **Writers:** #1293. `draw.js` is a prototype: it sits in the module's
+  testdata for hosts to qualify with, and no ox binary or module code runs it.
 - **Other engines and inputs:** only Chrome on macOS and mouse input were
   exercised. `checkVisibility()` exists in current Firefox and Safari; Safari's
   canvas rules for `foreignObject` were not tested.
