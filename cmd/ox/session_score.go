@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/sageox/ox/internal/cli"
+	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/session"
 	"github.com/spf13/cobra"
 )
@@ -38,9 +39,12 @@ func init() {
 }
 
 func runSessionScore(cmd *cobra.Command, _ []string) error {
-	agentID := os.Getenv("SAGEOX_AGENT_ID")
+	// prime tells every AI coworker to run this bare command, and only Claude
+	// Code's hook can export SAGEOX_AGENT_ID into later tool calls; the resolver
+	// also reads prime's native-session marker and the agent-process PID.
+	agentID := resolveImplicitAgentID()
 	if agentID == "" {
-		return fmt.Errorf("SAGEOX_AGENT_ID not set -- run 'ox agent prime' first")
+		return errkind.Errorf(errkind.Usage, "can't tell which coding session this is: run it from the session where 'ox agent prime' ran")
 	}
 
 	if !cmd.Flags().Changed("score") {
