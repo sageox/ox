@@ -240,8 +240,11 @@ Why inline:
 Every cut (an item, a label, a clipped text) sets `context.truncated`, and View
 original says so.
 
-These sit inside the 1 MiB review request cap (`reviewBodyLimit`) and the
-Ledger contract's 8 MiB record limit (§3.6).
+Every host accepts a round request of up to 1 MiB, the CLI's
+`reviewBodyLimit`, so a round one host accepts is never refused by another. The
+stored record is indented: a 1 MiB request carrying 34 numbers-heavy drawings
+at these limits stored 4.1 MB (4.0×), inside the Ledger contract's 8 MiB record
+limit (§3.6).
 
 The attachment criterion (durable publication before references, missing-byte
 diagnostics) does not arise.
@@ -287,7 +290,9 @@ style was needed.
 - Accept a capture only if every field the host later reads is well-formed:
   path, ellipse, targets, layout, and each context item and label. It must
   also be at most 64 KiB of UTF-8.
-- Mint `id`, stamp `plan_revision` and `created_at`.
+- Mint `id` and stamp `created_at`. Stamp the `plan_revision` the frame was
+  served: a host never reads the bytes its frame loads, so it frames the plan
+  at a named revision and its server refuses any other bytes.
 - The document accepts messages only from its parent.
 - A forged capture posted from another window was ignored.
 
@@ -338,10 +343,12 @@ verified) and a build of this branch, as in the Ledger contract's section 4:
 
 The module keeps drawings intact. Its `Capture` and `Assemble` read
 `region-items` as `expect.json` says. Its writer, run on that round's items
-(`ParseRoundRequest`, then `Record`), keeps each drawing's `region`
-byte-identical in the immutable record it names
-`round-<time>-<id>.<digest>.json`. That was checked once with a throwaway test
-against the merged module, not kept.
+(`ParseRoundRequest`, then `Record`), keeps each drawing's `region` in the
+immutable record it names `round-<time>-<id>.<digest>.json`: the same JSON, not
+the same bytes. The record is indented (the first drawing grew from 1,892 bytes
+to 6,621), and `<`, `>` and `&` in strings are written as `\u003c`, `\u003e`
+and `\u0026`. That was checked with a throwaway test against the module, not
+kept.
 
 What #1293 needs from this:
 
