@@ -13,7 +13,7 @@ import { clip } from './anchor.js';
 import { CHROME, typing } from './document-tools.js';
 import type { HostPort } from './ports.js';
 import type { PaintItem, Placed, State, Status, Tint } from './protocol.js';
-import { acceptBody, deliver, newId, openStore, queued, reopenBody, submitBody, syncMessage, wireItem, type Act, type Entry, type Mark, type Receipt, type SyncMessage, type Transport } from './state.js';
+import { acceptBody, deliver, newId, openStore, queued, reopenBody, submitBody, syncMessage, wireItem, type Act, type Approval, type Entry, type Mark, type Receipt, type SyncMessage, type Transport } from './state.js';
 
 /** One committed review item, as the page's review-state island carries it (buildReviewState in internal/plan). */
 export interface CommittedItem {
@@ -30,7 +30,7 @@ export interface CommittedItem {
 export interface HostControlsOptions {
   /** The reviewer's account. Drafts and the outbox are kept per account: another account on this browser never sees or sends them. */
   account: string;
-  /** The plan under review as the host resolves it (ox: its plan id, else its directory), since two plans can share a slug. Drafts and the outbox are kept per plan. */
+  /** The plan under review as the host resolves it (ox: its directory), since two plans can share a slug. Drafts and the outbox are kept per plan. */
   plan: string;
   /** The plan's slug, shown to the reviewer and naming an exported file. */
   slug: string;
@@ -42,7 +42,7 @@ export interface HostControlsOptions {
   /** The signed-in reviewer's name. Without it the controls ask for a name, keep it in this browser and send it with each request, as ox's local review, which has no sign-in, does. */
   reviewer?: string;
   /** Stamp the plan approved: offered as the bar's Approve. */
-  approve?: () => Promise<Receipt>;
+  approve?: () => Promise<Approval>;
   /** The frame holding the plan, when the document tools run in one: target rects are in its viewport. */
   frame?: HTMLIFrameElement;
   /** How to bring the host back, shown with a copy button while it is offline. */
@@ -453,12 +453,12 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
     else showSync('warn', 'Review server offline — your feedback is queued in this browser and sends when the server is back.');
   }
   function approve() {
-    const send = opts.approve as () => Promise<Receipt>;
+    const send = opts.approve as () => Promise<Approval>;
     showSync('ask', 'Approve this plan? This stamps it approved and closes the review loop.', [
       { label: 'Approve', fn: () => {
         showSync('pending', 'Approving…');
         inflight++;
-        Promise.resolve().then(send).catch((err): Receipt => ({ state: 'failed', message: err instanceof Error ? err.message : String(err) })).then((r) => {
+        Promise.resolve().then(send).catch((err): Approval => ({ state: 'failed', message: err instanceof Error ? err.message : String(err) })).then((r) => {
           inflight--;
           if (!destroyed) {
             setOffline(r.state === 'offline');

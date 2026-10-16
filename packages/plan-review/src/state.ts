@@ -59,13 +59,16 @@ export type Receipt =
    * the record and its recovery entry are on disk. id names the operation the
    * host stored; any other id acknowledges nothing.
    */
-  | { state: 'owned'; id?: string; synced: boolean; warning?: string }
+  | { state: 'owned'; id: string; synced: boolean; warning?: string }
   /** The host refuses these exact bytes, and always will: the entry is dropped and its drafts stay. */
   | { state: 'refused'; message: string }
   /** Not stored this time: the entry stays and is sent again. */
   | { state: 'failed'; message: string }
   /** The host is unreachable: the entry stays and is sent when it is back. */
   | { state: 'offline' };
+
+/** What a host answered for an Approve, which is not an outbox operation and has no id. */
+export type Approval = { state: 'owned'; synced: boolean } | { state: 'failed'; message: string } | { state: 'offline' };
 
 /** How a host stores operations: its server, with the reviewer's credentials. */
 export interface Transport {

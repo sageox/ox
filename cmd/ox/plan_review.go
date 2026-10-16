@@ -549,7 +549,7 @@ func renderLive(gitRoot, slug, base, token string) ([]byte, error) {
 // not mark primary, while continuing to regenerate known markdown projections.
 func renderSavedReviewPage(gitRoot, slug, planDir string, in plan.Input, res plan.Result, rev plan.Review, opts plan.RenderOptions) ([]byte, error) {
 	opts.Slug = slug
-	opts.ReviewPlan = reviewPlanKey(planDir)
+	opts.ReviewPlan = filepath.Base(planDir)
 	opts.Review = rev.Items
 	opts.ReviewProblems = rev.Problems()
 	opts.PriorArtURL = priorArtURLResolver(gitRoot)

@@ -64,8 +64,8 @@ type RenderOptions struct {
 	ReviewEndpoint string
 	ReviewToken    string
 	// ReviewPlan names the plan the page keeps a reviewer's drafts and outbox
-	// under: its plan id, else its directory, since two plans can share a
-	// slug. Empty: the page keys them by Slug.
+	// under: its directory, unique in its Ledger, which also names its review
+	// server's port. Empty: the page keys them by Slug.
 	ReviewPlan string
 	// PriorArtURL resolves a prior-art source (its kind + ref/slug) to a SageOx
 	// web URL, opened in a new tab from the enrichment panel. Nil-safe: when nil

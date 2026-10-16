@@ -451,8 +451,10 @@ receipts signed by the host); this contract does not provide one.
 ox's page and in a hosted viewer (`packages/plan-review/src/state.ts`):
 
 - **Keys:** one storage key per draft and per operation, under
-  `ox-review:<account>:<plan>:` (`<plan>` as in 3.1), so tabs never rewrite
-  each other's keys and another account never sees or sends them. ox's local
+  `ox-review:<account>:<plan>:`, so tabs never rewrite each other's keys and
+  another account never sees or sends them. ox's page uses the plan's
+  directory as `<plan>`: it also names the page's port, so it holds through a
+  legacy plan's first save, which mints its plan id. ox's local
   review has no sign-in: its account is `local` and the request names the
   reviewer. A hosted viewer passes its signed-in account and stamps the
   caller itself.

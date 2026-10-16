@@ -10,7 +10,7 @@ import { clip } from './anchor.js';
 import { startDocumentTools } from './document-tools.js';
 import { mountHostControls, type CommittedItem } from './host-controls.js';
 import { localPorts } from './ports.js';
-import { migrateLegacy, openStore, type Operation, type Receipt } from './state.js';
+import { migrateLegacy, openStore, type Approval, type Operation, type Receipt } from './state.js';
 
 // ox's local review has no sign-in: one account per browser profile, and the
 // reviewer's name travels in each request.
@@ -29,7 +29,7 @@ const ACCOUNT = 'local';
   }
   const body = document.body;
   const slug = (body.getAttribute('data-slug') || document.title || 'plan').trim();
-  // the plan's id, else its directory; a page rendered without one, by slug
+  // the plan's directory; a page rendered without one, by slug
   const plan = body.getAttribute('data-review-plan') || slug;
   const base = body.getAttribute('data-review-endpoint') || ''; // live server base, else ""
   const token = body.getAttribute('data-review-token') || '';
@@ -102,7 +102,7 @@ const ACCOUNT = 'local';
       warning: d.notified === false && !d.duplicate ? 'the plan’s authoring coworker was not notified automatically — tell them directly' : undefined,
     };
   }
-  async function approve(): Promise<Receipt> {
+  async function approve(): Promise<Approval> {
     const r = await post('/approve', '{}');
     if (!r) return { state: 'offline' };
     if (!r.ok) return { state: 'failed', message: await failure(r) };
