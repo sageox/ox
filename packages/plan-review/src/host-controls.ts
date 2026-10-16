@@ -322,15 +322,16 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
 
   let pop: HTMLElement | null = null;
   function sendMode() { port.send({ type: 'mode', on, open: !!pop }); }
-  function closePop() {
+  // replacing: another note opens in its place, so a waiting reload keeps waiting
+  function closePop(replacing?: boolean) {
     if (pop) { pop.remove(); pop = null; sendMode(); }
     port.send({ type: 'focus', anchor: null });
-    idle();
+    if (!replacing) idle();
   }
   // t is what a note is about: an element or a highlight — anchor, section,
   // label, and a highlight's quote. rect is where it opens below, in this window.
   function openPop(t: About, rect: { left: number; bottom: number }) {
-    closePop();
+    closePop(true);
     const a = t.a;
     const cstate = committedState(a);
     const p = pop = document.createElement('div'); p.className = 'rev-pop';

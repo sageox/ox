@@ -884,17 +884,17 @@
     function sendMode() {
       port.send({ type: "mode", on, open: !!pop });
     }
-    function closePop() {
+    function closePop(replacing) {
       if (pop) {
         pop.remove();
         pop = null;
         sendMode();
       }
       port.send({ type: "focus", anchor: null });
-      idle();
+      if (!replacing) idle();
     }
     function openPop(t, rect) {
-      closePop();
+      closePop(true);
       const a = t.a;
       const cstate = committedState(a);
       const p = pop = document.createElement("div");

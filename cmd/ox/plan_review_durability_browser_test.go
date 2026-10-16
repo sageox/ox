@@ -350,6 +350,36 @@ func TestBrowser_LiveReloadWaitsForSubmitResult(t *testing.T) {
 	}
 }
 
+// TestBrowser_LiveReloadWaitsForTheNote: a live reload that arrives while a
+// note is open waits until the reviewer closes it, and opening another note
+// in its place does not close it. Failure prevented: the agent's re-render
+// reloads the page under the reviewer, and the note they just opened vanishes.
+func TestBrowser_LiveReloadWaitsForTheNote(t *testing.T) {
+	base, bc := serveScriptedPlanReview(t, nil, nil)
+	ctx := newChrome(t)
+	openReviewer(t, ctx, base)
+	// DOM clicks, so the second lands on its section and not on the open note
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`window.oldPage=true;document.querySelector('.rev-toggle').click();`+
+		`document.querySelector('section#sec-1').click();document.querySelector('.rev-pop').id='first'`, nil)); err != nil {
+		t.Fatalf("open a note: %v", err)
+	}
+	bc.broadcast()
+	time.Sleep(700 * time.Millisecond)
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`document.querySelector('section#sec-2').click()`, nil)); err != nil {
+		t.Fatalf("open another note: %v", err)
+	}
+	time.Sleep(700 * time.Millisecond)
+	if evalString(t, ctx, `!!window.oldPage&&!!document.querySelector('.rev-pop')&&!document.getElementById('first')`) != "true" {
+		t.Fatal("opening another note must not run the reload waiting for the first to close")
+	}
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`document.querySelector('.rev-pop .rev-save').click()`, nil)); err != nil {
+		t.Fatalf("save the note: %v", err)
+	}
+	if !waitForNewPage(ctx, `!!document.querySelector('.rev-toggle')`, 10*time.Second) {
+		t.Fatal("closing the note must run the waiting reload")
+	}
+}
+
 // TestBrowser_SyncStatusTellsTheTruth: each server outcome reads as what it
 // is, and only an answer naming the round clears it. Failure prevented: the
 // page says "sent" when the feedback only sits on the author's laptop, an
@@ -449,9 +479,9 @@ func TestBrowser_TwoTabsKeepEachOthersMarks(t *testing.T) {
 
 	markSectionJS(t, tabA, "section#sec-1", "from tab A")
 	markSectionJS(t, tabB, "section#sec-2", "from tab B")
-	stored := evalString(t, tabA, jsMarks)
-	if !strings.Contains(stored, "from tab A") || !strings.Contains(stored, "from tab B") {
-		t.Fatalf("both tabs' marks must be in storage, got %s", stored)
+	// Chrome passes one tab's storage writes to another asynchronously
+	if !waitJS(tabA, jsMarks+`.indexOf('from tab A')>=0&&`+jsMarks+`.indexOf('from tab B')>=0`, 5*time.Second) {
+		t.Fatalf("both tabs' marks must be in storage, got %s", evalString(t, tabA, jsMarks))
 	}
 	if !waitJS(tabA, jsCount+`==='2 unsent'`, 5*time.Second) {
 		t.Fatalf("tab A must pick up tab B's mark, counter=%q", evalString(t, tabA, jsCount))
@@ -464,12 +494,8 @@ func TestBrowser_TwoTabsKeepEachOthersMarks(t *testing.T) {
 		t.Fatalf("delete in tab A: ok=%v err=%v", deleted, err)
 	}
 	markSectionJS(t, tabB, "section#sec-2", " (edited)")
-	stored = evalString(t, tabB, jsMarks)
-	if strings.Contains(stored, "from tab A") {
-		t.Fatalf("a mark deleted in tab A must not be resurrected by tab B's save: %s", stored)
-	}
-	if !strings.Contains(stored, "(edited)") {
-		t.Fatalf("tab B's edit must be saved: %s", stored)
+	if !waitJS(tabB, jsMarks+`.indexOf('from tab A')<0&&`+jsMarks+`.indexOf('(edited)')>=0`, 5*time.Second) {
+		t.Fatalf("tab B's edit must be saved, and a mark deleted in tab A not resurrected by it: %s", evalString(t, tabB, jsMarks))
 	}
 
 	if err := chromedp.Run(tabA, chromedp.Evaluate(`document.querySelector('.rev-submit').click()`, nil)); err != nil {
