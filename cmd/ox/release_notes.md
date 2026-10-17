@@ -9,11 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### New
 
+- **Apps can read every ox setting from ox itself** — `ox config schema --json` lists each setting with a short label and description, the values it accepts, the levels you can set it at, and its current value. It works outside a repository, so the SageOx desktop app can show your user-level ox settings without keeping its own copy of the list.
 - **Oxy does more while Claude works** — seven new animations, and more variety in the ones you see. A test run has him swatting a bug, a push or new PR launches a rocket, a web search pops browser tabs, reads and searches get his magnifying glass, and two failed tool calls in a row end with a smashed laptop. Ordinary tool calls pick from the laptop, robot, soccer juggle, tail wag, handheld, and Mario jump, so the laptop no longer fills the whole turn.
 - **Read a Visual walkthrough as joined moments** — `ox walkthrough` pairs each click, selection and pause with what was said and what happened next, shows zoomed pictures on request, and splits long recordings into chapters you can read one at a time. Recordings without this data read as before.
 
 ### Fixed
 
+- **`ox config --help` lists the settings ox actually has** — the list is now built from the same registry `ox config set` uses. It had advertised `murmuring` and `github_sync*`, which `ox config set` rejects, and left out `murmur_send`, `murmur_receive` and eleven other settings.
 - **Review feedback is sent once, even when its answer is lost** — the review page stores each Submit, Accept and Reopen in your browser before sending it, and resends it unchanged until ox confirms it, so a dropped connection, a reload or a second tab never sends it twice. If your browser cannot store it, nothing is sent and the page says so. Accept and Reopen now record who did them.
 - **Team memory observations no longer collide with background sync** — the observation `ox agent session stop` records, and `ox memory put`, wait for a running team-context sync instead of failing or committing in the middle of it. One recorded while sync needs repair is kept and committed by the next one, instead of being deleted when the sync is undone. The daemon's team-context sparse-checkout refresh and `ox doctor --fix`'s repair of it also wait for ox's own commits, such as `ox import`'s.
 - **Marks on Mermaid diagrams stay where you put them** — the review page no longer gives a diagram a new anchor every time Mermaid draws it, waits for a diagram to finish drawing before it places your marks, and keeps them attached when the plan is revised.
