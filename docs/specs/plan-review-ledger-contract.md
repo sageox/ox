@@ -177,12 +177,10 @@ The CLI reads and writes review records only through `pkg/planreview`.
 - **Event logs merge:** `data/plans/*/events.jsonl` is `merge=union` in each
   clone's `.git/info/attributes` (`kb.MergeUnionPaths`, rewritten before every
   push and pull), so two clones' appends merge, upstream's lines first, in a
-  rebase and in an autostash re-apply. Session stop rewrites its own lines in
-  place (`BackfillSessionID`); merged with an append after them, both copies
-  of each rewritten line survive, and a copy can follow the append. A reader
-  that folds the log must take a line repeating an earlier event (same `ts`,
-  `event` and `session_name`) as that event, not a new one: `plan.Fold` sets
-  no status, topic or visibility from it.
+  rebase and in an autostash re-apply. Union is safe because no writer edits
+  a line once appended: a line carries its recording's `session_id` from the
+  start, so session stop records the session only in `meta.json`. An edited
+  line next to another clone's append would come out of the merge twice.
 
 ---
 
@@ -222,9 +220,6 @@ ended, so neither holds that lock for long. Still open:
   trusting it.
 - H5 remains only where picking a side would drop entries: `events.jsonl`
   without its union attribute, and review records.
-- An in-place rewrite of an `events.jsonl` line (`BackfillSessionID`) racing an
-  append keeps both versions of that line; readers fold the second as a
-  repeat (above).
 - H10–H12 are unchanged.
 
 **Reproductions** (real clones of one Ledger with a bare remote, publishing

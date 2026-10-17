@@ -14,9 +14,13 @@ package plan
 // fields that a concurrent writer could clobber. An append-only line per
 // event sidesteps that — nothing already on disk is ever rewritten, so two
 // processes recording events for the same plan can never lose each other's
-// history, only interleave it (and interleaving is fine: Fold is order-
-// tolerant for everything except relying on file order for CreatedAt/
-// UpdatedAt, which matches how AppendEvent actually writes).
+// history, only interleave it. Fold reads file order as event order (the last
+// status, topic or visibility wins), so two events appended at once on
+// different clones read in the order git merged them.
+//
+// Never edit a line once written: git merges this file with merge=union
+// (kb.MergeUnionPaths), and union keeps both versions of an edited line that
+// sits next to another clone's append.
 //
 // Locking: the file is a shared resource across processes (CLI, daemon, a
 // future reconciler), so the read-modify-write that appends a line runs under
@@ -79,10 +83,9 @@ func validEventKind(k EventKind) bool {
 // Event is one line of a plan's events.jsonl. PlanID is carried on every
 // line (not just implied by the containing directory) so a line remains
 // self-describing if ever copied, replayed, or ingested elsewhere.
-// SessionID/SessionName are two-phase like Provenance's (see store.go):
-// SessionName is the durable join key available while a recording is live;
-// SessionID is the canonical ses_<UUIDv7> backfilled once known, typically
-// via a later event on the same plan rather than an edit to this one.
+// SessionName/SessionID name the recording live when the line was written.
+// A recording mints its ses_ id when it starts, so both are set together; a
+// recording an older ox started has no id, and its lines keep only the name.
 type Event struct {
 	Timestamp   time.Time  `json:"ts"`
 	PlanID      string     `json:"plan_id"`
@@ -190,65 +193,6 @@ func LoadEvents(planDir string) ([]Event, error) {
 	return events, nil
 }
 
-// BackfillSessionID rewrites events.jsonl lines whose SessionName matches
-// sessionName and whose SessionID is still empty, setting SessionID —
-// the same one-time id-reconciliation ReconcileSessionOutcome already
-// performs on meta.json's Provenance at session-stop (see store.go),
-// applied here to the append-only event log. events.jsonl is otherwise
-// immutable by design (see the package comment above): this is the sole,
-// narrowly-scoped exception, and it only ever WIDENS a line (fills a
-// previously-empty field) — it never changes a value a reader has already
-// observed, and only ever targets the calling session's own lines (matched
-// by SessionName, the durable pre-canonical join key). Runs under the same
-// flock AppendEvent/AppendPlanEvent use, so it can never race a concurrent
-// append. Idempotent: a line already carrying a SessionID (this session's or
-// any other's) is left untouched, so re-running after a successful backfill
-// updates nothing. Returns the number of lines changed; sessionName == "" or
-// sessionID == "" is a no-op, not an error (nothing to key off of / nothing
-// to write).
-func BackfillSessionID(ctx context.Context, planDir, sessionName, sessionID string) (int, error) {
-	if sessionName == "" || sessionID == "" {
-		return 0, nil
-	}
-
-	path := filepath.Join(planDir, eventsFile)
-	count := 0
-	err := fileutil.WithFileLock(ctx, path, func() error {
-		events, loadErr := LoadEvents(planDir)
-		if loadErr != nil {
-			return fmt.Errorf("load events: %w", loadErr)
-		}
-		if len(events) == 0 {
-			return nil // no events.jsonl yet (or empty) — nothing to backfill
-		}
-
-		for i := range events {
-			if events[i].SessionName == sessionName && events[i].SessionID == "" {
-				events[i].SessionID = sessionID
-				count++
-			}
-		}
-		if count == 0 {
-			return nil
-		}
-
-		var buf bytes.Buffer
-		for _, ev := range events {
-			line, mErr := json.Marshal(ev)
-			if mErr != nil {
-				return fmt.Errorf("encode event: %w", mErr)
-			}
-			buf.Write(line)
-			buf.WriteByte('\n')
-		}
-		return fileutil.AtomicWriteBytes(path, buf.Bytes(), 0o644)
-	})
-	if err != nil {
-		return 0, err
-	}
-	return count, nil
-}
-
 // FoldedState is the current-state projection of a plan's events.jsonl,
 // derived entirely by replaying the log — never itself stored. Two callers
 // folding the same event slice always get identical output.
@@ -261,7 +205,7 @@ type FoldedState struct {
 	UpdatedAt  time.Time
 	Visibility string
 	Sessions   []SessionRef // distinct sessions, first-seen order
-	Revisions  int          // distinct created and revised events: the plan's saves
+	Revisions  int          // created and revised events: the plan's saves
 }
 
 // SessionRef is one distinct session that touched a plan, folded from every
@@ -297,13 +241,6 @@ const defaultVisibility = "private"
 //     backfilled starting mid-lifecycle).
 //   - UpdatedAt: the latest event timestamp in the slice.
 //   - Revisions: the number of created and revised events.
-//
-// A second copy of an event (same timestamp, kind and session name) counts no
-// revision and sets no topic, status or visibility. events.jsonl is merge=union: when one clone's
-// BackfillSessionID rewrites lines that another clone appended after, the
-// merge can keep both copies of each, the rewritten copy after the append.
-// Read as a new event, a session's draft "created" line would undo a
-// teammate's approval.
 func Fold(events []Event) FoldedState {
 	state := FoldedState{
 		Status:     PlanStatusDraft,
@@ -318,7 +255,6 @@ func Fold(events []Event) FoldedState {
 	state.UpdatedAt = events[len(events)-1].Timestamp
 
 	seenAuthor := make(map[string]bool, len(events))
-	seenEvent := make(map[eventKey]bool, len(events))
 	sessionsByKey := make(map[string]*SessionRef, len(events))
 	var sessionOrder []string
 	haveCreated := false
@@ -332,20 +268,17 @@ func Fold(events []Event) FoldedState {
 			state.UpdatedAt = ev.Timestamp // defensive: tolerate a slice not already in file/append order
 		}
 
-		if k := (eventKey{ev.Timestamp.UnixNano(), ev.Kind, ev.SessionName}); !seenEvent[k] {
-			seenEvent[k] = true
-			if ev.Kind == EventCreated || ev.Kind == EventRevised {
-				state.Revisions++
-				if ev.Topic != "" {
-					state.Topic = ev.Topic
-				}
+		if ev.Kind == EventCreated || ev.Kind == EventRevised {
+			state.Revisions++
+			if ev.Topic != "" {
+				state.Topic = ev.Topic
 			}
-			if ev.Status != "" {
-				state.Status = ev.Status
-			}
-			if ev.Visibility != "" {
-				state.Visibility = ev.Visibility
-			}
+		}
+		if ev.Status != "" {
+			state.Status = ev.Status
+		}
+		if ev.Visibility != "" {
+			state.Visibility = ev.Visibility
 		}
 		if ev.Author != "" && !seenAuthor[ev.Author] {
 			seenAuthor[ev.Author] = true
@@ -366,8 +299,7 @@ func Fold(events []Event) FoldedState {
 			sessionOrder = append(sessionOrder, key)
 		} else {
 			// progressive enrichment: a later event on the same session may
-			// carry the SessionID backfilled at stop, or an Author the
-			// earliest event didn't have set.
+			// carry a SessionID or Author the earliest one lacks.
 			if ref.SessionName == "" {
 				ref.SessionName = ev.SessionName
 			}
@@ -396,14 +328,6 @@ func Fold(events []Event) FoldedState {
 		}
 	}
 	return state
-}
-
-// eventKey identifies an event across BackfillSessionID's rewrite of its
-// line, which sets only session_id.
-type eventKey struct {
-	unixNano    int64
-	kind        EventKind
-	sessionName string
 }
 
 func containsKind(kinds []EventKind, k EventKind) bool {

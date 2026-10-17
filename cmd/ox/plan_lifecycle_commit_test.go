@@ -242,47 +242,6 @@ func TestPlanLifecycle_ReRunReportsWhetherItSharedTheEvent(t *testing.T) {
 	}
 }
 
-// TestPlanLifecycle_ATeammatesApprovalSurvivesTheAuthorsSessionStop: Sam
-// approves on Sam's own clone while Devon's session is still recording;
-// Devon's session stop then stamps the session id onto Devon's event lines
-// and pushes over the approval. Failure prevented: the merge keeps Devon's
-// restamped "created" line after the approval, and the whole team reads the
-// plan as a draft again, saved twice.
-func TestPlanLifecycle_ATeammatesApprovalSurvivesTheAuthorsSessionStop(t *testing.T) {
-	f := newDurableReviewFixture(t)
-	ctx := context.Background()
-	if err := plan.AppendEvent(ctx, f.planDir, plan.Event{PlanID: "pln_lifecycle01", Kind: plan.EventCreated, Status: plan.PlanStatusDraft, SessionName: "devon-session"}); err != nil {
-		t.Fatal(err)
-	}
-	runGitInDir(t, f.ledger, "add", "data")
-	runGitInDir(t, f.ledger, "commit", "-q", "-m", "plan: created")
-	runGitInDir(t, f.ledger, "push", "-q")
-
-	sam := filepath.Join(t.TempDir(), "sam")
-	runGitInDir(t, filepath.Dir(sam), "clone", "-q", "-b", "main", f.origin, sam)
-	samPlan := filepath.Join(sam, "data", "plans", "2026-10-01-durable")
-	if _, err := plan.AppendPlanEvent(ctx, samPlan, plan.EventApproved, plan.PlanEventFields{}); err != nil {
-		t.Fatal(err)
-	}
-	runGitInDir(t, sam, "commit", "-q", "-am", "plan: approved")
-	runGitInDir(t, sam, "push", "-q")
-
-	// Devon's session stop, as reconcileProducedPlansAtStop runs it
-	if _, err := plan.BackfillSessionID(ctx, f.planDir, "devon-session", "ses_devon"); err != nil {
-		t.Fatal(err)
-	}
-	if err := commitAndPushPlanDir(ctx, f.ledger, f.planDir); err != nil {
-		t.Fatal(err)
-	}
-	runGitInDir(t, sam, "pull", "-q", "--rebase")
-	if got := plan.CurrentStatus(samPlan); got != plan.PlanStatusApproved {
-		t.Fatalf("after Devon's session stop the team reads the plan as %q, want approved", got)
-	}
-	if got := planRevisionCount(samPlan); got != 1 {
-		t.Fatalf("after Devon's session stop the plan counts %d revisions, want 1", got)
-	}
-}
-
 // TestPlanLifecycle_AFailedCommitIsUnstagedAndRetried: a lifecycle commit
 // that fails after its event is written reports it recorded but not
 // committed, leaves nothing staged for a later commit to sweep in, and each
