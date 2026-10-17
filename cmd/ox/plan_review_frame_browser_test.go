@@ -556,3 +556,38 @@ func TestBrowser_HostControlsAroundAFramedPlan(t *testing.T) {
 		t.Fatalf("owned operations must leave nothing of Devon's behind: %s", left)
 	}
 }
+
+// TestBrowser_ResolveOfferedOnlyToReviewersWhoMay mounts the review controls
+// around a framed plan with an item the author addressed, once as a host that
+// does not let this reviewer resolve and once with resolve. Devon opens the
+// item from its rail row: without resolve the composer opens to mark it up,
+// with neither Accept nor Reopen; with it, Accept and Reopen are offered.
+// Failure prevented: a host that authorizes resolutions per reviewer, or
+// stores none yet, offers Accept and Reopen to everyone, and its server can
+// only refuse them after the reviewer has clicked.
+func TestBrowser_ResolveOfferedOnlyToReviewersWhoMay(t *testing.T) {
+	ctx := frameBrowser(t)
+	// the author rewrote the item's text when addressing it: the rail lists
+	// it, and its row opens its composer
+	host := `<!doctype html><html><head><link rel="stylesheet" href="/host.css"></head><body><iframe id="doc" sandbox="allow-scripts"></iframe>` +
+		`<script type="module">import { connectFrame, mountHostControls } from '/index.js';` +
+		`const frame = document.getElementById('doc');` +
+		`mountHostControls(connectFrame(frame, '` + frameInstance + `'), { account: 'acct-devon', plan: 'pln_framed', slug: 'framed', reviewer: 'Devon',` +
+		` committed: [{ anchor: 'h00000000', section: 'Risks', label: 'Retry budget was two', status: 'request-change', state: 'addressed' }],` +
+		` transport: { send: () => Promise.resolve({ state: 'offline' }) }, resolve: location.search === '?resolve' });` +
+		`frame.src = '/doc';</script></body></html>`
+	base := serveFrameHost(t, []byte(`<!doctype html><html><body><p>Retry budget is three</p></body></html>`), host)
+	offered := func(query string) string {
+		t.Helper()
+		if err := chromedp.Run(ctx, chromedp.Navigate(base+query), chromedp.Click(".rev-rail-item", chromedp.ByQuery), chromedp.WaitVisible(".rev-pop", chromedp.ByQuery)); err != nil {
+			t.Fatalf("open the addressed item from its row: %v", err)
+		}
+		return evalString(t, ctx, `['rev-accept','rev-reopen','rev-save'].filter(function(c){return document.querySelector('.rev-pop .'+c)}).join(' ')`)
+	}
+	if got := offered(""); got != "rev-save" {
+		t.Errorf("without resolve, an addressed item must open the mark-up composer and offer neither Accept nor Reopen; it offered %q", got)
+	}
+	if got := offered("?resolve"); got != "rev-accept rev-reopen" {
+		t.Errorf("with resolve, an addressed item must offer Accept and Reopen; it offered %q", got)
+	}
+}

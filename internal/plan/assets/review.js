@@ -81,6 +81,7 @@
   }
   var INLINE = /^(A|ABBR|B|BDI|BDO|CITE|CODE|DATA|DEL|DFN|EM|I|INS|KBD|MARK|Q|S|SAMP|SMALL|SPAN|STRONG|SUB|SUP|TIME|U|VAR|WBR)$/;
   var TINTS = ["sage", "amber", "red", "gold", "faint"];
+  var OWN = "input, select, textarea, label, summary";
   function startDocumentTools(port, opts = {}) {
     const body = document.body;
     const SELECTOR = markableSelector(document);
@@ -319,7 +320,7 @@
         return;
       }
       if (!t) {
-        const el = el0.closest(SELECTOR);
+        const el = el0.closest(OWN) && !el0.closest("a[href]") ? null : el0.closest(SELECTOR);
         if (!el) {
           port.send({ type: "dismiss" });
           return;
@@ -627,6 +628,7 @@
     { id: "comment", glyph: "◌" }
   ];
   var HL_TINT = { "approve": "sage", "request-change": "amber", "flag": "red", "comment": "gold" };
+  var WHOLE = { a: "plan", section: "", label: "Whole plan" };
   var BUBBLE = '<svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 2.5h10A1.5 1.5 0 0 1 14.5 4v6a1.5 1.5 0 0 1-1.5 1.5H7.5L4 14.5v-3H3A1.5 1.5 0 0 1 1.5 10V4A1.5 1.5 0 0 1 3 2.5z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>';
   function esc(s) {
     return (s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
@@ -731,6 +733,7 @@
     function onPlaced(items) {
       placed = items;
       const seen = /* @__PURE__ */ Object.create(null);
+      seen[WHOLE.a] = true;
       placed.forEach((p) => {
         seen[p.anchor] = true;
       });
@@ -814,6 +817,7 @@
           });
         }
       }
+      add(null, WHOLE.a, WHOLE.section, WHOLE.label, "");
       const nth = /* @__PURE__ */ Object.create(null);
       placed.forEach((p) => {
         const k = nth[p.anchor] = nth[p.anchor] === void 0 ? 0 : nth[p.anchor] + 1;
@@ -834,7 +838,13 @@
         rail.className = "rev-rail";
         body.appendChild(rail);
         rail.addEventListener("click", (ev) => {
-          if (ev.target.closest(".rev-rail-show, .rev-rail-hide")) toggleRail();
+          const t = ev.target;
+          if (t.closest(".rev-rail-show, .rev-rail-hide")) toggleRail();
+          const plan2 = t.closest(".rev-rail-plan");
+          if (plan2) {
+            const b = plan2.getBoundingClientRect();
+            openPop(WHOLE, { left: b.left, bottom: b.bottom });
+          }
         });
       }
       const r = rail;
@@ -851,19 +861,21 @@
         return;
       }
       const hide = '<button class="rev-rail-hide" title="Hide comments">Hide</button>';
+      const plan = on ? '<button class="rev-rail-plan">+ Comment on the whole plan</button>' : "";
       if (!rows.length) {
-        r.innerHTML = '<div class="rev-rail-h">Comments' + hide + '</div><div class="rev-rail-empty">Click any section, risk, or row — or highlight text — to leave a comment.</div>';
+        r.innerHTML = '<div class="rev-rail-h">Comments' + hide + "</div>" + plan + '<div class="rev-rail-empty">Click any section, risk, or row — or highlight text — to leave a comment.</div>';
         return;
       }
-      let html = '<div class="rev-rail-h">Comments <span class="rev-rail-n">' + rows.length + "</span>" + hide + '</div><ul class="rev-rail-list">';
+      let html = '<div class="rev-rail-h">Comments <span class="rev-rail-n">' + rows.length + "</span>" + hide + "</div>" + plan + '<ul class="rev-rail-list">';
       rows.forEach((row, i) => {
+        const whole = row.a === WHOLE.a;
         let tag = "";
         if (row.tag) tag = '<span class="rev-rail-tag ' + row.tag + '">' + row.tag + "</span>";
         else if (row.state && row.state !== "open") tag = '<span class="rev-rail-tag ' + esc(row.state) + '">' + esc(row.state) + "</span>";
-        if (!row.at) tag += '<span class="rev-rail-tag">text changed</span>';
-        const content = (row.quote ? '<div class="rev-rail-quote">' + esc(row.label) + "</div>" : "") + (row.note ? '<div class="rev-rail-note">' + esc(row.note) + "</div>" : row.quote ? "" : '<div class="rev-rail-note muted">' + esc(row.label) + "</div>");
+        if (!row.at && !whole) tag += '<span class="rev-rail-tag">text changed</span>';
+        const content = (row.quote ? '<div class="rev-rail-quote">' + esc(row.label) + "</div>" : "") + (row.note ? '<div class="rev-rail-note">' + esc(row.note) + "</div>" : row.quote || whole ? "" : '<div class="rev-rail-note muted">' + esc(row.label) + "</div>");
         const whoTag = row.reviewer ? '<span class="rev-rail-who">' + esc(row.reviewer) + "</span>" : "";
-        html += '<li class="rev-rail-item" data-i="' + i + '" data-status="' + esc(row.status) + '"><span class="rev-rail-glyph">' + glyphFor(row.status) + '</span><div class="rev-rail-body"><div class="rev-rail-sec"><span class="rev-rail-sec-t">' + esc(row.section || "(plan)") + "</span>" + whoTag + tag + "</div>" + content + "</div></li>";
+        html += '<li class="rev-rail-item" data-i="' + i + '" data-status="' + esc(row.status) + '"><span class="rev-rail-glyph">' + glyphFor(row.status) + '</span><div class="rev-rail-body"><div class="rev-rail-sec"><span class="rev-rail-sec-t">' + esc(whole ? WHOLE.label : row.section || "(plan)") + "</span>" + whoTag + tag + "</div>" + content + "</div></li>";
       });
       html += "</ul>";
       r.innerHTML = html;
@@ -901,7 +913,7 @@
       p.className = "rev-pop";
       const quote = t.quote ? '<div class="rev-quote">' + esc(t.label) + "</div>" : "";
       port.send({ type: "focus", anchor: a });
-      if (live && (cstate === "addressed" || cstate === "verified")) {
+      if (live && opts.resolve && (cstate === "addressed" || cstate === "verified")) {
         p.innerHTML = quote + '<div class="rev-cap">Agent marked this ' + cstate + '.</div><textarea class="rev-note" placeholder="reopen note (optional)"></textarea><div class="rev-row"><button class="rev-accept">Accept</button><button class="rev-reopen">Reopen</button></div>';
         placePop(rect);
         p.querySelector(".rev-accept").onclick = () => {
@@ -1294,7 +1306,8 @@
       if (!localStorage.getItem("ox-plan-rev-seen")) {
         const hint = hintBubble = document.createElement("div");
         hint.className = "rev-hint";
-        hint.textContent = "← Click Review to mark up this plan";
+        hint.textContent = "↓ Click Review to mark up this plan";
+        hint.style.left = toggleEl.getBoundingClientRect().left + "px";
         body.appendChild(hint);
         setTimeout(() => {
           if (hintBubble === hint) {
@@ -1472,6 +1485,8 @@
       committed,
       problems: Number(body.getAttribute("data-review-problems")) || 0,
       transport: base ? { send } : void 0,
+      resolve: true,
+      // any reviewer of a local review may Accept or Reopen
       approve: base ? approve : void 0,
       restartCommand: "ox plan review " + slug
     });

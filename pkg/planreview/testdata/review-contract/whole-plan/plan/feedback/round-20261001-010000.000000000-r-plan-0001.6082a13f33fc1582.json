@@ -1,0 +1,17 @@
+{
+  "created_at": "2026-10-01T01:00:00Z",
+  "id": "r-plan-0001",
+  "items": [
+    {
+      "anchor": "plan",
+      "label": "Whole plan",
+      "note": "Split the rollout into two sprints.",
+      "reviewer": "Sam",
+      "section": "",
+      "status": "request-change"
+    }
+  ],
+  "request_sha256": "1781d45b2aeac7e4c15520308698f14c5a10b67b3692a1916a7983e1f6d8fe90",
+  "reviewer": "Sam",
+  "slug": "rc-whole-plan"
+}
