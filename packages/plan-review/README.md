@@ -46,7 +46,7 @@ settings grant your repository read access.
 Pin the exact version and commit your lockfile:
 
 ```sh
-npm install --save-exact @sageox/plan-review@0.3.0
+npm install --save-exact @sageox/plan-review@0.4.0
 ```
 
 Pinning matters because the host end and the document script must come from
@@ -125,7 +125,7 @@ protocol a build speaks.
    | `{type:'ready'}` | Listening: send `mode` and `paint` |
    | `{type:'target', target}` | In review mode the reviewer picked an element (`h` anchor) or highlighted words (`q` anchor, with `quote`). `target.rect` is where your composer opens below, in the frame's viewport pixels |
    | `{type:'refused', reason}` | A highlight that cannot anchor: `cross-section`, or `repeated` with the `quote` and its `count` |
-   | `{type:'dismiss'}` | A click that picked nothing, in review mode or out of it: close your composer |
+   | `{type:'dismiss'}` | A click that picked nothing, in review mode or out of it: close your composer. In review mode a click on the plan's own form control, label or summary picks nothing and does its own job, such as switching a tab; a link stays a pick |
    | `{type:'placed', items}` | Every painted mark in reading order, with its section and label. A mark you painted that is not here has lost its text |
    | `{type:'key', key}` | `r` or `Escape`, pressed inside the frame |
 
@@ -133,7 +133,8 @@ protocol a build speaks.
    tint, quote?, section?, label?}`, with `glyph` inserted as text. Only
    anchors the document computes, `h` or `q` plus eight hex digits, can be
    painted; a message carrying any other is dropped whole, so list the rest
-   (drawings, say) only in your own UI. See `src/protocol.ts`.
+   (drawings, say, or the whole plan's `plan`) only in your own UI. See
+   `src/protocol.ts`.
 
 ## Mount the review controls
 
@@ -154,10 +155,20 @@ const controls = mountHostControls(port, {
   reviewer: user.name,       // signed in: shown on the bar; your server stamps identity
   frame: iframe,             // target rects are in the frame's viewport
   transport: { send },
+  resolve: canResolve,       // this reviewer may Accept or Reopen what the author addressed
 });
 controls.update(items, problems); // after you read the review again
 controls.destroy(); // before another account signs in, or another plan mounts
 ```
+
+Leave `resolve` off for a reviewer your server will not let resolve: an
+addressed item then opens the mark-up composer instead of offering Accept and
+Reopen.
+
+In review mode the rail offers a comment on the whole plan, kept and sent
+like any other. Its anchor is `plan` (`WholePlanAnchor` in
+`pkg/planreview`), with an empty section and the label `Whole plan`; the
+controls never paint it, and list it first in the rail.
 
 `send(op)` stores one operation with your server. `op` carries `account`
 (never send it with another account's credentials), `id` (the same on every
@@ -190,7 +201,8 @@ startDocumentTools(tools);
 
 ox's page passes `host` to `mountHostControls` instead of listening itself,
 with no `frame` and no `reviewer`: it asks for a name and sends it with each
-request.
+request. Any reviewer of a local review may resolve, so it passes
+`resolve: true`.
 
 Messages between local ports are plain function calls, so a click has opened
 your composer by the time its handler returns.

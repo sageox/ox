@@ -4,8 +4,8 @@
 and a consuming host passed the §5 probes on its own storage. The three points
 that host raised are settled in 3.2 (identity on retries), 3.6 (per-host
 bounds) and §5 (what a host proves). The CLI adopted the module in #1289
-(§1.1), and the browser's outbox in #1291 (3.9). Follow-up owner: #1294
-(certification).
+(§1.1), and the browser's outbox in #1291 (3.9). #1384 added whole-plan
+marks (3.10). Follow-up owner: #1294 (certification).
 
 **Goal:** supported concurrent reviewers never lose feedback and never repair
 Git conflicts by hand. This spec records what the CLI does today, names the
@@ -25,7 +25,8 @@ contract choices the shared module implements.
 | `TestReviewContractFixtures` (`internal/plan/feedback_test.go`) | The CLI's reader, `plan.ReadReview`, against every fixture but `oversized` (which sets limits of its own) |
 | `TestPlanReviewDurability_RetryPublishesOnlyTheOriginalRecord` (`cmd/ox/plan_review_durability_test.go`) | 3.7: a failed commit and a failed push, then dirty authoring files, another operation's success and a restarted retry; each review commit carries one record and each entry clears only on its own record |
 | `TestPlanReviewDurability_RacingClonesAndLostResponses` (same file) | Rounds and resolutions from three clones survive the push rebase; a retried round is one logical submission, on the clone that stored it and on one that never saw it |
-| `packages/plan-review/test/state.test.mjs`; in Chrome (`cmd/ox`, tag `browser`) `TestBrowser_UnstorableReviewIsNeverSent`, `…LostAnswerAndAnEditDuringSendDeliverOnce`, `…TwoTabsKeepEachOthersMarks`, `…HostControlsAroundAFramedPlan` | 3.9: the browser's outbox |
+| `packages/plan-review/test/state.test.mjs`; in Chrome (`cmd/ox`, tag `browser`) `TestBrowser_UnstorableReviewIsNeverSent`, `…LostAnswerAndAnEditDuringSendDeliverOnce`, `…TwoTabsKeepEachOthersMarks`, `…HostControlsAroundAFramedPlan`, `…ResolveOfferedOnlyToReviewersWhoMay` | 3.9: the browser's outbox |
+| `TestRebind_MovesAMarkOnlyWhenTheMoveIsUnambiguous` (`pkg/planreview`); in Chrome `TestBrowser_WholePlanCommentReachesTheLedger` | 3.10: whole-plan marks |
 
 The CLI requires the released module (`pkg/planreview v0.1.0`): `go install
 github.com/sageox/ox/cmd/ox@<version>` refuses a `go.mod` with a `replace`
@@ -474,6 +475,26 @@ ox's page and in a hosted viewer (`packages/plan-review/src/state.ts`):
 - **Upgrade:** drafts and the outbox that pages before 0.3.0 kept under
   `ox-plan-fb:<slug>` move to the new keys; a waiting submission keeps its
   bytes, so its resend is the same operation.
+- **Resolving:** Accept and Reopen are offered only when the host mounts the
+  controls with `resolve` (#1383); ox's page always does.
+
+### 3.10 Whole-plan marks (#1384)
+
+A mark on the plan as a whole (its direction, scope or readiness) has the
+anchor `plan` (`WholePlanAnchor`), an empty section and the label
+`Whole plan`.
+
+- **Assembled like any mark:** the latest per reviewer; a resolution naming
+  `plan` closes it; a later round raises it again (fixture `whole-plan`).
+- **On no element:** `Rebind` never moves it, and the document tools never
+  paint or place it. The review controls list it first in the rail, without
+  the "text changed" tag, and open its composer from the rail.
+- **Released CLIs** read and resolve it. Measured on v0.23.0 with this
+  fixture: `ox plan feedback show` and the agent's digest list the open mark
+  as `[comment] (plan) Whole plan @Avery — Agree with the split.`, `--json`
+  carries both marks, and `ox plan feedback resolve <slug> plan` resolves
+  them. Its review page lists both in the rail as notes whose text changed,
+  and the open one in the banner of notes no longer anchored.
 
 ---
 

@@ -4,10 +4,11 @@
 // plan's own window for ox's local review page (local.ts), the page around
 // the plan's frame for a host that frames it. They reach the plan only
 // through the port to the document tools, which pick targets and paint, and
-// reach the host's store only through its transport. With a transport the
-// reviewer can also Accept (verify) or Reopen an item the author addressed,
-// and the rail keeps orphaned notes whose anchored text changed (never lose
-// feedback). Without one (a file:// page) Submit exports the feedback as JSON.
+// reach the host's store only through its transport. With a transport, a
+// reviewer the host lets resolve can also Accept (verify) or Reopen an item
+// the author addressed, and the rail keeps orphaned notes whose anchored text
+// changed (never lose feedback). Without one (a file:// page) Submit exports
+// the feedback as JSON.
 
 import { clip } from './anchor.js';
 import { CHROME, typing } from './document-tools.js';
@@ -41,6 +42,8 @@ export interface HostControlsOptions {
   transport?: Transport;
   /** The signed-in reviewer's name. Without it the controls ask for a name, keep it in this browser and send it with each request, as ox's local review, which has no sign-in, does. */
   reviewer?: string;
+  /** This reviewer may resolve: an addressed or verified item offers Accept and Reopen, which verify it or raise it again. Without it, that item opens the mark-up composer. Needs a transport. */
+  resolve?: boolean;
   /** Stamp the plan approved: offered as the bar's Approve. */
   approve?: () => Promise<Approval>;
   /** The frame holding the plan, when the document tools run in one: target rects are in its viewport. */
@@ -90,6 +93,9 @@ const STATUS: Array<{ id: Status; glyph: string }> = [
   { id: 'comment', glyph: '◌' },
 ];
 const HL_TINT: Record<string, Tint> = { 'approve': 'sage', 'request-change': 'amber', 'flag': 'red', 'comment': 'gold' };
+// a comment on the plan as a whole: WholePlanAnchor in pkg/planreview, with
+// the label readers that predate it print (plan-review-ledger-contract.md 3.10)
+const WHOLE: About = { a: 'plan', section: '', label: 'Whole plan' };
 const BUBBLE = '<svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 2.5h10A1.5 1.5 0 0 1 14.5 4v6a1.5 1.5 0 0 1-1.5 1.5H7.5L4 14.5v-3H3A1.5 1.5 0 0 1 1.5 10V4A1.5 1.5 0 0 1 3 2.5z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>';
 
 // esc makes untrusted text safe in element content and in double-quoted
@@ -154,8 +160,9 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
 
   // paintItems is what the document paints: per anchor, your unsent mark,
   // else the representative committed one; a highlight brings its words.
-  // Only anchors the document computes can be placed; the rest list as
-  // unplaced. Who marked what, and their notes, stay here: the rail shows them.
+  // Only anchors the document computes can be placed; the rail lists the
+  // rest, the whole plan first. Who marked what, and their notes, stay here:
+  // the rail shows them.
   function paintItems(): PaintItem[] {
     const out: PaintItem[] = [];
     Object.keys(committed).concat(Object.keys(ds)).forEach((a, i, all) => {
@@ -190,7 +197,9 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
   }
   function onPlaced(items: Placed[]) {
     placed = items;
+    // the whole plan names nothing on the page, so it is never unplaced
     const seen: Record<string, boolean> = Object.create(null);
+    seen[WHOLE.a] = true;
     placed.forEach((p) => { seen[p.anchor] = true; });
     // comments whose text is gone from the page — rewritten by the agent, or
     // edited while this tab was away — keep a rail row, so an addressed one can
@@ -234,9 +243,10 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
     (rail!.querySelector('.rev-rail-show, .rev-rail-hide') as HTMLElement).focus(); // the clicked button was just replaced
   }
   function railRows(): Row[] {
-    // reading order, highlights interleaved with element rows, as the document
-    // placed them, and rows with nothing on the page last. Multi-user: one row
-    // per reviewer's committed mark on an anchor, plus your unsent local mark.
+    // the whole plan first, then reading order, highlights interleaved with
+    // element rows, as the document placed them, and rows with nothing on the
+    // page last. Multi-user: one row per reviewer's committed mark on an
+    // anchor, plus your unsent local mark.
     const waiting = store.entries();
     const rows: Row[] = [];
     function add(at: Row['at'], a: string, section: string, label: string, quote: string) {
@@ -257,6 +267,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
         });
       }
     }
+    add(null, WHOLE.a, WHOLE.section, WHOLE.label, '');
     const nth: Record<string, number> = Object.create(null);
     placed.forEach((p) => {
       const k = nth[p.anchor] = (nth[p.anchor] === undefined ? 0 : nth[p.anchor] + 1);
@@ -274,7 +285,12 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
   function renderRail() {
     if (!rail) {
       rail = document.createElement('aside'); rail.className = 'rev-rail'; body.appendChild(rail);
-      rail.addEventListener('click', (ev) => { if ((ev.target as Element).closest('.rev-rail-show, .rev-rail-hide')) toggleRail(); });
+      rail.addEventListener('click', (ev) => {
+        const t = ev.target as Element;
+        if (t.closest('.rev-rail-show, .rev-rail-hide')) toggleRail();
+        const plan = t.closest('.rev-rail-plan');
+        if (plan) { const b = plan.getBoundingClientRect(); openPop(WHOLE, { left: b.left, bottom: b.bottom }, true); }
+      });
     }
     const r = rail;
     const rows = railRows();
@@ -287,25 +303,27 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
       return;
     }
     const hide = '<button class="rev-rail-hide" title="Hide comments">Hide</button>';
+    const plan = on ? '<button class="rev-rail-plan">+ Comment on the whole plan</button>' : '';
     if (!rows.length) {
-      r.innerHTML = '<div class="rev-rail-h">Comments' + hide + '</div><div class="rev-rail-empty">Click any section, risk, or row — or highlight text — to leave a comment.</div>';
+      r.innerHTML = '<div class="rev-rail-h">Comments' + hide + '</div>' + plan + '<div class="rev-rail-empty">Click any section, risk, or row — or highlight text — to leave a comment.</div>';
       return;
     }
-    let html = '<div class="rev-rail-h">Comments <span class="rev-rail-n">' + rows.length + '</span>' + hide + '</div><ul class="rev-rail-list">';
+    let html = '<div class="rev-rail-h">Comments <span class="rev-rail-n">' + rows.length + '</span>' + hide + '</div>' + plan + '<ul class="rev-rail-list">';
     rows.forEach((row, i) => {
+      const whole = row.a === WHOLE.a; // on no element: its heading names it, and it has no text to change
       let tag = '';
       if (row.tag) tag = '<span class="rev-rail-tag ' + row.tag + '">' + row.tag + '</span>';
       else if (row.state && row.state !== 'open') tag = '<span class="rev-rail-tag ' + esc(row.state) + '">' + esc(row.state) + '</span>';
-      if (!row.at) tag += '<span class="rev-rail-tag">text changed</span>';
+      if (!row.at && !whole) tag += '<span class="rev-rail-tag">text changed</span>';
       // a highlight's row leads with its words; its label is those words, so a
       // note-less highlight shows nothing more
       const content = (row.quote ? '<div class="rev-rail-quote">' + esc(row.label) + '</div>' : '') +
         (row.note ? '<div class="rev-rail-note">' + esc(row.note) + '</div>'
-          : row.quote ? '' : '<div class="rev-rail-note muted">' + esc(row.label) + '</div>');
+          : row.quote || whole ? '' : '<div class="rev-rail-note muted">' + esc(row.label) + '</div>');
       const whoTag = row.reviewer ? '<span class="rev-rail-who">' + esc(row.reviewer) + '</span>' : '';
       html += '<li class="rev-rail-item" data-i="' + i + '" data-status="' + esc(row.status) + '">' +
         '<span class="rev-rail-glyph">' + glyphFor(row.status) + '</span>' +
-        '<div class="rev-rail-body"><div class="rev-rail-sec"><span class="rev-rail-sec-t">' + esc(row.section || '(plan)') + '</span>' + whoTag + tag + '</div>' + content + '</div></li>';
+        '<div class="rev-rail-body"><div class="rev-rail-sec"><span class="rev-rail-sec-t">' + esc(whole ? WHOLE.label : row.section || '(plan)') + '</span>' + whoTag + tag + '</div>' + content + '</div></li>';
     });
     html += '</ul>';
     r.innerHTML = html;
@@ -330,7 +348,8 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
   }
   // t is what a note is about: an element or a highlight — anchor, section,
   // label, and a highlight's quote. rect is where it opens below, in this window.
-  function openPop(t: About, rect: { left: number; bottom: number }) {
+  // fresh: a new comment, which never resolves the marks already there.
+  function openPop(t: About, rect: { left: number; bottom: number }, fresh?: boolean) {
     closePop(true);
     const a = t.a;
     const cstate = committedState(a);
@@ -339,9 +358,9 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
     // reviewer clicks into the note, so the focus highlight keeps them visible too
     const quote = t.quote ? '<div class="rev-quote">' + esc(t.label) + '</div>' : '';
     port.send({ type: 'focus', anchor: a });
-    // a committed, addressed/verified item gets Accept/Reopen (close the loop);
-    // everything else gets the mark-up controls.
-    if (live && (cstate === 'addressed' || cstate === 'verified')) {
+    // a committed, addressed/verified item gets Accept/Reopen (close the loop)
+    // when this reviewer may resolve; everything else gets the mark-up controls.
+    if (live && opts.resolve && !fresh && (cstate === 'addressed' || cstate === 'verified')) {
       p.innerHTML = quote + '<div class="rev-cap">Agent marked this ' + cstate + '.</div>' +
         '<textarea class="rev-note" placeholder="reopen note (optional)"></textarea>' +
         '<div class="rev-row"><button class="rev-accept">Accept</button><button class="rev-reopen">Reopen</button></div>';
@@ -667,7 +686,9 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
     if (!localStorage.getItem('ox-plan-rev-seen')) {
       const hint = hintBubble = document.createElement('div');
       hint.className = 'rev-hint';
-      hint.textContent = '← Click Review to mark up this plan';
+      hint.textContent = '↓ Click Review to mark up this plan';
+      // over the toggle, which a live bar's connection state pushes right
+      hint.style.left = toggleEl.getBoundingClientRect().left + 'px';
       body.appendChild(hint);
       setTimeout(() => { if (hintBubble === hint) { hint.remove(); hintBubble = null; } }, 9000);
     }

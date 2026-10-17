@@ -44,7 +44,8 @@ const (
 )
 
 // Item is one anchored review mark. Anchor is the content hash the review page
-// computes (see AnchorFor): "h…" for an element, "q…" for a highlight.
+// computes (see AnchorFor): "h…" for an element, "q…" for a highlight; or
+// WholePlanAnchor.
 //
 // The field order and tags are ContentRoundID's input; changing them changes
 // every content-derived round id.
@@ -57,6 +58,11 @@ type Item struct {
 	Note     string `json:"note,omitempty"`
 	Reviewer string `json:"reviewer,omitempty"`
 }
+
+// WholePlanAnchor is the anchor of a mark on the plan as a whole, such as its
+// direction, scope or readiness. It names no element, so Rebind never moves
+// it. Writers label it "Whole plan", which readers that predate it print.
+const WholePlanAnchor = "plan"
 
 // Round is one review submission. RequestSHA256 is set on immutable records
 // only: the SHA-256 of the request bytes the client froze.
