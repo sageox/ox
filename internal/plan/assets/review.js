@@ -843,7 +843,7 @@
           const plan2 = t.closest(".rev-rail-plan");
           if (plan2) {
             const b = plan2.getBoundingClientRect();
-            openPop(WHOLE, { left: b.left, bottom: b.bottom });
+            openPop(WHOLE, { left: b.left, bottom: b.bottom }, true);
           }
         });
       }
@@ -905,7 +905,7 @@
       port.send({ type: "focus", anchor: null });
       if (!replacing) idle();
     }
-    function openPop(t, rect) {
+    function openPop(t, rect, fresh) {
       closePop(true);
       const a = t.a;
       const cstate = committedState(a);
@@ -913,7 +913,7 @@
       p.className = "rev-pop";
       const quote = t.quote ? '<div class="rev-quote">' + esc(t.label) + "</div>" : "";
       port.send({ type: "focus", anchor: a });
-      if (live && opts.resolve && (cstate === "addressed" || cstate === "verified")) {
+      if (live && opts.resolve && !fresh && (cstate === "addressed" || cstate === "verified")) {
         p.innerHTML = quote + '<div class="rev-cap">Agent marked this ' + cstate + '.</div><textarea class="rev-note" placeholder="reopen note (optional)"></textarea><div class="rev-row"><button class="rev-accept">Accept</button><button class="rev-reopen">Reopen</button></div>';
         placePop(rect);
         p.querySelector(".rev-accept").onclick = () => {

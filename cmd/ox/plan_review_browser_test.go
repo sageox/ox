@@ -1608,9 +1608,11 @@ func TestBrowser_ReopenedHighlightKeepsItsWords(t *testing.T) {
 // TestBrowser_WholePlanCommentReachesTheLedger: Devon comments on the plan as
 // a whole from the rail and submits it. It reaches the Ledger as his mark on
 // the whole plan, and the page that reloads lists it once, first in the rail,
-// with no "text changed" tag and no banner of notes no longer anchored.
+// with no "text changed" tag and no banner of notes no longer anchored. Once
+// the author addresses it, the button still starts a new comment.
 // Failure prevented: a comment on the plan's direction or scope has to be
-// pinned to some section, or, once stored, reads as a note whose text is gone.
+// pinned to some section; once stored, it reads as a note whose text is gone;
+// or, once one is addressed, the button offers to resolve it instead.
 func TestBrowser_WholePlanCommentReachesTheLedger(t *testing.T) {
 	ctx := frameBrowser(t)
 	base, planDir, _ := serveLivePlanReview(t)
@@ -1633,5 +1635,19 @@ func TestBrowser_WholePlanCommentReachesTheLedger(t *testing.T) {
 	}
 	if got := evalString(t, ctx, `document.querySelectorAll('.rev-rail-item').length+'|'+!!document.querySelector('.rev-orphans')`); got != "1|false" {
 		t.Fatalf("the rail must list it once, with no banner of notes no longer anchored (rows|banner): %q", got)
+	}
+
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`window.oldPage=true`, nil)); err != nil {
+		t.Fatalf("mark the page: %v", err)
+	}
+	resolveForTest(t, planDir, "plan", planreview.StateAddressed, "Split into two sprints.")
+	if !waitForNewPage(ctx, `!!document.querySelector('.rev-rail-tag.addressed')`, 10*time.Second) {
+		t.Fatal("the page must reload with the comment addressed")
+	}
+	if err := chromedp.Run(ctx, chromedp.Click(".rev-rail-plan", chromedp.ByQuery), chromedp.WaitVisible(".rev-pop", chromedp.ByQuery)); err != nil {
+		t.Fatalf("comment on the whole plan again: %v", err)
+	}
+	if got := evalString(t, ctx, `['rev-accept','rev-reopen','rev-save'].filter(function(c){return document.querySelector('.rev-pop .'+c)}).join(' ')`); got != "rev-save" {
+		t.Errorf("once a whole-plan comment is addressed, the button must still start a new one; it offered %q", got)
 	}
 }

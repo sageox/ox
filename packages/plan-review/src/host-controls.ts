@@ -289,7 +289,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
         const t = ev.target as Element;
         if (t.closest('.rev-rail-show, .rev-rail-hide')) toggleRail();
         const plan = t.closest('.rev-rail-plan');
-        if (plan) { const b = plan.getBoundingClientRect(); openPop(WHOLE, { left: b.left, bottom: b.bottom }); }
+        if (plan) { const b = plan.getBoundingClientRect(); openPop(WHOLE, { left: b.left, bottom: b.bottom }, true); }
       });
     }
     const r = rail;
@@ -348,7 +348,8 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
   }
   // t is what a note is about: an element or a highlight — anchor, section,
   // label, and a highlight's quote. rect is where it opens below, in this window.
-  function openPop(t: About, rect: { left: number; bottom: number }) {
+  // fresh: a new comment, which never resolves the marks already there.
+  function openPop(t: About, rect: { left: number; bottom: number }, fresh?: boolean) {
     closePop(true);
     const a = t.a;
     const cstate = committedState(a);
@@ -359,7 +360,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
     port.send({ type: 'focus', anchor: a });
     // a committed, addressed/verified item gets Accept/Reopen (close the loop)
     // when this reviewer may resolve; everything else gets the mark-up controls.
-    if (live && opts.resolve && (cstate === 'addressed' || cstate === 'verified')) {
+    if (live && opts.resolve && !fresh && (cstate === 'addressed' || cstate === 'verified')) {
       p.innerHTML = quote + '<div class="rev-cap">Agent marked this ' + cstate + '.</div>' +
         '<textarea class="rev-note" placeholder="reopen note (optional)"></textarea>' +
         '<div class="rev-row"><button class="rev-accept">Accept</button><button class="rev-reopen">Reopen</button></div>';
