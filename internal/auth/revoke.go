@@ -161,11 +161,42 @@ func (c *AuthClient) RevokeTokenStatus() (RevocationStatus, error) {
 
 	status := c.revokeOnServerStatus(token)
 
+	// SAGEOX_TOKEN shadows a stored login on the same endpoint, but that login
+	// is a separate credential. Revoke it too before RemoveToken deletes it:
+	// once its refresh token is gone from disk, nothing can retry, and it
+	// stays live on the server. An unreadable store is left alone here;
+	// RemoveToken then fails too, so the local copy survives for a retry.
+	ep := c.endpoint
+	if ep == "" {
+		ep = endpoint.Get()
+	}
+	if stored, err := c.storedTokenForEndpoint(endpoint.NormalizeEndpoint(ep)); err == nil && stored != nil && !sameCredential(stored, token) {
+		status = worseRevocation(status, c.revokeOnServerStatus(stored))
+	}
+
 	if err := c.RemoveToken(); err != nil {
 		return status, fmt.Errorf("%w: %w", ErrLocalTokenNotRemoved, err)
 	}
 
 	return status, nil
+}
+
+// sameCredential reports whether a and b are the same login, so it is revoked
+// once.
+func sameCredential(a, b *StoredToken) bool {
+	return a.AccessToken == b.AccessToken && a.RefreshToken == b.RefreshToken
+}
+
+// worseRevocation combines two revocations of one endpoint's credentials. An
+// unconfirmed one wins, so a credential that may still be live is never
+// reported as revoked.
+func worseRevocation(a, b RevocationStatus) RevocationStatus {
+	for _, s := range []RevocationStatus{a, b} {
+		if s == RevocationServerFailed || s == RevocationNetworkError {
+			return s
+		}
+	}
+	return a
 }
 
 // revokeOnServerStatus attempts revocation and returns structured status.

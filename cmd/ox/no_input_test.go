@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -147,6 +148,47 @@ func TestNoInputCLI(t *testing.T) {
 		assert.Contains(t, output, "Revoked on the server for")
 		assert.NotContains(t, output, "Failed to logout", "a revocation the server confirmed is not a failed logout")
 		assert.NotContains(t, output, "server-side sessions may still be active", "the server confirmed the revocation")
+	})
+
+	// SAGEOX_TOKEN shadows a stored login on the same endpoint. Logout must
+	// revoke both before deleting the stored one, or its refresh token stays
+	// live on the server with no local copy left to retry.
+	t.Run("logout revokes env token and the stored login it shadows", func(t *testing.T) {
+		env := noInputCLIEnv(t)
+		var mu sync.Mutex
+		var revoked []string
+		server := testguard.SafeMockServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == auth.RevokeEndpoint && r.Method == http.MethodPost {
+				require.NoError(t, r.ParseForm())
+				mu.Lock()
+				revoked = append(revoked, r.PostForm.Get("token"))
+				mu.Unlock()
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			http.NotFound(w, r)
+		}))
+		for i, pair := range env {
+			switch key, _, _ := strings.Cut(pair, "="); key {
+			case "SAGEOX_ENDPOINT":
+				env[i] = key + "=" + server.URL
+			case auth.EnvVarToken:
+				env[i] = key + "=oxp_test_4bDZfN"
+			}
+		}
+		require.NoError(t, auth.SaveTokenForEndpoint(server.URL, &auth.StoredToken{
+			AccessToken: "test-access", RefreshToken: "test-refresh", TokenType: "Bearer",
+			ExpiresAt: time.Now().Add(time.Hour),
+		}))
+
+		output, runErr := runNoInputCLI(t, oxBin, t.TempDir(), env, nil, "logout", "--no-input", "--yes")
+		require.NoError(t, runErr, "output: %s", output)
+		mu.Lock()
+		assert.ElementsMatch(t, []string{"oxp_test_4bDZfN", "test-refresh"}, revoked, "both credentials must be revoked; output: %s", output)
+		mu.Unlock()
+		token, err := auth.GetTokenForEndpoint(server.URL)
+		require.NoError(t, err)
+		assert.Nil(t, token, "the stored login must be removed")
 	})
 
 	t.Run("typed uninstall", func(t *testing.T) {

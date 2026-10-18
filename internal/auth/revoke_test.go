@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -480,6 +481,70 @@ func TestRevokeTokenStatus_LocalRemovalFailureKeepsServerAnswer(t *testing.T) {
 			assert.Equal(t, tt.wantStatus, status)
 			assert.Equal(t, tt.wantLocalOnly, errors.Is(err, ErrLocalTokenNotRemoved), "error: %v", err)
 			assert.Equal(t, tt.wantRevocations, revocations.Load())
+		})
+	}
+}
+
+// TestRevokeTokenStatus_SharedEndpointRevokesEveryCredential verifies logout
+// revokes a stored login that SAGEOX_TOKEN shadows on the same endpoint.
+// Failure prevented: only the env token was revoked, then the stored login was
+// deleted from disk unrevoked, so its refresh token stayed live on the server
+// with no local copy left to retry, while logout reported success.
+// The negative control: a single credential is revoked once, not twice.
+func TestRevokeTokenStatus_SharedEndpointRevokesEveryCredential(t *testing.T) {
+	const envToken, storedRefresh = "oxp_test_4bDZfN", "stored-refresh"
+	var mu sync.Mutex
+	var revoked []string
+	rejectStored := false
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, r.ParseForm())
+		mu.Lock()
+		revoked = append(revoked, r.PostForm.Get("token"))
+		reject := rejectStored && r.PostForm.Get("token") == storedRefresh
+		mu.Unlock()
+		if reject {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer mockServer.Close()
+	t.Setenv("SAGEOX_ENDPOINT", mockServer.URL)
+
+	for _, tt := range []struct {
+		name         string
+		envToken     string
+		rejectStored bool
+		wantRevoked  []string
+		wantStatus   RevocationStatus
+	}{
+		{name: "env token and stored login are both revoked", envToken: envToken, wantRevoked: []string{envToken, storedRefresh}, wantStatus: RevocationSuccess},
+		{name: "a stored login the server rejects is reported unconfirmed", envToken: envToken, rejectStored: true, wantRevoked: []string{envToken, storedRefresh}, wantStatus: RevocationServerFailed},
+		{name: "a single credential is revoked once", wantRevoked: []string{storedRefresh}, wantStatus: RevocationSuccess},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			mu.Lock()
+			revoked, rejectStored = nil, tt.rejectStored
+			mu.Unlock()
+			t.Setenv(EnvVarToken, tt.envToken)
+
+			client := NewAuthClientWithDir(t.TempDir())
+			client.endpoint = mockServer.URL
+			require.NoError(t, client.SaveToken(&StoredToken{
+				AccessToken: "stored-access", RefreshToken: storedRefresh, ExpiresAt: time.Now().Add(time.Hour),
+			}))
+
+			status, err := client.RevokeTokenStatus()
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantStatus, status)
+			mu.Lock()
+			assert.ElementsMatch(t, tt.wantRevoked, revoked, "every distinct credential on the endpoint must reach the server once")
+			mu.Unlock()
+
+			t.Setenv(EnvVarToken, "")
+			stored, err := client.GetToken()
+			require.NoError(t, err)
+			assert.Nil(t, stored, "the stored login must be removed after revocation")
 		})
 	}
 }
