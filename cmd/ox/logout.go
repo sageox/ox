@@ -31,21 +31,11 @@ var logoutCmd = &cobra.Command{
 		// refresh token that keeps the login usable, and leaving it on disk
 		// makes a reported logout a false promise. Preserve env-only logins,
 		// which ListEndpoints cannot see because they are not stored in auth.json.
-		loggedInEndpoints, err := auth.ListEndpoints()
-		if err != nil {
-			return fmt.Errorf("failed to list stored authentication endpoints: %w", err)
-		}
-		knownEndpoints := make(map[string]struct{}, len(loggedInEndpoints))
-		for _, ep := range loggedInEndpoints {
-			knownEndpoints[ep] = struct{}{}
-		}
-		for _, ep := range auth.GetLoggedInEndpoints() {
-			if _, ok := knownEndpoints[ep]; !ok {
-				loggedInEndpoints = append(loggedInEndpoints, ep)
-				knownEndpoints[ep] = struct{}{}
-			}
-		}
+		loggedInEndpoints, listErr := collectLogoutEndpoints()
 		if len(loggedInEndpoints) == 0 {
+			if listErr != nil {
+				return fmt.Errorf("failed to list stored authentication endpoints: %w", listErr)
+			}
 			fmt.Println("You are not currently logged in to any endpoints.")
 			return nil
 		}
@@ -115,8 +105,28 @@ var logoutCmd = &cobra.Command{
 		userCfg, _ := config.LoadUserConfig()
 		tips.MaybeShow("logout", tips.AlwaysShow, false, !userCfg.AreTipsEnabled(), false)
 
+		if listErr != nil {
+			return fmt.Errorf("failed to list stored authentication endpoints: %w", listErr)
+		}
 		return nil
 	},
+}
+
+// collectLogoutEndpoints retains usable environment credentials even if auth.json
+// cannot be read, so a storage error does not prevent revoking credentials we can still identify.
+func collectLogoutEndpoints() ([]string, error) {
+	endpoints, listErr := auth.ListEndpoints()
+	known := make(map[string]struct{}, len(endpoints))
+	for _, ep := range endpoints {
+		known[ep] = struct{}{}
+	}
+	for _, ep := range auth.GetLoggedInEndpoints() {
+		if _, ok := known[ep]; !ok {
+			endpoints = append(endpoints, ep)
+			known[ep] = struct{}{}
+		}
+	}
+	return endpoints, listErr
 }
 
 func init() {

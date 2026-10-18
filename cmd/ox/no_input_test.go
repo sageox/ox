@@ -36,6 +36,7 @@ func TestNoInputCLI(t *testing.T) {
 			expiredToken bool
 			wantError    []string
 		}{
+			{name: "no endpoints is a successful no-op", args: []string{"--no-input"}},
 			{name: "requires consent", args: []string{"--no-input"}, endpoints: 1, wantError: []string{cli.ErrConfirmationRequired.Error()}},
 			{name: "ignores piped consent", args: []string{"--no-input"}, endpoints: 1, input: "y\n", wantError: []string{cli.ErrConfirmationRequired.Error()}},
 			{name: "requires endpoint choice", args: []string{"--no-input"}, endpoints: 2, wantError: []string{"--no-input requires --endpoint", "--all"}},
@@ -71,6 +72,12 @@ func TestNoInputCLI(t *testing.T) {
 						AccessToken: "test-access", RefreshToken: "test-refresh", TokenType: "Bearer",
 						ExpiresAt: expiresAt,
 					}))
+				}
+				if tt.endpoints == 0 {
+					// ListEndpoints treats a missing auth file as an error, so leave
+					// behind a valid empty store to exercise the no-login case.
+					require.NoError(t, auth.SaveTokenForEndpoint("https://unused.example.com", &auth.StoredToken{AccessToken: "temporary"}))
+					require.NoError(t, auth.RemoveTokenForEndpoint("https://unused.example.com"))
 				}
 				authPath, err := auth.GetAuthFilePath()
 				require.NoError(t, err)

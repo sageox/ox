@@ -1,11 +1,30 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
+	"github.com/sageox/ox/internal/auth"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestCollectLogoutEndpointsKeepsEnvCredentialWhenAuthFileIsUnreadable(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("OX_XDG_DISABLE", "")
+	t.Setenv(auth.EnvVarToken, "oxp_test_4bDZfN")
+	t.Setenv("SAGEOX_ENDPOINT", "https://sageox.ai")
+
+	authPath, err := auth.GetAuthFilePath()
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Dir(authPath), 0o700))
+	require.NoError(t, os.WriteFile(authPath, []byte("not-json"), 0o600))
+
+	endpoints, listErr := collectLogoutEndpoints()
+	require.Error(t, listErr)
+	assert.Equal(t, []string{"https://sageox.ai"}, endpoints)
+}
 
 // TestSelectLogoutEndpoints_UnreadableSelectionFailsLoudly is the gate for the
 // review finding: with several endpoints logged in and nothing on stdin, logout
