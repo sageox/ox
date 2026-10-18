@@ -2675,7 +2675,7 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 			cloneCmd.Dir = parentDir
 		}
 		cloneStart := time.Now()
-		stopProgress := s.watchCloneProgress(tempPath, cloneStart)
+		stopProgress := s.watchCloneProgress(tempPath, cloneStart, progress)
 		output, err := cloneCmd.CombinedOutput()
 		received := stopProgress()
 		if err != nil {

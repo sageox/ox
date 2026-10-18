@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -163,7 +164,9 @@ func fixBrokenSymlink(localCfg *config.LocalConfig, issue repoPathIssue) bool {
 		endpoint: issue.endpoint,
 		issue:    "missing",
 	}); err != nil {
-		fmt.Printf("  Clone failed: %v\n", err)
+		if !errors.Is(err, daemon.ErrCheckoutInProgress) {
+			fmt.Printf("  Clone failed: %v\n", err)
+		}
 		return false
 	}
 
@@ -208,7 +211,7 @@ func fixRepoPathIssues(gitRoot string, localCfg *config.LocalConfig, issues []re
 		}
 	}
 
-	var fixed, skipped int
+	var fixed, skipped, cloning int
 
 	for _, issue := range issues {
 		var repoLabel string
@@ -287,6 +290,11 @@ func fixRepoPathIssues(gitRoot string, localCfg *config.LocalConfig, issues []re
 
 			// attempt clone
 			if err := cloneRepoForFix(issue); err != nil {
+				if errors.Is(err, daemon.ErrCheckoutInProgress) {
+					cloning++
+					fmt.Println()
+					continue
+				}
 				fmt.Printf("  Clone failed: %v\n", err)
 				skipped++
 				continue
@@ -321,9 +329,12 @@ func fixRepoPathIssues(gitRoot string, localCfg *config.LocalConfig, issues []re
 	if fixed == len(issues) {
 		return PassedCheck("git repo paths", fmt.Sprintf("fixed %d repo(s)", fixed))
 	}
-	if fixed > 0 {
+	if cloning > 0 && fixed+cloning == len(issues) {
+		return stillCloningCheck(cloning)
+	}
+	if fixed > 0 || cloning > 0 {
 		return WarningCheck("git repo paths",
-			fmt.Sprintf("fixed %d, skipped %d", fixed, skipped),
+			fmt.Sprintf("fixed %d, skipped %d", fixed, skipped)+stillCloningSuffix(cloning),
 			"Run `ox doctor --fix` again to fix remaining issues")
 	}
 	return WarningCheck("git repo paths",
@@ -377,7 +388,7 @@ func fixMissingRepos(gitRoot string, localCfg *config.LocalConfig) checkResult {
 		}
 	}
 
-	var fixed, skipped, total int
+	var fixed, skipped, cloning, total int
 
 	// clone ledger from repo detail API (GetRepos doesn't return ledgers)
 	if repoDetail != nil && repoDetail.Ledger != nil && repoDetail.Ledger.Status == "ready" && repoDetail.Ledger.RepoURL != "" {
@@ -399,7 +410,9 @@ func fixMissingRepos(gitRoot string, localCfg *config.LocalConfig) checkResult {
 		if err := os.MkdirAll(filepath.Dir(ledgerPath), 0755); err != nil {
 			fmt.Printf("    Error creating directory: %v\n", err)
 			skipped++
-		} else if err := cloneViaDaemon(repoDetail.Ledger.RepoURL, ledgerPath, "ledger", projectEndpoint); err != nil {
+		} else if err := cloneViaDaemon(repoDetail.Ledger.RepoURL, ledgerPath, "ledger", projectEndpoint); errors.Is(err, daemon.ErrCheckoutInProgress) {
+			cloning++
+		} else if err != nil {
 			fmt.Printf("    Clone failed: %v\n", err)
 			skipped++
 		} else {
@@ -470,6 +483,11 @@ func fixMissingRepos(gitRoot string, localCfg *config.LocalConfig) checkResult {
 		}
 
 		if err := cloneViaDaemon(tc.cloneURL, tcPath, "team-context", projectEndpoint); err != nil {
+			if errors.Is(err, daemon.ErrCheckoutInProgress) {
+				cloning++
+				fmt.Println()
+				continue
+			}
 			fmt.Printf("    Clone failed: %v\n", err)
 			skipped++
 			continue
@@ -495,9 +513,12 @@ func fixMissingRepos(gitRoot string, localCfg *config.LocalConfig) checkResult {
 	if fixed == total {
 		return PassedCheck("git repo paths", fmt.Sprintf("cloned %d repo(s)", fixed))
 	}
-	if fixed > 0 {
+	if cloning > 0 && fixed+cloning == total {
+		return stillCloningCheck(cloning)
+	}
+	if fixed > 0 || cloning > 0 {
 		return WarningCheck("git repo paths",
-			fmt.Sprintf("cloned %d, failed %d", fixed, skipped),
+			fmt.Sprintf("cloned %d, failed %d", fixed, skipped)+stillCloningSuffix(cloning),
 			"Run `ox doctor --fix` again to retry failed repos")
 	}
 	return FailedCheck("git repo paths",
@@ -536,6 +557,57 @@ func extractTeamIDFromRepoName(name string) string {
 	return ""
 }
 
+// doctorCheckoutIdle is how long doctor waits on a daemon clone that reports
+// no progress before leaving it to finish in the background. A downloading
+// Ledger clone reports every few seconds, so it is only reached when the
+// daemon is busy elsewhere first (e.g. waiting out its own background clone
+// of the same repo) or is too old to report downloads. Var so tests can
+// shrink it.
+var doctorCheckoutIdle = 60 * time.Second
+
+// checkoutProgressEvery is how often doctor prints a running download's
+// progress. The daemon reports every few seconds, for as long as a Ledger
+// downloads.
+const checkoutProgressEvery = 30 * time.Second
+
+// checkoutProgressPrinter prints a daemon clone's progress messages, each
+// once, and a running download's at most every checkoutProgressEvery.
+type checkoutProgressPrinter struct {
+	last         string
+	lastDownload time.Time
+}
+
+func (p *checkoutProgressPrinter) print(stage string, _ *int, message string) {
+	if message == "" || message == p.last {
+		return
+	}
+	if stage == daemon.CheckoutStageDownloading {
+		if time.Since(p.lastDownload) < checkoutProgressEvery {
+			return
+		}
+		p.lastDownload = time.Now()
+	}
+	p.last = message
+	fmt.Printf("    %s\n", message)
+}
+
+// stillCloningCheck is the result when every repo doctor could not finish is
+// still being cloned by the daemon: nothing failed, the clones land on their own.
+func stillCloningCheck(cloning int) checkResult {
+	return WarningCheck("git repo paths",
+		fmt.Sprintf("%d repo(s) still cloning in the background", cloning),
+		"The ox daemon is still cloning. Run `ox status` to check on it; `ox doctor` passes once it lands.")
+}
+
+// stillCloningSuffix extends a mixed outcome's summary with the repos the
+// daemon is still cloning.
+func stillCloningSuffix(cloning int) string {
+	if cloning == 0 {
+		return ""
+	}
+	return fmt.Sprintf(", still cloning %d", cloning)
+}
+
 // cloneViaDaemon clones a repo using the daemon's checkout capability.
 // Clone operations go through daemon for centralized credential handling.
 //
@@ -557,19 +629,20 @@ func extractTeamIDFromRepoName(name string) string {
 func cloneViaDaemon(cloneURL, targetPath, repoType, endpointURL string) error {
 	// Try daemon first (preferred path - centralized credential handling)
 	if daemon.IsRunning() {
-		client := daemon.NewClientForCurrentRepoWithTimeout(60 * time.Second)
+		client := daemon.NewClientForCurrentRepoWithTimeout(doctorCheckoutIdle)
 		payload := daemon.CheckoutPayload{
 			RepoPath: targetPath,
 			CloneURL: cloneURL,
 			RepoType: repoType,
 		}
 
-		result, err := client.Checkout(payload, func(stage string, percent *int, message string) {
-			// progress updates - could be shown to user if needed
-			if message != "" {
-				fmt.Printf("    %s\n", message)
-			}
-		})
+		progress := &checkoutProgressPrinter{}
+		result, err := client.Checkout(payload, progress.print)
+		if errors.Is(err, daemon.ErrCheckoutInProgress) {
+			// the daemon keeps cloning after doctor stops waiting
+			fmt.Println("    Still cloning in the ox daemon; it continues in the background.")
+			return err
+		}
 		if err != nil {
 			return err
 		}

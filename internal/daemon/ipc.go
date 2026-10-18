@@ -356,9 +356,13 @@ type TeamSyncResult struct {
 	Error    string `json:"error,omitempty"`
 }
 
+// CheckoutStageDownloading is the CheckoutProgress stage a Ledger clone
+// reports while it downloads.
+const CheckoutStageDownloading = "downloading"
+
 // CheckoutProgress is sent during long-running checkout operations.
 type CheckoutProgress struct {
-	Stage   string `json:"stage"`             // "connecting", "cloning", "verifying"
+	Stage   string `json:"stage"`             // "connecting", "cloning", "downloading", "verifying"
 	Percent *int   `json:"percent,omitempty"` // 0-100, nil if unknown
 	Message string `json:"message"`           // human-readable progress message
 }
@@ -2315,9 +2319,19 @@ func (c *Client) Stop() error {
 // Percent is nil when unknown.
 type ProgressCallback func(stage string, percent *int, message string)
 
+// ErrCheckoutInProgress means the client stopped waiting on a checkout the
+// daemon had not finished: nothing came back within the client's idle window.
+// It is not a clone failure. The daemon does not cancel a checkout when its
+// caller leaves, so the clone goes on in the background.
+var ErrCheckoutInProgress = errors.New("clone still in progress in the daemon")
+
 // Checkout requests the daemon to clone a repository.
 // The onProgress callback is called for each progress update (may be nil).
-// Uses a long timeout (60s) since clones can take time.
+// Uses an idle timeout: the deadline resets on each progress message, so the
+// client waits for as long as the daemon keeps reporting. A Ledger clone
+// reports every few seconds while it downloads, and can download for many
+// minutes. When the daemon stays quiet for the whole window, the error wraps
+// ErrCheckoutInProgress.
 func (c *Client) Checkout(payload CheckoutPayload, onProgress ProgressCallback) (*CheckoutResult, error) {
 	conn, err := c.Connect()
 	if err != nil {
@@ -2325,12 +2339,12 @@ func (c *Client) Checkout(payload CheckoutPayload, onProgress ProgressCallback) 
 	}
 	defer conn.Close()
 
-	// use configured timeout, with minimum floor for clone operations
-	checkoutTimeout := 60 * time.Second
-	if c.timeout > 0 && c.timeout < checkoutTimeout {
-		checkoutTimeout = c.timeout
+	// idle timeout — reset on each progress message
+	idleTimeout := 60 * time.Second
+	if c.timeout > 0 && c.timeout < idleTimeout {
+		idleTimeout = c.timeout
 	}
-	conn.SetDeadline(time.Now().Add(checkoutTimeout))
+	conn.SetDeadline(time.Now().Add(idleTimeout))
 
 	// marshal payload
 	payloadData, _ := json.Marshal(payload)
@@ -2351,6 +2365,9 @@ func (c *Client) Checkout(payload CheckoutPayload, onProgress ProgressCallback) 
 	reader := bufio.NewReader(conn)
 	for {
 		line, err := reader.ReadBytes('\n')
+		if errors.Is(err, os.ErrDeadlineExceeded) {
+			return nil, fmt.Errorf("%w: no progress reported for %s", ErrCheckoutInProgress, idleTimeout)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("read: %w", err)
 		}
@@ -2362,6 +2379,7 @@ func (c *Client) Checkout(payload CheckoutPayload, onProgress ProgressCallback) 
 
 		// check for progress update
 		if resp.Progress != nil {
+			conn.SetDeadline(time.Now().Add(idleTimeout))
 			if onProgress != nil {
 				onProgress(resp.Progress.Stage, resp.Progress.Percent, resp.Progress.Message)
 			}

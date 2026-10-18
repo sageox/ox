@@ -58,7 +58,12 @@ func (s *SyncScheduler) cloneContext(budget time.Duration) (context.Context, con
 // progress in the daemon log. git deletes a failed clone's directory as it
 // exits, so the size has to be sampled while git runs: reading it after a kill
 // finds nothing. stop ends sampling and returns the largest size seen.
-func (s *SyncScheduler) watchCloneProgress(dir string, start time.Time) (stop func() int64) {
+//
+// Every sample also goes to progress, the IPC caller waiting on this clone
+// (nil for a background clone). The caller's wait restarts on each report,
+// so `ox doctor --fix` waits out a download however long it runs instead of
+// giving up at a fixed limit while the clone is still arriving.
+func (s *SyncScheduler) watchCloneProgress(dir string, start time.Time, progress *ProgressWriter) (stop func() int64) {
 	var largest int64
 	done := make(chan struct{})
 	finished := make(chan struct{})
@@ -73,6 +78,10 @@ func (s *SyncScheduler) watchCloneProgress(dir string, start time.Time) (stop fu
 				return
 			case now := <-tick.C:
 				largest = max(largest, dirSize(dir))
+				if progress != nil {
+					_ = progress.WriteStage(CheckoutStageDownloading, fmt.Sprintf("Downloading: %s received, %s elapsed",
+						formatCloneBytes(largest), now.Sub(start).Round(time.Second)))
+				}
 				if now.Sub(lastLog) >= cloneProgressLogEvery {
 					lastLog = now
 					s.logger.Info("checkout: clone in progress",
