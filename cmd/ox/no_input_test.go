@@ -29,11 +29,12 @@ func TestNoInputCLI(t *testing.T) {
 
 	t.Run("logout", func(t *testing.T) {
 		for _, tt := range []struct {
-			name      string
-			args      []string
-			endpoints int
-			input     string
-			wantError []string
+			name         string
+			args         []string
+			endpoints    int
+			input        string
+			expiredToken bool
+			wantError    []string
 		}{
 			{name: "requires consent", args: []string{"--no-input"}, endpoints: 1, wantError: []string{cli.ErrConfirmationRequired.Error()}},
 			{name: "ignores piped consent", args: []string{"--no-input"}, endpoints: 1, input: "y\n", wantError: []string{cli.ErrConfirmationRequired.Error()}},
@@ -43,6 +44,7 @@ func TestNoInputCLI(t *testing.T) {
 			{name: "stray endpoint is rejected before logout", args: []string{"--no-input", "--force", "other-endpoint"}, endpoints: 2, wantError: []string{`unknown command "other-endpoint"`}},
 			{name: "explicit false still requires consent", args: []string{"--no-input", "--force=false"}, endpoints: 1, wantError: []string{cli.ErrConfirmationRequired.Error()}},
 			{name: "yes authorizes single endpoint", args: []string{"--no-input", "--yes"}, endpoints: 1},
+			{name: "yes authorizes logout of expired stored token", args: []string{"--no-input", "--yes"}, endpoints: 1, expiredToken: true},
 			{name: "all and yes authorize every endpoint", args: []string{"--no-input", "--all", "--yes"}, endpoints: 2},
 			{name: "force authorizes every endpoint", args: []string{"--no-input", "--force"}, endpoints: 2},
 			{name: "no-interactive still accepts piped consent", args: []string{"--no-interactive"}, endpoints: 1, input: "y"},
@@ -61,9 +63,13 @@ func TestNoInputCLI(t *testing.T) {
 						http.NotFound(w, r)
 					}))
 					endpoints = append(endpoints, server.URL)
+					expiresAt := time.Now().Add(time.Hour)
+					if tt.expiredToken {
+						expiresAt = time.Now().Add(-time.Hour)
+					}
 					require.NoError(t, auth.SaveTokenForEndpoint(server.URL, &auth.StoredToken{
 						AccessToken: "test-access", RefreshToken: "test-refresh", TokenType: "Bearer",
-						ExpiresAt: time.Now().Add(time.Hour),
+						ExpiresAt: expiresAt,
 					}))
 				}
 				authPath, err := auth.GetAuthFilePath()

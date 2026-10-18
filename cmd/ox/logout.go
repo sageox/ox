@@ -27,8 +27,24 @@ var logoutCmd = &cobra.Command{
 	Short: "Log out of SageOx",
 	Long:  "Remove local authentication token and log out of SageOx.",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// get all logged-in endpoints
-		loggedInEndpoints := auth.GetLoggedInEndpoints()
+		// Logout must see expired disk tokens too: they may still have a
+		// refresh token that keeps the login usable, and leaving it on disk
+		// makes a reported logout a false promise. Preserve env-only logins,
+		// which ListEndpoints cannot see because they are not stored in auth.json.
+		loggedInEndpoints, err := auth.ListEndpoints()
+		if err != nil {
+			return fmt.Errorf("failed to list stored authentication endpoints: %w", err)
+		}
+		knownEndpoints := make(map[string]struct{}, len(loggedInEndpoints))
+		for _, ep := range loggedInEndpoints {
+			knownEndpoints[ep] = struct{}{}
+		}
+		for _, ep := range auth.GetLoggedInEndpoints() {
+			if _, ok := knownEndpoints[ep]; !ok {
+				loggedInEndpoints = append(loggedInEndpoints, ep)
+				knownEndpoints[ep] = struct{}{}
+			}
+		}
 		if len(loggedInEndpoints) == 0 {
 			fmt.Println("You are not currently logged in to any endpoints.")
 			return nil
