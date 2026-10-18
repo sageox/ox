@@ -88,6 +88,12 @@ func (s *SyncScheduler) cloneInBackground(ctx context.Context, cloneURL, repoPat
 	}, nil) // no progress writer for background clones
 
 	if err != nil {
+		// the daemon stopped mid-download: not a clone failure, so no error
+		// and no backoff; the next start clones again
+		if errors.Is(err, errCloneInterrupted) {
+			s.logger.Info("clone stopped by daemon shutdown, will retry on next start", "type", repoType, "path", repoPath)
+			return
+		}
 		s.refreshAfterAuthFailure(ctx, err)
 		s.logger.Error("background clone failed", "type", repoType, "path", repoPath, "error", err)
 

@@ -2551,7 +2551,15 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 		// misclassifies as benign lock contention (matches
 		// context.DeadlineExceeded) — masking a real clone failure as a
 		// harmless retry-next-cycle.
-		cloneCtx, cloneCancel := context.WithTimeout(context.Background(), 60*time.Second)
+		//
+		// The budget depends on what is being cloned: a team context is a
+		// small partial clone, a Ledger is its whole history. See
+		// ledgerCloneTimeout.
+		cloneBudget := teamContextCloneTimeout
+		if payload.RepoType != "team-context" {
+			cloneBudget = ledgerCloneTimeout
+		}
+		cloneCtx, cloneCancel := s.cloneContext(cloneBudget)
 		defer cloneCancel()
 
 		// send progress: connecting
@@ -2666,15 +2674,15 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 			_ = os.MkdirAll(parentDir, 0755)
 			cloneCmd.Dir = parentDir
 		}
-		if output, err := cloneCmd.CombinedOutput(); err != nil {
-			sanitizedOutput := gitutil.SanitizeOutput(string(output))
-			s.logger.Error("checkout: clone failed", "error", err, "output", sanitizedOutput)
-			s.recordError(payload.RepoType, fmt.Sprintf("clone %s failed: %v", payload.RepoType, err))
-			if sanitizedOutput != "" {
-				return fmt.Errorf("git clone failed: %s", sanitizedOutput)
-			}
-			return fmt.Errorf("git clone failed: %w", err)
+		cloneStart := time.Now()
+		stopProgress := s.watchCloneProgress(tempPath, cloneStart)
+		output, err := cloneCmd.CombinedOutput()
+		received := stopProgress()
+		if err != nil {
+			return s.ledgerCloneError(cloneCtx, payload.RepoType, cloneBudget, time.Since(cloneStart), received, output, err)
 		}
+		s.logger.Info("checkout: clone downloaded", "path", payload.RepoPath,
+			"elapsed", time.Since(cloneStart).Round(time.Millisecond), "size_bytes", dirSize(tempPath))
 
 		// verify the temp clone is actually complete before it ever becomes
 		// visible at payload.RepoPath — an early-EOF clone can exit non-zero
