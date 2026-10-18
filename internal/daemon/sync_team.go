@@ -676,7 +676,9 @@ func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) (teamP
 		// pairs them and any local change to the deleted one becomes a false
 		// rename/delete conflict that suspends sync. Cost: a real upstream
 		// rename racing a local edit of that same file now surfaces as
-		// modify/delete instead of following the rename.
+		// modify/delete instead of following the rename, which suspends sync
+		// the same way until it is resolved. The local edit is kept (in the
+		// worktree and the autostash), never discarded.
 		ImmutablePaths:     true,
 		RepoPath:           path,
 		RepoName:           repoName,
