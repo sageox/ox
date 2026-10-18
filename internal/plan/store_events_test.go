@@ -207,6 +207,44 @@ func TestSave_SecondSaveAppendsRevisedEventSamePlanID(t *testing.T) {
 	}
 }
 
+// TestSave_ResaveInAnotherRecordingStampsThatRecording: meta.json keeps the
+// producing session's id, and the re-save's event line names the recording
+// that wrote it. Failure prevented: the meta.json merge rewrote the caller's
+// provenance, pairing the new session's name with the first session's id on
+// a line that is never edited.
+func TestSave_ResaveInAnotherRecordingStampsThatRecording(t *testing.T) {
+	ledger := t.TempDir()
+	withLedger(t, ledger)
+
+	first := Meta{Topic: "Two recordings", CreatedAt: time.Date(2026, 7, 1, 9, 0, 0, 0, time.UTC), Provenance: sampleProvenance()}
+	dir, _, err := Save("/g", Input{Raw: "# Two recordings\n\nv1"}, sampleResult(), nil, first)
+	if err != nil {
+		t.Fatalf("Save v1: %v", err)
+	}
+	second := first
+	second.Provenance = sampleProvenance()
+	second.Provenance.SessionName = "2026-07-02-person-a-Oxab12"
+	second.Provenance.SessionID = "ses_test0002"
+	if _, _, err := Save("/g", Input{Raw: "# Two recordings\n\nv2"}, sampleResult(), nil, second); err != nil {
+		t.Fatalf("Save v2: %v", err)
+	}
+
+	events, err := LoadEvents(dir)
+	if err != nil || len(events) != 2 {
+		t.Fatalf("LoadEvents: err=%v n=%d", err, len(events))
+	}
+	if got := events[1]; got.SessionName != "2026-07-02-person-a-Oxab12" || got.SessionID != "ses_test0002" {
+		t.Errorf("re-save event session = (%q, %q), want the recording that wrote it", got.SessionName, got.SessionID)
+	}
+	m, err := readMeta(dir)
+	if err != nil {
+		t.Fatalf("readMeta: %v", err)
+	}
+	if m.Provenance == nil || m.Provenance.SessionID != "ses_test0001" {
+		t.Errorf("meta.json provenance = %+v, want the producing session's ses_test0001", m.Provenance)
+	}
+}
+
 // TestSave_MetaJSONStillWrittenAlongsideEvents pins Phase 1's dual-write
 // contract directly: meta.json continues to be written exactly as before, and
 // both it and events.jsonl exist and agree on status after a save.
