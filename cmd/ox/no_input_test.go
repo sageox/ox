@@ -112,6 +112,40 @@ func TestNoInputCLI(t *testing.T) {
 		}
 	})
 
+	// An unreadable auth.json must not hide a usable SAGEOX_TOKEN: the compiled
+	// command revokes it first, then fails with the listing error instead of
+	// exiting 0 as if the store were fine.
+	t.Run("logout revokes env token before reporting an unreadable auth store", func(t *testing.T) {
+		env := noInputCLIEnv(t)
+		var revocations atomic.Int32
+		server := testguard.SafeMockServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == auth.RevokeEndpoint && r.Method == http.MethodPost {
+				revocations.Add(1)
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			http.NotFound(w, r)
+		}))
+		for i, pair := range env {
+			switch key, _, _ := strings.Cut(pair, "="); key {
+			case "SAGEOX_ENDPOINT":
+				env[i] = key + "=" + server.URL
+			case auth.EnvVarToken:
+				env[i] = key + "=oxp_test_4bDZfN"
+			}
+		}
+
+		authPath, err := auth.GetAuthFilePath()
+		require.NoError(t, err)
+		require.NoError(t, os.MkdirAll(filepath.Dir(authPath), 0o700))
+		require.NoError(t, os.WriteFile(authPath, []byte("not-json"), 0o600))
+
+		output, runErr := runNoInputCLI(t, oxBin, t.TempDir(), env, nil, "logout", "--no-input", "--yes")
+		require.Error(t, runErr, "output: %s", output)
+		assert.Contains(t, output, "failed to list stored authentication endpoints")
+		assert.EqualValues(t, 1, revocations.Load(), "the env token must be revoked before the error; output: %s", output)
+	})
+
 	t.Run("typed uninstall", func(t *testing.T) {
 		for _, tt := range []struct {
 			name       string
