@@ -289,3 +289,31 @@ func TestDoctorFix_DirectLedgerCloneStallIsAborted(t *testing.T) {
 	require.NotContains(t, output, "unexpected disconnect", "git's reaction to the abort is not the cause")
 	requireNoHalfClone(t, ledgerPath)
 }
+
+// TestDirectLedgerCloneError_SaysWhatEndedTheClone verifies a failed direct
+// Ledger clone is reported by its cause, not by git's reaction to it.
+// Failure prevented: "fetch-pack: unexpected disconnect" for a clone our own
+// backstop or curl's stall check ended, which reads like a server fault.
+func TestDirectLedgerCloneError_SaysWhatEndedTheClone(t *testing.T) {
+	expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	cloneErr := fmt.Errorf("clone failed: exit status 128")
+
+	for _, tt := range []struct {
+		name      string
+		ctx       context.Context
+		gitOutput string
+		want      string
+	}{
+		{name: "backstop expired", ctx: expired, gitOutput: "fetch-pack: unexpected disconnect while reading sideband packet", want: "clone ledger timed out after 1h0m0s (2 MB received)"},
+		{name: "curl stall abort", ctx: context.Background(), gitOutput: "error: RPC failed; curl 28 Operation too slow. Less than 1000 bytes/sec transferred the last 15 seconds", want: "clone ledger stalled: the download stopped making progress (2 MB received)"},
+		{name: "git's own failure", ctx: context.Background(), gitOutput: "fatal: repository 'http://127.0.0.1/ledger.git/' not found\n", want: "git clone failed: fatal: repository 'http://127.0.0.1/ledger.git/' not found"},
+		{name: "no git output", ctx: context.Background(), want: cloneErr.Error()},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := directLedgerCloneError(tt.ctx, time.Hour, 2<<20, tt.gitOutput, cloneErr)
+			require.Error(t, err)
+			assert.Equal(t, tt.want, err.Error())
+		})
+	}
+}

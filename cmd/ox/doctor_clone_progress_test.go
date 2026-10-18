@@ -178,6 +178,31 @@ func TestDoctorFix_FirstLedgerCloneWaitsOnProgress(t *testing.T) {
 	}
 }
 
+// TestDoctorFix_QuietTeamContextCloneIsAFailure verifies doctor reports a
+// team-context clone that goes quiet as failed, not cloning in the background.
+// Failure prevented: the daemon gives a team context the same 60s that doctor
+// waits, so the clone had already been killed when doctor told the coworker
+// it would finish on its own.
+func TestDoctorFix_QuietTeamContextCloneIsAFailure(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: waits out doctor's clone window")
+	}
+	root := setupDoctorCloneProject(t, func(p daemon.CheckoutPayload, _ *daemon.ProgressWriter) (*daemon.CheckoutResult, error) {
+		time.Sleep(3 * doctorCloneIdle)
+		return &daemon.CheckoutResult{Path: p.RepoPath, Cloned: true}, nil
+	})
+
+	var err error
+	output := captureStdoutForPlanCLI(t, func() {
+		err = cloneViaDaemon("http://127.0.0.1:1/team.git", filepath.Join(t.TempDir(), "team"), "team-context", endpoint.GetForProject(root))
+	})
+	if assert.Error(t, err) {
+		assert.NotErrorIs(t, err, daemon.ErrCheckoutInProgress, "a team-context clone is not left cloning in the background")
+		assert.Contains(t, err.Error(), "did not finish")
+	}
+	assert.NotContains(t, output, "Still cloning", "output: %s", output)
+}
+
 // TestDoctorFix_MissingLedgerCloneWaitsOnProgress drives the repair of a
 // configured Ledger whose directory is gone.
 func TestDoctorFix_MissingLedgerCloneWaitsOnProgress(t *testing.T) {

@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"math/rand/v2"
 	"net/http"
 	"net/http/cgi"
@@ -207,12 +208,18 @@ func TestLedgerClone_ProgressingDownloadOutlivesFixedCloneBudget(t *testing.T) {
 	setCloneBudgets(t, 2*time.Second, 2*time.Minute)
 	srv := servePacedLedger(t, ledgerFixtureBytes, ledgerPace, 0)
 	s, ledgerPath := newCloneLifecycleScheduler(t, srv.URL)
+	var logs lockedBuffer
+	s.logger = slog.New(slog.NewTextHandler(&logs, nil))
+	prevLogEvery := cloneProgressLogEvery
+	cloneProgressLogEvery = time.Second
+	t.Cleanup(func() { cloneProgressLogEvery = prevLogEvery })
 
 	start := time.Now()
 	result, err := checkoutLedger(s, srv.URL, ledgerPath)
 	elapsed := time.Since(start)
 
 	require.NoError(t, err, "a Ledger clone that is still downloading must not be killed")
+	require.Contains(t, logs.String(), "checkout: clone in progress", "a long first clone must show progress in the daemon log")
 	require.True(t, result.Cloned)
 	require.Greater(t, elapsed, teamContextCloneTimeout,
 		"the download finished inside the fixed budget, so this run proved nothing; slow the pace")

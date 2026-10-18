@@ -485,11 +485,6 @@ func fixMissingRepos(gitRoot string, localCfg *config.LocalConfig) checkResult {
 		}
 
 		if err := cloneViaDaemon(tc.cloneURL, tcPath, "team-context", projectEndpoint); err != nil {
-			if errors.Is(err, daemon.ErrCheckoutInProgress) {
-				cloning++
-				fmt.Println()
-				continue
-			}
 			fmt.Printf("    Clone failed: %v\n", err)
 			skipped++
 			continue
@@ -641,6 +636,11 @@ func cloneViaDaemon(cloneURL, targetPath, repoType, endpointURL string) error {
 		progress := &checkoutProgressPrinter{}
 		result, err := client.Checkout(payload, progress.print)
 		if errors.Is(err, daemon.ErrCheckoutInProgress) {
+			if repoType == "team-context" {
+				// its clone has the same 60s budget in the daemon, so a quiet
+				// window this long means it failed or is about to
+				return fmt.Errorf("team context clone did not finish within %s", doctorCheckoutIdle)
+			}
 			// the daemon keeps cloning after doctor stops waiting
 			fmt.Println("    Still cloning in the ox daemon; it continues in the background.")
 			return err
@@ -666,35 +666,35 @@ func cloneViaDaemon(cloneURL, targetPath, repoType, endpointURL string) error {
 	// ─────────────────────────────────────────────────────────────────────────
 	fmt.Println("    Note: Daemon not running, using direct clone")
 
-	if repoType != "team-context" {
-		if err := directCloneLedger(cloneURL, targetPath, endpointURL); err != nil {
-			return fmt.Errorf("direct clone failed: %w", err)
-		}
-		fmt.Println("    Cloned successfully (direct).")
-		return nil
-	}
-
+	// the team-context budget; a Ledger clone brings its own (directCloneLedger)
 	ctx, cancel := context.WithTimeout(context.Background(), directTeamContextCloneTimeout)
 	defer cancel()
 
-	// team contexts use shared two-phase partial clone (same code as daemon).
-	// Pre-check credentials exist so we fail with a clear error rather than
-	// a generic git auth failure; but pass the BARE URL to TwoPhaseClone —
-	// it resolves the PAT via the ox credential helper. Embedding the token
-	// in the URL (BuildAuthURL) would persist it into .git/config, which
-	// ox-eeqi explicitly forbids.
-	creds, err := gitserver.LoadCredentialsForEndpoint(endpointURL)
-	if err != nil {
-		return fmt.Errorf("load credentials: %w", err)
+	if repoType == "team-context" {
+		// team contexts use shared two-phase partial clone (same code as daemon).
+		// Pre-check credentials exist so we fail with a clear error rather than
+		// a generic git auth failure; but pass the BARE URL to TwoPhaseClone —
+		// it resolves the PAT via the ox credential helper. Embedding the token
+		// in the URL (BuildAuthURL) would persist it into .git/config, which
+		// ox-eeqi explicitly forbids.
+		creds, err := gitserver.LoadCredentialsForEndpoint(endpointURL)
+		if err != nil {
+			return fmt.Errorf("load credentials: %w", err)
+		}
+		if creds == nil {
+			return fmt.Errorf("direct clone failed: %w", gitserver.ErrNoCredentials)
+		}
+		result, err := gitserver.TwoPhaseClone(ctx, cloneURL, targetPath, manifest.RepoKindTeamContext)
+		if err != nil {
+			return fmt.Errorf("direct clone failed: %w", err)
+		}
+		gitserver.ValidateTeamContextClone(targetPath, result.ManifestConfig)
+	} else {
+		// ledger: full clone, on a backstop and curl's stall check, not ctx
+		if err := directCloneLedger(cloneURL, targetPath, endpointURL); err != nil {
+			return fmt.Errorf("direct clone failed: %w", err)
+		}
 	}
-	if creds == nil {
-		return fmt.Errorf("direct clone failed: %w", gitserver.ErrNoCredentials)
-	}
-	result, err := gitserver.TwoPhaseClone(ctx, cloneURL, targetPath, manifest.RepoKindTeamContext)
-	if err != nil {
-		return fmt.Errorf("direct clone failed: %w", err)
-	}
-	gitserver.ValidateTeamContextClone(targetPath, result.ManifestConfig)
 
 	fmt.Println("    Cloned successfully (direct).")
 	return nil

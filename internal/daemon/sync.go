@@ -819,7 +819,9 @@ func (s *SyncScheduler) waitClones(timeout time.Duration) {
 // Start runs the scheduler until cancellation, then joins the delayed startup
 // pull before returning. Tracked background clones receive a bounded drain period.
 func (s *SyncScheduler) Start(ctx context.Context) {
-	s.ctx = ctx
+	if s.ctx == nil { // the daemon binds it before the IPC server starts
+		s.ctx = ctx
+	}
 
 	// load initial workspace state from config
 	if err := s.workspaceRegistry.LoadFromConfig(); err != nil {

@@ -2365,7 +2365,10 @@ func (c *Client) Checkout(payload CheckoutPayload, onProgress ProgressCallback) 
 	reader := bufio.NewReader(conn)
 	for {
 		line, err := reader.ReadBytes('\n')
-		if errors.Is(err, os.ErrDeadlineExceeded) {
+		// net.Error, not os.ErrDeadlineExceeded: a Windows named pipe
+		// (go-winio) times out with its own error that only says Timeout().
+		var ne net.Error
+		if errors.As(err, &ne) && ne.Timeout() {
 			return nil, fmt.Errorf("%w: no progress reported for %s", ErrCheckoutInProgress, idleTimeout)
 		}
 		if err != nil {

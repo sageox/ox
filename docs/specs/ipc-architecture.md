@@ -281,8 +281,9 @@ Each workspace (repo) gets its own daemon instance:
 │  └─────────────┘     (60s idle timeout)         └─────────────┘                 │
 │  Purpose: Clone a new repo (ledger or team context)                            │
 │  Idle: deadline resets on each progress update; a Ledger download reports      │
-│     every few seconds. Quiet past it = ErrCheckoutInProgress: the clone goes   │
-│     on in the daemon, so doctor reports it as cloning in the background.       │
+│     every few seconds. Quiet past it = ErrCheckoutInProgress: a Ledger clone   │
+│     goes on in the daemon, so doctor reports it as cloning in the background.  │
+│     A team context has the same 60s in the daemon, so doctor reports failure.  │
 │  🔶 CRITICAL PATH: If fails, CLI falls back to direct git clone               │
 │     (see cmd/ox/doctor_git_repos.go:cloneViaDaemon)                            │
 │                                                                                 │

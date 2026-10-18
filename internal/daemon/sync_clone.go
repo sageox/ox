@@ -28,6 +28,16 @@ func (s *SyncScheduler) backgroundCloneContext() context.Context {
 	return context.Background()
 }
 
+// clonesInFlight reports whether a background clone is running.
+func (s *SyncScheduler) clonesInFlight() bool {
+	running := false
+	s.cloneInFlight.Range(func(_, _ any) bool {
+		running = true
+		return false
+	})
+	return running
+}
+
 // isClonePermanentError returns true if the error message indicates a failure
 // that won't resolve on its own (bad credentials, missing permissions, bad URL).
 // Transient errors (network timeout, server 503) return false.

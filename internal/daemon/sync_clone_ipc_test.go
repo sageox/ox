@@ -82,6 +82,23 @@ func TestLedgerClone_IPCCheckoutWaitsWhileDownloadProgresses(t *testing.T) {
 	require.False(t, strings.HasPrefix(last, "Downloading: 0.0 MB"), "the last report must reflect bytes that arrived: %q", last)
 }
 
+// TestLedgerClone_IPCCheckoutReportsInProgressWhenDaemonGoesQuiet verifies a
+// CLI whose idle window passes with no word from the daemon gets
+// ErrCheckoutInProgress, not a bare read error.
+// Failure prevented: doctor printed "Clone failed: read: i/o timeout" and
+// failed its check for a clone the daemon was still running.
+func TestLedgerClone_IPCCheckoutReportsInProgressWhenDaemonGoesQuiet(t *testing.T) {
+	release := make(chan struct{})
+	client := serveCheckoutIPC(t, func(p CheckoutPayload, _ *ProgressWriter) (*CheckoutResult, error) {
+		<-release // busy elsewhere, e.g. waiting out its own clone of this Ledger
+		return &CheckoutResult{Path: p.RepoPath, Cloned: true}, nil
+	}, 300*time.Millisecond)
+	t.Cleanup(func() { close(release) }) // runs before the server stops
+
+	_, err := client.Checkout(CheckoutPayload{CloneURL: "http://127.0.0.1:1/ledger.git", RepoPath: t.TempDir() + "/ledger", RepoType: "ledger"}, nil)
+	require.ErrorIs(t, err, ErrCheckoutInProgress)
+}
+
 // TestLedgerClone_IPCCallerHangingUpDoesNotStopClone verifies a Ledger clone
 // keeps downloading, and lands, after the CLI that asked for it hangs up.
 // Failure prevented: doctor tells the coworker that a clone it stopped

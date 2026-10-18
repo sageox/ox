@@ -336,6 +336,11 @@ func (d *Daemon) hasPendingWork() bool {
 	if d.sessionWatcher != nil && len(d.sessionWatcher.ActiveSessions()) > 0 {
 		return true
 	}
+	// a first Ledger clone can download for many minutes with no IPC traffic;
+	// exiting idle would cancel it and the next start would begin from zero
+	if d.scheduler != nil && d.scheduler.clonesInFlight() {
+		return true
+	}
 	return false
 }
 
@@ -1464,6 +1469,10 @@ func (d *Daemon) startWorkers() {
 		ws.RunIdleCloseJanitor(d.ctx, &d.wg, DefaultIdleCloseInterval, DefaultIdleCloseThreshold)
 	}
 
+	// IPC checkouts read the scheduler's context to stop a clone at shutdown,
+	// so bind it before the server can accept one; scheduler.Start runs
+	// concurrently and must not write it then.
+	d.scheduler.ctx = d.ctx
 	d.wg.Add(1)
 	go func() {
 		defer d.wg.Done()
