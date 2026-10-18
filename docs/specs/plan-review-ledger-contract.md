@@ -178,9 +178,10 @@ The CLI reads and writes review records only through `pkg/planreview`.
   clone's `.git/info/attributes` (`kb.MergeUnionPaths`, rewritten before every
   push and pull), so two clones' appends merge, upstream's lines first, in a
   rebase and in an autostash re-apply. Union is safe because no writer edits
-  a line once appended: a line carries its recording's `session_id` from the
-  start, so session stop records the session only in `meta.json`. An edited
-  line next to another clone's append would come out of the merge twice.
+  a line once appended: a line gets its `session_id`, if it has one, when it
+  is written, and session stop records the session only in `meta.json`. An
+  edited line next to another clone's append would come out of the merge
+  twice.
 
 ---
 

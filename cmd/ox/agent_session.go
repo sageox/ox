@@ -1701,7 +1701,7 @@ func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionRe
 	// reverse-link reconciliation: the session is committed, so record its
 	// ses_ id + outcome=stopped in the meta.json of every plan it produced
 	// (slugs in hand — no directory scan), then commit those plan dirs.
-	// Best-effort; any miss falls to `ox doctor`.
+	// Best-effort; see reconcileProducedPlansAtStop.
 	effects.reconcilePlans(projectRoot, state.ProducedPlans, meta.EffectiveSessionID())
 
 	// M5: the push succeeded — the session URL is now viewable. Transition
@@ -1763,8 +1763,9 @@ func writeInitialSessionMeta(sessionDir, agentID string, builder *lfs.SessionMet
 // (plan.ReconcileSessionOutcome), then commits each plan dir (data/plans/ is
 // not covered by the session commit). It leaves events.jsonl alone: those
 // lines are never edited (internal/plan/events.go). Slug-driven — no
-// directory scan — and fully best-effort: any miss is reconciled later by
-// `ox doctor`.
+// directory scan — and best-effort: a meta.json write that fails is logged at
+// debug and skipped; a commit that fails is retried by the next
+// `ox agent prime`.
 func reconcileProducedPlansAtStop(projectRoot string, slugs []string, sessionID string) {
 	for _, slug := range slugs {
 		if err := plan.ReconcileSessionOutcome(projectRoot, slug, sessionID, plan.SessionOutcomeStopped); err != nil {

@@ -288,6 +288,11 @@ func TestResolvePlanProvenance_SessionSurvivesMissingAgentID(t *testing.T) {
 	if prov.SessionOutcome != plan.SessionOutcomeActive {
 		t.Errorf("SessionOutcome = %q, want %q", prov.SessionOutcome, plan.SessionOutcomeActive)
 	}
+	// lifecycle events and the review page's Approve take their session from
+	// here, and their lines are never edited, so the id must arrive with them
+	if f := planEventFieldsFromProvenance(root); f.SessionID != rec.SessionID || f.SessionName != want {
+		t.Errorf("lifecycle event session = (%q, %q), want (%q, %q)", f.SessionName, f.SessionID, want, rec.SessionID)
+	}
 }
 
 // TestResolvePlanProvenance_SubagentPrefersParentAndAgreesWithRenderLink pins

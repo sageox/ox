@@ -420,10 +420,10 @@ func Save(gitRoot string, in Input, res Result, html []byte, meta Meta) (string,
 				if merged.Primary == "" {
 					merged.Primary = existing.Primary
 				}
-				// SessionID and SessionOutcome are system-managed (backfilled /
-				// reconciled at stop), never set by a save-time caller — preserve
-				// them across a re-save even when the caller supplies fresh
-				// provenance for the other (snapshot) fields.
+				// A re-save keeps the SessionID and SessionOutcome already
+				// recorded, so it cannot reset a stopped outcome to active or
+				// replace the producing session's id with its own; the other
+				// (snapshot) provenance fields take the caller's values.
 				if existing.Provenance != nil {
 					if existing.Provenance.SessionID != "" || existing.Provenance.SessionOutcome != "" {
 						if merged.Provenance == nil {
