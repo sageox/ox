@@ -149,7 +149,7 @@ delivery, not whether murmurs are relayed for others.`,
 	{
 		Key:         "telemetry",
 		Label:       "Usage telemetry",
-		Description: "Send usage data that helps improve ox. Never includes your code or sessions.",
+		Description: "Send usage data that helps improve ox. Never includes your code or session conversations.",
 		LongDescription: `Controls the usage data ox sends to help improve it.
 
 When on, ox sends:

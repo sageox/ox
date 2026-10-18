@@ -212,6 +212,35 @@ func TestConfigHelp_ListsExactlyTheRegisteredKeys(t *testing.T) {
 	assert.Equal(t, registered, listed)
 }
 
+// TestConfigSchema_TextOutputListsEverySetting — failure prevented: a coworker
+// running 'ox config schema' without --json gets JSON, nothing, or a list that
+// omits settings, instead of a readable summary pointing at --json.
+func TestConfigSchema_TextOutputListsEverySetting(t *testing.T) {
+	isolateConfigSchemaEnv(t)
+	oldCfg := cfg
+	cfg = &config.Config{}
+	t.Cleanup(func() { cfg = oldCfg })
+
+	var out bytes.Buffer
+	configSchemaCmd.SetOut(&out)
+	t.Cleanup(func() { configSchemaCmd.SetOut(nil) })
+	require.NoError(t, runConfigSchema(configSchemaCmd, nil))
+
+	text := out.String()
+	assert.False(t, json.Valid(out.Bytes()), "text mode must not print JSON")
+	for _, s := range AllSettings {
+		assert.Contains(t, text, s.Key)
+		assert.Contains(t, text, s.Label)
+	}
+	assert.Contains(t, text, "disabled | manual | auto")
+	assert.Contains(t, text, "0.0 to 1.0")
+	assert.Contains(t, text, "ox config schema --json")
+}
+
+func TestSettingValuesSummary_UnknownSetting(t *testing.T) {
+	assert.Empty(t, settingValuesSummary(nil))
+}
+
 func jsonObjectKeys(m map[string]any) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {
