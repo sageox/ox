@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -19,6 +20,7 @@ import (
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/gitserver"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/manifest"
 	"github.com/sageox/ox/internal/paths"
@@ -567,8 +569,8 @@ var doctorCheckoutIdle = 60 * time.Second
 
 // checkoutProgressEvery is how often doctor prints a running download's
 // progress. The daemon reports every few seconds, for as long as a Ledger
-// downloads.
-const checkoutProgressEvery = 30 * time.Second
+// downloads. Var so tests can shrink it.
+var checkoutProgressEvery = 30 * time.Second
 
 // checkoutProgressPrinter prints a daemon clone's progress messages, each
 // once, and a running download's at most every checkoutProgressEvery.
@@ -664,37 +666,134 @@ func cloneViaDaemon(cloneURL, targetPath, repoType, endpointURL string) error {
 	// ─────────────────────────────────────────────────────────────────────────
 	fmt.Println("    Note: Daemon not running, using direct clone")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	if repoType != "team-context" {
+		if err := directCloneLedger(cloneURL, targetPath, endpointURL); err != nil {
+			return fmt.Errorf("direct clone failed: %w", err)
+		}
+		fmt.Println("    Cloned successfully (direct).")
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), directTeamContextCloneTimeout)
 	defer cancel()
 
-	if repoType == "team-context" {
-		// team contexts use shared two-phase partial clone (same code as daemon).
-		// Pre-check credentials exist so we fail with a clear error rather than
-		// a generic git auth failure; but pass the BARE URL to TwoPhaseClone —
-		// it resolves the PAT via the ox credential helper. Embedding the token
-		// in the URL (BuildAuthURL) would persist it into .git/config, which
-		// ox-eeqi explicitly forbids.
-		creds, err := gitserver.LoadCredentialsForEndpoint(endpointURL)
-		if err != nil {
-			return fmt.Errorf("load credentials: %w", err)
-		}
-		if creds == nil {
-			return fmt.Errorf("direct clone failed: %w", gitserver.ErrNoCredentials)
-		}
-		result, err := gitserver.TwoPhaseClone(ctx, cloneURL, targetPath, manifest.RepoKindTeamContext)
-		if err != nil {
-			return fmt.Errorf("direct clone failed: %w", err)
-		}
-		gitserver.ValidateTeamContextClone(targetPath, result.ManifestConfig)
-	} else {
-		// ledger: full clone
-		if err := gitserver.CloneFromURLWithEndpoint(ctx, cloneURL, targetPath, endpointURL, nil); err != nil {
-			return fmt.Errorf("direct clone failed: %w", err)
-		}
+	// team contexts use shared two-phase partial clone (same code as daemon).
+	// Pre-check credentials exist so we fail with a clear error rather than
+	// a generic git auth failure; but pass the BARE URL to TwoPhaseClone —
+	// it resolves the PAT via the ox credential helper. Embedding the token
+	// in the URL (BuildAuthURL) would persist it into .git/config, which
+	// ox-eeqi explicitly forbids.
+	creds, err := gitserver.LoadCredentialsForEndpoint(endpointURL)
+	if err != nil {
+		return fmt.Errorf("load credentials: %w", err)
 	}
+	if creds == nil {
+		return fmt.Errorf("direct clone failed: %w", gitserver.ErrNoCredentials)
+	}
+	result, err := gitserver.TwoPhaseClone(ctx, cloneURL, targetPath, manifest.RepoKindTeamContext)
+	if err != nil {
+		return fmt.Errorf("direct clone failed: %w", err)
+	}
+	gitserver.ValidateTeamContextClone(targetPath, result.ManifestConfig)
 
 	fmt.Println("    Cloned successfully (direct).")
 	return nil
+}
+
+// Budgets for a direct clone, used when the daemon is not running. Vars so
+// tests can shrink them.
+var (
+	// directTeamContextCloneTimeout bounds the team-context two-phase clone,
+	// a partial clone whose blobs arrive on demand, so a fixed budget fits it.
+	directTeamContextCloneTimeout = 60 * time.Second
+
+	// directLedgerCloneTimeout is only a backstop, as it is in the daemon
+	// (ledgerCloneTimeout in internal/daemon/sync_clone_budget.go). A Ledger
+	// clone downloads the whole history, so how long it takes is the
+	// coworker's link speed. The fixed 60s this clone used to share killed
+	// every Ledger that needed longer (GH #994). A transfer that stops making
+	// progress is still aborted within ~20s, by curl's stall check
+	// (gitutil.GitHTTPTimeoutFlags).
+	directLedgerCloneTimeout = time.Hour
+
+	// directCloneSampleEvery is how often a direct Ledger clone's size is
+	// sampled. Doctor prints it every checkoutProgressEvery.
+	directCloneSampleEvery = 2 * time.Second
+)
+
+// curlLowSpeedAbort is how curl words its stall abort ("Operation too slow.
+// Less than 1000 bytes/sec transferred the last 15 seconds"). curl's messages
+// are not translated, so it holds in any locale.
+const curlLowSpeedAbort = "Operation too slow"
+
+// directCloneLedger clones a Ledger without the daemon, on the budget the
+// daemon gives one: a long backstop, with curl's stall check ending a dead
+// link. A full Ledger clone can run for many minutes, so doctor prints how
+// much has arrived while it does.
+func directCloneLedger(cloneURL, targetPath, endpointURL string) error {
+	budget := directLedgerCloneTimeout
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+
+	var output bytes.Buffer
+	stopProgress := watchDirectClone(targetPath, time.Now())
+	err := gitserver.CloneFromURLWithEndpoint(ctx, cloneURL, targetPath, endpointURL,
+		&gitserver.CheckoutOptions{Quiet: true, Output: &output})
+	received := stopProgress()
+	if err != nil {
+		return directLedgerCloneError(ctx, budget, received, output.String(), err)
+	}
+	return nil
+}
+
+// watchDirectClone samples how large the clone at dir has grown while git
+// runs and prints it the way a daemon clone's progress is printed. git deletes
+// a failed clone's directory as it exits, so the size has to be sampled while
+// git runs. stop ends sampling and returns the largest size seen.
+func watchDirectClone(dir string, start time.Time) (stop func() int64) {
+	var largest int64
+	done := make(chan struct{})
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		tick := time.NewTicker(directCloneSampleEvery)
+		defer tick.Stop()
+		progress := &checkoutProgressPrinter{}
+		for {
+			select {
+			case <-done:
+				return
+			case now := <-tick.C:
+				if largest = max(largest, dirSize(dir)); largest == 0 {
+					continue // still negotiating; nothing has arrived
+				}
+				progress.print(daemon.CheckoutStageDownloading, nil, fmt.Sprintf("Downloading: %s received, %s elapsed",
+					humanSize(largest), now.Sub(start).Round(time.Second)))
+			}
+		}
+	}()
+	return func() int64 {
+		close(done)
+		<-finished
+		return largest
+	}
+}
+
+// directLedgerCloneError says why a direct Ledger clone failed. When the
+// backstop or curl's stall check ended it, git's own output ("fetch-pack:
+// unexpected disconnect while reading sideband packet", "early EOF")
+// describes the abort, not the server, so it is replaced with what happened.
+func directLedgerCloneError(ctx context.Context, budget time.Duration, received int64, gitOutput string, err error) error {
+	switch {
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		return fmt.Errorf("clone ledger timed out after %s (%s received)", budget, humanSize(received))
+	case strings.Contains(gitOutput, curlLowSpeedAbort):
+		return fmt.Errorf("clone ledger stalled: the download stopped making progress (%s received)", humanSize(received))
+	}
+	if out := gitutil.SanitizeOutput(gitOutput); out != "" {
+		return fmt.Errorf("git clone failed: %s", out)
+	}
+	return err
 }
 
 // cloneRepoForFix clones a repo to fix a path issue.

@@ -90,12 +90,16 @@ func doctorCloneScenarios() []doctorCloneScenario {
 	}
 }
 
-// serveLedgerAPI is the cloud API for a project whose Ledger is ready.
-func serveLedgerAPI(t *testing.T, repoID string) string {
+// serveLedgerAPI is the cloud API for a project whose Ledger is ready at
+// ledgerURL; empty names a placeholder on the API server itself.
+func serveLedgerAPI(t *testing.T, repoID, ledgerURL string) string {
 	t.Helper()
 	var srv *httptest.Server
 	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ledgerURL := srv.URL + "/ledger.git"
+		ledgerURL := ledgerURL
+		if ledgerURL == "" {
+			ledgerURL = srv.URL + "/ledger.git"
+		}
 		switch r.URL.Path {
 		case auth.IntrospectEndpoint:
 			_ = json.NewEncoder(w).Encode(map[string]any{"active": true, "principal_kind": auth.PrincipalKindTeamService})
@@ -113,17 +117,26 @@ func serveLedgerAPI(t *testing.T, repoID string) string {
 	return srv.URL
 }
 
-// setupDoctorCloneProject is an initialized, logged-in project with no Ledger
-// on disk, a daemon that handles checkout, and doctor's window set to idle.
-func setupDoctorCloneProject(t *testing.T, checkout func(daemon.CheckoutPayload, *daemon.ProgressWriter) (*daemon.CheckoutResult, error)) string {
+// setupDoctorProject is an initialized, logged-in project with no Ledger on
+// disk and a cloud API whose Ledger is ready at ledgerURL (see
+// serveLedgerAPI). svc answers the daemon's IPC; nil means no daemon runs.
+func setupDoctorProject(t *testing.T, svc *testutil.MockService, ledgerURL string) string {
 	t.Helper()
 	const repoID = "repo_doctor_clone"
-	startSyncTestDaemon(t, &testutil.MockService{CheckoutFunc: checkout})
-	setupAuthRenderEnv(t, serveLedgerAPI(t, repoID), validTeamToken)
+	startSyncTestDaemon(t, svc)
+	setupAuthRenderEnv(t, serveLedgerAPI(t, repoID, ledgerURL), validTeamToken)
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	root := createInitializedProjectWithConfig(t, &config.ProjectConfig{RepoID: repoID})
 	hostedTestGit(t, root, "init")
 	t.Chdir(root)
+	return root
+}
+
+// setupDoctorCloneProject is setupDoctorProject with a daemon that handles
+// checkout, and doctor's window set to idle.
+func setupDoctorCloneProject(t *testing.T, checkout func(daemon.CheckoutPayload, *daemon.ProgressWriter) (*daemon.CheckoutResult, error)) string {
+	t.Helper()
+	root := setupDoctorProject(t, &testutil.MockService{CheckoutFunc: checkout}, "")
 
 	prev := doctorCheckoutIdle
 	doctorCheckoutIdle = doctorCloneIdle

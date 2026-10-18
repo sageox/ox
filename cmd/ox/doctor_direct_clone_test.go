@@ -1,0 +1,291 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"math/rand/v2"
+	"net/http"
+	"net/http/cgi"
+	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/daemon"
+	"github.com/sageox/ox/internal/endpoint"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// With no daemon running, `ox doctor --fix` clones a missing Ledger itself.
+// A Ledger is cloned with its whole history, so how long that takes is set by
+// the coworker's link, not by ox. These tests serve a real Ledger through
+// git's smart HTTP backend, paced so a small fixture downloads as slowly as a
+// large Ledger does on a home connection, and drive doctor's real repair
+// paths end to end with the daemon down.
+
+const (
+	// directPace and directFixtureBytes make one fixture clone take ~5s.
+	directPace         = 64 << 10 // bytes per second
+	directFixtureBytes = 320 << 10
+	directChunk        = 4 << 10 // bytes the server sends between pauses
+)
+
+// servePacedGitRepo serves a bare Ledger holding blobBytes of incompressible
+// history at bytesPerSec and returns its clone URL. stallAfter > 0 makes every
+// response stop after that many bytes and hold the connection open, the way a
+// dead link looks to curl, until the client hangs up.
+func servePacedGitRepo(t *testing.T, blobBytes, bytesPerSec, stallAfter int) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("CGI Git HTTP fixture requires Unix process semantics")
+	}
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	require.NoError(t, os.Mkdir(source, 0o700))
+	hostedTestGit(t, source, "init", "-b", "main")
+	hostedTestGit(t, source, "config", "user.name", "Test")
+	hostedTestGit(t, source, "config", "user.email", "test@example.invalid")
+	// incompressible, so the pack is as large as the blob; seeded, so every
+	// run moves the same bytes
+	blob := make([]byte, blobBytes)
+	_, _ = rand.NewChaCha8([32]byte{'o', 'x'}).Read(blob)
+	require.NoError(t, os.Mkdir(filepath.Join(source, "sessions"), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(source, "sessions", "history.bin"), blob, 0o600))
+	hostedTestGit(t, source, "add", "--all")
+	hostedTestGit(t, source, "commit", "-m", "seed Ledger history")
+	cloneBareRemote(t, source, filepath.Join(root, "ledger.git"))
+
+	backend := &cgi.Handler{
+		Path: filepath.Join(hostedTestGit(t, root, "--exec-path"), "git-http-backend"),
+		Env:  []string{"GIT_PROJECT_ROOT=" + root, "GIT_HTTP_EXPORT_ALL=1"},
+	}
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		backend.ServeHTTP(&pacedResponse{
+			ResponseWriter: w,
+			ctx:            r.Context(),
+			release:        release,
+			pause:          time.Duration(directChunk) * time.Second / time.Duration(bytesPerSec),
+			stallAfter:     stallAfter,
+		}, r)
+	}))
+	// cleanups run last-in first-out: unblock stalled handlers, then close
+	t.Cleanup(server.Close)
+	t.Cleanup(func() { close(release) })
+	return server.URL + "/ledger.git"
+}
+
+// pacedResponse sends a response directChunk bytes at a time, pausing between
+// chunks, and flushes each chunk so the client sees steady progress.
+type pacedResponse struct {
+	http.ResponseWriter
+	ctx        context.Context
+	release    <-chan struct{}
+	pause      time.Duration
+	stallAfter int
+	sent       int
+}
+
+func (p *pacedResponse) Write(b []byte) (int, error) {
+	written := 0
+	for len(b) > 0 {
+		n := min(len(b), directChunk)
+		if p.stallAfter > 0 {
+			n = min(n, p.stallAfter-p.sent)
+		}
+		if n > 0 {
+			m, err := p.ResponseWriter.Write(b[:n])
+			written += m
+			p.sent += m
+			if err != nil {
+				return written, err
+			}
+			if f, ok := p.ResponseWriter.(http.Flusher); ok {
+				f.Flush()
+			}
+			b = b[n:]
+		}
+		if p.stallAfter > 0 && p.sent >= p.stallAfter {
+			// a dead link: nothing more arrives until the client gives up.
+			// The error makes cgi.Handler kill git-http-backend.
+			select {
+			case <-p.ctx.Done():
+				return written, p.ctx.Err()
+			case <-p.release:
+				return written, http.ErrHandlerTimeout
+			}
+		}
+		select {
+		case <-p.ctx.Done():
+			return written, p.ctx.Err()
+		case <-time.After(p.pause):
+		}
+	}
+	return written, nil
+}
+
+// setDirectCloneBudgets shrinks doctor's direct-clone budgets for one test:
+// fixed is the team-context budget, the fixed 60s a Ledger clone used to
+// share; backstop is the Ledger's own wall-clock limit. Progress is sampled
+// and printed often enough to see in a download lasting a few seconds.
+func setDirectCloneBudgets(t *testing.T, fixed, backstop time.Duration) {
+	t.Helper()
+	prevFixed, prevBackstop := directTeamContextCloneTimeout, directLedgerCloneTimeout
+	prevSample, prevPrint := directCloneSampleEvery, checkoutProgressEvery
+	directTeamContextCloneTimeout, directLedgerCloneTimeout = fixed, backstop
+	directCloneSampleEvery, checkoutProgressEvery = 50*time.Millisecond, time.Second
+	t.Cleanup(func() {
+		directTeamContextCloneTimeout, directLedgerCloneTimeout = prevFixed, prevBackstop
+		directCloneSampleEvery, checkoutProgressEvery = prevSample, prevPrint
+	})
+}
+
+// setupDirectCloneProject is an initialized, logged-in project with no Ledger
+// on disk, a cloud API whose Ledger is served at ledgerURL, and no daemon.
+func setupDirectCloneProject(t *testing.T, ledgerURL string) string {
+	t.Helper()
+	root := setupDoctorProject(t, nil, ledgerURL)
+	require.False(t, daemon.IsRunning(), "doctor must take the direct-clone path")
+	return root
+}
+
+// directLedgerRepair is one of doctor's repairs that clones a Ledger.
+type directLedgerRepair struct {
+	name string
+	run  func(t *testing.T, root, ledgerURL string) (result checkResult, ledgerPath string)
+}
+
+func directLedgerRepairs() []directLedgerRepair {
+	return []directLedgerRepair{
+		{
+			name: "first Ledger clone",
+			run: func(t *testing.T, root, _ string) (checkResult, string) {
+				localCfg := &config.LocalConfig{}
+				result := fixMissingRepos(root, localCfg)
+				ledgerPath := ""
+				if localCfg.Ledger != nil {
+					ledgerPath = localCfg.Ledger.Path
+				}
+				return result, ledgerPath
+			},
+		},
+		{name: "configured Ledger gone missing", run: repairMissingLedger},
+	}
+}
+
+// repairMissingLedger drives the repair of a configured Ledger whose directory
+// is gone. The Ledger's path is known whether or not the clone succeeds.
+func repairMissingLedger(t *testing.T, root, ledgerURL string) (checkResult, string) {
+	missing := repoPathIssue{repoType: "ledger", path: filepath.Join(t.TempDir(), "ledger"),
+		endpoint: endpoint.GetForProject(root), cloneURL: ledgerURL, issue: "missing"}
+	return fixRepoPathIssues(root, &config.LocalConfig{}, []repoPathIssue{missing}), missing.path
+}
+
+// requireNoHalfClone asserts a failed clone left no repository at ledgerPath
+// for the daemon or a later doctor run to mistake for a real Ledger.
+func requireNoHalfClone(t *testing.T, ledgerPath string) {
+	t.Helper()
+	require.NoDirExists(t, filepath.Join(ledgerPath, ".git"), "a failed clone must not leave a half-written Ledger in place")
+}
+
+// TestDoctorFix_DirectLedgerCloneOutlivesFixedBudget verifies a direct Ledger
+// clone that is still downloading is not killed by a fixed budget.
+// Failure prevented: with the daemon down, `ox doctor --fix` killed every
+// Ledger clone that took longer than 60s on the coworker's link (GH #994), so
+// a large Ledger could never be repaired without the daemon. The fixed budget
+// is scaled from 60s to 2s here; the fixture downloads for ~5s.
+func TestDoctorFix_DirectLedgerCloneOutlivesFixedBudget(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real paced Git clone")
+	}
+	for _, repair := range directLedgerRepairs() {
+		t.Run(repair.name, func(t *testing.T) {
+			setDirectCloneBudgets(t, 2*time.Second, 2*time.Minute)
+			ledgerURL := servePacedGitRepo(t, directFixtureBytes, directPace, 0)
+			root := setupDirectCloneProject(t, ledgerURL)
+
+			var result checkResult
+			var ledgerPath string
+			start := time.Now()
+			output := captureStdoutForPlanCLI(t, func() { result, ledgerPath = repair.run(t, root, ledgerURL) })
+			elapsed := time.Since(start)
+
+			require.True(t, result.passed && !result.warning, "a Ledger clone that is still downloading must not be killed: %s / %s\n%s",
+				result.message, result.detail, output)
+			require.Greater(t, elapsed, directTeamContextCloneTimeout,
+				"the download finished inside the fixed budget, so this run proved nothing; slow the pace")
+			assert.Contains(t, output, "Cloned successfully (direct)")
+			assert.Contains(t, output, "Downloading: ", "a long direct clone must show how much has arrived")
+			size, err := exec.Command("git", "-C", ledgerPath, "cat-file", "-s", "HEAD:sessions/history.bin").Output()
+			require.NoError(t, err, "the Ledger's history must have arrived in full")
+			require.Equal(t, fmt.Sprint(directFixtureBytes), strings.TrimSpace(string(size)))
+		})
+	}
+}
+
+// TestDoctorFix_DirectLedgerCloneBackstopReportsTimeout verifies a direct
+// Ledger clone ended by its backstop is reported as a timeout, with how much
+// arrived, and leaves nothing behind.
+// Failure prevented: the kill read as git's reaction to it ("fetch-pack:
+// unexpected disconnect while reading sideband packet", "early EOF"), which
+// looks like a server fault; and git, killed outright, left a half-written
+// .git whose HEAD points at refs/heads/.invalid where the Ledger belongs.
+func TestDoctorFix_DirectLedgerCloneBackstopReportsTimeout(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real paced Git clone")
+	}
+	setDirectCloneBudgets(t, 60*time.Second, 2500*time.Millisecond)
+	ledgerURL := servePacedGitRepo(t, directFixtureBytes, directPace, 0)
+	root := setupDirectCloneProject(t, ledgerURL)
+
+	var result checkResult
+	var ledgerPath string
+	output := captureStdoutForPlanCLI(t, func() { result, ledgerPath = repairMissingLedger(t, root, ledgerURL) })
+
+	require.False(t, result.passed && !result.warning, "a clone that timed out is not a repair:\n%s", output)
+	require.Contains(t, output, "clone ledger timed out after 2.5s")
+	require.Regexp(t, `\(\d+ KB received\)`, output, "the report must say how much of the Ledger arrived")
+	for _, misleading := range []string{"unexpected disconnect", "early EOF", "exit code"} {
+		require.NotContains(t, output, misleading, "git's reaction to being stopped is not the cause")
+	}
+	requireNoHalfClone(t, ledgerPath)
+}
+
+// TestDoctorFix_DirectLedgerCloneStallIsAborted verifies a direct Ledger clone
+// over a dead link is aborted by curl's stall check, long before the backstop,
+// and reported as a stall.
+// Failure prevented: replacing the fixed budget with a long backstop turns a
+// dead link into a doctor run that hangs for an hour, then reports git's
+// "unexpected disconnect" instead of the stall.
+func TestDoctorFix_DirectLedgerCloneStallIsAborted(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real paced Git clone")
+	}
+	setDirectCloneBudgets(t, 60*time.Second, time.Minute)
+	// curl gives up on a dead link after 2s instead of production's 15. git
+	// reads this after its -c flags, but it only shortens the window: curl
+	// checks speed at all only because doctor passes http.lowSpeedLimit.
+	t.Setenv("GIT_HTTP_LOW_SPEED_TIME", "2")
+	// the pack stops after 96 KiB and the connection stays open
+	ledgerURL := servePacedGitRepo(t, directFixtureBytes, directPace, 96<<10)
+	root := setupDirectCloneProject(t, ledgerURL)
+
+	var result checkResult
+	var ledgerPath string
+	start := time.Now()
+	output := captureStdoutForPlanCLI(t, func() { result, ledgerPath = repairMissingLedger(t, root, ledgerURL) })
+	elapsed := time.Since(start)
+
+	require.False(t, result.passed && !result.warning, "a clone over a dead link is not a repair:\n%s", output)
+	// curl averages speed over ~5s before its 2s window starts counting
+	require.Less(t, elapsed, 30*time.Second, "the stall check, not the backstop, must end a dead clone")
+	require.Contains(t, output, "clone ledger stalled")
+	require.NotContains(t, output, "unexpected disconnect", "git's reaction to the abort is not the cause")
+	requireNoHalfClone(t, ledgerPath)
+}
