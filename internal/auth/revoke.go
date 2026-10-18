@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -139,8 +140,15 @@ const (
 	RevocationNetworkError
 )
 
+// ErrLocalTokenNotRemoved marks a RevokeTokenStatus error raised after the
+// server was asked: the returned status is still the server's answer, but the
+// local copy could not be removed (e.g. an unreadable auth.json). Callers must
+// not report it as a failed revocation.
+var ErrLocalTokenNotRemoved = errors.New("failed to remove local token")
+
 // RevokeTokenStatus revokes token and removes from local storage,
-// returning a structured status instead of a boolean.
+// returning a structured status instead of a boolean. An error wrapping
+// ErrLocalTokenNotRemoved comes with the server's real status.
 func (c *AuthClient) RevokeTokenStatus() (RevocationStatus, error) {
 	token, err := c.GetToken()
 	if err != nil {
@@ -154,7 +162,7 @@ func (c *AuthClient) RevokeTokenStatus() (RevocationStatus, error) {
 	status := c.revokeOnServerStatus(token)
 
 	if err := c.RemoveToken(); err != nil {
-		return status, fmt.Errorf("failed to remove local token: %w", err)
+		return status, fmt.Errorf("%w: %w", ErrLocalTokenNotRemoved, err)
 	}
 
 	return status, nil

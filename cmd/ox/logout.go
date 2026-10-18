@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -69,21 +70,14 @@ var logoutCmd = &cobra.Command{
 		for _, ep := range endpointsToLogout {
 			client := auth.NewAuthClient().WithEndpoint(ep)
 			status, err := client.RevokeTokenStatus()
-			if err != nil {
+			if err != nil && !errors.Is(err, auth.ErrLocalTokenNotRemoved) {
 				fmt.Printf("Failed to logout from %s: %v\n", ep, err)
 				anyServerFailed = true
 				continue
 			}
-			switch status {
-			case auth.RevocationSuccess, auth.RevocationNoToken:
-				fmt.Printf("Logged out from %s\n", ep)
-			case auth.RevocationNetworkError:
-				anyServerFailed = true
-				fmt.Printf("Logged out locally from %s (could not reach server)\n", ep)
-			case auth.RevocationServerFailed:
-				anyServerFailed = true
-				fmt.Printf("Logged out locally from %s (server did not confirm revocation)\n", ep)
-			}
+			line, serverUnconfirmed := logoutOutcome(ep, status, err)
+			fmt.Println(line)
+			anyServerFailed = anyServerFailed || serverUnconfirmed
 		}
 
 		if anyServerFailed {
@@ -110,6 +104,31 @@ var logoutCmd = &cobra.Command{
 		}
 		return nil
 	},
+}
+
+// logoutOutcome words one endpoint's logout from the server's answer. localErr
+// (wrapping auth.ErrLocalTokenNotRemoved, or nil) means the local copy stayed
+// behind; it changes what is said about the local token, never the server's
+// answer, so a revocation the server confirmed is not reported as failed.
+// serverUnconfirmed is true when the server-side session may still be active.
+func logoutOutcome(ep string, status auth.RevocationStatus, localErr error) (line string, serverUnconfirmed bool) {
+	switch status {
+	case auth.RevocationSuccess, auth.RevocationNoToken:
+		if localErr != nil {
+			return fmt.Sprintf("Revoked on the server for %s, but %v", ep, localErr), false
+		}
+		return fmt.Sprintf("Logged out from %s", ep), false
+	case auth.RevocationNetworkError:
+		if localErr != nil {
+			return fmt.Sprintf("Could not reach the server for %s, and %v", ep, localErr), true
+		}
+		return fmt.Sprintf("Logged out locally from %s (could not reach server)", ep), true
+	default: // auth.RevocationServerFailed
+		if localErr != nil {
+			return fmt.Sprintf("Server did not confirm revocation for %s, and %v", ep, localErr), true
+		}
+		return fmt.Sprintf("Logged out locally from %s (server did not confirm revocation)", ep), true
+	}
 }
 
 // collectLogoutEndpoints retains usable environment credentials even if auth.json

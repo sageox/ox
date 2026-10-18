@@ -144,6 +144,9 @@ func TestNoInputCLI(t *testing.T) {
 		require.Error(t, runErr, "output: %s", output)
 		assert.Contains(t, output, "failed to list stored authentication endpoints")
 		assert.EqualValues(t, 1, revocations.Load(), "the env token must be revoked before the error; output: %s", output)
+		assert.Contains(t, output, "Revoked on the server for")
+		assert.NotContains(t, output, "Failed to logout", "a revocation the server confirmed is not a failed logout")
+		assert.NotContains(t, output, "server-side sessions may still be active", "the server confirmed the revocation")
 	})
 
 	t.Run("typed uninstall", func(t *testing.T) {

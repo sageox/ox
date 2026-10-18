@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -32,18 +33,54 @@ func TestCollectLogoutEndpoints_EnvLoginOnStoredEndpointIsOneTarget(t *testing.T
 	assert.ElementsMatch(t, []string{"https://sageox.ai", "https://test.sageox.ai"}, endpoints)
 }
 
+// TestLogoutOutcome_LocalFailureNeverRewritesServerAnswer covers every server
+// answer with and without a local copy left behind.
+// Failure prevented: a confirmed revocation reported as failed, or a line that
+// says "Logged out" while the local token is still on disk.
+func TestLogoutOutcome_LocalFailureNeverRewritesServerAnswer(t *testing.T) {
+	const ep = "https://sageox.ai"
+	localErr := fmt.Errorf("%w: failed to parse auth file", auth.ErrLocalTokenNotRemoved)
+	for _, tt := range []struct {
+		name            string
+		status          auth.RevocationStatus
+		localErr        error
+		wantLine        string
+		wantUnconfirmed bool
+	}{
+		{name: "confirmed", status: auth.RevocationSuccess, wantLine: "Logged out from " + ep},
+		{name: "nothing to revoke", status: auth.RevocationNoToken, wantLine: "Logged out from " + ep},
+		{name: "unreachable", status: auth.RevocationNetworkError, wantLine: "Logged out locally from " + ep + " (could not reach server)", wantUnconfirmed: true},
+		{name: "unconfirmed", status: auth.RevocationServerFailed, wantLine: "Logged out locally from " + ep + " (server did not confirm revocation)", wantUnconfirmed: true},
+		{name: "confirmed, local copy remains", status: auth.RevocationSuccess, localErr: localErr, wantLine: "Revoked on the server for " + ep + ", but failed to remove local token: failed to parse auth file"},
+		{name: "unreachable, local copy remains", status: auth.RevocationNetworkError, localErr: localErr, wantLine: "Could not reach the server for " + ep + ", and failed to remove local token: failed to parse auth file", wantUnconfirmed: true},
+		{name: "unconfirmed, local copy remains", status: auth.RevocationServerFailed, localErr: localErr, wantLine: "Server did not confirm revocation for " + ep + ", and failed to remove local token: failed to parse auth file", wantUnconfirmed: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			line, unconfirmed := logoutOutcome(ep, tt.status, tt.localErr)
+			assert.Equal(t, tt.wantLine, line)
+			assert.Equal(t, tt.wantUnconfirmed, unconfirmed, "server-side session may still be active")
+			if tt.localErr != nil {
+				assert.NotContains(t, line, "Logged out", "the local token is still on disk")
+			}
+		})
+	}
+}
+
 // TestLogout_UnreadableAuthStore drives `ox logout` when auth.json cannot be
 // parsed.
 // Failure prevented: the storage error hid a usable SAGEOX_TOKEN, so logout
 // revoked nothing, or revoked it and then exited 0 as if the store were fine.
-// With no usable credential, the error must not read as "not logged in".
+// With no usable credential, the error must not read as "not logged in". A
+// revocation the server confirmed must not be reported as failed just because
+// the corrupt store kept the local copy from being removed.
 func TestLogout_UnreadableAuthStore(t *testing.T) {
 	for _, tt := range []struct {
 		name            string
 		envToken        string
 		wantRevocations int32
+		wantOutput      string
 	}{
-		{name: "env token is revoked, then the listing error is reported", envToken: "oxp_test_4bDZfN", wantRevocations: 1},
+		{name: "env token is revoked, then the listing error is reported", envToken: "oxp_test_4bDZfN", wantRevocations: 1, wantOutput: "Revoked on the server for"},
 		{name: "no usable credential reports the listing error, not a logged-out state"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -80,6 +117,11 @@ func TestLogout_UnreadableAuthStore(t *testing.T) {
 			assert.Contains(t, runErr.Error(), "failed to list stored authentication endpoints")
 			assert.Equal(t, tt.wantRevocations, revocations.Load(), "output: %s", output)
 			assert.NotContains(t, output, "not currently logged in", "a storage error must not read as logged out")
+			assert.NotContains(t, output, "Failed to logout", "a revocation the server confirmed is not a failed logout")
+			assert.NotContains(t, output, "server-side sessions may still be active", "the server confirmed the revocation")
+			if tt.wantOutput != "" {
+				assert.Contains(t, output, tt.wantOutput)
+			}
 		})
 	}
 }

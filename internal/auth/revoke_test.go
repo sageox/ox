@@ -1,10 +1,13 @@
 package auth
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -435,6 +438,50 @@ func TestRevokeTokenStatus_ServerFailed(t *testing.T) {
 	tok, err := client.GetToken()
 	assert.NoError(t, err)
 	assert.Nil(t, tok)
+}
+
+// TestRevokeTokenStatus_LocalRemovalFailureKeepsServerAnswer verifies a failure
+// to remove the local copy is told apart from a failure to revoke.
+// Failure prevented: with an unreadable auth.json, a revocation the server
+// confirmed came back as a bare error, so `ox logout` said "Failed to logout"
+// and "server-side sessions may still be active" about a revoked token.
+// The negative control: when the token cannot even be loaded, nothing reached
+// the server, and the error must not claim otherwise.
+func TestRevokeTokenStatus_LocalRemovalFailureKeepsServerAnswer(t *testing.T) {
+	var revocations atomic.Int32
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		revocations.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer mockServer.Close()
+	t.Setenv("SAGEOX_ENDPOINT", mockServer.URL)
+
+	for _, tt := range []struct {
+		name            string
+		envToken        string
+		wantStatus      RevocationStatus
+		wantLocalOnly   bool
+		wantRevocations int32
+	}{
+		{name: "server confirmed, local copy could not be removed", envToken: "oxp_test_4bDZfN", wantStatus: RevocationSuccess, wantLocalOnly: true, wantRevocations: 1},
+		{name: "token could not be loaded, nothing was revoked", wantStatus: RevocationServerFailed},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			revocations.Store(0)
+			t.Setenv(EnvVarToken, tt.envToken)
+			tmpDir := t.TempDir()
+			require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "auth.json"), []byte("not-json"), 0o600))
+
+			client := NewAuthClientWithDir(tmpDir)
+			client.endpoint = mockServer.URL
+
+			status, err := client.RevokeTokenStatus()
+			require.Error(t, err, "an unreadable auth.json must be reported")
+			assert.Equal(t, tt.wantStatus, status)
+			assert.Equal(t, tt.wantLocalOnly, errors.Is(err, ErrLocalTokenNotRemoved), "error: %v", err)
+			assert.Equal(t, tt.wantRevocations, revocations.Load())
+		})
+	}
 }
 
 func TestRevokeTokenStatus_NetworkError(t *testing.T) {
