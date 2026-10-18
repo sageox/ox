@@ -32,8 +32,8 @@ type ManagedRepoPullOpts struct {
 	RepoName string
 
 	// ImmutablePaths declares that this repository's paths never move (the
-	// Ledger). Pull-rebase and conflict resolution then skip git's rename
-	// detection; see gitutil.WithImmutablePaths.
+	// Ledger, team context). Pull-rebase and conflict resolution then skip
+	// git's rename detection; see gitutil.WithImmutablePaths.
 	ImmutablePaths bool
 
 	// NoSymlinks holds the fetch and pull until ledger.DisableSymlinks has

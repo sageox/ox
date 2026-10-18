@@ -671,6 +671,13 @@ func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) (teamP
 	mCfg := manifest.ParseFile(manifestPath, manifest.RepoKindTeamContext)
 
 	result := s.pullManagedRepo(ctx, ManagedRepoPullOpts{
+		// Discussion dirs are ID-named and full of near-identical JSON, so when
+		// upstream deletes one discussion and adds another, rename detection
+		// pairs them and any local change to the deleted one becomes a false
+		// rename/delete conflict that suspends sync. Cost: a real upstream
+		// rename racing a local edit of that same file now surfaces as
+		// modify/delete instead of following the rename.
+		ImmutablePaths:     true,
 		RepoPath:           path,
 		RepoName:           repoName,
 		ProjectRoot:        s.config.ProjectRoot,
