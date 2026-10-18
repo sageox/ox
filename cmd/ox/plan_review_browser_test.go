@@ -1623,7 +1623,7 @@ func TestBrowser_WholePlanCommentReachesTheLedger(t *testing.T) {
 		t.Fatalf("submit: %v", err)
 	}
 	it := waitForOneRound(t, planDir, 15*time.Second)
-	if it.Anchor != "plan" || it.Label != "Whole plan" || it.Section != "" || it.Note != note || it.Reviewer != "Devon" {
+	if it.Anchor != planreview.WholePlanAnchor || it.Label != "Whole plan" || it.Section != "" || it.Note != note || it.Reviewer != "Devon" {
 		t.Fatalf("the round must carry Devon's mark on the whole plan: %+v", it)
 	}
 	// the rail's first row: its heading, its tags, and its note
@@ -1640,7 +1640,7 @@ func TestBrowser_WholePlanCommentReachesTheLedger(t *testing.T) {
 	if err := chromedp.Run(ctx, chromedp.Evaluate(`window.oldPage=true`, nil)); err != nil {
 		t.Fatalf("mark the page: %v", err)
 	}
-	resolveForTest(t, planDir, "plan", planreview.StateAddressed, "Split into two sprints.")
+	resolveForTest(t, planDir, planreview.WholePlanAnchor, planreview.StateAddressed, "Split into two sprints.")
 	if !waitForNewPage(ctx, `!!document.querySelector('.rev-rail-tag.addressed')`, 10*time.Second) {
 		t.Fatal("the page must reload with the comment addressed")
 	}
