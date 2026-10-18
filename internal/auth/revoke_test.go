@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gofrs/flock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -483,6 +484,65 @@ func TestRevokeTokenStatus_LocalRemovalFailureKeepsServerAnswer(t *testing.T) {
 			assert.Equal(t, tt.wantRevocations, revocations.Load())
 		})
 	}
+}
+
+// TestRevokeTokenStatus_PreservesStoredLoginWhenLookupFails verifies a stored
+// login that could not be read is kept, not deleted unrevoked.
+// Failure prevented: the lookup of the login SAGEOX_TOKEN shadows timed out on
+// the auth lock and was skipped, then RemoveToken got the lock and deleted that
+// login, leaving its refresh token live on the server with nothing to retry.
+func TestRevokeTokenStatus_PreservesStoredLoginWhenLookupFails(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: waits out the auth file lock timeout")
+	}
+	const envToken, storedToken = "oxp_test_4bDZfN", "stored-refresh"
+	var mu sync.Mutex
+	var revoked []string
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, r.ParseForm())
+		mu.Lock()
+		revoked = append(revoked, r.PostForm.Get("token"))
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer mockServer.Close()
+	t.Setenv(EnvVarToken, envToken)
+	t.Setenv("SAGEOX_ENDPOINT", mockServer.URL)
+
+	client := NewAuthClientWithDir(t.TempDir())
+	client.endpoint = mockServer.URL
+	require.NoError(t, client.SaveToken(&StoredToken{
+		AccessToken: "stored-access", RefreshToken: storedToken, ExpiresAt: time.Now().Add(time.Hour),
+	}))
+
+	authPath, err := client.GetAuthFilePath()
+	require.NoError(t, err)
+	lock := flock.New(authPath + ".lock")
+	locked, err := lock.TryLock()
+	require.NoError(t, err)
+	require.True(t, locked)
+
+	unlock := make(chan error, 1)
+	go func() {
+		// Hold beyond authLockTimeout so the stored-token lookup fails, then
+		// release before RemoveToken's next lock attempt can run.
+		time.Sleep(authLockTimeout + 250*time.Millisecond)
+		unlock <- lock.Unlock()
+	}()
+
+	status, revokeErr := client.RevokeTokenStatus()
+	require.NoError(t, <-unlock)
+
+	assert.Equal(t, RevocationSuccess, status)
+	require.ErrorIs(t, revokeErr, ErrLocalTokenNotRemoved, "lookup failure must stop local removal")
+	mu.Lock()
+	assert.Equal(t, []string{envToken}, revoked, "the stored token could not be read and must not be silently discarded")
+	mu.Unlock()
+
+	t.Setenv(EnvVarToken, "")
+	stored, err := client.GetToken()
+	require.NoError(t, err)
+	assert.Equal(t, storedToken, stored.RefreshToken, "the stored login must remain available for retry")
 }
 
 // TestRevokeTokenStatus_SharedEndpointRevokesEveryCredential verifies logout

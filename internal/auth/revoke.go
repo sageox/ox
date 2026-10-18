@@ -164,13 +164,17 @@ func (c *AuthClient) RevokeTokenStatus() (RevocationStatus, error) {
 	// SAGEOX_TOKEN shadows a stored login on the same endpoint, but that login
 	// is a separate credential. Revoke it too before RemoveToken deletes it:
 	// once its refresh token is gone from disk, nothing can retry, and it
-	// stays live on the server. An unreadable store is left alone here;
-	// RemoveToken then fails too, so the local copy survives for a retry.
+	// stays live on the server. A failed lookup must stop removal: the next read
+	// may succeed, and deleting then could discard an unrevoked credential.
 	ep := c.endpoint
 	if ep == "" {
 		ep = endpoint.Get()
 	}
-	if stored, err := c.storedTokenForEndpoint(endpoint.NormalizeEndpoint(ep)); err == nil && stored != nil && !sameCredential(stored, token) {
+	stored, err := c.storedTokenForEndpoint(endpoint.NormalizeEndpoint(ep))
+	if err != nil {
+		return status, fmt.Errorf("%w: %w", ErrLocalTokenNotRemoved, err)
+	}
+	if stored != nil && !sameCredential(stored, token) {
 		status = worseRevocation(status, c.revokeOnServerStatus(stored))
 	}
 
