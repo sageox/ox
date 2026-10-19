@@ -4,6 +4,7 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -44,6 +45,20 @@ func initFriction(rootCmd *cobra.Command) {
 			_ = frictionEngine.UpdateCatalog(data)
 		}
 	}
+}
+
+// handleFriction asks frictionax for a suggestion on a failed invocation.
+// Suggestions are best-effort: a panic inside frictionax must not replace the
+// coworker's real error with a stack trace, so it is recovered and treated as
+// no suggestion. frictionax v0.1.2 panicked this way in Windows directories.
+func handleFriction(engine *friction.Friction, args []string, err error) (result *friction.Result) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Debug("friction handle panicked", "panic", r)
+			result = nil
+		}
+	}()
+	return engine.Handle(args, err)
 }
 
 // getCatalogCachePath returns the path to the friction catalog cache file.

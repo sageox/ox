@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"os"
@@ -162,6 +163,53 @@ func TestSendFrictionEvent_Suppressed(t *testing.T) {
 			case <-time.After(50 * time.Millisecond):
 				// good — nothing sent
 			}
+		})
+	}
+}
+
+// --- Friction must never break the usage-error path ---
+
+// panickingFrictionAdapter panics from inside frictionax's Handle, the way
+// frictionax v0.1.2's isGitRepo did in Windows directories.
+type panickingFrictionAdapter struct{}
+
+func (panickingFrictionAdapter) CommandNames() []string    { return nil }
+func (panickingFrictionAdapter) FlagNames(string) []string { return nil }
+func (panickingFrictionAdapter) ParseError(error) *friction.ParsedError {
+	panic("runtime error: slice bounds out of range [:-1]")
+}
+
+// TestExecuteWithFrictionRecovery_FrictionPanicKeepsOriginalError drives
+// mistyped invocations through the real recovery path with a frictionax engine
+// that panics.
+// Failure prevented: a bug inside frictionax replaces the coworker's error, and
+// the exit code a script relies on, with a Go stack trace.
+func TestExecuteWithFrictionRecovery_FrictionPanicKeepsOriginalError(t *testing.T) {
+	prev := frictionEngine
+	frictionEngine = friction.New(panickingFrictionAdapter{})
+	t.Cleanup(func() { frictionEngine = prev })
+
+	tests := []struct {
+		name    string
+		args    []string
+		wantErr string
+	}{
+		{"unknown command", []string{"statuss"}, `unknown command "statuss"`},
+		{"unknown flag", []string{"status", "--no-such-flag"}, "unknown flag: --no-such-flag"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			code := -1
+			stderr := captureStderr(t, func() {
+				defer func() {
+					if r := recover(); r != nil {
+						t.Errorf("friction panic reached the coworker: %v", r)
+					}
+				}()
+				code = executeWithFrictionRecovery(context.Background(), tt.args, 0)
+			})
+			assert.Equal(t, 1, code, "a usage error must still exit 1")
+			assert.Contains(t, stderr, tt.wantErr, "the original error must still reach the coworker")
 		})
 	}
 }
