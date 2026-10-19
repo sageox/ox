@@ -27,7 +27,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { PROTOCOL, connectFrame, mountHostControls, parseDocumentMessage } from '@sageox/plan-review';
+import { PROTOCOL, connectFrame, forgetAccount, mountHostControls, parseDocumentMessage } from '@sageox/plan-review';
 import { localPorts, startDocumentTools } from '@sageox/plan-review/document-tools';
 import script from '@sageox/plan-review/document-tools-script';
 import { framePlan } from '@sageox/plan-review/frame-plan';
@@ -37,6 +37,7 @@ const require = createRequire(import.meta.url);
 assert.equal(manifest.protocol, PROTOCOL);
 assert.equal(typeof connectFrame, 'function');
 assert.equal(typeof mountHostControls, 'function');
+assert.equal(typeof forgetAccount, 'function');
 assert.equal(typeof startDocumentTools, 'function');
 assert.equal(parseDocumentMessage({ ox: 'review', v: PROTOCOL, instance: 'i-000001', type: 'ready' }, 'i-000001').type, 'ready');
 assert.ok(localPorts().host);
@@ -58,7 +59,7 @@ for (const [f, sum] of Object.entries(manifest.files)) {
 `;
 
 const consumerTS = `
-import { PROTOCOL, connectFrame, mountHostControls, type DocumentMessage, type HostMessage, type Receipt, type Transport } from '@sageox/plan-review';
+import { PROTOCOL, connectFrame, forgetAccount, mountHostControls, type DocumentMessage, type HostMessage, type Receipt, type Transport } from '@sageox/plan-review';
 import { localPorts, startDocumentTools } from '@sageox/plan-review/document-tools';
 import script from '@sageox/plan-review/document-tools-script';
 import { framePlan, type FramePlanOptions } from '@sageox/plan-review/frame-plan';
@@ -73,6 +74,7 @@ const transport: Transport = { send: async (op): Promise<Receipt> => ({ state: '
 const controls = mountHostControls(port, { account: 'acct', plan: 'pln_1', slug: 'plan', committed: [], transport, reviewer: 'Devon', frame: document.createElement('iframe') });
 controls.update([{ anchor: 'h1234abcd', status: 'flag', state: 'open' }], 0);
 controls.destroy();
+forgetAccount(localStorage, 'acct');
 port.close();
 startDocumentTools(localPorts().document, { forwardKeys: false });
 const opts: FramePlanOptions = { documentTools: true, instance: 'instance-1' };

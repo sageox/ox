@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { load } from './load.mjs';
 
-const { openStore, deliver, queued, submitBody, acceptBody, migrateLegacy, syncMessage, newId } = await load('state.ts');
+const { openStore, forgetAccount, deliver, queued, submitBody, acceptBody, migrateLegacy, syncMessage, newId } = await load('state.ts');
 
 // fakeStorage is localStorage over a Map, recording the keys each write
 // touches; full(true) makes every write throw, as a full or denied storage does.
@@ -46,6 +46,22 @@ test('a tab writes only the keys of the draft or operation it saved', () => {
   assert.deepEqual(s.writes, ['ox-review:acct:pln_1:draft:h00000002', 'ox-review:acct:pln_1:op:op-b0000002']);
   assert.deepEqual(a.drafts().map((m) => m.note), ['from tab A', 'from tab B']);
   assert.deepEqual(a.entries().map((e) => e.id), ['op-a0000001', 'op-b0000002']);
+});
+
+// Failure prevented: the next person on a shared browser finds the notes and
+// unsent submissions of a coworker who signed out, or signing out clears
+// another account's review, one whose id merely starts the same way.
+test('forgetting an account removes its review on every plan, and only its own', () => {
+  const s = fakeStorage();
+  for (const plan of ['pln_1', 'pln_2']) {
+    const st = openStore(s, 'usr_a', plan);
+    st.save(mark('h00000001', 'mine'));
+    st.freeze('submit', 'op-a0000001', '{}', {});
+  }
+  openStore(s, 'usr_ab', 'pln_1').save(mark('h00000001', 'theirs'));
+  s.map.set('ox-plan-rev-seen', '1');
+  forgetAccount(s, 'usr_a');
+  assert.deepEqual([...s.map.keys()], ['ox-review:usr_ab:pln_1:draft:h00000001', 'ox-plan-rev-seen']);
 });
 
 // Failure prevented: storage that is full or denied silently drops a draft,

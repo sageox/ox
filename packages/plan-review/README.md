@@ -19,7 +19,7 @@ The ox CLI does not install this package. It builds the same source into
 
 | Export | What it is |
 |---|---|
-| `@sageox/plan-review` | `PROTOCOL`, the message types, `parseDocumentMessage`, `parseHostMessage`, `connectFrame` (the host's end of a framed plan), and `mountHostControls` (the review controls and their outbox) |
+| `@sageox/plan-review` | `PROTOCOL`, the message types, `parseDocumentMessage`, `parseHostMessage`, `connectFrame` (the host's end of a framed plan), `mountHostControls` (the review controls and their outbox), and `forgetAccount` (clears an account's review from storage) |
 | `@sageox/plan-review/host.css` | The review controls' styles |
 | `@sageox/plan-review/document-tools-script` | The document tools for a framed plan, as a string to inline (default export) |
 | `@sageox/plan-review/document-tools.iife.js` | The same script, as a file |
@@ -218,6 +218,9 @@ attempt: your idempotency key), `kind` (`round` for a submission or a reopen,
 Each draft and operation is one `localStorage` key under
 `ox-review:<account>:<plan>:`, stored before anything is sent; what storage
 refuses is never sent. Operations go out oldest first, one at a time.
+
+When an account signs out, `forgetAccount(localStorage, account)` deletes
+everything it kept, on every plan, including operations not yet sent.
 
 ## A plan in your own window
 

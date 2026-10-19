@@ -420,6 +420,7 @@
   var OP = "op:";
   var EXPORT = "export";
   var enc = encodeURIComponent;
+  var accountPrefix = (account) => "ox-review:" + enc(account) + ":";
   var has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
   function obj2(v) {
     return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -476,7 +477,7 @@
     return { id: v.id, act: v.act, body: v.body, at: v.at, stamps };
   }
   function openStore(storage, account, plan) {
-    const prefix = "ox-review:" + enc(account) + ":" + enc(plan) + ":";
+    const prefix = accountPrefix(account) + enc(plan) + ":";
     const memory = /* @__PURE__ */ Object.create(null);
     let last = 0;
     function stored(anchor) {

@@ -107,6 +107,7 @@ export interface Store {
 const ACTS = ['submit', 'reopen', 'accept'];
 const DRAFT = 'draft:', OP = 'op:', EXPORT = 'export';
 const enc = encodeURIComponent;
+const accountPrefix = (account: string) => 'ox-review:' + enc(account) + ':';
 const has = (o: object, k: string) => Object.prototype.hasOwnProperty.call(o, k);
 
 function obj(v: unknown): v is Record<string, unknown> {
@@ -157,9 +158,18 @@ function asEntry(v: unknown): Entry | null {
   return { id: v.id, act: v.act as Act, body: v.body, at: v.at, stamps };
 }
 
+/**
+ * forgetAccount deletes everything one account keeps, on every plan: drafts,
+ * operations still waiting to be sent, and exports. A host runs it when that
+ * account signs out, so the next person on the browser finds none of it.
+ */
+export function forgetAccount(storage: Storage, account: string): void {
+  keysUnder(storage, accountPrefix(account)).forEach((k) => unset(storage, k));
+}
+
 /** openStore is the drafts and outbox of one account's review of one plan, kept in storage. */
 export function openStore(storage: Storage, account: string, plan: string): Store {
-  const prefix = 'ox-review:' + enc(account) + ':' + enc(plan) + ':';
+  const prefix = accountPrefix(account) + enc(plan) + ':';
   // drafts storage refused, kept for as long as this tab lives
   const memory: Record<string, Mark> = Object.create(null);
   let last = 0;
