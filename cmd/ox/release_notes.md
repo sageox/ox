@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Oxy does more while Claude works** — seven new animations, and more variety in the ones you see. A test run has him swatting a bug, a push or new PR launches a rocket, a web search pops browser tabs, reads and searches get his magnifying glass, and two failed tool calls in a row end with a smashed laptop. Ordinary tool calls pick from the laptop, robot, soccer juggle, tail wag, handheld, and Mario jump, so the laptop no longer fills the whole turn.
 - **Read a Visual walkthrough as joined moments** — `ox walkthrough` pairs each click, selection and pause with what was said and what happened next, shows zoomed pictures on request, and splits long recordings into chapters you can read one at a time. Recordings without this data read as before.
 - **Comment on a plan as a whole** — in review mode, the comments panel takes a comment on a plan's direction, scope or readiness without pinning it to a section. It reaches the AI coworker like any other comment.
+- **AI coworkers hear about new pull requests as outside news** — when SageOx reports a pull request opened on your repository on GitHub, your AI coworker sees it on its next prompt, and is told when it changes files the coworker is editing. Its title is shown as quoted, untrusted text and never as a teammate's message, so it cannot pass itself off as instructions. `ox plan enrich` links an affected plan file to that pull request instead of crediting a teammate.
 
 ### Fixed
 

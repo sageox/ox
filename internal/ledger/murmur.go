@@ -36,6 +36,73 @@ type MurmurFile struct {
 	PrincipalDisplay string `json:"principal_display,omitempty"`
 }
 
+// UnmarshalJSON decodes a murmur file whose metadata values need not be JSON
+// strings. ox writes every value as a string, but SageOx's server writes
+// outside news with a PR number as a number and its files as an array. A
+// number or boolean keeps its JSON text, an array of strings and numbers
+// becomes a comma-separated list (the metadata["files"] convention), and an
+// object or nested array is dropped instead of failing the whole file.
+func (m *MurmurFile) UnmarshalJSON(data []byte) error {
+	type murmurFields MurmurFile // no methods, so decoding it cannot recurse
+	var decoded struct {
+		murmurFields
+		Metadata map[string]json.RawMessage `json:"metadata,omitempty"`
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*m = MurmurFile(decoded.murmurFields)
+	m.Metadata = murmurMetadataStrings(decoded.Metadata)
+	return nil
+}
+
+// murmurMetadataStrings converts decoded metadata values to the strings
+// MurmurFile.Metadata holds. JSON null stays the empty string, as it was when
+// metadata decoded straight into a string map.
+func murmurMetadataStrings(raw map[string]json.RawMessage) map[string]string {
+	if raw == nil {
+		return nil
+	}
+	out := make(map[string]string, len(raw))
+	for key, value := range raw {
+		if text, ok := murmurMetadataScalar(value); ok {
+			out[key] = text
+			continue
+		}
+		var items []json.RawMessage
+		if json.Unmarshal(value, &items) != nil {
+			continue // an object: no string form a reader could rely on
+		}
+		var parts []string
+		for _, item := range items {
+			if text, ok := murmurMetadataScalar(item); ok && text != "" {
+				parts = append(parts, text)
+			}
+		}
+		out[key] = strings.Join(parts, ",")
+	}
+	return out
+}
+
+// murmurMetadataScalar returns the string form of a JSON string, number,
+// boolean, or null value, and false for an array or object.
+func murmurMetadataScalar(value json.RawMessage) (string, bool) {
+	var decoded any
+	if json.Unmarshal(value, &decoded) != nil {
+		return "", false
+	}
+	switch v := decoded.(type) {
+	case nil:
+		return "", true
+	case string:
+		return v, true
+	case bool, float64:
+		return strings.TrimSpace(string(value)), true
+	default:
+		return "", false
+	}
+}
+
 // MurmurDateHourDir returns the relative directory path for murmurs at a given time.
 // Format: data/murmurs/YYYY-MM-DD/HH/
 func MurmurDateHourDir(t time.Time) string {

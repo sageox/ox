@@ -167,6 +167,11 @@ func murmurContextItems(murmurs []ledger.MurmurFile, files, headings []string, n
 
 	var items []ContextItem
 	for _, m := range murmurs {
+		if m.IsOutsideNews() {
+			// a PR title written outside the team is not team context; the
+			// collision detector already badges the files it touches.
+			continue
+		}
 		matched, score := scoreMurmur(m, want, headings)
 		if !matched {
 			continue
