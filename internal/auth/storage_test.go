@@ -196,6 +196,12 @@ func TestRemoveTokenIfUnchanged_DeletesOnlyTheRevokedLogin(t *testing.T) {
 	login := func(name string) *StoredToken {
 		return &StoredToken{AccessToken: name + "-access", RefreshToken: name + "-refresh", ExpiresAt: time.Now().Add(time.Hour)}
 	}
+	// A refresh can keep the access and refresh tokens and still return a new
+	// session token, which EffectiveRefreshToken falls back to.
+	withSession := func(tok *StoredToken, session string) *StoredToken {
+		tok.SessionToken = session
+		return tok
+	}
 
 	for _, tt := range []struct {
 		name        string
@@ -207,6 +213,7 @@ func TestRemoveTokenIfUnchanged_DeletesOnlyTheRevokedLogin(t *testing.T) {
 		{name: "the revoked login is deleted", onDisk: login("s1"), revoked: login("s1")},
 		{name: "a login that replaced the revoked one is kept", onDisk: login("s2"), revoked: login("s1"), wantChanged: true, wantKept: "s2-refresh"},
 		{name: "a login saved when none was revoked is kept", onDisk: login("s2"), wantChanged: true, wantKept: "s2-refresh"},
+		{name: "a login refreshed to a new session token is kept", onDisk: withSession(login("s1"), "s1-session-2"), revoked: withSession(login("s1"), "s1-session-1"), wantChanged: true, wantKept: "s1-refresh"},
 		{name: "a login already removed is not a change", revoked: login("s1")},
 		{name: "nothing stored and nothing revoked", revoked: nil},
 	} {

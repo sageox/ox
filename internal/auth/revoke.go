@@ -196,9 +196,12 @@ func (c *AuthClient) RevokeTokenStatus() (RevocationStatus, error) {
 }
 
 // sameCredential reports whether a and b are the same login, so it is revoked
-// once.
+// once. SessionToken counts: a refresh can keep the other two and return a new
+// one, which EffectiveRefreshToken falls back to.
 func sameCredential(a, b *StoredToken) bool {
-	return a.AccessToken == b.AccessToken && a.RefreshToken == b.RefreshToken
+	return a.AccessToken == b.AccessToken &&
+		a.RefreshToken == b.RefreshToken &&
+		a.SessionToken == b.SessionToken
 }
 
 // worseRevocation combines two revocations of one endpoint's credentials. An
