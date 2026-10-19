@@ -91,13 +91,14 @@ func TestBrowser_FramedControlsStayOverTheFrame(t *testing.T) {
 // nothing. Once the reviewer is writing a note, nothing the plan sends can
 // close it, swap what it is about, or end review mode, and the note always
 // names what it is about. The reviewer's own Esc still closes it, a note the
-// plan asks for far outside its frame opens over the frame, and a repeated
-// placement lists its comment once.
+// plan asks for far outside its frame opens over the frame, a repeated
+// placement lists its comment once, and a note opened from the rail stays open
+// even before the reviewer types.
 // Failure prevented: a plan opens the trusted note box with its own text
 // outside review mode, files a reviewer's note under another part of the
 // plan, throws away what the reviewer typed so no objection can be written,
-// places the note box over the host's own controls, or floods the host's
-// rail with copies of one comment.
+// places the note box over the host's own controls, floods the host's rail
+// with copies of one comment, or closes every note before a word is typed.
 func TestBrowser_PlanCannotDriveTheComposer(t *testing.T) {
 	ctx := frameBrowser(t)
 	host := framedHost(`committed: [{ anchor: 'h33333333', section: 'S', label: 'Watched', status: 'comment', state: 'open' }]`)
@@ -180,6 +181,23 @@ func TestBrowser_PlanCannotDriveTheComposer(t *testing.T) {
 		`return (r.left>=f.left&&r.left<=f.right&&r.top>=f.top&&r.top<=f.bottom)+' '+JSON.stringify({pop:[r.left,r.top],frame:[f.left,f.top,f.right,f.bottom]})})()`
 	if got := evalString(t, ctx, corner); !strings.HasPrefix(got, "true") {
 		t.Errorf("the note must open over the plan's frame wherever the plan asks: %s", got)
+	}
+
+	// a note the reviewer opens from the rail stays open, empty, whatever the
+	// plan sends; the placed answer last shows every earlier message was handled
+	if err := chromedp.Run(ctx, chromedp.KeyEvent(kb.Escape), chromedp.Click(".rev-rail-plan", chromedp.ByQuery), chromedp.WaitVisible(".rev-pop .rev-note", chromedp.ByQuery)); err != nil {
+		t.Fatalf("open the whole-plan note from the rail: %v", err)
+	}
+	for _, msg := range []string{`{type:'dismiss'}`, `{type:'key',key:'Escape'}`, `{type:'key',key:'r'}`,
+		target("h22222222", "Elsewhere", 60, 60), `{type:'refused',reason:'cross-section'}`} {
+		forge(msg)
+	}
+	forge(`{type:'placed',items:[{anchor:'h33333333',section:'S',label:'Watched'}]}`)
+	if !waitJS(ctx, `!(`+textChanged+`)`, 5*time.Second) {
+		t.Fatal("the forged messages never arrived")
+	}
+	if got := evalString(t, ctx, `document.querySelector('.rev-pop .rev-about')&&document.querySelector('.rev-pop .rev-about').textContent`); got != "Whole plan" {
+		t.Errorf("nothing the plan sends may close or retarget a note opened from the rail: it is about %q", got)
 	}
 }
 

@@ -877,6 +877,7 @@
           if (plan2) {
             const b = plan2.getBoundingClientRect();
             openPop(WHOLE, { left: b.left, bottom: b.bottom }, true);
+            popByHost = true;
           }
         });
       }
@@ -918,6 +919,7 @@
           if (!row) return;
           if (!row.at) {
             openPop({ a: row.a, section: row.section, label: row.label, quote: row.quote }, { left: ev.clientX, bottom: ev.clientY });
+            popByHost = true;
             ev.stopPropagation();
             return;
           }
@@ -927,14 +929,16 @@
     }
     let pop = null;
     let popNote = "";
+    let popByHost = false;
     function sendMode() {
       port.send({ type: "mode", on, open: !!pop });
     }
-    function dirty() {
+    function held() {
       const n = pop ? pop.querySelector(".rev-note") : null;
-      return !!n && n.value.trim() !== popNote;
+      return !!pop && (popByHost || !!n && n.value.trim() !== popNote);
     }
     function closePop(replacing) {
+      popByHost = false;
       if (pop) {
         pop.remove();
         pop = null;
@@ -1408,7 +1412,7 @@
           onPlaced(m.items);
           break;
         case "target": {
-          if (!on || dirty()) break;
+          if (!on || held()) break;
           const b = box();
           openPop({ a: m.target.anchor, section: m.target.section, label: m.target.label, quote: m.target.quote }, {
             left: Math.min(Math.max(m.target.rect.left + b.left, b.left), Math.max(b.left, b.right - 300)),
@@ -1417,14 +1421,14 @@
           break;
         }
         case "refused":
-          if (!dirty()) closePop();
+          if (!held()) closePop();
           toast(m.reason === "repeated" ? "“" + clip(m.quote, 40) + "” appears " + m.count + " times in this section — highlight a longer phrase so the comment points at one place." : "Highlight text within one section to comment on it.");
           break;
         case "dismiss":
-          if ((on || pop) && !dirty()) closePop();
+          if ((on || pop) && !held()) closePop();
           break;
         case "key":
-          if (dirty()) break;
+          if (held()) break;
           if (m.key === "Escape") escape();
           else setReview(!on);
           break;

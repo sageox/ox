@@ -185,8 +185,9 @@ The controls hold to that:
 - A `target` opens a note only in review mode, over the frame's box, and the
   note always names what it is about.
 - Nothing the frame sends (`target`, `dismiss`, `key`, `refused`) closes or
-  replaces a note the reviewer has typed into; their own Esc, Save and Delete
-  still do.
+  replaces a note the reviewer opened from the rail or has typed into; their
+  own Esc, Save and Delete still do. The rail's comment on the whole plan is
+  always there to write.
 - An anchor the frame places more than once is listed once in the rail.
 - A committed item whose `status` or `state` is outside `STATUSES` or
   `STATES` is left out and counted with `problems`; Ledger text is escaped and

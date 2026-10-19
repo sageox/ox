@@ -306,7 +306,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
         const t = ev.target as Element;
         if (t.closest('.rev-rail-show, .rev-rail-hide')) toggleRail();
         const plan = t.closest('.rev-rail-plan');
-        if (plan) { const b = plan.getBoundingClientRect(); openPop(WHOLE, { left: b.left, bottom: b.bottom }, true); }
+        if (plan) { const b = plan.getBoundingClientRect(); openPop(WHOLE, { left: b.left, bottom: b.bottom }, true); popByHost = true; }
       });
     }
     const r = rail;
@@ -350,7 +350,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
         const row = rows[+(li.getAttribute('data-i') as string)];
         if (!row) return;
         // nothing on the page to scroll to: open the comment from its row
-        if (!row.at) { openPop({ a: row.a, section: row.section, label: row.label, quote: row.quote }, { left: ev.clientX, bottom: ev.clientY }); ev.stopPropagation(); return; }
+        if (!row.at) { openPop({ a: row.a, section: row.section, label: row.label, quote: row.quote }, { left: ev.clientX, bottom: ev.clientY }); popByHost = true; ev.stopPropagation(); return; }
         port.send({ type: 'reveal', anchor: row.at.anchor, nth: row.at.nth });
       };
     });
@@ -358,16 +358,19 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
 
   let pop: HTMLElement | null = null;
   let popNote = ''; // the open note's text when it opened
+  let popByHost = false; // opened from the rail, not by a pick in the plan's frame
   function sendMode() { port.send({ type: 'mode', on, open: !!pop }); }
-  // The open note holds text the reviewer typed: a close or replacement the
-  // plan's frame asks for would lose it, so only the reviewer's own Esc, Save
-  // or Delete ends it.
-  function dirty(): boolean {
+  // The open note is held when the reviewer opened it from the rail or typed
+  // in it: only their own Esc, Save or Delete ends it, never the plan's frame.
+  // A plan that closed every note it could would leave no way to object, and
+  // the rail's notes are the ones it cannot open.
+  function held(): boolean {
     const n = pop ? pop.querySelector('.rev-note') as HTMLTextAreaElement | null : null;
-    return !!n && n.value.trim() !== popNote;
+    return !!pop && (popByHost || (!!n && n.value.trim() !== popNote));
   }
   // replacing: another note opens in its place, so a waiting reload keeps waiting
   function closePop(replacing?: boolean) {
+    popByHost = false;
     if (pop) { pop.remove(); pop = null; sendMode(); }
     port.send({ type: 'focus', anchor: null });
     if (!replacing) idle();
@@ -781,7 +784,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
       case 'target': {
         // The document picks only in review mode, so any other target came
         // from the plan's own scripts, as does one replacing a note in progress.
-        if (!on || dirty()) break;
+        if (!on || held()) break;
         // a framed document's rect is in the frame's viewport: move it into
         // this one, and keep the whole note (about 300 x 200) over the frame
         // wherever the plan says
@@ -793,16 +796,16 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
         break;
       }
       case 'refused':
-        if (!dirty()) closePop();
+        if (!held()) closePop();
         toast(m.reason === 'repeated'
           ? '“' + clip(m.quote, 40) + '” appears ' + m.count + ' times in this section — highlight a longer phrase so the comment points at one place.'
           : 'Highlight text within one section to comment on it.');
         break;
       case 'dismiss':
-        if ((on || pop) && !dirty()) closePop();
+        if ((on || pop) && !held()) closePop();
         break;
       case 'key':
-        if (dirty()) break;
+        if (held()) break;
         if (m.key === 'Escape') escape();
         else setReview(!on);
         break;

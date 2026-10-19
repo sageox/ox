@@ -55,7 +55,7 @@ test('review mode announces itself, keeps its exit in view, and survives a reloa
     "sessionStorage.setItem(ON_KEY, '1')", // kept per tab, not per browser
     'if (!on && sessionStorage.getItem(ON_KEY)) setReview(true, true);', // restored silently after a reload
     'if (t.closest && t.closest(CHROME) && (on || pop)) closePop();', // a click on the controls dismisses a note
-    "case 'dismiss':\n        if ((on || pop) && !dirty()) closePop();", // so does a click on nothing markable, unless the note holds typed text
+    "case 'dismiss':\n        if ((on || pop) && !held()) closePop();", // so does a click on nothing markable, unless the reviewer opened the note from the rail or typed in it
     'if (toastEl === el) toastEl = null;', // a toast timer removes only its own toast
   ]);
   pins('document-tools.ts', [
