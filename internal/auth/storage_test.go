@@ -242,6 +242,29 @@ func TestRemoveTokenIfUnchanged_DeletesOnlyTheRevokedLogin(t *testing.T) {
 	}
 }
 
+// TestRemoveTokenIfUnchanged_UnreadableStoreIsAnError verifies an auth.json that
+// cannot be parsed at removal time is reported as a failure, not as a change.
+// Failure prevented: logout told the user the login "changed during logout" (or
+// that it logged out) when it could not read the store at all, and the bytes on
+// disk were overwritten instead of left for the next attempt.
+func TestRemoveTokenIfUnchanged_UnreadableStoreIsAnError(t *testing.T) {
+	t.Parallel()
+	const ep = "https://sageox.ai"
+	client := NewTestClient(t).WithEndpoint(ep)
+	authPath, err := client.GetAuthFilePath()
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Dir(authPath), 0o700))
+	require.NoError(t, os.WriteFile(authPath, []byte("not-json"), 0o600))
+
+	err = client.removeTokenIfUnchanged(ep, &StoredToken{AccessToken: "s1-access", RefreshToken: "s1-refresh"})
+	require.Error(t, err, "an unreadable store must not read as removed")
+	assert.NotErrorIs(t, err, ErrLoginChanged, "nothing was compared, so nothing changed")
+
+	data, err := os.ReadFile(authPath)
+	require.NoError(t, err)
+	assert.Equal(t, "not-json", string(data), "an unreadable store must be left as it was")
+}
+
 func TestIsExpired(t *testing.T) {
 	t.Parallel()
 
