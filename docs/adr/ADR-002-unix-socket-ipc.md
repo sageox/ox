@@ -35,8 +35,11 @@ Messages are classified into two patterns based on whether the caller needs a re
 
 | Pattern | Timeout | Use Cases |
 |---------|---------|-----------|
-| **Request/Response** | 5s read/write | `ping`, `status`, `sync`, `doctor`, `checkout` |
+| **Request/Response** | 5s read/write | `ping`, `status`, `sync`, `doctor` |
+| **Request/Response, progress-streamed** | 60s idle, restarted by each progress line | `checkout` |
 | **Fire-and-Forget** | 50ms write-only | `heartbeat`, `telemetry`, `friction`, `session_finalize`, `murmur_*` |
+
+`checkout` amended 2026-10-18 (PR #1396). A fixed deadline gave up on a Ledger clone that was still downloading, so the window now restarts on each progress line (see Progress Streaming). When it runs out, the client returns `ErrCheckoutInProgress` and the daemon keeps cloning.
 
 Fire-and-forget messages never block the CLI. The 50ms write deadline means if the daemon's socket buffer is full, the message is silently dropped. This is intentional — heartbeats and telemetry are best-effort.
 
