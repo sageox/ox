@@ -274,3 +274,59 @@ func TestSyncIssues_WiderDaysAfterFirstSyncBackfills(t *testing.T) {
 		t.Fatalf("--days 90 after a 30-day sync wrote %d snapshot(s) of issue 3; want 1", len(snaps))
 	}
 }
+
+// cancelOnCommentsFetcher cancels the sync's context from inside a comment
+// fetch, as a Ctrl-C or daemon shutdown would, and fails the fetch.
+type cancelOnCommentsFetcher struct {
+	windowFetcher
+	cancel context.CancelFunc
+}
+
+func (f *cancelOnCommentsFetcher) ListPRComments(context.Context, string, string, int) ([]FetchedComment, error) {
+	f.cancel()
+	return nil, context.Canceled
+}
+
+func (f *cancelOnCommentsFetcher) ListIssueComments(context.Context, string, string, int) ([]FetchedComment, error) {
+	f.cancel()
+	return nil, context.Canceled
+}
+
+// TestSync_CanceledDuringCommentFetchStopsWithoutSavingState verifies a
+// cancellation is not mistaken for a per-item failure: the sync stops with the
+// context error and does not persist a cursor, so nothing is skipped later.
+func TestSync_CanceledDuringCommentFetchStopsWithoutSavingState(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	at := now.Add(-time.Hour)
+	run := map[string]func(context.Context, GitHubFetcher, string) error{
+		"pr": func(ctx context.Context, f GitHubFetcher, lp string) error {
+			_, err := SyncPRs(ctx, f, lp, "o", "r", 30, slog.Default())
+			return err
+		},
+		"issue": func(ctx context.Context, f GitHubFetcher, lp string) error {
+			_, err := SyncIssues(ctx, f, lp, "o", "r", 30, slog.Default())
+			return err
+		},
+	}
+	for dataType, sync := range run {
+		t.Run(dataType, func(t *testing.T) {
+			ledgerPath := t.TempDir()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			f := &cancelOnCommentsFetcher{cancel: cancel, windowFetcher: windowFetcher{
+				prs:    []FetchedPR{{Number: 1, State: "open", CreatedAt: at, UpdatedAt: at}},
+				issues: []FetchedIssue{{Number: 1, State: "open", CreatedAt: at, UpdatedAt: at}},
+			}}
+			if err := sync(ctx, f, ledgerPath); !errors.Is(err, context.Canceled) {
+				t.Fatalf("sync error = %v, want context.Canceled", err)
+			}
+			state, err := ReadGitHubTypeSyncState(ledgerPath, dataType)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !state.LastSyncAt.IsZero() {
+				t.Fatalf("canceled sync persisted a cursor (%v)", state.LastSyncAt)
+			}
+		})
+	}
+}

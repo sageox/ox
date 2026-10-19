@@ -255,19 +255,10 @@ func runIndexGitHub(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// The in-process fallback indexes where the daemon does (the shared
-	// CodeDB). Until that index is built, search reads the Ledger index
-	// instead; a shared index holding only GitHub data would take its place
-	// and hide code results, so leave it to `ox index code`.
-	codeDBDir := resolveCodeDBDir(gitRoot)
-	if _, useLedger := resolvePreferredCodeDBDir(gitRoot); useLedger {
-		codeDBDir = ""
-	}
-
 	return syncGitHubIndex(cmd.Context(), githubIndexRun{
 		Fetcher:    gh.NewFetcher(gh.NewClient(token)),
 		LedgerPath: ledgerPath,
-		CodeDBDir:  codeDBDir,
+		CodeDBDir:  githubFallbackCodeDBDir(gitRoot),
 		Owner:      owner,
 		Repo:       repo,
 		MaxDays:    maxDays,
@@ -275,6 +266,18 @@ func runIndexGitHub(cmd *cobra.Command, args []string) error {
 		SyncIssues: syncIssues,
 		NoPush:     noPush,
 	})
+}
+
+// githubFallbackCodeDBDir returns where the in-process fallback may index
+// GitHub data: the shared CodeDB, where the daemon indexes it. Until that index
+// is built, search reads the Ledger index instead, and a shared index holding
+// only GitHub data would take its place and hide code results — so it returns
+// "" then, leaving the build to `ox index code`.
+func githubFallbackCodeDBDir(gitRoot string) string {
+	if _, useLedger := resolvePreferredCodeDBDir(gitRoot); useLedger {
+		return ""
+	}
+	return resolveCodeDBDir(gitRoot)
 }
 
 // githubIndexRun is one resolved `ox index github` run: everything the command
