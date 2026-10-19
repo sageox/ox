@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -71,6 +72,36 @@ func (e *TokenRefreshError) Error() string {
 
 func (e *TokenRefreshError) Unwrap() error {
 	return e.Err
+}
+
+// ErrLoggedOutDuringRefresh marks a token refresh whose stored login was
+// removed, normally by `ox logout`, while the refresh waited on the server.
+// The refreshed token is discarded so a finished logout stays finished. It
+// comes wrapped in a TokenRefreshError.
+var ErrLoggedOutDuringRefresh = errors.New("logged out during token refresh")
+
+// refreshResult turns what saveTokenIfUnchanged left stored for ep into the
+// refresh's answer, which is always the login on disk, as a fresh read would
+// return it:
+//   - refreshed was saved: refreshed.
+//   - the login was removed: ErrLoggedOutDuringRefresh, which callers treat
+//     like any failed refresh (re-authentication required).
+//   - the login changed (a concurrent refresh or `ox login` saved first): the
+//     stored login, which is newer than the one this refresh started from.
+//     Failing instead would break a command whose refresh merely lost a race
+//     with the daemon's. When two processes refresh one login, the first to
+//     save now wins; the blind save let the last one win.
+func refreshResult(ep string, stored, refreshed *StoredToken) (*StoredToken, error) {
+	if stored == nil {
+		return nil, &TokenRefreshError{
+			Message: "token refresh failed, re-authentication required",
+			Err:     ErrLoggedOutDuringRefresh,
+		}
+	}
+	if stored != refreshed {
+		slog.Info("auth: login changed during token refresh, using the stored login", "endpoint", ep)
+	}
+	return stored, nil
 }
 
 // EnsureValidToken ensures we have a valid token, refreshing proactively if needed.
@@ -363,15 +394,17 @@ func refreshTokenForEndpointContext(ctx context.Context, token *StoredToken, ep 
 		UserInfo:     token.UserInfo, // preserve user info from original token
 	}
 
-	// save new token for the endpoint we refreshed against
-	if err := SaveTokenForEndpoint(baseURL, newToken); err != nil {
+	// save new token for the endpoint we refreshed against, unless its login
+	// was removed or replaced while we waited on the server
+	stored, err := saveTokenForEndpointIfUnchanged(baseURL, token, newToken)
+	if err != nil {
 		return nil, &TokenRefreshError{
 			Message: "failed to save refreshed token",
 			Err:     err,
 		}
 	}
 
-	return newToken, nil
+	return refreshResult(endpoint.NormalizeEndpoint(baseURL), stored, newToken)
 }
 
 // AuthClient methods for test isolation (enable t.Parallel())
@@ -601,13 +634,16 @@ func (c *AuthClient) refreshToken(token *StoredToken) (*StoredToken, error) {
 		UserInfo:     token.UserInfo, // preserve user info from original token
 	}
 
-	// save new token using client's storage
-	if err := c.SaveToken(newToken); err != nil {
+	// save new token using client's storage, unless its login was removed or
+	// replaced while we waited on the server
+	ep := endpoint.NormalizeEndpoint(baseURL)
+	stored, err := c.saveTokenIfUnchanged(ep, token, newToken)
+	if err != nil {
 		return nil, &TokenRefreshError{
 			Message: "failed to save refreshed token",
 			Err:     err,
 		}
 	}
 
-	return newToken, nil
+	return refreshResult(ep, stored, newToken)
 }
