@@ -186,6 +186,55 @@ func TestRemoveToken_NoFile(t *testing.T) {
 	assert.NoError(t, err, "want nil when file doesn't exist")
 }
 
+// TestRemoveTokenIfUnchanged_DeletesOnlyTheRevokedLogin covers every pairing of
+// the login on disk with the login the caller revoked.
+// Failure prevented: logout deleted whatever auth.json held at removal time,
+// including a login saved after the revocation that was never revoked.
+func TestRemoveTokenIfUnchanged_DeletesOnlyTheRevokedLogin(t *testing.T) {
+	t.Parallel()
+	const ep = "https://sageox.ai"
+	login := func(name string) *StoredToken {
+		return &StoredToken{AccessToken: name + "-access", RefreshToken: name + "-refresh", ExpiresAt: time.Now().Add(time.Hour)}
+	}
+
+	for _, tt := range []struct {
+		name        string
+		onDisk      *StoredToken
+		revoked     *StoredToken
+		wantChanged bool
+		wantKept    string // refresh token left on disk; "" for none
+	}{
+		{name: "the revoked login is deleted", onDisk: login("s1"), revoked: login("s1")},
+		{name: "a login that replaced the revoked one is kept", onDisk: login("s2"), revoked: login("s1"), wantChanged: true, wantKept: "s2-refresh"},
+		{name: "a login saved when none was revoked is kept", onDisk: login("s2"), wantChanged: true, wantKept: "s2-refresh"},
+		{name: "a login already removed is not a change", revoked: login("s1")},
+		{name: "nothing stored and nothing revoked", revoked: nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			client := NewTestClient(t).WithEndpoint(ep)
+			if tt.onDisk != nil {
+				require.NoError(t, client.SaveToken(tt.onDisk))
+			}
+
+			err := client.removeTokenIfUnchanged(ep, tt.revoked)
+			if tt.wantChanged {
+				require.ErrorIs(t, err, ErrLoginChanged)
+			} else {
+				require.NoError(t, err)
+			}
+
+			stored, err := client.GetToken()
+			require.NoError(t, err)
+			if tt.wantKept == "" {
+				assert.Nil(t, stored)
+			} else if assert.NotNil(t, stored, "a login that was never revoked must not be deleted") {
+				assert.Equal(t, tt.wantKept, stored.RefreshToken)
+			}
+		})
+	}
+}
+
 func TestIsExpired(t *testing.T) {
 	t.Parallel()
 
