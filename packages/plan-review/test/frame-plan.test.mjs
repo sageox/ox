@@ -30,6 +30,24 @@ test('an ES-module import reads the global; the build follows the page and the t
   assert.equal(framePlan(page, { documentTools: true }), want + '<script>' + ESCAPED + '</script>');
 });
 
+// Failure prevented: a "<" earlier in the module script hides its import, and
+// the framed plan draws no diagram.
+test('the import is found anywhere in its module script', () => {
+  const imp = `import mermaid from '${CDN}/dist/mermaid.esm.min.mjs';`;
+  const page = `${DIAGRAM}<script type="module">const smaller = 1 < 2;\n${imp}\nmermaid.run()</script>`;
+  assert.equal(framePlan(page), page.replace(imp, 'const mermaid = globalThis.mermaid;') + '<script>' + ESCAPED + '</script>');
+});
+
+// Failure prevented: a data-src or data-type attribute, or a type that only
+// starts with "module", is read as the script's own, and the page loses a
+// script or has an inert one's text rewritten.
+test('only a script tag\'s own src and type count', () => {
+  const imp = `import mermaid from '${CDN}/dist/mermaid.esm.min.mjs';`;
+  const page = DIAGRAM + `<script data-src="${CDN}/dist/mermaid.min.js">var a = 1</script>` +
+    `<script type="module-template">${imp}</script><script data-type=module type=text/plain>${imp}</script>`;
+  assert.equal(framePlan(page), page);
+});
+
 // Failure prevented: every plan ox renders carries the 2.7 MB build, diagram or not.
 test('a page with no diagram is left as it is', () => {
   const page = `<p>No diagram</p><script src="${CDN}@11.6.0/dist/mermaid.min.js"></script>`;
@@ -45,10 +63,11 @@ test('the document tools go before the last </body>, verbatim', () => {
   assert.throws(() => framePlan(page, { documentTools: true, instance: '"><x' }));
 });
 
-// Failure prevented: an unterminated <script> tag pins the host's thread while
-// framePlan backtracks (the patterns this replaced took ~45 s on 1 MiB).
-test('an unterminated script tag frames in linear time', () => {
-  for (const run of [' type=module', ` src="${CDN}/dist/mermaid.js"`]) {
+// Failure prevented: an unterminated <script> tag, or many module scripts that
+// never close, pin the host's thread (the patterns this replaced took ~45 s on
+// 1 MiB).
+test('an unterminated script frames in linear time', () => {
+  for (const run of [' type=module', ` src="${CDN}/dist/mermaid.js"`, ' type=module><script']) {
     const page = DIAGRAM + '<script' + run.repeat(Math.ceil((1 << 20) / run.length));
     const start = performance.now();
     assert.equal(framePlan(page, { documentTools: true }), page + '<script>' + TOOLS + '</script>');
