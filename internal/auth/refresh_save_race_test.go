@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -106,6 +107,8 @@ func isolateAuthFile(t *testing.T) {
 // Failure prevented: a refresh saved blindly when the server answered, so a
 // login `ox logout` had just revoked and deleted came back on disk after the
 // logout reported success, and an older login overwrote a newer `ox login`.
+// Also prevented: the refresh token a rotating server issued mid-logout stayed
+// live on the server after the logout, with no local copy left to revoke.
 func TestRefresh_SavesOnlyOverTheLoginItRefreshed(t *testing.T) {
 	otherAccount := &StoredToken{
 		AccessToken:  "other-account-access",
@@ -116,25 +119,38 @@ func TestRefresh_SavesOnlyOverTheLoginItRefreshed(t *testing.T) {
 	siblingRefresh := createTestToken(time.Hour)
 	siblingRefresh.AccessToken = "sibling-refresh-jwt"
 	siblingRefresh.RefreshToken = "sibling-refresh-rt"
+	logout := func(c *AuthClient) error {
+		status, err := c.RevokeTokenStatus()
+		if err == nil && status != RevocationSuccess {
+			return errors.New("logout did not report success")
+		}
+		return err
+	}
 
 	races := []struct {
 		name string
 		// meanwhile runs, as another process, while the refresh grant is on
 		// the server; nil changes nothing.
 		meanwhile func(c *AuthClient) error
+		// keepsRefreshToken makes the server answer with the refresh token it
+		// was sent, as a Better Auth session token does, instead of rotating it.
+		keepsRefreshToken bool
 		// wantAccess is the access token the refresh returns and auth.json
 		// holds afterwards; "" means a logout that must stay logged out.
 		wantAccess string
+		// wantRevoked lists the tokens the server is asked to revoke, in order.
+		wantRevoked []string
 	}{
 		{
-			name: "ox logout revoked and removed the login",
-			meanwhile: func(c *AuthClient) error {
-				status, err := c.RevokeTokenStatus()
-				if err == nil && status != RevocationSuccess {
-					return errors.New("logout did not report success")
-				}
-				return err
-			},
+			name:        "ox logout revoked and removed the login",
+			meanwhile:   logout,
+			wantRevoked: []string{"test-refresh-token", "refreshed-rt"},
+		},
+		{
+			name:              "ox logout revoked the session the server keeps",
+			meanwhile:         logout,
+			keepsRefreshToken: true,
+			wantRevoked:       []string{"test-refresh-token"},
 		},
 		{
 			name:       "ox login saved another account",
@@ -157,6 +173,8 @@ func TestRefresh_SavesOnlyOverTheLoginItRefreshed(t *testing.T) {
 			for _, race := range races {
 				t.Run(race.name, func(t *testing.T) {
 					var meanwhileErr error
+					var revokedMu sync.Mutex
+					var revoked []string
 					srv := httptest.NewUnstartedServer(nil)
 					ep := "http://" + srv.Listener.Addr().String()
 					e := entry.open(t, ep)
@@ -167,9 +185,13 @@ func TestRefresh_SavesOnlyOverTheLoginItRefreshed(t *testing.T) {
 							if race.meanwhile != nil {
 								meanwhileErr = race.meanwhile(e.client)
 							}
+							rt := "refreshed-rt"
+							if race.keepsRefreshToken {
+								rt = r.FormValue("refresh_token")
+							}
 							_ = json.NewEncoder(w).Encode(map[string]any{
 								"access_token":  "refreshed-opaque",
-								"refresh_token": "refreshed-rt",
+								"refresh_token": rt,
 								"token_type":    "Bearer",
 								"expires_in":    3600,
 							})
@@ -180,6 +202,9 @@ func TestRefresh_SavesOnlyOverTheLoginItRefreshed(t *testing.T) {
 								"expires_in":   900,
 							})
 						case RevokeEndpoint:
+							revokedMu.Lock()
+							revoked = append(revoked, r.FormValue("token"))
+							revokedMu.Unlock()
 							w.WriteHeader(http.StatusOK)
 						default:
 							t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
@@ -197,6 +222,11 @@ func TestRefresh_SavesOnlyOverTheLoginItRefreshed(t *testing.T) {
 
 					stored, readErr := e.stored()
 					require.NoError(t, readErr)
+
+					revokedMu.Lock()
+					assert.Equal(t, race.wantRevoked, revoked,
+						"logout must leave no refreshed token live on the server, and nothing else may be revoked")
+					revokedMu.Unlock()
 
 					if race.wantAccess == "" {
 						assert.Nil(t, stored, "a login logout removed came back on disk")

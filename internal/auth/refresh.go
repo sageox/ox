@@ -76,8 +76,9 @@ func (e *TokenRefreshError) Unwrap() error {
 
 // ErrLoggedOutDuringRefresh marks a token refresh whose stored login was
 // removed, normally by `ox logout`, while the refresh waited on the server.
-// The refreshed token is discarded so a finished logout stays finished. It
-// comes wrapped in a TokenRefreshError.
+// The refreshed token is discarded so a finished logout stays finished, and
+// revoked if the server rotated its refresh token. It comes wrapped in a
+// TokenRefreshError.
 var ErrLoggedOutDuringRefresh = errors.New("logged out during token refresh")
 
 // refreshResult turns what saveTokenIfUnchanged left stored for ep into the
@@ -85,7 +86,8 @@ var ErrLoggedOutDuringRefresh = errors.New("logged out during token refresh")
 // return it:
 //   - refreshed was saved: refreshed.
 //   - the login was removed: ErrLoggedOutDuringRefresh, which callers treat
-//     like any failed refresh (re-authentication required).
+//     like any failed refresh (re-authentication required). The caller has
+//     already revoked a rotated refresh token (revokeDiscardedRefresh).
 //   - the login changed (a concurrent refresh or `ox login` saved first): the
 //     stored login, which is newer than the one this refresh started from.
 //     Failing instead would break a command whose refresh merely lost a race
@@ -102,6 +104,24 @@ func refreshResult(ep string, stored, refreshed *StoredToken) (*StoredToken, err
 		slog.Info("auth: login changed during token refresh, using the stored login", "endpoint", ep)
 	}
 	return stored, nil
+}
+
+// revokeDiscardedRefresh asks the server at baseURL to revoke the refreshed
+// login a refresh discards because `ox logout` removed its login while the
+// grant was on the server. sent is the refresh token the grant used, which the
+// logout revoked. A server that rotates refresh tokens had already issued a
+// new one, which would stay live until it expires with no local copy left to
+// revoke. A refresh token the server kept, such as a Better Auth session
+// token, is the one the logout revoked: revoking it again adds nothing, and
+// could sign out that session if a login this refresh did not find on disk
+// still uses it. Best effort: the refresh fails as logged out either way.
+func revokeDiscardedRefresh(ctx context.Context, baseURL, sent string, discarded *StoredToken) {
+	if discarded.RefreshToken == "" || discarded.RefreshToken == sent {
+		return
+	}
+	status := revokeOnServerAt(ctx, baseURL, discarded)
+	slog.Info("auth: asked the server to revoke the token refreshed during logout",
+		"endpoint", endpoint.NormalizeEndpoint(baseURL), "confirmed", status == RevocationSuccess)
 }
 
 // EnsureValidToken ensures we have a valid token, refreshing proactively if needed.
@@ -403,6 +423,9 @@ func refreshTokenForEndpointContext(ctx context.Context, token *StoredToken, ep 
 			Err:     err,
 		}
 	}
+	if stored == nil {
+		revokeDiscardedRefresh(ctx, baseURL, rt, newToken)
+	}
 
 	return refreshResult(endpoint.NormalizeEndpoint(baseURL), stored, newToken)
 }
@@ -643,6 +666,9 @@ func (c *AuthClient) refreshToken(token *StoredToken) (*StoredToken, error) {
 			Message: "failed to save refreshed token",
 			Err:     err,
 		}
+	}
+	if stored == nil {
+		revokeDiscardedRefresh(context.Background(), baseURL, rt, newToken)
 	}
 
 	return refreshResult(ep, stored, newToken)
