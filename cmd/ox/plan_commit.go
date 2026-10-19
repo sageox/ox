@@ -176,6 +176,9 @@ var errEventNotCommitted = errors.New("plan event recorded but not committed")
 // planEventFiles are the files plan.AppendPlanEvent writes in a plan dir.
 var planEventFiles = []string{"events.jsonl", "meta.json"}
 
+// planHTMLFileName mirrors internal/plan's planHTMLFile (unexported there).
+const planHTMLFileName = "plan.html"
+
 // commitPlanEvent records a lifecycle event (approve, work, realize, abandon,
 // supersede) and commits exactly the files that writes, in one hold of the
 // repo lock: a pull never finds them half written, and nothing else in the

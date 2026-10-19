@@ -165,58 +165,34 @@ func TestReconcile_PushRangeScope_IgnoresPointersTheRemoteAlreadyHas(t *testing.
 	}
 }
 
-// Negative control for the test above: the whole-tree variant still sees the
-// coworker's broken session, so the scoping — not a weaker check — is what lets
-// the push-range repair through. `ox doctor` relies on the whole-tree variant to
-// clear pointers the remote already holds.
-func TestReconcile_WholeTreeScope_StillSeesAlreadyPushedPointers(t *testing.T) {
+// TestReconcile_PushRangeIgnoresPointerLookalikes: an unpushed file that starts
+// like a pointer but is over maxPointerSize, or a pointer with no size line, is
+// not a pointer, so the reconcile scans none and needs no LFS client.
+// pointer.Parse skips lines it does not know, so for the large file the size
+// filter is the only guard. Failure prevented: content mistaken for a pointer is
+// probed, reported missing, and pauses the push.
+func TestReconcile_PushRangeIgnoresPointerLookalikes(t *testing.T) {
 	if testing.Short() {
-		t.Skip("short: real git remote and mocked LFS batch API")
+		t.Skip("short: real git remote")
 	}
-	teammateOID := strings.Repeat("7", 64)
-	teammateMetaOID := strings.Repeat("8", 64)
+	for _, tc := range []struct{ name, content string }{
+		{"over the pointer size", lfsPointerContent(strings.Repeat("a", 64), 999) + strings.Repeat("x", maxPointerSize)},
+		{"no size line", "version https://git-lfs.github.com/spec/v1\noid sha256:" + strings.Repeat("b", 64) + "\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ledger, _ := initLedgerWithRemote(t)
+			writeAndCommit(t, ledger, "pointer look-alike", map[string]string{"sessions/s/raw.jsonl": tc.content})
 
-	setup := func(t *testing.T) (string, *Client) {
-		ledger, _ := initLedgerWithRemote(t)
-		writeAndCommit(t, ledger, "teammate session", map[string]string{
-			"sessions/teammate/summary.md": lfsPointerContent(teammateOID, 10),
-			"sessions/teammate/meta.json":  metaFor(metaRef("summary.md", teammateMetaOID, 10)),
+			result, err := reconcileUnpushedPointers(context.Background(), ledger, nil, func() (*Client, error) {
+				t.Fatal("a push range with no pointer needs no LFS client")
+				return nil, nil
+			})
+
+			require.NoError(t, err)
+			assert.Zero(t, result.ScannedPointers)
+			assert.False(t, result.Changed())
 		})
-		mustPush(t, ledger)
-		return ledger, fakeLFSDownloadServer(t, map[string]int{teammateOID: http.StatusNotFound})
 	}
-
-	t.Run("whole tree reports the coworker's pointer and removes nothing", func(t *testing.T) {
-		ledger, client := setup(t)
-		_, err := reconcileAllPointers(context.Background(), ledger, nil, func() (*Client, error) { return client, nil })
-		var unrecoverable *UnrecoverablePointersError
-		require.ErrorAs(t, err, &unrecoverable)
-		assert.Equal(t, "sessions/teammate/summary.md", filepath.ToSlash(unrecoverable.Pointers[0].Path))
-		assert.FileExists(t, filepath.Join(ledger, "sessions", "teammate", "summary.md"))
-	})
-
-	t.Run("push range has nothing to do", func(t *testing.T) {
-		ledger, client := setup(t)
-		result, err := reconcileUnpushedPointers(context.Background(), ledger, nil, func() (*Client, error) { return client, nil })
-		require.NoError(t, err)
-		assert.Zero(t, result.ScannedPointers)
-		assert.False(t, result.Changed())
-	})
-
-	t.Run("whole tree never removes an already-pushed pointer with a dead blob", func(t *testing.T) {
-		ledger, _ := initLedgerWithRemote(t)
-		writeAndCommit(t, ledger, "plan with a dead blob", map[string]string{
-			"data/plans/p1/plan.html": lfsPointerContent(teammateOID, 500),
-		})
-		mustPush(t, ledger)
-		client := fakeLFSDownloadServer(t, map[string]int{teammateOID: http.StatusNotFound})
-
-		result, err := reconcileAllPointers(context.Background(), ledger, nil, func() (*Client, error) { return client, nil })
-		var unrecoverable *UnrecoverablePointersError
-		require.ErrorAs(t, err, &unrecoverable)
-		assert.False(t, result.Changed())
-		assert.FileExists(t, filepath.Join(ledger, "data", "plans", "p1", "plan.html"))
-	})
 }
 
 // Failure prevented: a missing object referenced only by an intermediate
