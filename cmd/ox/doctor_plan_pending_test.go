@@ -1,3 +1,5 @@
+//go:build !short
+
 package main
 
 // doctor_plan_pending_test.go covers the plan-pending-writes doctor check.
