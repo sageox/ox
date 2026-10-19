@@ -169,6 +169,24 @@ func TestSendFrictionEvent_Suppressed(t *testing.T) {
 
 // --- Friction must never break the usage-error path ---
 
+// restoreRootCmdState undoes what executeWithFrictionRecovery leaves behind as
+// the process entry point: it resets rootCmd's flags and registers new flag
+// objects, sets root args, and assigns the command context. Left in place, a
+// later in-process command parses --json into the old flag object while readers
+// look up the new one through cmd.Root().PersistentFlags().
+func restoreRootCmdState(t *testing.T) {
+	t.Helper()
+	flags, persistent := rootCmd.Flags(), rootCmd.PersistentFlags()
+	savedCtx, savedPreRun := cliCtx, preRunReached
+	t.Cleanup(func() {
+		rootCmd.ResetFlags()
+		rootCmd.Flags().AddFlagSet(flags)
+		rootCmd.PersistentFlags().AddFlagSet(persistent)
+		rootCmd.SetArgs(nil)
+		cliCtx, preRunReached = savedCtx, savedPreRun
+	})
+}
+
 // panickingFrictionAdapter panics from inside frictionax's Handle, the way
 // frictionax v0.1.2's isGitRepo did in Windows directories.
 type panickingFrictionAdapter struct{}
@@ -185,17 +203,20 @@ func (panickingFrictionAdapter) ParseError(error) *friction.ParsedError {
 // Failure prevented: a bug inside frictionax replaces the coworker's error, and
 // the exit code a script relies on, with a Go stack trace.
 func TestExecuteWithFrictionRecovery_FrictionPanicKeepsOriginalError(t *testing.T) {
+	restoreRootCmdState(t)
 	prev := frictionEngine
 	frictionEngine = friction.New(panickingFrictionAdapter{})
 	t.Cleanup(func() { frictionEngine = prev })
 
+	// Both invocations fail at the root, so no subcommand merges the flag
+	// objects executeWithFrictionRecovery mints and restoreRootCmdState discards.
 	tests := []struct {
 		name    string
 		args    []string
 		wantErr string
 	}{
 		{"unknown command", []string{"statuss"}, `unknown command "statuss"`},
-		{"unknown flag", []string{"status", "--no-such-flag"}, "unknown flag: --no-such-flag"},
+		{"unknown flag", []string{"--no-such-flag"}, "unknown flag: --no-such-flag"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
