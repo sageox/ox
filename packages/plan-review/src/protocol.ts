@@ -81,7 +81,8 @@ const MAX_ITEMS = 10000;
 const ANCHOR = /^[hq][0-9a-f]{8}$/;
 /** Every Status, for validating one read back from storage or a message. */
 export const STATUSES: readonly Status[] = ['approve', 'request-change', 'flag', 'comment'];
-const STATES = ['open', 'addressed', 'verified', 'wontfix'];
+/** Every State, for validating one a host read back from its store. */
+export const STATES: readonly State[] = ['open', 'addressed', 'verified', 'wontfix'];
 const TINTS = ['sage', 'amber', 'red', 'gold', 'faint'];
 
 type Obj = Record<string, unknown>;
@@ -177,19 +178,26 @@ export function parseHostMessage(data: unknown, instance: string): HostMessage |
       if (!list(d.items)) return null;
       const items: PaintItem[] = [];
       for (const it of d.items) {
-        if (!obj(it) || typeof it.anchor !== 'string' || !ANCHOR.test(it.anchor)) return null;
-        if ((it.kind !== 'unsent' && it.kind !== 'committed') || !oneOf(it.status, STATUSES) || !oneOf(it.tint, TINTS)) return null;
-        if ((it.state !== undefined && !oneOf(it.state, STATES)) || !text(it.glyph)) return null;
-        if (!optText(it.quote) || !optText(it.section) || !optText(it.label)) return null;
-        const p: PaintItem = { anchor: it.anchor, kind: it.kind, status: it.status as Status, glyph: it.glyph, tint: it.tint as Tint };
-        if (it.state !== undefined) p.state = it.state as State;
-        if (it.quote !== undefined) p.quote = it.quote as string;
-        if (it.section !== undefined) p.section = it.section as string;
-        if (it.label !== undefined) p.label = it.label as string;
+        const p = paintItem(it);
+        if (!p) return null;
         items.push(p);
       }
       return { type: 'paint', items };
     }
   }
   return null;
+}
+
+/** paintItem validates one item a host paints; null when it is not one. A host checks each before it sends, since one bad item drops the whole paint. */
+export function paintItem(it: unknown): PaintItem | null {
+  if (!obj(it) || typeof it.anchor !== 'string' || !ANCHOR.test(it.anchor)) return null;
+  if ((it.kind !== 'unsent' && it.kind !== 'committed') || !oneOf(it.status, STATUSES) || !oneOf(it.tint, TINTS)) return null;
+  if ((it.state !== undefined && !oneOf(it.state, STATES)) || !text(it.glyph)) return null;
+  if (!optText(it.quote) || !optText(it.section) || !optText(it.label)) return null;
+  const p: PaintItem = { anchor: it.anchor, kind: it.kind, status: it.status as Status, glyph: it.glyph, tint: it.tint as Tint };
+  if (it.state !== undefined) p.state = it.state as State;
+  if (it.quote !== undefined) p.quote = it.quote as string;
+  if (it.section !== undefined) p.section = it.section as string;
+  if (it.label !== undefined) p.label = it.label as string;
+  return p;
 }

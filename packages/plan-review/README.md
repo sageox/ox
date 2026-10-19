@@ -46,7 +46,7 @@ settings grant your repository read access.
 Pin the exact version and commit your lockfile:
 
 ```sh
-npm install --save-exact @sageox/plan-review@0.4.1
+npm install --save-exact @sageox/plan-review@0.5.0
 ```
 
 Pinning matters because the host end and the document script must come from
@@ -153,9 +153,10 @@ const controls = mountHostControls(port, {
   committed: review.items,   // CommittedItem[]: what the Ledger holds
   problems: review.problems, // records it could not read, and operations stored with differing content
   reviewer: user.name,       // signed in: shown on the bar; your server stamps identity
-  frame: iframe,             // target rects are in the frame's viewport
+  frame: iframe,             // target rects are in the frame's viewport; the controls sit over it
   transport: { send },
   resolve: canResolve,       // this reviewer may Accept or Reopen what the author addressed
+  reviewing: true,           // the reviewer asked to review: open in review mode
 });
 controls.update(items, problems); // after you read the review again
 controls.destroy(); // before another account signs in, or another plan mounts
@@ -164,6 +165,28 @@ controls.destroy(); // before another account signs in, or another plan mounts
 Leave `resolve` off for a reviewer your server will not let resolve: an
 addressed item then opens the mark-up composer instead of offering Accept and
 Reopen.
+
+With `frame`, the bar, rail, note and status lines sit over the frame's box
+rather than the window, so your page's own navigation and actions stay clear;
+the rail stays fixed at every width. Set `--rev-z` on your page to stack the
+controls under your own dialogs (default `2147483000`).
+
+The frame is untrusted, and so is every committed item: a member wrote it.
+The controls hold to that:
+
+- A `target` opens a note only in review mode, over the frame's box, and the
+  note always names what it is about.
+- Nothing the frame sends (`target`, `dismiss`, `key`, `refused`) closes or
+  replaces a note the reviewer has typed into; their own Esc, Save and Delete
+  still do.
+- A committed item whose `status` or `state` is outside `STATUSES` or
+  `STATES` is left out and counted with `problems`; Ledger text is escaped and
+  never becomes a class name.
+- Each paint item is checked with `paintItem` before it is sent, so one bad
+  item cannot drop the paint.
+
+A committed item can carry `resolutionNote`, the author's note on its latest
+resolution; the rail shows it under the item while that resolution stands.
 
 In review mode the rail offers a comment on the whole plan, kept and sent
 like any other. Its anchor is `plan` (`WholePlanAnchor` in

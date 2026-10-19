@@ -16,14 +16,14 @@
   function clip(t, n) {
     return t.length > n ? t.slice(0, n - 1) + "…" : t;
   }
-  function contentAnchor(heading, text) {
-    return "h" + fnv1a(norm(heading) + "\0" + norm(text));
+  function contentAnchor(heading, text2) {
+    return "h" + fnv1a(norm(heading) + "\0" + norm(text2));
   }
   function quoteAnchor(section, quote) {
     return "q" + fnv1a(norm(section) + "\0" + norm(quote));
   }
-  function labelOf(text) {
-    return clip((text || "").replace(/\s+/g, " ").trim(), 70);
+  function labelOf(text2) {
+    return clip((text2 || "").replace(/\s+/g, " ").trim(), 70);
   }
   var GENERATED = "section[id], li, tr, .ox-chip, .stat, .bar-row";
   var AUTHORED = "h1,h2,h3,h4,p,li,tr,pre,blockquote,figure,[data-ox-section]";
@@ -57,7 +57,35 @@
   }
 
   // src/protocol.ts
+  var MAX_TEXT = 65536;
+  var ANCHOR = /^[hq][0-9a-f]{8}$/;
   var STATUSES = ["approve", "request-change", "flag", "comment"];
+  var STATES = ["open", "addressed", "verified", "wontfix"];
+  var TINTS = ["sage", "amber", "red", "gold", "faint"];
+  function obj(v) {
+    return typeof v === "object" && v !== null && !Array.isArray(v);
+  }
+  function text(v) {
+    return typeof v === "string" && v.length <= MAX_TEXT;
+  }
+  function optText(v) {
+    return v === void 0 || text(v);
+  }
+  function oneOf(v, list) {
+    return typeof v === "string" && list.indexOf(v) >= 0;
+  }
+  function paintItem(it) {
+    if (!obj(it) || typeof it.anchor !== "string" || !ANCHOR.test(it.anchor)) return null;
+    if (it.kind !== "unsent" && it.kind !== "committed" || !oneOf(it.status, STATUSES) || !oneOf(it.tint, TINTS)) return null;
+    if (it.state !== void 0 && !oneOf(it.state, STATES) || !text(it.glyph)) return null;
+    if (!optText(it.quote) || !optText(it.section) || !optText(it.label)) return null;
+    const p = { anchor: it.anchor, kind: it.kind, status: it.status, glyph: it.glyph, tint: it.tint };
+    if (it.state !== void 0) p.state = it.state;
+    if (it.quote !== void 0) p.quote = it.quote;
+    if (it.section !== void 0) p.section = it.section;
+    if (it.label !== void 0) p.label = it.label;
+    return p;
+  }
 
   // src/ports.ts
   function localPorts() {
@@ -80,7 +108,7 @@
     return !!t && (t.tagName === "TEXTAREA" || t.tagName === "INPUT" || t.isContentEditable);
   }
   var INLINE = /^(A|ABBR|B|BDI|BDO|CITE|CODE|DATA|DEL|DFN|EM|I|INS|KBD|MARK|Q|S|SAMP|SMALL|SPAN|STRONG|SUB|SUP|TIME|U|VAR|WBR)$/;
-  var TINTS = ["sage", "amber", "red", "gold", "faint"];
+  var TINTS2 = ["sage", "amber", "red", "gold", "faint"];
   var OWN = "input, select, textarea, label, summary";
   function startDocumentTools(port, opts = {}) {
     const body = document.body;
@@ -158,7 +186,7 @@
         (tints[m.tint] = tints[m.tint] || []).push(h.range);
       });
       if (!HL) return;
-      TINTS.forEach((c) => {
+      TINTS2.forEach((c) => {
         CSS.highlights.delete("rev-q-" + c);
         if (!tints[c]) return;
         const hl = new Highlight();
@@ -199,7 +227,7 @@
     }
     function textIndex() {
       const nodes = [];
-      let text = "", prev = null, brk = false;
+      let text2 = "", prev = null, brk = false;
       const w = document.createTreeWalker(body, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
       for (let n = w.nextNode(); n; n = w.nextNode()) {
         if (n.nodeType === 1) {
@@ -208,13 +236,13 @@
         }
         const t = n;
         if (!t.parentElement || t.parentElement.closest(NOT_TEXT)) continue;
-        if (prev && (brk || !inlineBetween(prev, t))) text += "\n";
+        if (prev && (brk || !inlineBetween(prev, t))) text2 += "\n";
         brk = false;
-        nodes.push({ node: t, start: text.length });
-        text += t.data;
+        nodes.push({ node: t, start: text2.length });
+        text2 += t.data;
         prev = t;
       }
-      return { nodes, text };
+      return { nodes, text: text2 };
     }
     function inlineBetween(a, b) {
       const up = [];
@@ -393,7 +421,7 @@
   var EXPORT = "export";
   var enc = encodeURIComponent;
   var has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
-  function obj(v) {
+  function obj2(v) {
     return typeof v === "object" && v !== null && !Array.isArray(v);
   }
   function read(storage, key) {
@@ -431,7 +459,7 @@
     return out;
   }
   function asMark(v) {
-    if (!obj(v) || typeof v.anchor !== "string" || STATUSES.indexOf(v.status) < 0 || typeof v.at !== "number") return null;
+    if (!obj2(v) || typeof v.anchor !== "string" || STATUSES.indexOf(v.status) < 0 || typeof v.at !== "number") return null;
     const m = { anchor: v.anchor, status: v.status, at: v.at };
     ["section", "label", "note", "quote"].forEach((k) => {
       if (typeof v[k] === "string") m[k] = v[k];
@@ -439,7 +467,7 @@
     return m;
   }
   function asEntry(v) {
-    if (!obj(v) || typeof v.id !== "string" || ACTS.indexOf(v.act) < 0 || typeof v.body !== "string" || typeof v.at !== "number" || !obj(v.stamps)) return null;
+    if (!obj2(v) || typeof v.id !== "string" || ACTS.indexOf(v.act) < 0 || typeof v.body !== "string" || typeof v.at !== "number" || !obj2(v.stamps)) return null;
     const stamps = /* @__PURE__ */ Object.create(null);
     Object.keys(v.stamps).forEach((a) => {
       const s = v.stamps[a];
@@ -528,7 +556,7 @@
       },
       exportId(items) {
         const prev = read(storage, prefix + EXPORT);
-        const id = obj(prev) && typeof prev.id === "string" && JSON.stringify(prev.items) === JSON.stringify(items) ? prev.id : newId();
+        const id = obj2(prev) && typeof prev.id === "string" && JSON.stringify(prev.items) === JSON.stringify(items) ? prev.id : newId();
         write(storage, prefix + EXPORT, { id, items });
         return id;
       }
@@ -598,25 +626,25 @@
     if (marks === null && box === null && exp === null) return;
     let ok = true;
     const current = store.drafts();
-    if (obj(marks)) {
+    if (obj2(marks)) {
       Object.keys(marks).forEach((a) => {
         const v = marks[a];
-        const m = asMark(obj(v) ? { ...v, anchor: a, at: Math.max(+v.updated_at || 0, 1) } : null);
+        const m = asMark(obj2(v) ? { ...v, anchor: a, at: Math.max(+v.updated_at || 0, 1) } : null);
         if (!m || current.some((d) => d.anchor === a && d.at >= m.at)) return;
         ok = write(storage, store.prefix + DRAFT + enc(a), m) && ok;
       });
     }
-    if (obj(box) && typeof box.id === "string" && Array.isArray(box.items)) {
+    if (obj2(box) && typeof box.id === "string" && Array.isArray(box.items)) {
       const stamps = /* @__PURE__ */ Object.create(null);
-      const s = obj(box.stamps) ? box.stamps : {};
+      const s = obj2(box.stamps) ? box.stamps : {};
       box.items.forEach((it) => {
-        if (obj(it) && typeof it.anchor === "string") stamps[it.anchor] = Math.max(+s[it.anchor] || 0, 1);
+        if (obj2(it) && typeof it.anchor === "string") stamps[it.anchor] = Math.max(+s[it.anchor] || 0, 1);
       });
       const body = JSON.stringify({ id: box.id, slug, reviewer: box.reviewer, items: box.items });
       const e = { id: box.id, act: "submit", body, at: Date.parse(box.created_at) || Date.now(), stamps };
       ok = write(storage, store.prefix + OP + enc(e.id), e) && ok;
     }
-    if (obj(exp)) ok = write(storage, store.prefix + EXPORT, exp) && ok;
+    if (obj2(exp)) ok = write(storage, store.prefix + EXPORT, exp) && ok;
     if (ok) ["", ":tombs", ":outbox", ":export"].forEach((k) => unset(storage, KEY + k));
   }
 
@@ -631,8 +659,9 @@
   var WHOLE = { a: "plan", section: "", label: "Whole plan" };
   var BUBBLE = '<svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 2.5h10A1.5 1.5 0 0 1 14.5 4v6a1.5 1.5 0 0 1-1.5 1.5H7.5L4 14.5v-3H3A1.5 1.5 0 0 1 1.5 10V4A1.5 1.5 0 0 1 3 2.5z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>';
   function esc(s) {
-    return (s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
+    return (s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
   }
+  var STATE_TAG = { addressed: "addressed", verified: "verified", wontfix: "wontfix" };
   function glyphFor(id) {
     for (let i = 0; i < STATUS.length; i++) if (STATUS[i].id === id) return STATUS[i].glyph;
     return "◌";
@@ -662,10 +691,16 @@
     const off = new AbortController();
     const signal = off.signal;
     let problems = opts.problems || 0;
+    let invalid = 0;
     let committed = /* @__PURE__ */ Object.create(null);
     function setCommitted(items) {
       committed = /* @__PURE__ */ Object.create(null);
+      invalid = 0;
       items.forEach((x) => {
+        if (typeof x.anchor !== "string" || STATUSES.indexOf(x.status) < 0 || STATES.indexOf(x.state) < 0) {
+          invalid++;
+          return;
+        }
         (committed[x.anchor] = committed[x.anchor] || []).push(x);
       });
     }
@@ -716,12 +751,14 @@
           it.section = q.section || "";
           if (q.label) it.label = q.label;
         }
-        out.push(it);
+        const ok = paintItem(it);
+        if (ok) out.push(ok);
       });
       return out;
     }
     function paint() {
       if (destroyed) return;
+      place();
       ds = /* @__PURE__ */ Object.create(null);
       store.drafts().forEach((m) => {
         ds[m.anchor] = m;
@@ -752,10 +789,11 @@
         orphanBar = null;
       }
       const open = orphans.filter((o) => o.state === "open");
-      if (!open.length && !problems) return;
+      const n = problems + invalid;
+      if (!open.length && !n) return;
       const bar2 = orphanBar = document.createElement("div");
       bar2.className = "rev-orphans";
-      let html = problems ? '<div class="rev-orphans-h">⚠ This review could not be fully read or holds conflicting copies (' + problems + " problem(s)): notes may be missing or shown resolved.</div>" : "";
+      let html = n ? '<div class="rev-orphans-h">⚠ This review could not be fully read or holds conflicting copies (' + n + " problem(s)): notes may be missing or shown resolved.</div>" : "";
       if (open.length) {
         const items = open.map((o) => "<li><strong>" + esc(o.status) + "</strong> " + esc(o.label || o.anchor) + (o.note ? " — " + esc(o.note) : "") + "</li>").join("");
         html += '<div class="rev-orphans-h">⚠ ' + open.length + " review note(s) no longer anchored (the text changed) — still open:</div><ul>" + items + "</ul>";
@@ -798,7 +836,8 @@
             label: c.label || label,
             state: c.state,
             reviewer: c.reviewer || "",
-            tag: ""
+            tag: "",
+            answer: c.state !== "open" && c.resolutionNote ? c.resolutionNote : ""
           });
         });
         const m = ds[a];
@@ -813,7 +852,8 @@
             label: m.label || label,
             state: "",
             reviewer: who() || "(you)",
-            tag: store.unsaved(a) ? "unsaved" : queued(waiting, m) ? "queued" : "unsent"
+            tag: store.unsaved(a) ? "unsaved" : queued(waiting, m) ? "queued" : "unsent",
+            answer: ""
           });
         }
       }
@@ -871,9 +911,9 @@
         const whole = row.a === WHOLE.a;
         let tag = "";
         if (row.tag) tag = '<span class="rev-rail-tag ' + row.tag + '">' + row.tag + "</span>";
-        else if (row.state && row.state !== "open") tag = '<span class="rev-rail-tag ' + esc(row.state) + '">' + esc(row.state) + "</span>";
+        else if (STATE_TAG[row.state]) tag = '<span class="rev-rail-tag ' + STATE_TAG[row.state] + '">' + STATE_TAG[row.state] + "</span>";
         if (!row.at && !whole) tag += '<span class="rev-rail-tag">text changed</span>';
-        const content = (row.quote ? '<div class="rev-rail-quote">' + esc(row.label) + "</div>" : "") + (row.note ? '<div class="rev-rail-note">' + esc(row.note) + "</div>" : row.quote || whole ? "" : '<div class="rev-rail-note muted">' + esc(row.label) + "</div>");
+        const content = (row.quote ? '<div class="rev-rail-quote">' + esc(row.label) + "</div>" : "") + (row.note ? '<div class="rev-rail-note">' + esc(row.note) + "</div>" : row.quote || whole ? "" : '<div class="rev-rail-note muted">' + esc(row.label) + "</div>") + (row.answer ? '<div class="rev-rail-answer">↳ ' + esc(row.answer) + "</div>" : "");
         const whoTag = row.reviewer ? '<span class="rev-rail-who">' + esc(row.reviewer) + "</span>" : "";
         html += '<li class="rev-rail-item" data-i="' + i + '" data-status="' + esc(row.status) + '"><span class="rev-rail-glyph">' + glyphFor(row.status) + '</span><div class="rev-rail-body"><div class="rev-rail-sec"><span class="rev-rail-sec-t">' + esc(whole ? WHOLE.label : row.section || "(plan)") + "</span>" + whoTag + tag + "</div>" + content + "</div></li>";
       });
@@ -893,8 +933,13 @@
       });
     }
     let pop = null;
+    let popNote = "";
     function sendMode() {
       port.send({ type: "mode", on, open: !!pop });
+    }
+    function dirty() {
+      const n = pop ? pop.querySelector(".rev-note") : null;
+      return !!n && n.value.trim() !== popNote;
     }
     function closePop(replacing) {
       if (pop) {
@@ -911,9 +956,10 @@
       const cstate = committedState(a);
       const p = pop = document.createElement("div");
       p.className = "rev-pop";
-      const quote = t.quote ? '<div class="rev-quote">' + esc(t.label) + "</div>" : "";
+      const quote = '<div class="' + (t.quote ? "rev-quote" : "rev-about") + '">' + esc(clip(t.label || t.a, 280)) + "</div>";
       port.send({ type: "focus", anchor: a });
       if (live && opts.resolve && !fresh && (cstate === "addressed" || cstate === "verified")) {
+        popNote = "";
         p.innerHTML = quote + '<div class="rev-cap">Agent marked this ' + cstate + '.</div><textarea class="rev-note" placeholder="reopen note (optional)"></textarea><div class="rev-row"><button class="rev-accept">Accept</button><button class="rev-reopen">Reopen</button></div>';
         placePop(rect);
         p.querySelector(".rev-accept").onclick = () => {
@@ -925,6 +971,7 @@
         return;
       }
       const existing = ds[a] || { status: "request-change", note: "" };
+      popNote = existing.note || "";
       const btns = STATUS.map((s) => '<button data-s="' + s.id + '" class="rev-s' + (existing.status === s.id ? " on" : "") + '">' + s.glyph + " " + s.id + "</button>").join("");
       p.innerHTML = quote + '<div class="rev-row">' + btns + '</div><textarea class="rev-note" placeholder="note (optional)">' + esc(existing.note || "") + '</textarea><div class="rev-row"><button class="rev-save">Save</button><button class="rev-del">Delete</button></div>';
       placePop(rect);
@@ -949,6 +996,23 @@
         paint();
         closePop();
       };
+    }
+    function box() {
+      return opts.frame ? opts.frame.getBoundingClientRect() : { left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight };
+    }
+    function place() {
+      if (!opts.frame || destroyed) return;
+      const r = opts.frame.getBoundingClientRect();
+      const top = Math.max(r.top, 0), bottom = Math.min(r.bottom, window.innerHeight);
+      const v = {
+        top,
+        left: Math.max(r.left, 0),
+        right: Math.max(window.innerWidth - r.right, 0),
+        bottom: Math.max(window.innerHeight - bottom, 0),
+        width: Math.max(r.width, 0),
+        height: Math.max(bottom - top, 0)
+      };
+      Object.keys(v).forEach((k) => body.style.setProperty("--rev-" + k, v[k] + "px"));
     }
     function placePop(rect) {
       const p = pop;
@@ -1089,14 +1153,14 @@
         syncEl = null;
       }
     }
-    function showSync(kind, text, actions, input) {
+    function showSync(kind, text2, actions, input) {
       hideSync();
       const el = syncEl = document.createElement("div");
       el.className = "rev-sync " + kind;
       el.setAttribute("role", kind === "err" ? "alert" : "status");
       const msg = document.createElement("span");
       msg.className = "rev-sync-msg";
-      msg.textContent = text;
+      msg.textContent = text2;
       el.appendChild(msg);
       let field = null;
       if (input !== void 0) {
@@ -1222,6 +1286,14 @@
         fn();
       }
     }
+    if (opts.frame) {
+      body.classList.add("rev-framed");
+      place();
+      window.addEventListener("resize", place, { signal });
+      document.addEventListener("scroll", place, { capture: true, passive: true, signal });
+    }
+    const resized = opts.frame && typeof ResizeObserver !== "undefined" ? new ResizeObserver(place) : null;
+    if (resized && opts.frame) resized.observe(opts.frame);
     const bar = document.createElement("div");
     bar.className = "rev-bar";
     bar.innerHTML = (live ? '<span class="rev-conn"></span>' : "") + '<button class="rev-toggle" title="Toggle review mode">Review</button><span class="rev-count"></span>' + (live && !opts.reviewer ? '<button class="rev-who" title="Set the name teammates see on your comments"></button>' : "") + '<button class="rev-submit" title="Send feedback to the agent">' + (live ? "Submit" : "Export") + "</button>" + (opts.approve ? '<button class="rev-approve" title="Approve and close the loop">Approve</button>' : "");
@@ -1303,7 +1375,7 @@
       }
     }, { signal });
     try {
-      if (!localStorage.getItem("ox-plan-rev-seen")) {
+      if (!opts.reviewing && !localStorage.getItem("ox-plan-rev-seen")) {
         const hint = hintBubble = document.createElement("div");
         hint.className = "rev-hint";
         hint.textContent = "↓ Click Review to mark up this plan";
@@ -1335,7 +1407,7 @@
           if (started) return;
           started = true;
           try {
-            if (sessionStorage.getItem(ON_KEY)) setReview(true, true);
+            if (!on && sessionStorage.getItem(ON_KEY)) setReview(true, true);
           } catch (e) {
           }
           break;
@@ -1343,27 +1415,37 @@
           onPlaced(m.items);
           break;
         case "target": {
-          const f = opts.frame ? opts.frame.getBoundingClientRect() : { left: 0, top: 0 };
-          openPop(
-            { a: m.target.anchor, section: m.target.section, label: m.target.label, quote: m.target.quote },
-            { left: m.target.rect.left + f.left, bottom: m.target.rect.bottom + f.top }
-          );
+          if (!on || dirty()) break;
+          const b = box();
+          openPop({ a: m.target.anchor, section: m.target.section, label: m.target.label, quote: m.target.quote }, {
+            left: Math.min(Math.max(m.target.rect.left + b.left, b.left), Math.max(b.left, b.right - 300)),
+            bottom: Math.min(Math.max(m.target.rect.bottom + b.top, b.top), Math.max(b.top, b.bottom - 200))
+          });
           break;
         }
         case "refused":
-          closePop();
+          if (!dirty()) closePop();
           toast(m.reason === "repeated" ? "“" + clip(m.quote, 40) + "” appears " + m.count + " times in this section — highlight a longer phrase so the comment points at one place." : "Highlight text within one section to comment on it.");
           break;
         case "dismiss":
-          if (on || pop) closePop();
+          if ((on || pop) && !dirty()) closePop();
           break;
         case "key":
+          if (dirty()) break;
           if (m.key === "Escape") escape();
           else setReview(!on);
           break;
       }
     });
     restoreSync();
+    if (opts.reviewing) {
+      let seen = true;
+      try {
+        seen = !!localStorage.getItem("ox-plan-rev-seen");
+      } catch (e) {
+      }
+      setReview(true, seen);
+    }
     paint();
     const restored = Object.keys(ds).length;
     if (live && restored && !store.entries().length) toast(restored + " unsent mark(s) restored — Submit to send them.");
@@ -1390,10 +1472,12 @@
         });
         port.send({ type: "mode", on: false, open: false });
         port.send({ type: "paint", items: [] });
+        if (resized) resized.disconnect();
         [bar, rail, orphanBar, syncEl, toastEl, offlineBar, hintBubble].forEach((el) => {
           if (el) el.remove();
         });
-        body.classList.remove("rev-on", "rev-offline");
+        body.classList.remove("rev-on", "rev-offline", "rev-framed");
+        ["top", "left", "right", "bottom", "width", "height"].forEach((k) => body.style.removeProperty("--rev-" + k));
       }
     };
   }

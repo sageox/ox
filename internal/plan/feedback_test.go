@@ -330,7 +330,10 @@ func TestRenderHTML_CarriesReviewState(t *testing.T) {
 	review := []MergedItem{
 		{Item: planreview.Item{Anchor: "h1", Section: "Approach", Label: "x", Status: planreview.StatusRequestChange}, Open: true},
 		{Item: planreview.Item{Anchor: "h2", Section: "Approach", Label: "y", Status: planreview.StatusFlag},
-			Resolution: &planreview.Resolution{Anchor: "h2", State: planreview.StateAddressed, Commit: "abc"}, Open: false},
+			Resolution: &planreview.Resolution{Anchor: "h2", State: planreview.StateAddressed, Commit: "abc", Note: "Added a rollback step"}, Open: false},
+		// raised again after it was addressed: the old answer no longer stands
+		{Item: planreview.Item{Anchor: "h3", Section: "Approach", Label: "z", Status: planreview.StatusRequestChange},
+			Resolution: &planreview.Resolution{Anchor: "h3", State: planreview.StateAddressed, Note: "Stale answer"}, Open: true},
 	}
 	opts := RenderOptions{Slug: "p", Review: review, ReviewEndpoint: "http://127.0.0.1:9/feedback", ReviewToken: "tok"}
 	out, err := RenderHTMLOpts(in, Result{}, opts)
@@ -342,13 +345,17 @@ func TestRenderHTML_CarriesReviewState(t *testing.T) {
 		`id="ox-review-state"`, // JSON island
 		`data-review-endpoint="http://127.0.0.1:9/feedback"`,
 		`data-review-token="tok"`,
-		"rev-status",          // summary strip
-		`"anchor":"h1"`,       // island carries items
-		`"state":"addressed"`, // resolved state surfaced
+		"rev-status",                               // summary strip
+		`"anchor":"h1"`,                            // island carries items
+		`"state":"addressed"`,                      // resolved state surfaced
+		`"resolutionNote":"Added a rollback step"`, // the author's answer, for the rail
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("render missing %q", want)
 		}
+	}
+	if strings.Contains(s, "Stale answer") {
+		t.Error("an item raised again must not carry the answer to its earlier round")
 	}
 	if strings.Contains(s, `data-review-problems="`) {
 		t.Error("a complete review must not be flagged incomplete")

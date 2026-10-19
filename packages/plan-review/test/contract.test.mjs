@@ -53,9 +53,9 @@ test('review mode announces itself, keeps its exit in view, and survives a reloa
     "if (m.key === 'Escape') escape();", // a framed document's Esc too
     "if (e.key === 'r' && !typing(e)", // r toggles, not from a text field
     "sessionStorage.setItem(ON_KEY, '1')", // kept per tab, not per browser
-    'if (sessionStorage.getItem(ON_KEY)) setReview(true, true);', // restored silently after a reload
+    'if (!on && sessionStorage.getItem(ON_KEY)) setReview(true, true);', // restored silently after a reload
     'if (t.closest && t.closest(CHROME) && (on || pop)) closePop();', // a click on the controls dismisses a note
-    "case 'dismiss':\n        if (on || pop) closePop();", // so does a click on nothing markable
+    "case 'dismiss':\n        if ((on || pop) && !dirty()) closePop();", // so does a click on nothing markable, unless the note holds typed text
     'if (toastEl === el) toastEl = null;', // a toast timer removes only its own toast
   ]);
   pins('document-tools.ts', [
@@ -120,5 +120,7 @@ test('text from the Ledger cannot close an attribute', async () => {
   const { esc } = await load('host-controls.ts');
   const hostile = 'flag" onmouseover="fetch(\'/approve\')';
   assert.ok(!esc(hostile).includes('"'));
-  pins('host-controls.ts', ['data-status="\' + esc(row.status)', 'rev-rail-tag \' + esc(row.state)']);
+  assert.ok(!/['<>]/.test(esc("'><img>")));
+  // a state names a class only through STATE_TAG, never as Ledger text
+  pins('host-controls.ts', ['data-status="\' + esc(row.status)', 'rev-rail-tag \' + STATE_TAG[row.state]']);
 });

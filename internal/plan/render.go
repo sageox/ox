@@ -111,6 +111,8 @@ type reviewStateItem struct {
 	State    string `json:"state"`
 	Note     string `json:"note,omitempty"`
 	Reviewer string `json:"reviewer,omitempty"`
+	// ResolutionNote is the author's note on the latest resolution, while it stands.
+	ResolutionNote string `json:"resolutionNote,omitempty"`
 }
 
 // mermaid fences come out of goldmark as <pre><code class="language-mermaid">…;

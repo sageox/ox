@@ -3,9 +3,10 @@
    --panel, …) when it defines them, else the SageOx palette. z-index sits near
    the top of the 32-bit range: an authored plan's own stacking is unknown and
    often tall (modals, sticky tab bars), and the controls must stay clickable
-   above it. */
+   above it. A host that frames the plan can set --rev-z to keep its own
+   dialogs above the controls. */
 
-.rev-bar{position:fixed;left:16px;bottom:16px;z-index:2147483002;display:flex;align-items:center;gap:8px;background:var(--panel, #111411);border:1px solid var(--hair, #212620);border-radius:9px;padding:6px 8px;box-shadow:var(--shadow, 0 1px 0 rgba(255,255,255,.02), 0 8px 30px rgba(0,0,0,.35))}
+.rev-bar{position:fixed;left:16px;bottom:16px;z-index:calc(var(--rev-z, 2147483000) + 2);display:flex;align-items:center;gap:8px;background:var(--panel, #111411);border:1px solid var(--hair, #212620);border-radius:9px;padding:6px 8px;box-shadow:var(--shadow, 0 1px 0 rgba(255,255,255,.02), 0 8px 30px rgba(0,0,0,.35))}
 .rev-bar button{background:var(--panel2, #171b17);border:1px solid var(--hair2, var(--hair, #212620));color:var(--dim, #b7b6a3);border-radius:6px;padding:4px 9px;font-size:12px;cursor:pointer;font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace}
 .rev-bar button:hover{color:var(--ink, #f4f2ef)}
 .rev-bar .rev-toggle.on{background:var(--sage, #99c693);border-color:var(--sage, #99c693);color:#111411}
@@ -25,7 +26,7 @@ body.rev-on .rev-rail li:hover{outline:none;cursor:pointer}
 body.rev-on .rev-orphans li:hover{outline:none;cursor:auto}
 
 /* the composer */
-.rev-pop{position:absolute;z-index:2147483005;width:280px;background:var(--panel, #111411);border:1px solid var(--hair, #212620);border-radius:9px;padding:10px;box-shadow:var(--shadow, 0 1px 0 rgba(255,255,255,.02), 0 8px 30px rgba(0,0,0,.35))}
+.rev-pop{position:absolute;z-index:calc(var(--rev-z, 2147483000) + 5);width:280px;background:var(--panel, #111411);border:1px solid var(--hair, #212620);border-radius:9px;padding:10px;box-shadow:var(--shadow, 0 1px 0 rgba(255,255,255,.02), 0 8px 30px rgba(0,0,0,.35))}
 .rev-pop .rev-row{display:flex;flex-wrap:wrap;gap:5px;margin:4px 0}
 .rev-pop .rev-s{flex:1 1 auto;background:var(--panel2, #171b17);border:1px solid var(--hair2, var(--hair, #212620));color:var(--dim, #b7b6a3);border-radius:5px;padding:3px 6px;font-size:10.5px;cursor:pointer;font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace}
 /* control color PREDICTS the resulting mark color */
@@ -39,10 +40,11 @@ body.rev-on .rev-orphans li:hover{outline:none;cursor:auto}
 .rev-pop .rev-cap{font-size:11.5px;color:var(--dim, #b7b6a3);margin-bottom:6px}
 .rev-pop .rev-accept{flex:1;background:var(--sage, #99c693);border:1px solid var(--sage, #99c693);color:#111411;border-radius:5px;padding:4px;font-size:11px;cursor:pointer}
 .rev-pop .rev-reopen{background:var(--panel2, #171b17);border:1px solid var(--amber, #c6a23c);color:var(--amber, #c6a23c);border-radius:5px;padding:4px 8px;font-size:11px;cursor:pointer}
+.rev-pop .rev-about{font-size:12px;line-height:1.4;color:var(--dim, #b7b6a3);margin:0 0 6px;overflow-wrap:anywhere}
 .rev-pop .rev-quote{font-size:12px;line-height:1.4;color:var(--ink, #f4f2ef);border-left:2px solid var(--gold, #d9b654);padding:1px 0 1px 8px;margin:0 0 6px;overflow-wrap:anywhere}
 
 /* orphaned-note banner — feedback whose anchored text changed */
-.rev-orphans{position:fixed;left:50%;top:14px;transform:translateX(-50%);z-index:2147483004;max-width:680px;background:var(--panel, #111411);border:1px solid var(--amber, #c6a23c);border-left:3px solid var(--amber, #c6a23c);border-radius:9px;padding:10px 14px;box-shadow:var(--shadow, 0 1px 0 rgba(255,255,255,.02), 0 8px 30px rgba(0,0,0,.35));font-size:13px;color:var(--dim, #b7b6a3)}
+.rev-orphans{max-height:40vh;overflow-y:auto;position:fixed;left:50%;top:14px;transform:translateX(-50%);z-index:calc(var(--rev-z, 2147483000) + 4);max-width:680px;background:var(--panel, #111411);border:1px solid var(--amber, #c6a23c);border-left:3px solid var(--amber, #c6a23c);border-radius:9px;padding:10px 14px;box-shadow:var(--shadow, 0 1px 0 rgba(255,255,255,.02), 0 8px 30px rgba(0,0,0,.35));font-size:13px;color:var(--dim, #b7b6a3)}
 .rev-orphans-h{color:var(--amber, #c6a23c);font-weight:600;margin-bottom:4px}
 .rev-orphans ul{margin:.3em 0;padding-left:1.1em}
 .rev-orphans .rev-orphans-x{margin-top:6px;background:var(--panel2, #171b17);border:1px solid var(--hair2, var(--hair, #212620));color:var(--dim, #b7b6a3);border-radius:5px;padding:3px 9px;font-size:11px;cursor:pointer;font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace}
@@ -53,13 +55,13 @@ body.rev-on .rev-orphans li:hover{outline:none;cursor:auto}
    1.4s bob it used to run repeated forever without ever communicating anything
    new; one settle on entry says "I just appeared" and then stops. Above the
    bar, never on its row, where it would take a button's click. */
-.rev-hint{position:fixed;bottom:64px;z-index:2147483003;background:var(--panel, #111411);border:1px solid var(--sage, #99c693);color:var(--sage, #99c693);border-radius:7px;padding:6px 10px;font-size:12px;font-weight:500;box-shadow:var(--shadow, 0 1px 0 rgba(255,255,255,.02), 0 8px 30px rgba(0,0,0,.35));animation:rev-hint-in .25s ease-out both}
+.rev-hint{position:fixed;bottom:64px;z-index:calc(var(--rev-z, 2147483000) + 3);background:var(--panel, #111411);border:1px solid var(--sage, #99c693);color:var(--sage, #99c693);border-radius:7px;padding:6px 10px;font-size:12px;font-weight:500;box-shadow:var(--shadow, 0 1px 0 rgba(255,255,255,.02), 0 8px 30px rgba(0,0,0,.35));animation:rev-hint-in .25s ease-out both}
 @keyframes rev-hint-in{from{opacity:0;transform:translateX(-6px)}to{opacity:1;transform:none}}
 @media (prefers-reduced-motion:reduce){.rev-hint{animation:none}}
 
 /* review comments rail — surfaces the note TEXT (not just a margin glyph) in the
    right gutter; each row scroll-jumps to its anchored element. */
-.rev-rail{position:fixed;top:64px;right:18px;z-index:2147483001;width:266px;max-height:calc(100vh - 100px);overflow-y:auto;background:var(--panel, #111411);border:1px solid var(--hair, #212620);border-radius:10px;padding:10px 12px;box-shadow:var(--shadow, 0 1px 0 rgba(255,255,255,.02), 0 8px 30px rgba(0,0,0,.35))}
+.rev-rail{position:fixed;top:64px;right:18px;z-index:calc(var(--rev-z, 2147483000) + 1);width:266px;max-height:calc(100vh - 100px);overflow-y:auto;background:var(--panel, #111411);border:1px solid var(--hair, #212620);border-radius:10px;padding:10px 12px;box-shadow:var(--shadow, 0 1px 0 rgba(255,255,255,.02), 0 8px 30px rgba(0,0,0,.35))}
 .rev-rail-h{font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--dim, #b7b6a3);margin-bottom:8px;display:flex;align-items:center;gap:6px}
 /* Hide shrinks the rail to the Show button (comment icon + count), as tall as
    the theme toggle above it, so the plan under the rail can be read */
@@ -86,6 +88,7 @@ body.rev-on .rev-orphans li:hover{outline:none;cursor:auto}
 .rev-rail-sec-t{flex:1;min-width:0;font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10px;color:var(--faint, #8c8e7e);text-transform:uppercase;letter-spacing:.03em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .rev-rail-who{flex:none;font-size:9px;border-radius:6px;padding:0 5px;border:1px solid var(--hair2, var(--hair, #212620));color:var(--sage, #99c693);text-transform:none;letter-spacing:0;max-width:90px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .rev-rail-note{font-size:12.5px;color:var(--ink, #f4f2ef);line-height:1.45;overflow-wrap:anywhere}
+.rev-rail-answer{font-size:12px;color:var(--dim, #b7b6a3);line-height:1.45;margin-top:3px;overflow-wrap:anywhere}
 .rev-rail-note.muted{color:var(--dim, #b7b6a3)}
 .rev-rail-tag{flex:none;font-size:9px;border-radius:6px;padding:0 5px;border:1px solid var(--hair2, var(--hair, #212620));color:var(--dim, #b7b6a3);text-transform:uppercase;letter-spacing:.02em}
 .rev-rail-tag.unsent,.rev-rail-tag.queued{color:var(--gold, #d9b654);border-color:var(--gold, #d9b654)}
@@ -104,18 +107,30 @@ body.rev-on .rev-orphans li:hover{outline:none;cursor:auto}
 .rev-conn.ok{color:var(--sage, #99c693)}
 .rev-conn.off{color:var(--red, #d77e6c);animation:rev-conn-pulse 1.6s ease-in-out infinite}
 @keyframes rev-conn-pulse{50%{opacity:.45}}
-.rev-offline-bar{position:fixed;top:0;left:0;right:0;z-index:2147483006;background:var(--panel, #111411);border-bottom:2px solid var(--red, #d77e6c);color:var(--ink, #f4f2ef);padding:9px 14px;font-size:13px;box-shadow:var(--shadow, 0 1px 0 rgba(255,255,255,.02), 0 8px 30px rgba(0,0,0,.35))}
+.rev-offline-bar{position:fixed;top:0;left:0;right:0;z-index:calc(var(--rev-z, 2147483000) + 6);background:var(--panel, #111411);border-bottom:2px solid var(--red, #d77e6c);color:var(--ink, #f4f2ef);padding:9px 14px;font-size:13px;box-shadow:var(--shadow, 0 1px 0 rgba(255,255,255,.02), 0 8px 30px rgba(0,0,0,.35))}
 .rev-offline-bar code{background:var(--panel2, #171b17);border:1px solid var(--hair2, var(--hair, #212620));border-radius:5px;padding:2px 7px;font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;user-select:all}
 .rev-offline-bar .rev-offline-copy{margin-left:6px;background:var(--panel2, #171b17);border:1px solid var(--hair2, var(--hair, #212620));color:var(--dim, #b7b6a3);border-radius:5px;padding:2px 8px;font-size:11px;cursor:pointer}
 .rev-offline-bar .rev-offline-copy:hover{color:var(--ink, #f4f2ef)}
 body.rev-offline .rev-bar .rev-submit,body.rev-offline .rev-bar .rev-approve{opacity:.45;cursor:not-allowed}
-.rev-toast{position:fixed;left:16px;bottom:64px;z-index:2147483002;background:var(--panel, #111411);border:1px solid var(--sage, #99c693);color:var(--ink, #f4f2ef);border-radius:9px;padding:8px 12px;font-size:12.5px;box-shadow:var(--shadow, 0 1px 0 rgba(255,255,255,.02), 0 8px 30px rgba(0,0,0,.35))}
+.rev-toast{position:fixed;left:16px;bottom:64px;z-index:calc(var(--rev-z, 2147483000) + 2);background:var(--panel, #111411);border:1px solid var(--sage, #99c693);color:var(--ink, #f4f2ef);border-radius:9px;padding:8px 12px;font-size:12.5px;box-shadow:var(--shadow, 0 1px 0 rgba(255,255,255,.02), 0 8px 30px rgba(0,0,0,.35))}
 /* sync status: what happened to the reviewer's feedback; sits above the toast so both read */
-.rev-sync{position:fixed;left:16px;bottom:104px;z-index:2147483003;max-width:min(560px,calc(100vw - 32px));display:flex;flex-wrap:wrap;align-items:center;gap:8px;background:var(--panel, #111411);border:1px solid var(--hair, #212620);border-left-width:3px;color:var(--ink, #f4f2ef);border-radius:9px;padding:8px 10px 8px 12px;font-size:12.5px;box-shadow:var(--shadow, 0 1px 0 rgba(255,255,255,.02), 0 8px 30px rgba(0,0,0,.35))}
+.rev-sync{position:fixed;left:16px;bottom:104px;z-index:calc(var(--rev-z, 2147483000) + 3);max-width:min(560px,calc(100vw - 32px));display:flex;flex-wrap:wrap;align-items:center;gap:8px;background:var(--panel, #111411);border:1px solid var(--hair, #212620);border-left-width:3px;color:var(--ink, #f4f2ef);border-radius:9px;padding:8px 10px 8px 12px;font-size:12.5px;box-shadow:var(--shadow, 0 1px 0 rgba(255,255,255,.02), 0 8px 30px rgba(0,0,0,.35))}
 .rev-sync.ok{border-color:var(--sage, #99c693)}.rev-sync.warn,.rev-sync.ask{border-color:var(--amber, #c6a23c)}.rev-sync.err{border-color:var(--red, #d77e6c)}.rev-sync.pending{border-color:var(--hair, #212620);color:var(--dim, #b7b6a3)}
 .rev-sync-msg{flex:1 1 220px}
 .rev-sync button,.rev-sync-input{background:var(--panel2, #171b17);border:1px solid var(--hair, #212620);color:var(--ink, #f4f2ef);border-radius:6px;padding:3px 9px;font-size:12px;font-family:inherit}
 .rev-sync button{cursor:pointer}.rev-sync button:hover{color:var(--ink, #f4f2ef)}.rev-sync .rev-sync-x{border:0;background:none;padding:0 4px;font-size:15px;line-height:1}
+
+/* a framed plan: the controls sit over the frame's box, which mountHostControls
+   tracks into --rev-top/left/right/bottom/width/height, so the host's own
+   chrome around the frame stays clear. The rail stays fixed at every width:
+   below 1400px it would drop into the host's page flow, not the plan's. */
+body.rev-framed .rev-bar{left:calc(var(--rev-left) + 16px);bottom:calc(var(--rev-bottom) + 16px)}
+body.rev-framed .rev-toast{left:calc(var(--rev-left) + 16px);bottom:calc(var(--rev-bottom) + 64px);max-width:calc(var(--rev-width) - 32px)}
+body.rev-framed .rev-sync{left:calc(var(--rev-left) + 16px);bottom:calc(var(--rev-bottom) + 104px);max-width:min(560px,calc(var(--rev-width) - 32px))}
+body.rev-framed .rev-hint{bottom:calc(var(--rev-bottom) + 64px)}
+body.rev-framed .rev-rail{position:fixed;top:calc(var(--rev-top) + 16px);right:calc(var(--rev-right) + 16px);width:min(266px,calc(var(--rev-width) - 32px));max-height:calc(var(--rev-height) - 112px);margin:0}
+body.rev-framed .rev-orphans{top:calc(var(--rev-top) + 14px);left:calc(var(--rev-left) + var(--rev-width) / 2);max-width:min(680px,calc(var(--rev-width) - 32px))}
+body.rev-framed .rev-offline-bar{top:var(--rev-top);left:var(--rev-left);right:var(--rev-right)}
 
 /* print: the controls are a review surface, never part of the printed plan */
 @media print{.rev-bar,.rev-rail,.rev-orphans,.rev-hint,.rev-pop,.rev-offline-bar,.rev-toast,.rev-sync{display:none!important}}

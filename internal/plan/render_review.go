@@ -23,9 +23,9 @@ func buildReviewState(items []MergedItem) (template.JS, reviewSummary) {
 	sum.HasReview = true
 	slim := make([]reviewStateItem, 0, len(items))
 	for _, it := range items {
-		state := "open"
+		state, resolutionNote := "open", ""
 		if !it.Open && it.Resolution != nil {
-			state = string(it.Resolution.State)
+			state, resolutionNote = string(it.Resolution.State), it.Resolution.Note
 		}
 		switch {
 		case it.Open && it.Status == planreview.StatusApprove:
@@ -45,6 +45,7 @@ func buildReviewState(items []MergedItem) (template.JS, reviewSummary) {
 		slim = append(slim, reviewStateItem{
 			Anchor: it.Anchor, Section: it.Section, Label: it.Label, Quote: it.Quote,
 			Status: string(it.Status), State: state, Note: it.Note, Reviewer: it.Reviewer,
+			ResolutionNote: resolutionNote,
 		})
 	}
 	b, err := json.Marshal(slim)
