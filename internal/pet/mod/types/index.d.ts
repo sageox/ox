@@ -12,7 +12,8 @@ declare module 'claude-code' {
       // terminal and $.store say.
       /** `/hatch-pet off` hides Oxy and restores Claude Code's own spinner. */
       hidden: boolean | null
-      renderer: Renderer | null
+      /** `/hatch-pet image|cells`; renamed from `renderer`, which an older Oxy also wrote on its own. */
+      drawAs: Renderer | null
       size: Size | null
       /** `/hatch-pet <animation>` pins one animation; null follows Claude. */
       pinned: string | null

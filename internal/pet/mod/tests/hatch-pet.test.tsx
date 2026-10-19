@@ -350,6 +350,49 @@ test('a session with no session.start still draws a picture at the saved size', 
   await ui.unmount()
 })
 
+// A terminal still settling at startup draws a picture's alt for a moment;
+// treating that as "no pictures here" left Oxy in cells for the session.
+test('a picture refused for a moment at startup stays a picture', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000 })
+  mock.store(on)
+  mock.env(on, { TERM_PROGRAM: 'ghostty' })
+  mockFrameFiles(on)
+  let settled = false
+  on('ui.blit', () => (settled ? { value: {} } : { value: { deny: 'the Image draws its alt there: no placeholder images' } }))
+  let ui = await $.ui.mount({ ...SPINNER, props: { word: 'Working', message: null, suffix: '…', mode: 'thinking' } })
+  expect(await ui.find({ type: 'Image', key: 'oxy' })).toBeDefined()
+  await clock.advance(500)
+  settled = true
+  await clock.advance(500)
+  await ui.unmount()
+  ui = await $.ui.mount({ ...SPINNER, props: { word: 'Working', message: null, suffix: '…', mode: 'thinking' } })
+  expect(await ui.find({ type: 'Raster' })).toBeUndefined()
+  expect(await ui.find({ type: 'Image', key: 'oxy' })).toBeDefined()
+  await ui.unmount()
+})
+
+// A terminal that never draws the picture still gets Oxy, as cells, and the
+// fallback is this process's alone: a resumed session re-checks the terminal.
+test('a picture refused for good falls back to cells without saving it to the session', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000 })
+  mock.store(on)
+  mock.env(on, { TERM_PROGRAM: 'ghostty' })
+  mockFrameFiles(on)
+  on('ui.blit', () => ({ value: { deny: 'the Image draws its alt there: no placeholder images' } }))
+  const writes: string[] = []
+  on('state.set', (_, e, next) => {
+    writes.push((e as { key: string }).key)
+    return next(e)
+  })
+  let ui = await $.ui.mount({ ...SPINNER, props: { word: 'Working', message: null, suffix: '…', mode: 'thinking' } })
+  await clock.advance(5_000)
+  await ui.unmount()
+  ui = await $.ui.mount({ ...SPINNER, props: { word: 'Working', message: null, suffix: '…', mode: 'thinking' } })
+  expect(await ui.find({ type: 'Raster', key: 'oxy' })).toBeDefined()
+  await ui.unmount()
+  expect(writes).not.toContain('drawAs')
+})
+
 test('a non-terminal surface keeps the engine spinner', async ($, on) => {
   on('ui.render', ($, e) => {
     const { Text } = $.ui.resolve(e)

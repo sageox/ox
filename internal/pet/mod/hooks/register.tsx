@@ -31,7 +31,7 @@ import {
 // /clear or an in-app resume starts a new session with none and no
 // session.start, so every read goes through `prefs`, never the atom alone.
 const hidden = atom({ plugin: 'ox-cli-oxy', key: 'hidden' } as const, null as boolean | null)
-const renderer = atom({ plugin: 'ox-cli-oxy', key: 'renderer' } as const, null as Renderer | null)
+const renderer = atom({ plugin: 'ox-cli-oxy', key: 'drawAs' } as const, null as Renderer | null)
 const size = atom({ plugin: 'ox-cli-oxy', key: 'size' } as const, null as Size | null)
 const pinned = atom({ plugin: 'ox-cli-oxy', key: 'pinned' } as const, null as string | null)
 
@@ -40,6 +40,9 @@ const pinned = atom({ plugin: 'ox-cli-oxy', key: 'pinned' } as const, null as st
 // read that fails draws with the defaults and is tried again next time.
 let terminal: Renderer | null = null
 let saved: { size: Size; hidden: boolean } | null = null
+// Since when the terminal has drawn the picture's alt instead of Oxy.
+let refusedSince: number | null = null
+const PICTURE_GRACE_MS = 3_000
 
 async function terminalRenderer($: EngineInterface): Promise<Renderer> {
   if (terminal === null) {
@@ -181,9 +184,18 @@ async function tick($: EngineInterface) {
     }
     if (done.deny === undefined) {
       site.drawn = f.drawn
+      refusedSince = null
     } else if (kind === 'image' && /alt/i.test(done.deny)) {
-      // The terminal can't show pictures here after all: redraw as cells.
-      await update($, renderer, () => 'cells')
+      // The picture shows its alt: for a moment while a terminal settles at
+      // startup, or for good where it can't show pictures. Keep trying; only
+      // a refusal that outlasts the grace redraws as cells, and only for this
+      // process, so a restart or resume checks the terminal again.
+      refusedSince ??= now
+      if (now - refusedSince > PICTURE_GRACE_MS) {
+        terminal = 'cells'
+        refusedSince = null
+        $.ui.invalidate('ui.render')
+      }
     } else {
       sites.delete(requestId)
     }
