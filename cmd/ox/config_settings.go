@@ -36,6 +36,11 @@ type ConfigSetting struct {
 	Default         string        // default value
 	Levels          []ConfigLevel // which levels support this setting
 
+	// Number marks a free-text setting that must be a number in
+	// [Number.Min, Number.Max]. 'ox config set' validates against it and
+	// 'ox config schema' publishes it, so the two cannot disagree.
+	Number *NumberRange
+
 	// Deprecated marks a setting kept only for backward compatibility: it
 	// remains resolvable and settable (existing config files and scripts
 	// must not break), but is not wired to any behavior. Never wire new
@@ -47,6 +52,11 @@ type ConfigSetting struct {
 	// and name the setting that actually does the job. Empty unless
 	// Deprecated is true.
 	DeprecationNotice string
+}
+
+// NumberRange is the inclusive range a numeric setting accepts.
+type NumberRange struct {
+	Min, Max float64
 }
 
 // ConfigValue represents a resolved config value with its source.
@@ -565,6 +575,7 @@ commit hook adds the Co-Authored-By trailer.
 Default: 0.5`,
 		Category:    "Attribution",
 		ValidValues: []string{},
+		Number:      &NumberRange{Min: 0, Max: 1},
 		Default:     "0.5",
 		Levels:      []ConfigLevel{ConfigLevelUser, ConfigLevelRepo},
 	},
@@ -920,11 +931,11 @@ func SetConfigValue(key, value string, level ConfigLevel, projectRoot string) er
 		return fmt.Errorf("unknown setting: %s", key)
 	}
 
-	// validate value — score_threshold uses float validation, others use ValidValues list
-	if key == "attribution.score_threshold" {
+	// validate value — numeric settings use their range, others use ValidValues list
+	if r := setting.Number; r != nil {
 		f, err := strconv.ParseFloat(value, 64)
-		if err != nil || f < 0.0 || f > 1.0 {
-			return fmt.Errorf("invalid value %q for %s: must be a number between 0.0 and 1.0", value, key)
+		if err != nil || f < r.Min || f > r.Max {
+			return fmt.Errorf("invalid value %q for %s: must be a number between %.1f and %.1f", value, key, r.Min, r.Max)
 		}
 	} else if len(setting.ValidValues) > 0 {
 		valid := false

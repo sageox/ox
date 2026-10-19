@@ -17,6 +17,9 @@ const configSchemaVersion = 1
 const (
 	configSchemaTypeEnum = "enum" // values lists every value 'ox config set' accepts
 	configSchemaTypeText = "text" // free text; values is null
+
+	// configSchemaFormatNumber narrows a text setting to a number in [min, max].
+	configSchemaFormatNumber = "number"
 )
 
 // configSchema is the machine-readable description of every 'ox config'
@@ -36,6 +39,11 @@ type configSchemaSetting struct {
 	Values      []string      `json:"values"` // nil (JSON null) for text settings
 	Scopes      []ConfigLevel `json:"scopes"`
 	Deprecated  bool          `json:"deprecated"`
+	// Format, Min and Max are present only for numeric text settings
+	// (attribution.score_threshold): the value must be a number in [Min, Max].
+	Format string   `json:"format,omitempty"`
+	Min    *float64 `json:"min,omitempty"`
+	Max    *float64 `json:"max,omitempty"`
 	// Value, Source and Default mean exactly what they mean in 'ox config --json'.
 	Value   string      `json:"value"`
 	Source  ConfigLevel `json:"source"`
@@ -58,10 +66,13 @@ Examples:
 	RunE: runConfigSchema,
 }
 
+// init registers 'ox config schema' under 'ox config'.
 func init() {
 	configCmd.AddCommand(configSchemaCmd)
 }
 
+// runConfigSchema prints the schema as JSON with --json, or as a readable
+// two-line-per-setting list otherwise.
 func runConfigSchema(cmd *cobra.Command, _ []string) error {
 	// config.FindProjectRoot returns "" outside a repo (the desktop app runs
 	// this from /), so values resolve from user config and defaults only.
@@ -114,6 +125,11 @@ func buildConfigSchema(projectRoot string) configSchema {
 			entry.Type = configSchemaTypeEnum
 			entry.Values = append([]string{}, s.ValidValues...)
 		}
+		if r := s.Number; r != nil {
+			entry.Format = configSchemaFormatNumber
+			lo, hi := r.Min, r.Max // copies: never alias the registry
+			entry.Min, entry.Max = &lo, &hi
+		}
 		if cv, err := ResolveConfigValue(s.Key, projectRoot); err == nil {
 			entry.Value, entry.Source, entry.Default = cv.Value, cv.Source, cv.Default
 		}
@@ -130,8 +146,8 @@ func settingValuesSummary(s *ConfigSetting) string {
 		return ""
 	case len(s.ValidValues) > 0:
 		return strings.Join(s.ValidValues, " | ")
-	case s.Key == "attribution.score_threshold":
-		return "0.0 to 1.0"
+	case s.Number != nil:
+		return fmt.Sprintf("%.1f to %.1f", s.Number.Min, s.Number.Max)
 	default:
 		return `any text, "" to disable`
 	}

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -104,6 +105,38 @@ func TestConfigSchema_ValuesMatchWhatSetAccepts(t *testing.T) {
 	}
 }
 
+// TestConfigSchema_NumberRangeMatchesWhatSetAccepts — failure prevented: the
+// desktop app offers a number 'ox config set' rejects, or blocks one it
+// accepts, for a numeric setting such as attribution.score_threshold.
+func TestConfigSchema_NumberRangeMatchesWhatSetAccepts(t *testing.T) {
+	isolateConfigSchemaEnv(t)
+
+	var numeric []string
+	for _, s := range buildConfigSchema("").Settings {
+		if s.Format == "" {
+			assert.Nil(t, s.Min, s.Key)
+			assert.Nil(t, s.Max, s.Key)
+			continue
+		}
+		numeric = append(numeric, s.Key)
+		require.Equal(t, configSchemaFormatNumber, s.Format)
+		require.Equal(t, configSchemaTypeText, s.Type)
+		require.NotNil(t, s.Min)
+		require.NotNil(t, s.Max)
+		lo, hi := *s.Min, *s.Max
+
+		for _, v := range []float64{lo, (lo + hi) / 2, hi} {
+			assert.NoError(t, SetConfigValue(s.Key, strconv.FormatFloat(v, 'f', -1, 64), ConfigLevelUser, ""),
+				"%s: %v is inside the published range", s.Key, v)
+		}
+		for _, v := range []string{strconv.FormatFloat(lo-0.01, 'f', -1, 64), strconv.FormatFloat(hi+0.01, 'f', -1, 64), "high"} {
+			assert.ErrorContains(t, SetConfigValue(s.Key, v, ConfigLevelUser, ""), "invalid value",
+				"%s: %q is outside the published range", s.Key, v)
+		}
+	}
+	assert.Equal(t, []string{"attribution.score_threshold"}, numeric)
+}
+
 // TestConfigSchema_FlagsDeprecatedKeys — failure prevented: the desktop app
 // presents a setting that never had any effect as a working control.
 func TestConfigSchema_FlagsDeprecatedKeys(t *testing.T) {
@@ -164,7 +197,15 @@ func TestConfigSchema_JSONShape(t *testing.T) {
 		s, ok := raw.(map[string]any)
 		require.True(t, ok)
 		key, _ := s["key"].(string)
-		assert.ElementsMatch(t, wantKeys, jsonObjectKeys(s), key)
+		want := wantKeys
+		if _, numeric := s["format"]; numeric {
+			want = append(slices.Clone(wantKeys), "format", "min", "max")
+			assert.Equal(t, "number", s["format"], key)
+			assert.Equal(t, "text", s["type"], "%s: numeric settings stay type text", key)
+			assert.IsType(t, float64(0), s["min"], "%s.min", key)
+			assert.IsType(t, float64(0), s["max"], "%s.max", key)
+		}
+		assert.ElementsMatch(t, want, jsonObjectKeys(s), key)
 
 		for _, f := range []string{"key", "label", "description", "type", "value", "source", "default"} {
 			assert.IsType(t, "", s[f], "%s.%s is a string", key, f)
@@ -237,10 +278,13 @@ func TestConfigSchema_TextOutputListsEverySetting(t *testing.T) {
 	assert.Contains(t, text, "ox config schema --json")
 }
 
+// TestSettingValuesSummary_UnknownSetting — an unknown key yields no hint
+// rather than a panic.
 func TestSettingValuesSummary_UnknownSetting(t *testing.T) {
 	assert.Empty(t, settingValuesSummary(nil))
 }
 
+// jsonObjectKeys returns the keys of a decoded JSON object.
 func jsonObjectKeys(m map[string]any) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {
