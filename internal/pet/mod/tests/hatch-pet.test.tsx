@@ -336,6 +336,20 @@ test('/hatch-pet remembers a hidden Oxy across sessions', async ($, on) => {
   await ui.unmount()
 })
 
+// A /clear or an in-app resume starts a session with fresh state and no
+// session.start: Oxy must still be a picture in Ghostty, at the saved size.
+test('a session with no session.start still draws a picture at the saved size', async ($, on) => {
+  mock.clock(on, { now: 1_000 })
+  mock.store(on, { size: 'large' })
+  mock.env(on, { TERM_PROGRAM: 'ghostty' })
+  mockFrameFiles(on)
+  const ui = await $.ui.mount({ ...SPINNER, props: { word: 'Enchanting', message: null, suffix: '…', mode: 'thinking' } })
+  expect(await ui.find({ type: 'Raster' })).toBeUndefined()
+  const image = await ui.find({ type: 'Image', key: 'oxy' })
+  expect(image?.props.rows).toBe(FRAMES.sizes.large.rows)
+  await ui.unmount()
+})
+
 test('a non-terminal surface keeps the engine spinner', async ($, on) => {
   on('ui.render', ($, e) => {
     const { Text } = $.ui.resolve(e)

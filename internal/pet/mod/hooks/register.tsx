@@ -27,10 +27,59 @@ import {
   type OneShot,
 } from './logic'
 
-const hidden = atom({ plugin: 'ox-cli-oxy', key: 'hidden' } as const, false)
-const renderer = atom({ plugin: 'ox-cli-oxy', key: 'renderer' } as const, 'cells' as Renderer)
-const size = atom({ plugin: 'ox-cli-oxy', key: 'size' } as const, 'medium' as Size)
+// This session's choices, null until made. `$.state` is the session's, and a
+// /clear or an in-app resume starts a new session with none and no
+// session.start, so every read goes through `prefs`, never the atom alone.
+const hidden = atom({ plugin: 'ox-cli-oxy', key: 'hidden' } as const, null as boolean | null)
+const renderer = atom({ plugin: 'ox-cli-oxy', key: 'renderer' } as const, null as Renderer | null)
+const size = atom({ plugin: 'ox-cli-oxy', key: 'size' } as const, null as Size | null)
 const pinned = atom({ plugin: 'ox-cli-oxy', key: 'pinned' } as const, null as string | null)
+
+// What outlives a session: the terminal's picture support, read once per
+// process, and the size and visibility `$.store` keeps across sessions. A
+// read that fails draws with the defaults and is tried again next time.
+let terminal: Renderer | null = null
+let saved: { size: Size; hidden: boolean } | null = null
+
+async function terminalRenderer($: EngineInterface): Promise<Renderer> {
+  if (terminal === null) {
+    try {
+      const term = (await $.env.get('TERM_PROGRAM')) ?? ''
+      const kitty = (await $.env.get('KITTY_WINDOW_ID')) !== undefined
+      const tmux = (await $.env.get('TMUX')) !== undefined
+      terminal = !tmux && (kitty || /ghostty|kitty/i.test(term)) ? 'image' : 'cells'
+    } catch {
+      return 'cells'
+    }
+  }
+  return terminal
+}
+
+async function savedPrefs($: EngineInterface): Promise<{ size: Size; hidden: boolean }> {
+  if (saved === null) {
+    try {
+      const box = await $.store.get('size')
+      saved = { size: isSize(box) ? box : 'medium', hidden: (await $.store.get('hidden')) === true }
+    } catch {
+      return { size: 'medium', hidden: false }
+    }
+  }
+  return saved
+}
+
+// The renderer, size and visibility in force: this session's choice, else
+// what the terminal supports and what was saved.
+async function prefs($: EngineInterface): Promise<{ kind: Renderer; box: Size; hide: boolean }> {
+  const kind = await read($, renderer)
+  const box = await read($, size)
+  const hide = await read($, hidden)
+  const fallback = await savedPrefs($)
+  return {
+    kind: kind ?? (await terminalRenderer($)),
+    box: box ?? fallback.size,
+    hide: hide ?? fallback.hidden,
+  }
+}
 
 const KEY = 'oxy'
 const MAIN = 'main'
@@ -111,8 +160,7 @@ function frameOf(requestId: string, site: Site, now: number, pin: string | null)
 async function tick($: EngineInterface) {
   const now = await $.clock.now()
   const pin = await read($, pinned)
-  const kind = await read($, renderer)
-  const box = await read($, size)
+  const { kind, box } = await prefs($)
   for (const [requestId, site] of sites) {
     const f = frameOf(requestId, site, now, pin)
     if (f.drawn === site.drawn) {
@@ -174,18 +222,6 @@ async function sprite($: EngineInterface, { Image, Raster }: Elements['terminal'
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
-    const term = (await $.env.get('TERM_PROGRAM')) ?? ''
-    const kitty = (await $.env.get('KITTY_WINDOW_ID')) !== undefined
-    const tmux = (await $.env.get('TMUX')) !== undefined
-    const pictures = !tmux && (kitty || /ghostty|kitty/i.test(term))
-    await update($, renderer, () => (pictures ? 'image' : 'cells'))
-    const saved = await $.store.get('size')
-    if (isSize(saved)) {
-      await update($, size, () => saved)
-    }
-    if ((await $.store.get('hidden')) === true) {
-      await update($, hidden, () => true)
-    }
     await $.command.register({
       name: 'hatch-pet',
       description: 'Hatch Oxy into the thinking line; off, auto, small, medium, large, image, cells, or an animation to pin',
@@ -198,9 +234,10 @@ export const register: Register = on => {
     const arg = e.args.trim().toLowerCase()
     if (arg === '' || arg === 'on' || arg === 'off') {
       const hide = arg === 'off'
-      const was = await read($, hidden)
+      const was = (await prefs($)).hide
       await update($, hidden, () => hide)
       await $.store.set('hidden', hide)
+      saved = { ...(await savedPrefs($)), hidden: hide }
       if (hide) {
         return { text: 'Oxy is hidden; Claude Code draws its own spinner. /hatch-pet brings him back.' }
       }
@@ -217,6 +254,7 @@ export const register: Register = on => {
     if (isSize(arg)) {
       await update($, size, () => arg)
       await $.store.set('size', arg)
+      saved = { ...(await savedPrefs($)), size: arg }
       return { text: `Oxy is ${arg} now.` }
     }
     if (isAnim(arg)) {
@@ -265,7 +303,11 @@ export const register: Register = on => {
   }).catch(($, e, next) => next(e))
 
   on('ui.render', { component: 'Spinner' }, async ($, e, next) => {
-    if (e.surface !== 'terminal' || (await read($, hidden))) {
+    if (e.surface !== 'terminal') {
+      return next(e)
+    }
+    const { kind, box, hide } = await prefs($)
+    if (hide) {
       return next(e)
     }
     const now = await $.clock.now()
@@ -274,8 +316,6 @@ export const register: Register = on => {
     site.drawn = f.drawn
     sites.set(e.requestId, site)
     startTicker($)
-    const kind = await read($, renderer)
-    const box = await read($, size)
     const els = $.ui.resolve(e)
     const { Box, Text } = els
     return (
@@ -292,7 +332,11 @@ export const register: Register = on => {
   }).catch(($, e, next) => next(e))
 
   on('ui.render', { component: 'TurnDuration' }, async ($, e, next) => {
-    if (e.surface !== 'terminal' || (await read($, hidden))) {
+    if (e.surface !== 'terminal') {
+      return next(e)
+    }
+    const { kind, box, hide } = await prefs($)
+    if (hide) {
       return next(e)
     }
     const now = await $.clock.now()
@@ -311,8 +355,6 @@ export const register: Register = on => {
     if (site) {
       site.drawn = `${anim}:${index}`
     }
-    const kind = await read($, renderer)
-    const box = await read($, size)
     const els = $.ui.resolve(e)
     const { Box, Text } = els
     return (

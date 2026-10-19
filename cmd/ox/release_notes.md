@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **`ox config --help` lists the settings ox actually has** — the list is now built from the same registry `ox config set` uses. It had advertised `murmuring` and `github_sync*`, which `ox config set` rejects, and left out `murmur_send`, `murmur_receive` and eleven other settings.
+- **Oxy stays a crisp picture after `/clear` or a resume** — in Ghostty and kitty he no longer falls back to blocky half-block cells once you clear or switch sessions, and he keeps the size you chose and stays hidden if you hid him.
 - **A plan's tabs work while you review it** — clicking a plan's own tabs, checkboxes or collapsible notes in review mode switches or opens them, instead of starting a comment on the section around them.
 - **Review starts on your first click** — the tip that points new reviewers at Review now sits above the review bar, not on it, where it swallowed clicks on Review and the buttons beside it.
 - **Review feedback is sent once, even when its answer is lost** — the review page stores each Submit, Accept and Reopen in your browser before sending it, and resends it unchanged until ox confirms it, so a dropped connection, a reload or a second tab never sends it twice. If your browser cannot store it, nothing is sent and the page says so. Accept and Reopen now record who did them.

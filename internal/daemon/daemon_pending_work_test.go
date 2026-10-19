@@ -44,6 +44,25 @@ func TestDaemonDoesNotExitWhileFinalizationPending(t *testing.T) {
 	assert.True(t, d.hasPendingWork(), "daemon should detect pending work when items are queued")
 }
 
+// TestDaemonDoesNotExitWhileCloneInFlight verifies a running background
+// clone delays the inactivity exit.
+// Failure prevented: a first Ledger clone that outlasted the inactivity
+// timeout was canceled, and the next start downloaded it again from zero.
+func TestDaemonDoesNotExitWhileCloneInFlight(t *testing.T) {
+	d := New(&Config{
+		InactivityTimeout:      100 * time.Millisecond,
+		PendingWorkGracePeriod: 5 * time.Second,
+	}, slog.Default())
+	d.scheduler = NewSyncScheduler(d.config, slog.Default())
+	require.False(t, d.hasPendingWork(), "no clone is running")
+
+	d.scheduler.cloneInFlight.Store("ledger-workspace", true)
+	assert.True(t, d.hasPendingWork(), "a running clone is pending work")
+
+	d.scheduler.cloneInFlight.Delete("ledger-workspace")
+	assert.False(t, d.hasPendingWork(), "a finished clone is not")
+}
+
 // TestDaemonExitsAfterGracePeriod verifies the daemon exits once the grace
 // period expires, even if work is still pending. Prevents stuck daemons.
 // Failure prevented: daemon hangs forever waiting for stuck finalization.

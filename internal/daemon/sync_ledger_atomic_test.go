@@ -212,7 +212,8 @@ func TestSyncScheduler_Checkout_FailedLedgerCloneLeavesNoHalfClone(t *testing.T)
 // invoking `git clone` into the same destination at once. Red on main
 // (pre-ox-baz5.6): flip WithPreCloneLock to a no-op and this test should
 // show more than one goroutine's clone command actually running, and/or a
-// corrupted final repo.
+// corrupted final repo. Every caller but the winner is told at once that the
+// clone is already running, or, arriving after it lands, that it exists.
 func TestSyncScheduler_Checkout_ConcurrentLedgerCloneRace(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: git clone operations")
@@ -242,7 +243,7 @@ func TestSyncScheduler_Checkout_ConcurrentLedgerCloneRace(t *testing.T) {
 	}
 	wg.Wait()
 
-	var cloned, alreadyExists, failed int
+	var cloned, notCloned, failed int
 	var failureMsgs []string
 	for i := range n {
 		switch {
@@ -251,14 +252,14 @@ func TestSyncScheduler_Checkout_ConcurrentLedgerCloneRace(t *testing.T) {
 			failureMsgs = append(failureMsgs, errs[i].Error())
 		case results[i].Cloned:
 			cloned++
-		case results[i].AlreadyExists:
-			alreadyExists++
+		case results[i].InProgress || results[i].AlreadyExists:
+			notCloned++
 		}
 	}
 
 	assert.Empty(t, failureMsgs, "no Checkout() call should fail under a race for the same new path: %s", strings.Join(failureMsgs, " | "))
 	assert.Equal(t, 1, cloned, "exactly one of %d concurrent callers should have actually cloned", n)
-	assert.Equal(t, n-1, alreadyExists, "every other caller should observe AlreadyExists once the winner finishes")
+	assert.Equal(t, n-1, notCloned, "every other caller should be told the clone is running or has landed")
 	assert.Zero(t, failed)
 
 	// the final repo must be a single, healthy clone — not corrupted by a
@@ -314,9 +315,6 @@ func TestWithPreCloneLock_SerializesConcurrentCallers(t *testing.T) {
 // real clone failure worth penalizing.
 func TestCloneInBackground_PreCloneLockBusyDoesNotEscalateBackoff(t *testing.T) {
 	s := checkoutTestScheduler(t)
-	// short wait budget so the test doesn't sit for the production 5m10s
-	// default while a peer holds the lock.
-	s.preCloneLockWaitOverride = 200 * time.Millisecond
 
 	repoPath := filepath.Join(t.TempDir(), "ledger")
 	workspaceID := "ws-lock-busy-test"

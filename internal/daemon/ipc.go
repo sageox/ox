@@ -341,6 +341,9 @@ type CheckoutResult struct {
 	Path          string `json:"path"`           // actual path where repo exists
 	AlreadyExists bool   `json:"already_exists"` // true if repo already existed
 	Cloned        bool   `json:"cloned"`         // true if we performed a clone
+	// InProgress is true when another clone of this path was already running,
+	// so none was started. That clone lands on its own.
+	InProgress bool `json:"in_progress,omitempty"`
 }
 
 // TeamSyncResult is the per-team outcome of a team-context sync, returned as the
@@ -356,9 +359,13 @@ type TeamSyncResult struct {
 	Error    string `json:"error,omitempty"`
 }
 
+// CheckoutStageDownloading is the CheckoutProgress stage a Ledger clone
+// reports while it downloads.
+const CheckoutStageDownloading = "downloading"
+
 // CheckoutProgress is sent during long-running checkout operations.
 type CheckoutProgress struct {
-	Stage   string `json:"stage"`             // "connecting", "cloning", "verifying"
+	Stage   string `json:"stage"`             // "connecting", "cloning", "downloading", "verifying"
 	Percent *int   `json:"percent,omitempty"` // 0-100, nil if unknown
 	Message string `json:"message"`           // human-readable progress message
 }
@@ -2315,9 +2322,27 @@ func (c *Client) Stop() error {
 // Percent is nil when unknown.
 type ProgressCallback func(stage string, percent *int, message string)
 
+// ErrCheckoutInProgress means the client stopped waiting on a checkout the
+// daemon had not finished: nothing came back within the client's idle window.
+// It is not a clone failure. The daemon does not cancel a checkout when its
+// caller leaves, so the clone goes on in the background.
+var ErrCheckoutInProgress = errors.New("clone still in progress in the daemon")
+
+// ErrCloneAlreadyRunning means the daemon started no clone because another
+// clone of the same path was already running: its background clone, or an
+// earlier `ox doctor --fix`. It wraps ErrCheckoutInProgress, since that clone
+// lands on its own, and unlike a quiet idle window it says nothing about how
+// the running clone is doing.
+var ErrCloneAlreadyRunning = fmt.Errorf("%w: another clone of this path is already running", ErrCheckoutInProgress)
+
 // Checkout requests the daemon to clone a repository.
 // The onProgress callback is called for each progress update (may be nil).
-// Uses a long timeout (60s) since clones can take time.
+// Uses an idle timeout: the deadline resets on each progress message, so the
+// client waits for as long as the daemon keeps reporting. A Ledger clone
+// reports every few seconds while it downloads, and can download for many
+// minutes. When the daemon stays quiet for the whole window, the error wraps
+// ErrCheckoutInProgress. When another clone of the path is already running,
+// the daemon says so at once and the error is ErrCloneAlreadyRunning.
 func (c *Client) Checkout(payload CheckoutPayload, onProgress ProgressCallback) (*CheckoutResult, error) {
 	conn, err := c.Connect()
 	if err != nil {
@@ -2325,12 +2350,12 @@ func (c *Client) Checkout(payload CheckoutPayload, onProgress ProgressCallback) 
 	}
 	defer conn.Close()
 
-	// use configured timeout, with minimum floor for clone operations
-	checkoutTimeout := 60 * time.Second
-	if c.timeout > 0 && c.timeout < checkoutTimeout {
-		checkoutTimeout = c.timeout
+	// idle timeout — reset on each progress message
+	idleTimeout := 60 * time.Second
+	if c.timeout > 0 && c.timeout < idleTimeout {
+		idleTimeout = c.timeout
 	}
-	conn.SetDeadline(time.Now().Add(checkoutTimeout))
+	conn.SetDeadline(time.Now().Add(idleTimeout))
 
 	// marshal payload
 	payloadData, _ := json.Marshal(payload)
@@ -2351,6 +2376,12 @@ func (c *Client) Checkout(payload CheckoutPayload, onProgress ProgressCallback) 
 	reader := bufio.NewReader(conn)
 	for {
 		line, err := reader.ReadBytes('\n')
+		// net.Error, not os.ErrDeadlineExceeded: a Windows named pipe
+		// (go-winio) times out with its own error that only says Timeout().
+		var ne net.Error
+		if errors.As(err, &ne) && ne.Timeout() {
+			return nil, fmt.Errorf("%w: no progress reported for %s", ErrCheckoutInProgress, idleTimeout)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("read: %w", err)
 		}
@@ -2362,6 +2393,7 @@ func (c *Client) Checkout(payload CheckoutPayload, onProgress ProgressCallback) 
 
 		// check for progress update
 		if resp.Progress != nil {
+			conn.SetDeadline(time.Now().Add(idleTimeout))
 			if onProgress != nil {
 				onProgress(resp.Progress.Stage, resp.Progress.Percent, resp.Progress.Message)
 			}
@@ -2376,6 +2408,9 @@ func (c *Client) Checkout(payload CheckoutPayload, onProgress ProgressCallback) 
 		var result CheckoutResult
 		if err := json.Unmarshal(resp.Data, &result); err != nil {
 			return nil, fmt.Errorf("unmarshal result: %w", err)
+		}
+		if result.InProgress {
+			return nil, ErrCloneAlreadyRunning
 		}
 		return &result, nil
 	}

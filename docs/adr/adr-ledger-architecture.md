@@ -93,7 +93,9 @@ sequenceDiagram
 | `sync` | 30s | synchronous | trigger immediate sync |
 | `stop` | 5s | synchronous | graceful shutdown |
 | `heartbeat` | none | fire-and-forget | activity signal + credentials |
-| `checkout` | 60s | synchronous | clone/checkout ledger |
+| `checkout` | 60s idle¹ | synchronous, streams progress | clone/checkout ledger |
+
+¹ Amended 2026-10-18 (PR #1396): the 60s is an idle window that restarts on each progress line, not a cap on the clone. A Ledger clone downloads its whole history and reports progress every few seconds, so the CLI waits as long as it keeps arriving. In the daemon a Ledger clone has a 1h backstop plus curl's stall abort; a team context keeps a 60s budget.
 
 ```mermaid
 flowchart LR
