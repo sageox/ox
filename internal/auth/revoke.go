@@ -146,9 +146,15 @@ const (
 // not report it as a failed revocation.
 var ErrLocalTokenNotRemoved = errors.New("failed to remove local token")
 
+// ErrLoginChanged marks a RevokeTokenStatus error where the stored login was
+// replaced while logout waited on the server, so the new login was kept
+// rather than deleted unrevoked. It comes wrapped with ErrLocalTokenNotRemoved.
+var ErrLoginChanged = errors.New("the stored login changed during logout and was kept")
+
 // RevokeTokenStatus revokes token and removes from local storage,
 // returning a structured status instead of a boolean. An error wrapping
-// ErrLocalTokenNotRemoved comes with the server's real status.
+// ErrLocalTokenNotRemoved comes with the server's real status; it also wraps
+// ErrLoginChanged when a login saved during the revocation was kept.
 func (c *AuthClient) RevokeTokenStatus() (RevocationStatus, error) {
 	token, err := c.GetToken()
 	if err != nil {
@@ -162,15 +168,16 @@ func (c *AuthClient) RevokeTokenStatus() (RevocationStatus, error) {
 	status := c.revokeOnServerStatus(token)
 
 	// SAGEOX_TOKEN shadows a stored login on the same endpoint, but that login
-	// is a separate credential. Revoke it too before RemoveToken deletes it:
-	// once its refresh token is gone from disk, nothing can retry, and it
-	// stays live on the server. A failed lookup must stop removal: the next read
-	// may succeed, and deleting then could discard an unrevoked credential.
+	// is a separate credential. Revoke it too before deleting it: once its
+	// refresh token is gone from disk, nothing can retry, and it stays live on
+	// the server. A failed lookup must stop removal: the next read may succeed,
+	// and deleting then could discard an unrevoked credential.
 	ep := c.endpoint
 	if ep == "" {
 		ep = endpoint.Get()
 	}
-	stored, err := c.storedTokenForEndpoint(endpoint.NormalizeEndpoint(ep))
+	ep = endpoint.NormalizeEndpoint(ep)
+	stored, err := c.storedTokenForEndpoint(ep)
 	if err != nil {
 		return status, fmt.Errorf("%w: %w", ErrLocalTokenNotRemoved, err)
 	}
@@ -178,7 +185,10 @@ func (c *AuthClient) RevokeTokenStatus() (RevocationStatus, error) {
 		status = worseRevocation(status, c.revokeOnServerStatus(stored))
 	}
 
-	if err := c.RemoveToken(); err != nil {
+	// Delete only the login just revoked. A login saved while the server was
+	// answering was never revoked; deleting it would leave it live on the
+	// server with no local copy left to revoke.
+	if err := c.removeTokenIfUnchanged(ep, stored); err != nil {
 		return status, fmt.Errorf("%w: %w", ErrLocalTokenNotRemoved, err)
 	}
 
