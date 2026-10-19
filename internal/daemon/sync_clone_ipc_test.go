@@ -99,6 +99,35 @@ func TestLedgerClone_IPCCheckoutReportsInProgressWhenDaemonGoesQuiet(t *testing.
 	require.ErrorIs(t, err, ErrCheckoutInProgress)
 }
 
+// TestLedgerClone_IPCCheckoutIsPendingWorkWhileItDownloads verifies a Ledger
+// clone a CLI asked for over IPC holds off the daemon's inactivity exit.
+// Failure prevented: IPC traffic counts as activity only when a message
+// arrives, so a long clone `ox doctor --fix` started could be canceled by the
+// idle exit mid-download, and the next start downloaded it again from zero.
+func TestLedgerClone_IPCCheckoutIsPendingWorkWhileItDownloads(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real paced Git clone")
+	}
+	setCloneBudgets(t, 60*time.Second, 2*time.Minute)
+	srv := servePacedLedger(t, ledgerFixtureBytes, ledgerPace, 0)
+	s, ledgerPath := newCloneLifecycleScheduler(t, srv.URL)
+	d := New(&Config{InactivityTimeout: time.Hour, PendingWorkGracePeriod: time.Minute}, slog.New(slog.DiscardHandler))
+	d.scheduler = s
+	client := serveCheckoutIPC(t, s.Checkout, 5*time.Second)
+	require.False(t, d.hasPendingWork(), "nothing is cloning yet")
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.Checkout(CheckoutPayload{CloneURL: srv.URL, RepoPath: ledgerPath, RepoType: "ledger"}, nil)
+		done <- err
+	}()
+	<-srv.streaming // the Ledger is downloading
+	require.True(t, d.hasPendingWork(), "a clone still downloading is pending work")
+
+	require.NoError(t, <-done)
+	require.False(t, d.hasPendingWork(), "a finished clone is not")
+}
+
 // TestLedgerClone_IPCCallerHangingUpDoesNotStopClone verifies a Ledger clone
 // keeps downloading, and lands, after the CLI that asked for it hangs up.
 // Failure prevented: doctor tells the coworker that a clone it stopped

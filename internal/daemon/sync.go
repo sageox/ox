@@ -178,6 +178,7 @@ type SyncScheduler struct {
 	cloneSem      chan struct{}  // semaphore limiting concurrent clones
 	cloneInFlight sync.Map       // tracks workspace IDs with clone in progress (dedup)
 	cloneWg       sync.WaitGroup // tracks in-flight background clone goroutines
+	checkouts     atomic.Int32   // Checkout calls running, background or over IPC
 
 	// cloneMu guards cloneWg.Add against a concurrent Wait during shutdown.
 	// Without this, a pullChanges goroutine still running after ctx cancel
@@ -2399,6 +2400,12 @@ func isValidRepoPath(path string) bool {
 // │ - Workspace registry cache invalidation                                     │
 // └─────────────────────────────────────────────────────────────────────────────┘
 func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWriter) (*CheckoutResult, error) {
+	// a running checkout is pending work for the inactivity exit (clonesInFlight):
+	// IPC traffic counts as activity only when a message arrives, not while a
+	// long clone it asked for is still downloading
+	s.checkouts.Add(1)
+	defer s.checkouts.Add(-1)
+
 	// validate path before any operations to prevent path traversal attacks
 	if !isValidRepoPath(payload.RepoPath) {
 		return nil, ErrInvalidRepoPath

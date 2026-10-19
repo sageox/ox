@@ -28,8 +28,12 @@ func (s *SyncScheduler) backgroundCloneContext() context.Context {
 	return context.Background()
 }
 
-// clonesInFlight reports whether a background clone is running.
+// clonesInFlight reports whether a clone is running: a checkout in progress
+// (background or over IPC), or a background clone not yet in Checkout.
 func (s *SyncScheduler) clonesInFlight() bool {
+	if s.checkouts.Load() > 0 {
+		return true
+	}
 	running := false
 	s.cloneInFlight.Range(func(_, _ any) bool {
 		running = true
