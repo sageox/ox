@@ -134,8 +134,11 @@ func checkInstanceStale(fix bool) checkResult {
 			"")
 	}
 
+	// every worktree of the repository shares one instance store
+	storeRoot := instanceStoreRoot(gitRoot)
+
 	// check if .sageox directory exists
-	sageoxDir := filepath.Join(gitRoot, ".sageox")
+	sageoxDir := filepath.Join(storeRoot, ".sageox")
 	if _, err := os.Stat(sageoxDir); os.IsNotExist(err) {
 		return SkippedCheck("Stale instances",
 			"not initialized",
@@ -169,7 +172,7 @@ func checkInstanceStale(fix bool) checkResult {
 		}
 
 		userSlug := entry.Name()
-		store, err := agentinstance.NewStoreForUser(gitRoot, userSlug)
+		store, err := agentinstance.NewStoreForUser(storeRoot, userSlug)
 		if err != nil {
 			continue
 		}
@@ -223,7 +226,7 @@ func checkInstanceStale(fix bool) checkResult {
 				continue
 			}
 			userSlug := entry.Name()
-			store, err := agentinstance.NewStoreForUser(gitRoot, userSlug)
+			store, err := agentinstance.NewStoreForUser(storeRoot, userSlug)
 			if err != nil {
 				continue
 			}

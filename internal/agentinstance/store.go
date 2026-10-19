@@ -19,6 +19,11 @@ import (
 // ErrInstanceNotFound is returned when an operation targets an agent ID that doesn't exist in the store.
 var ErrInstanceNotFound = errors.New("instance not found")
 
+// ErrInstanceExpired is returned by Get when the agent ID's record is still in
+// the store but has expired. Expired records are pruned, so a lookup after the
+// prune reports ErrInstanceNotFound instead.
+var ErrInstanceExpired = errors.New("instance expired")
+
 // Design decision: JSONL storage format
 // Rationale: Append-only enables concurrent writes; scan newest-first for O(recent) lookups;
 // simpler than SQLite for this use case. Abstracted behind Store interface for future migration.
@@ -131,19 +136,33 @@ func NewStoreForUser(projectRoot string, userSlug string) (*Store, error) {
 		return nil, fmt.Errorf("failed to resolve project root: %w", err)
 	}
 
-	// new path: .sageox/agent_instances/<user-slug>/
-	storePath := filepath.Join(absRoot, sageoxDir, subDir, userSlug)
-	if err := os.MkdirAll(storePath, 0755); err != nil {
+	instancesPath := StorePath(absRoot, userSlug)
+	if err := os.MkdirAll(filepath.Dir(instancesPath), 0755); err != nil {
 		return nil, fmt.Errorf("failed to create instance directory: %w", err)
 	}
 
 	store := &Store{
 		projectRoot:   absRoot,
-		instancesPath: filepath.Join(storePath, fileName),
+		instancesPath: instancesPath,
 		userSlug:      userSlug,
 	}
 
 	return store, nil
+}
+
+// StorePath returns the JSONL file holding userSlug's instances under
+// projectRoot, without creating anything. An empty userSlug means "anonymous",
+// as in NewStoreForUser.
+func StorePath(projectRoot, userSlug string) string {
+	if userSlug == "" {
+		userSlug = "anonymous"
+	}
+	return filepath.Join(projectRoot, sageoxDir, subDir, userSlug, fileName)
+}
+
+// Path returns the JSONL file backing this store.
+func (s *Store) Path() string {
+	return s.instancesPath
 }
 
 // Add appends a new instance to the JSONL file
@@ -287,6 +306,8 @@ func (s *Store) IncrementPrimeCallCount(agentID string) (*Instance, bool, error)
 }
 
 // Get retrieves an instance by agent ID, pruning expired instances during read.
+// A miss wraps ErrInstanceExpired when the agent ID's record is present but
+// expired, and ErrInstanceNotFound otherwise.
 //
 // Design decision: Prune on read
 // Rationale: Amortizes cleanup cost; ensures Get() never returns expired instances
@@ -314,7 +335,36 @@ func (s *Store) Get(agentID string) (*Instance, error) {
 		}
 	}
 
-	return nil, fmt.Errorf("instance not found for agent_id: %s", agentID)
+	if expiresAt, ok := s.expiredAt(agentID); ok {
+		return nil, fmt.Errorf("%w: %s expired at %s", ErrInstanceExpired, agentID, expiresAt.Format(time.RFC3339))
+	}
+	return nil, fmt.Errorf("%w for agent_id: %s", ErrInstanceNotFound, agentID)
+}
+
+// expiredAt reports when agentID's newest record expired, if the file still
+// holds one. Only called on a Get miss, so the extra read costs nothing on the
+// hit path.
+func (s *Store) expiredAt(agentID string) (time.Time, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	f, err := os.Open(s.instancesPath)
+	if err != nil {
+		return time.Time{}, false
+	}
+	defer f.Close()
+
+	var expiresAt time.Time
+	found := false
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		var inst Instance
+		if err := json.Unmarshal(scanner.Bytes(), &inst); err != nil || inst.AgentID != agentID {
+			continue
+		}
+		expiresAt, found = inst.ExpiresAt, true // last write wins, as in readInstancesNoLock
+	}
+	return expiresAt, found && time.Now().After(expiresAt)
 }
 
 // List returns all active (non-expired) instances
