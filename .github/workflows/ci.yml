@@ -108,7 +108,7 @@ jobs:
           python3 scripts/test_metrics.py test-timings.json >/dev/null
 
       - name: Upload unit coverage
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: unit-coverage-${{ matrix.slot }}
           path: tmp/unit-parts/coverage-${{ matrix.slot }}.out
@@ -135,7 +135,7 @@ jobs:
 
       - name: Upload JUnit results
         if: always() && hashFiles('test-results.xml') != ''
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: test-results-${{ matrix.slot }}
           path: test-results.xml
@@ -144,7 +144,7 @@ jobs:
 
       - name: Upload test timing events
         if: always() && hashFiles('test-timings.json') != ''
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: test-timing-events-${{ matrix.slot }}
           path: test-timings.json
@@ -215,7 +215,7 @@ jobs:
 
       - name: Upload JUnit results
         if: always() && hashFiles('test-results.xml') != ''
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: test-results
           path: test-results.xml
@@ -224,7 +224,7 @@ jobs:
 
       - name: Upload test timing events
         if: always() && hashFiles('test-timings.json') != ''
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: test-timing-events
           path: test-timings.json
@@ -296,7 +296,7 @@ jobs:
         run: make test-acceptance-cover coverage-integration-profile
 
       - name: Upload acceptance coverage
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: acceptance-coverage
           path: |
@@ -344,7 +344,7 @@ jobs:
         run: make test-digital-twin-cover
 
       - name: Upload twin coverage
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: twins-coverage
           path: tmp/coverage/twins/*.out
@@ -389,20 +389,20 @@ jobs:
           go-version-file: 'go.mod'
           cache: false
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         if: github.event_name == 'pull_request'
         with:
           pattern: unit-coverage-*
           merge-multiple: true
           path: tmp/unit-parts
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         if: github.event_name == 'pull_request'
         with:
           name: acceptance-coverage
           path: tmp/coverage
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         if: github.event_name == 'pull_request'
         with:
           name: twins-coverage
@@ -488,7 +488,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
 
