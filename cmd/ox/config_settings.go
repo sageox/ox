@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 
@@ -934,7 +935,7 @@ func SetConfigValue(key, value string, level ConfigLevel, projectRoot string) er
 	// validate value — numeric settings use their range, others use ValidValues list
 	if r := setting.Number; r != nil {
 		f, err := strconv.ParseFloat(value, 64)
-		if err != nil || f < r.Min || f > r.Max {
+		if err != nil || math.IsNaN(f) || f < r.Min || f > r.Max { // NaN passes both comparisons
 			return fmt.Errorf("invalid value %q for %s: must be a number between %.1f and %.1f", value, key, r.Min, r.Max)
 		}
 	} else if len(setting.ValidValues) > 0 {

@@ -129,7 +129,7 @@ func TestConfigSchema_NumberRangeMatchesWhatSetAccepts(t *testing.T) {
 			assert.NoError(t, SetConfigValue(s.Key, strconv.FormatFloat(v, 'f', -1, 64), ConfigLevelUser, ""),
 				"%s: %v is inside the published range", s.Key, v)
 		}
-		for _, v := range []string{strconv.FormatFloat(lo-0.01, 'f', -1, 64), strconv.FormatFloat(hi+0.01, 'f', -1, 64), "high"} {
+		for _, v := range []string{strconv.FormatFloat(lo-0.01, 'f', -1, 64), strconv.FormatFloat(hi+0.01, 'f', -1, 64), "high", "NaN", "nan", "Inf"} {
 			assert.ErrorContains(t, SetConfigValue(s.Key, v, ConfigLevelUser, ""), "invalid value",
 				"%s: %q is outside the published range", s.Key, v)
 		}
