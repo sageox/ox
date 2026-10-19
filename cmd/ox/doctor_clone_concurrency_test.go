@@ -299,6 +299,9 @@ func TestDirectCloneLedger_TargetStates(t *testing.T) {
 				notADir := filepath.Join(t.TempDir(), "not-a-directory")
 				require.NoError(t, os.WriteFile(notADir, []byte("x"), 0o600))
 				t.Setenv("TMPDIR", notADir)
+				if os.TempDir() != notADir {
+					t.Skip("TMPDIR does not set os.TempDir on this platform (Windows reads TMP and TEMP)")
+				}
 			},
 			wantErr: "open lock file",
 		},

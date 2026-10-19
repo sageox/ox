@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -139,6 +140,11 @@ func TestWithFileLock_RespectsContext(t *testing.T) {
 // actually cross-process-serializes. Skips the cross-process test on
 // platforms where tryFlock is a no-op (Windows).
 func crossProcessFlockAvailable() bool {
+	// tryFlock is a no-op on Windows, so the probe below would succeed there
+	// without proving any cross-process exclusion.
+	if runtime.GOOS == "windows" {
+		return false
+	}
 	dir, _ := os.MkdirTemp("", "ox-flock-probe-")
 	defer os.RemoveAll(dir)
 	target := filepath.Join(dir, "probe")
@@ -376,7 +382,7 @@ func TestWithFileLockTimeout_CrossProcessGenuineTimeout(t *testing.T) {
 func TestWithFileLockTimeout_OpenFileFails(t *testing.T) {
 	notADir := filepath.Join(t.TempDir(), "not-a-directory")
 	require.NoError(t, os.WriteFile(notADir, []byte("x"), 0o644))
-	t.Setenv("TMPDIR", notADir)
+	pointTempDirAt(t, notADir)
 
 	err := WithFileLockTimeout(context.Background(), "/some/target", LockTimeout, func() error {
 		return errors.New("must not run — the lock could not have been acquired")
@@ -446,7 +452,7 @@ func TestTryWithFileLock_HeldLockReturnsAtOnce(t *testing.T) {
 func TestTryWithFileLock_OpenFailureIsAnError(t *testing.T) {
 	notADir := filepath.Join(t.TempDir(), "not-a-directory")
 	require.NoError(t, os.WriteFile(notADir, []byte("x"), 0o644))
-	t.Setenv("TMPDIR", notADir)
+	pointTempDirAt(t, notADir)
 
 	acquired, err := TryWithFileLock("/some/target", func() error {
 		return errors.New("must not run — the lock could not have been acquired")
@@ -454,4 +460,15 @@ func TestTryWithFileLock_OpenFailureIsAnError(t *testing.T) {
 	assert.False(t, acquired)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "open lock file")
+}
+
+// pointTempDirAt points os.TempDir, and with it LockPath's lock directory, at
+// dir. It skips the test where TMPDIR does not steer os.TempDir (Windows reads
+// TMP and TEMP), rather than run it against the real temp dir.
+func pointTempDirAt(t *testing.T, dir string) {
+	t.Helper()
+	t.Setenv("TMPDIR", dir)
+	if os.TempDir() != dir {
+		t.Skip("TMPDIR does not set os.TempDir on this platform")
+	}
 }
