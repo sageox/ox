@@ -542,6 +542,60 @@ func (c *AuthClient) removeTokenIfUnchanged(ep string, want *StoredToken) error 
 	}, legacyOpt, trackerOpt)
 }
 
+// saveTokenIfUnchanged stores to as ep's login only if the entry still holds
+// from, the login a token refresh started from. A refresh waits seconds on the
+// server; saving blindly afterwards would bring back a login `ox logout`
+// deleted meanwhile, or overwrite one a concurrent `ox login` or refresh saved.
+// Checking and saving under one write lock leaves both alone.
+//
+// It returns the login stored for ep when it is done: to if it was saved, the
+// login that replaced from if the entry changed, or nil if the entry is gone.
+// ep must already be normalized.
+func (c *AuthClient) saveTokenIfUnchanged(ep string, from, to *StoredToken) (*StoredToken, error) {
+	authPath, err := c.GetAuthFilePath()
+	if err != nil {
+		return nil, err
+	}
+	return saveTokenIfUnchangedAt(authPath, ep, from, to, withLegacyMigrationEndpoint(c.endpoint), withEndpointTracker(c))
+}
+
+// saveTokenForEndpointIfUnchanged is saveTokenIfUnchanged for the package-level
+// refresh, which has no AuthClient.
+func saveTokenForEndpointIfUnchanged(ep string, from, to *StoredToken) (*StoredToken, error) {
+	authPath, err := GetAuthFilePath()
+	if err != nil {
+		return nil, err
+	}
+	return saveTokenIfUnchangedAt(authPath, endpoint.NormalizeEndpoint(ep), from, to)
+}
+
+// saveTokenIfUnchangedAt implements saveTokenIfUnchanged for the auth file at
+// authPath.
+func saveTokenIfUnchangedAt(authPath, ep string, from, to *StoredToken, opts ...authFileOption) (*StoredToken, error) {
+	var stored *StoredToken
+	err := withAuthFileLocked(authPath, func(h *authFileHandle) error {
+		store, loadErr := h.load()
+		if loadErr != nil {
+			return loadErr
+		}
+		cur := store.Tokens[ep]
+		if cur == nil || !sameCredential(cur, from) {
+			stored = cur
+			return nil
+		}
+		store.Tokens[ep] = to
+		if err := h.save(store); err != nil {
+			return err
+		}
+		stored = to
+		return nil
+	}, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return stored, nil
+}
+
 // IsAuthenticated checks if a locally valid token exists for this client's endpoint.
 // AuthClient is used for test isolation — uses local-only check (no server call).
 func (c *AuthClient) IsAuthenticated() (bool, error) {
