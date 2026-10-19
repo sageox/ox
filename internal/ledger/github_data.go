@@ -21,6 +21,7 @@ type PRFile struct {
 	Body        string      `json:"body"`
 	Author      string      `json:"author"`
 	State       string      `json:"state"` // "open", "closed", "merged"
+	Draft       bool        `json:"draft,omitempty"`
 	Labels      []string    `json:"labels,omitempty"`
 	CreatedAt   time.Time   `json:"created_at"`
 	MergedAt    *time.Time  `json:"merged_at,omitempty"`
@@ -83,7 +84,13 @@ type IssueComment struct {
 //   - It does not need to be shared across coworkers
 type GitHubTypeSyncState struct {
 	LastSyncAt time.Time `json:"last_sync_at"`
-	Count      int       `json:"count"`
+	// CoveredSince is the oldest updated_at back to which every item has been
+	// synced. A run asking for a window that starts earlier lists from there
+	// instead of from LastSyncAt, so a wider --days applies without --full.
+	// Zero (a state written before this field, or rebuilt from disk) means
+	// unknown: the next run lists its whole window once.
+	CoveredSince time.Time `json:"covered_since,omitempty"`
+	Count        int       `json:"count"`
 	// KnownItems tracks the last-seen state and updated_at of each item by number.
 	// Used to detect state transitions (open→closed/merged) and content updates
 	// (new comments, edits) which trigger a re-extract.

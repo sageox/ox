@@ -35,8 +35,10 @@ type FetchedPR struct {
 	CreatedAt time.Time
 	UpdatedAt time.Time
 	MergedAt  *time.Time
+	ClosedAt  *time.Time
 	MergeSHA  string
 	HTMLURL   string
+	Draft     bool
 }
 
 // FetchedIssue is a GitHub issue as returned by the fetcher.
@@ -97,6 +99,58 @@ type SyncResult struct {
 	IssueTotal   int
 	IssueCreated int
 	IssueUpdated int
+	// PRFailed and IssueFailed count items left unsynced because their
+	// comments could not be fetched. They are retried on the next sync.
+	PRFailed    int
+	IssueFailed int
+}
+
+// syncWindow tracks one sync pass's listing window and the items it failed to
+// save, and turns them into the next cursor.
+type syncWindow struct {
+	start       time.Time // now - maxDays
+	since       time.Time // what the listing asked for
+	oldestFail  time.Time // earliest updated_at among failed items
+	failedItems int
+}
+
+// newSyncWindow picks where to list from. Normally that is LastSyncAt
+// (incremental). When the requested window reaches further back than any
+// earlier run covered, it lists the whole window instead, so a wider --days
+// takes effect on its own. Items already known and unchanged are skipped
+// without per-item API calls, so re-listing costs only the listing pages.
+func newSyncWindow(state *GitHubTypeSyncState, maxDays int) *syncWindow {
+	w := &syncWindow{start: time.Now().AddDate(0, 0, -maxDays)}
+	w.since = w.start
+	covered := !state.CoveredSince.IsZero() && !w.start.Before(state.CoveredSince)
+	if covered && state.LastSyncAt.After(w.since) {
+		w.since = state.LastSyncAt
+	}
+	return w
+}
+
+// fail records an item that was listed but could not be saved.
+func (w *syncWindow) fail(updatedAt time.Time) {
+	if w.failedItems == 0 || updatedAt.Before(w.oldestFail) {
+		w.oldestFail = updatedAt
+	}
+	w.failedItems++
+}
+
+// advance moves the state's cursors past this pass. Neither cursor may pass an
+// item that failed: holding both at its updated_at makes the next run whose
+// window includes it list it again, and its unchanged KnownItem (or absence)
+// makes that run fetch it again.
+func (w *syncWindow) advance(state *GitHubTypeSyncState) {
+	if w.failedItems > 0 {
+		state.LastSyncAt = w.oldestFail
+		state.CoveredSince = w.oldestFail
+		return
+	}
+	state.LastSyncAt = time.Now()
+	if state.CoveredSince.IsZero() || w.start.Before(state.CoveredSince) {
+		state.CoveredSince = w.start
+	}
 }
 
 // SyncPRs fetches PRs from GitHub and writes them to the ledger.
@@ -121,16 +175,13 @@ func SyncPRs(ctx context.Context, fetcher GitHubFetcher, ledgerPath, owner, repo
 		}
 	}
 
-	since := time.Now().AddDate(0, 0, -maxDays)
-	if !state.LastSyncAt.IsZero() && state.LastSyncAt.After(since) {
-		since = state.LastSyncAt
-	}
+	window := newSyncWindow(state, maxDays)
 
-	logger.Info("fetching PRs from GitHub", "owner", owner, "repo", repo, "since", since.Format(time.RFC3339))
+	logger.Info("fetching PRs from GitHub", "owner", owner, "repo", repo, "since", window.since.Format(time.RFC3339))
 
 	prs, _, err := fetcher.ListPullRequests(ctx, owner, repo, ListPRsOptions{
 		State: "all",
-		Since: since,
+		Since: window.since,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("list PRs: %w", err)
@@ -160,8 +211,21 @@ func SyncPRs(ctx context.Context, fetcher GitHubFetcher, ledgerPath, owner, repo
 			continue
 		}
 
-		// fetch comments for new PRs or state transitions
-		comments := fetchPRComments(ctx, fetcher, owner, repo, pr.Number, logger)
+		// fetch comments for new PRs or state transitions. Without them the
+		// snapshot would be incomplete, and because it would carry the PR's
+		// current updated_at it would replace the last complete one for every
+		// reader. Leave the PR unsynced instead; the cursor holds so the next
+		// sync retries it.
+		comments, cErr := fetchPRComments(ctx, fetcher, owner, repo, pr.Number)
+		if cErr != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return result, ctxErr
+			}
+			logger.Warn("fetch PR comments failed, will retry next sync", "pr", pr.Number, "error", cErr)
+			window.fail(pr.UpdatedAt)
+			result.PRFailed++
+			continue
+		}
 
 		// fetch commits for merged PRs — only when first seen as merged
 		// (commit list is immutable once merged, no need to re-fetch)
@@ -176,9 +240,11 @@ func SyncPRs(ctx context.Context, fetcher GitHubFetcher, ledgerPath, owner, repo
 			Body:        pr.Body,
 			Author:      pr.Author,
 			State:       prState,
+			Draft:       pr.Draft,
 			Labels:      pr.Labels,
 			CreatedAt:   pr.CreatedAt,
 			MergedAt:    pr.MergedAt,
+			ClosedAt:    pr.ClosedAt,
 			UpdatedAt:   pr.UpdatedAt,
 			MergeCommit: pr.MergeSHA,
 			URL:         pr.HTMLURL,
@@ -210,7 +276,7 @@ func SyncPRs(ctx context.Context, fetcher GitHubFetcher, ledgerPath, owner, repo
 	}
 
 	// persist updated state
-	state.LastSyncAt = time.Now()
+	window.advance(state)
 	state.Count += result.PRCreated
 	if err := WriteGitHubTypeSyncState(ledgerPath, "pr", state); err != nil {
 		return result, fmt.Errorf("write pr sync state: %w", err)
@@ -237,16 +303,13 @@ func SyncIssues(ctx context.Context, fetcher GitHubFetcher, ledgerPath, owner, r
 		}
 	}
 
-	since := time.Now().AddDate(0, 0, -maxDays)
-	if !state.LastSyncAt.IsZero() && state.LastSyncAt.After(since) {
-		since = state.LastSyncAt
-	}
+	window := newSyncWindow(state, maxDays)
 
-	logger.Info("fetching issues from GitHub", "owner", owner, "repo", repo, "since", since.Format(time.RFC3339))
+	logger.Info("fetching issues from GitHub", "owner", owner, "repo", repo, "since", window.since.Format(time.RFC3339))
 
 	issues, _, err := fetcher.ListIssues(ctx, owner, repo, ListIssuesOptions{
 		State: "all",
-		Since: since,
+		Since: window.since,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("list issues: %w", err)
@@ -268,18 +331,24 @@ func SyncIssues(ctx context.Context, fetcher GitHubFetcher, ledgerPath, owner, r
 			continue
 		}
 
-		var comments []IssueComment
+		// a failed comment fetch leaves the issue unsynced — see SyncPRs
 		fetched, cErr := fetcher.ListIssueComments(ctx, owner, repo, issue.Number)
 		if cErr != nil {
-			logger.Warn("fetch issue comments failed", "issue", issue.Number, "error", cErr)
-		} else {
-			for _, c := range fetched {
-				comments = append(comments, IssueComment{
-					Author:    c.Author,
-					Body:      c.Body,
-					CreatedAt: c.CreatedAt,
-				})
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return result, ctxErr
 			}
+			logger.Warn("fetch issue comments failed, will retry next sync", "issue", issue.Number, "error", cErr)
+			window.fail(issue.UpdatedAt)
+			result.IssueFailed++
+			continue
+		}
+		var comments []IssueComment
+		for _, c := range fetched {
+			comments = append(comments, IssueComment{
+				Author:    c.Author,
+				Body:      c.Body,
+				CreatedAt: c.CreatedAt,
+			})
 		}
 
 		issueFile := &IssueFile{
@@ -310,7 +379,7 @@ func SyncIssues(ctx context.Context, fetcher GitHubFetcher, ledgerPath, owner, r
 		result.IssueTotal++
 	}
 
-	state.LastSyncAt = time.Now()
+	window.advance(state)
 	state.Count += result.IssueCreated
 	if err := WriteGitHubTypeSyncState(ledgerPath, "issue", state); err != nil {
 		return result, fmt.Errorf("write issue sync state: %w", err)
@@ -525,26 +594,24 @@ func fetchPRCommits(ctx context.Context, fetcher GitHubFetcher, owner, repo stri
 	return commits
 }
 
-func fetchPRComments(ctx context.Context, fetcher GitHubFetcher, owner, repo string, number int, logger *slog.Logger) []PRComment {
-	var comments []PRComment
-
+// fetchPRComments returns a PR's review and conversation comments, or an
+// error if either listing failed: a partial list is not a PR's discussion.
+func fetchPRComments(ctx context.Context, fetcher GitHubFetcher, owner, repo string, number int) ([]PRComment, error) {
 	reviewComments, err := fetcher.ListPRComments(ctx, owner, repo, number)
 	if err != nil {
-		logger.Warn("fetch review comments failed", "pr", number, "error", err)
-	} else {
-		for _, c := range reviewComments {
-			comments = append(comments, PRComment(c))
-		}
+		return nil, fmt.Errorf("review comments: %w", err)
 	}
-
 	issueComments, err := fetcher.ListIssueComments(ctx, owner, repo, number)
 	if err != nil {
-		logger.Warn("fetch issue comments failed", "pr", number, "error", err)
-	} else {
-		for _, c := range issueComments {
-			comments = append(comments, PRComment(c))
-		}
+		return nil, fmt.Errorf("conversation comments: %w", err)
 	}
 
-	return comments
+	var comments []PRComment
+	for _, c := range reviewComments {
+		comments = append(comments, PRComment(c))
+	}
+	for _, c := range issueComments {
+		comments = append(comments, PRComment(c))
+	}
+	return comments, nil
 }

@@ -41,8 +41,10 @@ func (f *Fetcher) ListPullRequests(ctx context.Context, owner, repo string, opts
 			CreatedAt: pr.CreatedAt,
 			UpdatedAt: pr.UpdatedAt,
 			MergedAt:  pr.MergedAt,
+			ClosedAt:  pr.ClosedAt,
 			MergeSHA:  pr.MergeSHA,
 			HTMLURL:   pr.HTMLURL,
+			Draft:     pr.Draft,
 		}
 	}
 	return result, convertRL(rl), nil

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/codedb"
 	"github.com/sageox/ox/internal/codedb/index"
 	"github.com/sageox/ox/internal/config"
@@ -254,44 +255,135 @@ func runIndexGitHub(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	fetcher := gh.NewFetcher(gh.NewClient(token))
+	// The in-process fallback indexes where the daemon does (the shared
+	// CodeDB). Until that index is built, search reads the Ledger index
+	// instead; a shared index holding only GitHub data would take its place
+	// and hide code results, so leave it to `ox index code`.
+	codeDBDir := resolveCodeDBDir(gitRoot)
+	if _, useLedger := resolvePreferredCodeDBDir(gitRoot); useLedger {
+		codeDBDir = ""
+	}
+
+	return syncGitHubIndex(cmd.Context(), githubIndexRun{
+		Fetcher:    gh.NewFetcher(gh.NewClient(token)),
+		LedgerPath: ledgerPath,
+		CodeDBDir:  codeDBDir,
+		Owner:      owner,
+		Repo:       repo,
+		MaxDays:    maxDays,
+		SyncPRs:    syncPRs,
+		SyncIssues: syncIssues,
+		NoPush:     noPush,
+	})
+}
+
+// githubIndexRun is one resolved `ox index github` run: everything the command
+// derives from flags, config, remotes and credentials.
+type githubIndexRun struct {
+	Fetcher    ledger.GitHubFetcher
+	LedgerPath string
+	// CodeDBDir is where the in-process fallback indexes; the daemon resolves
+	// its own (the same directory). Empty disables the fallback.
+	CodeDBDir  string
+	Owner      string
+	Repo       string
+	MaxDays    int
+	SyncPRs    bool
+	SyncIssues bool
+	NoPush     bool
+}
+
+// indexGitHubViaDaemon asks the daemon to run its index pass, which ends with
+// the same GitHub-data stage the daemon runs after its own syncs (plus the team
+// board's mirrored posts). A variable so tests can take the daemon away.
+var indexGitHubViaDaemon = func() error {
+	if err := daemon.EnsureDaemon(); err != nil {
+		return err
+	}
+	client := daemon.NewClientForCurrentRepoWithTimeout(5 * time.Minute)
+	_, err := client.CodeIndex(daemon.CodeIndexPayload{}, nil)
+	return err
+}
+
+// indexGitHubCodeDB makes freshly synced PRs and issues searchable, the way the
+// daemon does after each of its syncs: through the daemon when one answers,
+// otherwise by indexing the Ledger's GitHub data into CodeDB in-process.
+func indexGitHubCodeDB(ctx context.Context, run githubIndexRun) error {
+	err := indexGitHubViaDaemon()
+	if err == nil {
+		return nil
+	}
+	slog.Debug("daemon github indexing failed, falling back to in-process", "error", err)
+	if run.CodeDBDir == "" {
+		return errors.New("the code search index is not built yet; run `ox index code`, then `ox index github --no-push`")
+	}
+
+	db, err := codedb.Open(run.CodeDBDir)
+	if err != nil {
+		return fmt.Errorf("open codedb: %w", err)
+	}
+	defer db.Close()
+	if db.ReadOnly() {
+		return fmt.Errorf("cannot index into %s: read-only", run.CodeDBDir)
+	}
+	if _, err := db.IndexGitHubData(ctx, run.LedgerPath, nil); err != nil {
+		return fmt.Errorf("index github data: %w", err)
+	}
+	return nil
+}
+
+// syncGitHubIndex syncs PRs and issues into the Ledger and pushes them.
+func syncGitHubIndex(ctx context.Context, run githubIndexRun) error {
 	logger := slog.Default()
 	combined := &ledger.SyncResult{}
 
-	if syncPRs {
-		prResult, prErr := ledger.SyncPRs(cmd.Context(), fetcher, ledgerPath, owner, repo, maxDays, logger)
+	if run.SyncPRs {
+		prResult, prErr := ledger.SyncPRs(ctx, run.Fetcher, run.LedgerPath, run.Owner, run.Repo, run.MaxDays, logger)
 		if prErr != nil {
 			return fmt.Errorf("sync PRs: %w", prErr)
 		}
 		combined.PRTotal = prResult.PRTotal
 		combined.PRCreated = prResult.PRCreated
 		combined.PRUpdated = prResult.PRUpdated
+		combined.PRFailed = prResult.PRFailed
 	}
 
-	if syncIssues {
-		issueResult, issueErr := ledger.SyncIssues(cmd.Context(), fetcher, ledgerPath, owner, repo, maxDays, logger)
+	if run.SyncIssues {
+		issueResult, issueErr := ledger.SyncIssues(ctx, run.Fetcher, run.LedgerPath, run.Owner, run.Repo, run.MaxDays, logger)
 		if issueErr != nil {
 			return fmt.Errorf("sync issues: %w", issueErr)
 		}
 		combined.IssueTotal = issueResult.IssueTotal
 		combined.IssueCreated = issueResult.IssueCreated
 		combined.IssueUpdated = issueResult.IssueUpdated
+		combined.IssueFailed = issueResult.IssueFailed
 	}
 
-	if syncPRs {
+	if run.SyncPRs {
 		fmt.Printf("Synced %d PRs (%d new, %d updated) from %s/%s\n",
-			combined.PRTotal, combined.PRCreated, combined.PRUpdated, owner, repo)
+			combined.PRTotal, combined.PRCreated, combined.PRUpdated, run.Owner, run.Repo)
 	}
-	if syncIssues {
+	if run.SyncIssues {
 		fmt.Printf("Synced %d issues (%d new, %d updated) from %s/%s\n",
-			combined.IssueTotal, combined.IssueCreated, combined.IssueUpdated, owner, repo)
+			combined.IssueTotal, combined.IssueCreated, combined.IssueUpdated, run.Owner, run.Repo)
 	}
 
-	if noPush {
+	if failed := combined.PRFailed + combined.IssueFailed; failed > 0 {
+		cli.PrintWarning(fmt.Sprintf("%d item(s) skipped because their comments could not be fetched; they are retried on the next sync", failed))
+	}
+
+	// Index what is now in the Ledger, pushed or not: --no-push skips the
+	// push, not the extract.
+	fmt.Fprintln(os.Stderr, "Indexing GitHub data for search...")
+	if err := indexGitHubCodeDB(ctx, run); err != nil {
+		cli.PrintWarning(fmt.Sprintf("GitHub data synced but not indexed for search: %v", err))
+	}
+
+	if run.NoPush {
 		return nil
 	}
 
-	if err := ledger.CommitAndPushGitHubData(context.Background(), ledgerPath, owner, repo, combined, pushLedger); err != nil {
+	if err := ledger.CommitAndPushGitHubData(context.Background(), run.LedgerPath, run.Owner, run.Repo, combined, pushLedger); err != nil {
 		return fmt.Errorf("push to ledger: %w", err)
 	}
 
