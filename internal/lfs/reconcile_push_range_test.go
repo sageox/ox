@@ -165,60 +165,6 @@ func TestReconcile_PushRangeScope_IgnoresPointersTheRemoteAlreadyHas(t *testing.
 	}
 }
 
-// Negative control for the test above: the whole-tree variant still sees the
-// coworker's broken session, so the scoping — not a weaker check — is what lets
-// the push-range repair through. `ox doctor` relies on the whole-tree variant to
-// clear pointers the remote already holds.
-func TestReconcile_WholeTreeScope_StillSeesAlreadyPushedPointers(t *testing.T) {
-	if testing.Short() {
-		t.Skip("short: real git remote and mocked LFS batch API")
-	}
-	teammateOID := strings.Repeat("7", 64)
-	teammateMetaOID := strings.Repeat("8", 64)
-
-	setup := func(t *testing.T) (string, *Client) {
-		ledger, _ := initLedgerWithRemote(t)
-		writeAndCommit(t, ledger, "teammate session", map[string]string{
-			"sessions/teammate/summary.md": lfsPointerContent(teammateOID, 10),
-			"sessions/teammate/meta.json":  metaFor(metaRef("summary.md", teammateMetaOID, 10)),
-		})
-		mustPush(t, ledger)
-		return ledger, fakeLFSDownloadServer(t, map[string]int{teammateOID: http.StatusNotFound})
-	}
-
-	t.Run("whole tree reports the coworker's pointer and removes nothing", func(t *testing.T) {
-		ledger, client := setup(t)
-		_, err := reconcileAllPointers(context.Background(), ledger, nil, func() (*Client, error) { return client, nil })
-		var unrecoverable *UnrecoverablePointersError
-		require.ErrorAs(t, err, &unrecoverable)
-		assert.Equal(t, "sessions/teammate/summary.md", filepath.ToSlash(unrecoverable.Pointers[0].Path))
-		assert.FileExists(t, filepath.Join(ledger, "sessions", "teammate", "summary.md"))
-	})
-
-	t.Run("push range has nothing to do", func(t *testing.T) {
-		ledger, client := setup(t)
-		result, err := reconcileUnpushedPointers(context.Background(), ledger, nil, func() (*Client, error) { return client, nil })
-		require.NoError(t, err)
-		assert.Zero(t, result.ScannedPointers)
-		assert.False(t, result.Changed())
-	})
-
-	t.Run("whole tree never removes an already-pushed pointer with a dead blob", func(t *testing.T) {
-		ledger, _ := initLedgerWithRemote(t)
-		writeAndCommit(t, ledger, "plan with a dead blob", map[string]string{
-			"data/plans/p1/plan.html": lfsPointerContent(teammateOID, 500),
-		})
-		mustPush(t, ledger)
-		client := fakeLFSDownloadServer(t, map[string]int{teammateOID: http.StatusNotFound})
-
-		result, err := reconcileAllPointers(context.Background(), ledger, nil, func() (*Client, error) { return client, nil })
-		var unrecoverable *UnrecoverablePointersError
-		require.ErrorAs(t, err, &unrecoverable)
-		assert.False(t, result.Changed())
-		assert.FileExists(t, filepath.Join(ledger, "data", "plans", "p1", "plan.html"))
-	})
-}
-
 // Failure prevented: a missing object referenced only by an intermediate
 // unpushed commit is invisible to a tip-only repair ("no changes"), so the push
 // stayed rejected forever. GitLab checks every commit in the pack. The incident

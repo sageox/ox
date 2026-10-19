@@ -26,7 +26,7 @@ import (
 
 // ReconcileResult describes what ReconcileUnpushedPointers found and fixed.
 type ReconcileResult struct {
-	ScannedPointers  int  // distinct pointers examined (push-range scope) or pointer files found (whole-tree scope)
+	ScannedPointers  int  // distinct pointers in the push range
 	MissingOnRemote  int  // pointers whose LFS OIDs are not in the remote store
 	HistoryOnly      int  // missing OIDs referenced only by intermediate unpushed commits, not the tip
 	RecoveredUploads int  // missing OIDs restored from exact local recovery-cache content
@@ -91,30 +91,14 @@ func (r *ReconcileResult) Changed() bool {
 // Unpushed history is squashed into one commit in that last case, because
 // GitLab's pre-receive hook scans every commit in the pack, not just HEAD.
 //
-// Ambiguous cache content fails closed. Ambiguous cache content fails closed. A missing
-// upstream or diverged branch also fails closed; callers needing a deliberate
-// whole-tree repair must use ReconcileAllPointers.
+// Ambiguous cache content fails closed. A missing upstream or diverged branch
+// also fails closed.
 func ReconcileUnpushedPointers(ctx context.Context, ledgerPath, endpointURL string, logger *slog.Logger) (*ReconcileResult, error) {
-	return reconcileLocked(ctx, ledgerPath, endpointURL, logger, reconcileUnpushedPointers)
-}
-
-// ReconcileAllPointers is the whole-working-tree variant: it examines every
-// pointer under sessions/ and data/plans/ whether or not it was ever pushed.
-// `ox doctor` uses it to clear a missing blob it found by scanning the tree;
-// the push path uses ReconcileUnpushedPointers, which cannot be derailed by
-// pointers the remote already accepted.
-func ReconcileAllPointers(ctx context.Context, ledgerPath, endpointURL string, logger *slog.Logger) (*ReconcileResult, error) {
-	return reconcileLocked(ctx, ledgerPath, endpointURL, logger, reconcileAllPointers)
-}
-
-type reconcileFunc func(ctx context.Context, ledgerPath string, logger *slog.Logger, newClient func() (*Client, error)) (*ReconcileResult, error)
-
-func reconcileLocked(ctx context.Context, ledgerPath, endpointURL string, logger *slog.Logger, run reconcileFunc) (*ReconcileResult, error) {
 	var result *ReconcileResult
 	ctx = withReconcileOwner(ctx, identity.AttributionDisplayName(endpointURL, config.GetDisplayName()))
 	err := gitutil.WithRepoLock(ctx, ledgerPath, func() error {
 		var err error
-		result, err = run(ctx, ledgerPath, logger, func() (*Client, error) {
+		result, err = reconcileUnpushedPointers(ctx, ledgerPath, logger, func() (*Client, error) {
 			return NewClientFromLedgerContext(ctx, ledgerPath, endpointURL)
 		})
 		return err
@@ -123,20 +107,6 @@ func reconcileLocked(ctx context.Context, ledgerPath, endpointURL string, logger
 		result = &ReconcileResult{}
 	}
 	return result, err
-}
-
-// reconcileUnpushedPointers is the client-injectable core of
-// ReconcileUnpushedPointers. newClient is invoked ONLY when orphan candidates are
-// found, preserving the "no pointers → no client, no error" behavior that clean
-// ledgers with no configured remote rely on. Tests inject a fake-LFS-server
-// client to exercise the missing-artifact removal and squash path.
-func reconcileUnpushedPointers(ctx context.Context, ledgerPath string, logger *slog.Logger, newClient func() (*Client, error)) (*ReconcileResult, error) {
-	return reconcilePointers(ctx, ledgerPath, logger, newClient, true)
-}
-
-// reconcileAllPointers is the client-injectable core of ReconcileAllPointers.
-func reconcileAllPointers(ctx context.Context, ledgerPath string, logger *slog.Logger, newClient func() (*Client, error)) (*ReconcileResult, error) {
-	return reconcilePointers(ctx, ledgerPath, logger, newClient, false)
 }
 
 // pointerEntry is one pointer file at the branch tip.
@@ -163,31 +133,24 @@ func (p *pointerSet) total() int {
 	return len(p.repairable) + len(p.unrepairable) + len(p.historyOnly)
 }
 
-func reconcilePointers(ctx context.Context, ledgerPath string, logger *slog.Logger, newClient func() (*Client, error), pushRangeOnly bool) (*ReconcileResult, error) {
+// reconcileUnpushedPointers is the client-injectable core of
+// ReconcileUnpushedPointers. newClient is invoked ONLY when orphan candidates are
+// found, preserving the "no pointers → no client, no error" behavior that clean
+// ledgers with no configured remote rely on. Tests inject a fake-LFS-server
+// client to exercise the recovery-upload and squash paths.
+func reconcileUnpushedPointers(ctx context.Context, ledgerPath string, logger *slog.Logger, newClient func() (*Client, error)) (*ReconcileResult, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
 
 	result := &ReconcileResult{}
 
-	var set *pointerSet
-	if pushRangeOnly {
-		if err := ensureReconcileGitSafe(ctx, ledgerPath); err != nil {
-			return result, fmt.Errorf("preflight Ledger for LFS reconcile: %w", err)
-		}
-		var err error
-		set, err = scanPushRange(ctx, ledgerPath, logger)
-		if err != nil {
-			return result, fmt.Errorf("scan push range for pointers: %w", err)
-		}
+	if err := ensureReconcileGitSafe(ctx, ledgerPath); err != nil {
+		return result, fmt.Errorf("preflight Ledger for LFS reconcile: %w", err)
 	}
-	if set == nil {
-		// whole-tree mode: every pointer in the working tree
-		pointers, err := walkWorkingTreePointers(ledgerPath)
-		if err != nil {
-			return result, err
-		}
-		set = &pointerSet{repairable: pointers}
+	set, err := scanPushRange(ctx, ledgerPath, logger)
+	if err != nil {
+		return result, fmt.Errorf("scan push range for pointers: %w", err)
 	}
 
 	result.ScannedPointers = set.total()
@@ -257,12 +220,6 @@ func reconcilePointers(ctx context.Context, ledgerPath string, logger *slog.Logg
 		}
 	}
 
-	if !pushRangeOnly {
-		if err := ensureReconcileGitSafe(ctx, ledgerPath); err != nil {
-			return result, fmt.Errorf("preflight Ledger for LFS reconcile: %w", err)
-		}
-	}
-
 	// Plain content staged by a finalize whose upload failed would make the
 	// validation below refuse, and finalize waits for this very reconcile to
 	// un-wedge the push. Upload the current coworker's own staged artifacts first.
@@ -280,10 +237,8 @@ func reconcilePointers(ctx context.Context, ledgerPath string, logger *slog.Logg
 	if err := gitutil.ValidateStagedLedgerCommit(ctx, ledgerPath); err != nil {
 		return result, fmt.Errorf("validate Ledger before LFS reconcile: %w", err)
 	}
-	if pushRangeOnly {
-		if err := validateUnpushedTip(ctx, ledgerPath, set.upstream); err != nil {
-			return result, fmt.Errorf("validate unpushed Ledger before LFS reconcile: %w", err)
-		}
+	if err := validateUnpushedTip(ctx, ledgerPath, set.upstream); err != nil {
+		return result, fmt.Errorf("validate unpushed Ledger before LFS reconcile: %w", err)
 	}
 
 	for _, upload := range recoverable {
@@ -545,41 +500,6 @@ func findMissingOIDs(ctx context.Context, client *Client, set *pointerSet) (map[
 		}
 	}
 	return missing, nil
-}
-
-// walkWorkingTreePointers returns every pointer file under the pointer-bearing
-// trees: session artifacts and captured plans. Either can poison the shared push.
-func walkWorkingTreePointers(ledgerPath string) ([]pointerEntry, error) {
-	roots := []string{
-		filepath.Join(ledgerPath, "sessions"),
-		filepath.Join(ledgerPath, "data", "plans"),
-	}
-
-	var pointers []pointerEntry
-	for _, root := range roots {
-		if _, err := os.Stat(root); os.IsNotExist(err) {
-			continue
-		}
-		err := filepath.Walk(root, func(absPath string, info os.FileInfo, err error) error {
-			if err != nil || info.IsDir() || info.Size() > maxPointerSize {
-				return nil
-			}
-			if !IsPointerFile(absPath) {
-				return nil
-			}
-			ref, parseErr := ReadPointerFile(absPath)
-			if parseErr != nil {
-				return nil
-			}
-			relPath, _ := filepath.Rel(ledgerPath, absPath)
-			pointers = append(pointers, pointerEntry{relPath: relPath, ref: ref})
-			return nil
-		})
-		if err != nil {
-			return nil, fmt.Errorf("walk %s: %w", root, err)
-		}
-	}
-	return pointers, nil
 }
 
 func ensureReconcileGitSafe(ctx context.Context, ledgerPath string) error {

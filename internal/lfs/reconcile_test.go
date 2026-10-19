@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/auth"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -19,15 +21,12 @@ import (
 // Behavioral tests for ReconcileUnpushedPointers
 //
 // These test the CONTRACT, not the implementation. If the implementation
-// changes (e.g., squash replaced by filter-branch, walk replaced by
-// git ls-files), these should still pass as long as the guarantees hold.
+// changes (e.g., squash replaced by filter-branch), these should still pass as
+// long as the guarantees hold.
 //
 // Guarantees tested:
-// 1. Ledgers without pointer files are unaffected
-// 2. Non-pointer content is never modified or lost
-// 3. Orphaned pointers are neutralized (no longer block push)
-// 4. Reconciliation is idempotent
-// 5. After reconciliation, unpushed history is collapsed to minimize push size
+// 1. Content is never modified or lost, even when reconciliation refuses
+// 2. After reconciliation, unpushed history is collapsed to minimize push size
 // ---------------------------------------------------------------------------
 
 // lfsPointerContent creates a valid LFS pointer string for test use.
@@ -97,23 +96,6 @@ func unpushedCount(t *testing.T, dir string) int {
 	return n
 }
 
-// --- Guarantee 1: ledgers without pointer files are unaffected ---
-
-func TestReconcile_EmptyLedger_Unaffected(t *testing.T) {
-	dir := t.TempDir() // not even a git repo
-	result, err := ReconcileAllPointers(context.Background(), dir, "", nil)
-	require.NoError(t, err)
-	assert.Zero(t, result.ScannedPointers)
-}
-
-func TestReconcile_NoSessions_Unaffected(t *testing.T) {
-	dir := initLedgerRepo(t)
-	// sessions/ exists but is empty
-	result, err := ReconcileAllPointers(context.Background(), dir, "", nil)
-	require.NoError(t, err)
-	assert.Zero(t, result.ScannedPointers)
-}
-
 func TestReconcile_WaitsForRepoWriter(t *testing.T) {
 	dir := initLedgerRepo(t)
 	locked := make(chan struct{})
@@ -138,107 +120,64 @@ func TestReconcile_WaitsForRepoWriter(t *testing.T) {
 	assert.Zero(t, result.ScannedPointers)
 }
 
-func TestReconcile_OnlyRegularContent_Unaffected(t *testing.T) {
-	dir := initLedgerRepo(t)
+// --- Guarantee 1: content is never lost ---
 
-	// write real session content (not pointers)
-	sessDir := filepath.Join(dir, "sessions", "2026-04-07-test")
-	require.NoError(t, os.MkdirAll(sessDir, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(sessDir, "raw.jsonl"),
-		[]byte(`{"type":"header","version":"1.0"}`), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(sessDir, "summary.md"),
-		[]byte("# Session summary\nThis is real content."), 0o644))
-
-	result, err := ReconcileAllPointers(context.Background(), dir, "", nil)
-	require.NoError(t, err)
-	assert.Zero(t, result.ScannedPointers, "regular content should not be detected as pointers")
-
-	// verify content is untouched
-	content, _ := os.ReadFile(filepath.Join(sessDir, "raw.jsonl"))
-	assert.Contains(t, string(content), "header")
-}
-
-// --- Guarantee 2: non-pointer content is never modified ---
-
-func TestReconcile_LargeFiles_Ignored(t *testing.T) {
-	dir := initLedgerRepo(t)
-	sessDir := filepath.Join(dir, "sessions", "test-session")
-	require.NoError(t, os.MkdirAll(sessDir, 0o755))
-
-	// file that starts like a pointer but is too large (e.g., a session with
-	// content that coincidentally starts with the version string — paranoid case)
-	bigContent := make([]byte, maxPointerSize+100)
-	copy(bigContent, []byte("version https://git-lfs.github.com/spec/v1\noid sha256:aaa\nsize 999\n"))
-	require.NoError(t, os.WriteFile(filepath.Join(sessDir, "big.jsonl"), bigContent, 0o644))
-
-	result, err := ReconcileAllPointers(context.Background(), dir, "", nil)
-	require.NoError(t, err)
-	assert.Zero(t, result.ScannedPointers, "files exceeding pointer size limit should be skipped")
-
-	// verify file is untouched
-	after, _ := os.ReadFile(filepath.Join(sessDir, "big.jsonl"))
-	assert.Equal(t, bigContent, after)
-}
-
-func TestReconcile_MalformedPointer_Ignored(t *testing.T) {
-	dir := initLedgerRepo(t)
-	sessDir := filepath.Join(dir, "sessions", "test-session")
-	require.NoError(t, os.MkdirAll(sessDir, 0o755))
-
-	// looks like a pointer but missing size field — ParsePointer should reject
-	malformed := "version https://git-lfs.github.com/spec/v1\noid sha256:abc123\n"
-	require.NoError(t, os.WriteFile(filepath.Join(sessDir, "broken.jsonl"), []byte(malformed), 0o644))
-
-	result, err := ReconcileAllPointers(context.Background(), dir, "", nil)
-	require.NoError(t, err)
-	assert.Zero(t, result.ScannedPointers, "malformed pointers should not be counted")
-
-	// verify file is untouched
-	after, _ := os.ReadFile(filepath.Join(sessDir, "broken.jsonl"))
-	assert.Equal(t, malformed, string(after))
-}
-
-// --- Guarantee 3: orphaned pointers are detected ---
-
-func TestReconcile_DetectsValidPointerFiles(t *testing.T) {
-	dir := initLedgerRepo(t)
-	sessDir := filepath.Join(dir, "sessions", "test-session")
-	require.NoError(t, os.MkdirAll(sessDir, 0o755))
-
-	// write valid pointer files
-	oid1 := "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
-	oid2 := "cafebabecafebabecafebabecafebabecafebabecafebabecafebabecafebabe"
-	require.NoError(t, os.WriteFile(filepath.Join(sessDir, "raw.jsonl"),
-		[]byte(lfsPointerContent(oid1, 12345)), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(sessDir, "summary.md"),
-		[]byte(lfsPointerContent(oid2, 67890)), 0o644))
-
-	// will fail at LFS client creation (no credentials) but should have counted pointers
-	result, err := ReconcileAllPointers(context.Background(), dir, "https://example.com", nil)
-	assert.Error(t, err, "should fail when LFS client can't be created")
-	assert.Equal(t, 2, result.ScannedPointers, "should detect both pointer files before failing")
-}
-
-func TestReconcile_NestedSessionDirectories(t *testing.T) {
-	dir := initLedgerRepo(t)
-
-	// pointers scattered across multiple session directories
-	sessions := []string{
-		"2026-04-07T03-48-ryan-Ox83hv",
-		"2026-04-07T04-10-ryan-OxU3Y3",
-		"2026-04-09T18-34-ryan-OxXUbq",
+// TestReconcileUnpushedPointers_FailsClosed: a reconcile that runs mid-merge,
+// cannot scan the push range (no upstream), or cannot reach the LFS store
+// returns an error and leaves HEAD and the pointer as they were. Failure
+// prevented: a push-triggered repair that cannot safely see what the push
+// carries changes the Ledger anyway.
+func TestReconcileUnpushedPointers_FailsClosed(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git repos")
 	}
-	oid := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	for _, s := range sessions {
-		sessDir := filepath.Join(dir, "sessions", s)
-		require.NoError(t, os.MkdirAll(sessDir, 0o755))
-		require.NoError(t, os.WriteFile(filepath.Join(sessDir, "raw.jsonl"),
-			[]byte(lfsPointerContent(oid, 100)), 0o644))
-	}
+	// no stored or env credentials, so the real client constructor fails
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv(auth.EnvVarToken, "")
+	t.Setenv(endpoint.EnvVar, "")
 
-	result, err := ReconcileAllPointers(context.Background(), dir, "https://example.com", nil)
-	assert.Error(t, err) // LFS client fails
-	assert.Equal(t, 3, result.ScannedPointers, "should scan all nested session dirs")
+	pointer := lfsPointerContent(strings.Repeat("e", 64), 500)
+	for _, tc := range []struct {
+		name        string
+		remote      bool
+		midMerge    bool
+		wantErr     string
+		wantScanned int
+	}{
+		{name: "merge in progress", remote: true, midMerge: true, wantErr: "preflight Ledger for LFS reconcile"},
+		{name: "no upstream", wantErr: "no upstream tracking ref"},
+		{name: "no LFS client", remote: true, wantErr: "lfs client", wantScanned: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var ledger string
+			if tc.remote {
+				ledger, _ = initLedgerWithRemote(t)
+			} else {
+				ledger = initLedgerRepo(t)
+			}
+			path := filepath.Join(ledger, "data", "plans", "p", "plan.html")
+			require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+			require.NoError(t, os.WriteFile(path, []byte(pointer), 0o644))
+			git(t, ledger, "add", ".")
+			git(t, ledger, "commit", "-m", "plan", "--no-verify")
+			head := git(t, ledger, "rev-parse", "HEAD")
+			if tc.midMerge {
+				// after the commit: committing with MERGE_HEAD present concludes the merge
+				require.NoError(t, os.WriteFile(filepath.Join(ledger, ".git", "MERGE_HEAD"), []byte(head+"\n"), 0o644))
+			}
+
+			result, err := ReconcileUnpushedPointers(context.Background(), ledger, "https://example.com", nil)
+
+			require.ErrorContains(t, err, tc.wantErr)
+			assert.Equal(t, tc.wantScanned, result.ScannedPointers)
+			assert.Equal(t, head, git(t, ledger, "rev-parse", "HEAD"), "no commit, no squash")
+			got, readErr := os.ReadFile(path)
+			require.NoError(t, readErr)
+			assert.Equal(t, pointer, string(got), "the pointer file is untouched")
+		})
+	}
 }
 
 // A 404 after upload must not turn a recoverable session into an empty commit
@@ -409,23 +348,7 @@ func TestReconcile_RefusesConflictInUnpushedHistory(t *testing.T) {
 	assert.Equal(t, markers, content, "failed squash must preserve corrupt metadata for doctor recovery")
 }
 
-// --- Guarantee 4: idempotent ---
-
-func TestReconcile_AlreadyEmpty_Idempotent(t *testing.T) {
-	dir := initLedgerRepo(t)
-	sessDir := filepath.Join(dir, "sessions", "test-session")
-	require.NoError(t, os.MkdirAll(sessDir, 0o755))
-
-	// empty files (what a pointer looks like AFTER reconciliation)
-	require.NoError(t, os.WriteFile(filepath.Join(sessDir, "raw.jsonl"), []byte{}, 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(sessDir, "summary.md"), []byte{}, 0o644))
-
-	result, err := ReconcileAllPointers(context.Background(), dir, "", nil)
-	require.NoError(t, err)
-	assert.Zero(t, result.ScannedPointers, "empty files should not be detected as pointers")
-}
-
-// --- Guarantee 5: history squash collapses unpushed commits ---
+// --- Guarantee 2: history squash collapses unpushed commits ---
 
 func TestReconcile_Squash_CollapsesMultipleCommits(t *testing.T) {
 	if testing.Short() {
@@ -530,31 +453,4 @@ func TestReconcile_Squash_SingleCommit_NoOp(t *testing.T) {
 
 	after := git(t, ledger, "rev-parse", "HEAD")
 	assert.Equal(t, before, after, "single unpushed commit should not be rewritten")
-}
-
-// --- Mixed scenarios ---
-
-func TestReconcile_MixedContent_OnlyPointersScanned(t *testing.T) {
-	dir := initLedgerRepo(t)
-	sessDir := filepath.Join(dir, "sessions", "mixed-session")
-	require.NoError(t, os.MkdirAll(sessDir, 0o755))
-
-	// mix of real content, pointers, and metadata
-	require.NoError(t, os.WriteFile(filepath.Join(sessDir, "meta.json"),
-		[]byte(`{"version":"1.0","files":{}}`), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(sessDir, "summary.json"),
-		[]byte(`{"title":"test"}`), 0o644))
-
-	oid := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	require.NoError(t, os.WriteFile(filepath.Join(sessDir, "raw.jsonl"),
-		[]byte(lfsPointerContent(oid, 5000)), 0o644))
-
-	// regular content file that happens to be small
-	require.NoError(t, os.WriteFile(filepath.Join(sessDir, "context-trace.jsonl"),
-		[]byte(`{"type":"provided","ts":"2026-04-07T05:01:26Z"}`), 0o644))
-
-	result, err := ReconcileAllPointers(context.Background(), dir, "https://example.com", nil)
-	assert.Error(t, err) // LFS client creation fails
-	assert.Equal(t, 1, result.ScannedPointers,
-		"only the actual pointer file should be scanned, not metadata or regular content")
 }
