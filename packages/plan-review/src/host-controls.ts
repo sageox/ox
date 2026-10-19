@@ -109,6 +109,7 @@ export function esc(s: string | undefined): string {
 }
 // A rail tag's class names a resolution state; anything else gets none.
 const STATE_TAG: Record<string, string> = { addressed: 'addressed', verified: 'verified', wontfix: 'wontfix' };
+const TEXT_FIELDS = ['section', 'label', 'quote', 'note', 'reviewer', 'resolutionNote'] as const;
 function glyphFor(id: string): string {
   for (let i = 0; i < STATUS.length; i++) if (STATUS[i].id === id) return STATUS[i].glyph;
   return '◌';
@@ -150,7 +151,9 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
     committed = Object.create(null);
     invalid = 0;
     items.forEach((x) => {
-      if (typeof x.anchor !== 'string' || STATUSES.indexOf(x.status) < 0 || STATES.indexOf(x.state) < 0) { invalid++; return; }
+      // a member wrote the record: one of the wrong shape would stop the rail drawing
+      if (!x || typeof x.anchor !== 'string' || STATUSES.indexOf(x.status) < 0 || STATES.indexOf(x.state) < 0 ||
+          TEXT_FIELDS.some((k) => x[k] !== undefined && typeof x[k] !== 'string')) { invalid++; return; }
       (committed[x.anchor] = committed[x.anchor] || []).push(x);
     });
   }

@@ -203,12 +203,14 @@ func TestBrowser_PlanCannotDriveTheComposer(t *testing.T) {
 
 // TestBrowser_LedgerTextCannotStyleOrScriptTheRail mounts committed items as a
 // member could write them into the Ledger: markup in a note, a label and a
-// reviewer's name, a state made of class names, and a status that breaks out
-// of its attribute. The markup shows as text, the two items outside the
-// contract are left out and counted as problems, and the valid item still
+// reviewer's name, a state made of class names, a status that breaks out of
+// its attribute, and a note and label that are not text. The markup shows as
+// text, the three items outside the contract are left out and counted as
+// problems in a banner that stays within the frame, and the valid item still
 // paints.
 // Failure prevented: a member's record runs script or lays an invisible layer
-// over the host's page, or one bad record stops every mark from painting.
+// over the host's page, one bad record stops every mark from painting or the
+// rail from drawing, or the banner listing them covers the host's own page.
 func TestBrowser_LedgerTextCannotStyleOrScriptTheRail(t *testing.T) {
 	ctx := frameBrowser(t)
 	anchor := planreview.AnchorFor("", "Retry budget is three")
@@ -216,7 +218,8 @@ func TestBrowser_LedgerTextCannotStyleOrScriptTheRail(t *testing.T) {
 	host := framedHost(`committed: [` +
 		`{ anchor: '` + anchor + `', section: '', label: 'Retry budget is three', status: 'comment', state: 'open', note: '` + payload + `', reviewer: '` + payload + `' },` +
 		`{ anchor: 'h22222222', label: 'x', status: 'flag', state: 'fixed inset-0 rev-bar' },` +
-		`{ anchor: 'h44444444', label: 'y', status: 'x\" onmouseover=\"window.pwned=3', state: 'open' }]`)
+		`{ anchor: 'h44444444', label: 'y', status: 'x\" onmouseover=\"window.pwned=3', state: 'open' },` +
+		`{ anchor: 'h55555555', label: { toString: null }, status: 'comment', state: 'open', note: 42 }]`)
 	base := serveFrameHost(t, []byte(`<!doctype html><html><body><p>Retry budget is three</p></body></html>`), host)
 	if err := chromedp.Run(ctx, chromedp.Navigate(base), chromedp.WaitVisible(".rev-rail-item", chromedp.ByQuery)); err != nil {
 		t.Fatalf("load the framed plan: %v", err)
@@ -225,8 +228,11 @@ func TestBrowser_LedgerTextCannotStyleOrScriptTheRail(t *testing.T) {
 	if !waitJS(ctx, `document.querySelectorAll('.rev-rail-item').length===1&&document.querySelector('.rev-rail').textContent.indexOf('text changed')<0`, 10*time.Second) {
 		t.Fatalf("only the valid item must be listed, painted on the page: %s", evalString(t, ctx, `document.querySelector('.rev-rail').textContent`))
 	}
-	if got := evalString(t, ctx, `document.querySelector('.rev-orphans').textContent`); !strings.Contains(got, "2 problem(s)") {
-		t.Errorf("the two items outside the contract must count as problems reading the review: %q", got)
+	if got := evalString(t, ctx, `document.querySelector('.rev-orphans').textContent`); !strings.Contains(got, "3 problem(s)") {
+		t.Errorf("the three items outside the contract must count as problems reading the review: %q", got)
+	}
+	if got := evalString(t, ctx, `Math.abs(parseFloat(getComputedStyle(document.querySelector('.rev-orphans')).maxHeight)-0.4*document.getElementById('doc').getBoundingClientRect().height)<1`); got != "true" {
+		t.Errorf("the problems banner must stay within the frame's height, not the window's")
 	}
 	if got := evalString(t, ctx, `JSON.stringify([window.pwned===undefined,document.querySelectorAll('.rev-rail img,.rev-rail svg,.rev-orphans img').length,`+
 		`document.querySelectorAll('.fixed,.inset-0').length,document.querySelector('.rev-rail').textContent.indexOf('<img src=x')>=0])`); got != `[true,0,0,true]` {

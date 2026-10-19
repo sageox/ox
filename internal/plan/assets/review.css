@@ -161,7 +161,7 @@ body.rev-framed .rev-toast{left:calc(var(--rev-left) + 16px);bottom:calc(var(--r
 body.rev-framed .rev-sync{left:calc(var(--rev-left) + 16px);bottom:calc(var(--rev-bottom) + 104px);max-width:min(560px,calc(var(--rev-width) - 32px))}
 body.rev-framed .rev-hint{bottom:calc(var(--rev-bottom) + 64px)}
 body.rev-framed .rev-rail{position:fixed;top:calc(var(--rev-top) + 16px);right:calc(var(--rev-right) + 16px);width:min(266px,calc(var(--rev-width) - 32px));max-height:calc(var(--rev-height) - 112px);margin:0}
-body.rev-framed .rev-orphans{top:calc(var(--rev-top) + 14px);left:calc(var(--rev-left) + var(--rev-width) / 2);max-width:min(680px,calc(var(--rev-width) - 32px))}
+body.rev-framed .rev-orphans{top:calc(var(--rev-top) + 14px);left:calc(var(--rev-left) + var(--rev-width) / 2);max-width:min(680px,calc(var(--rev-width) - 32px));max-height:calc(var(--rev-height) * .4)}
 body.rev-framed .rev-offline-bar{top:var(--rev-top);left:var(--rev-left);right:var(--rev-right)}
 
 /* print: the controls are a review surface, never part of the printed plan */

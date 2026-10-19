@@ -54,11 +54,14 @@ one version: the protocol moves with the package. `manifest.json` names the
 protocol a build speaks.
 
 Each release's tarball has a provenance attestation from this repository's
-release workflow. Check a tarball before you pin it:
+release workflow, naming the tag it was built from. Check a tarball before you
+pin it:
 
 ```sh
 npm pack @sageox/plan-review@0.5.0
-gh attestation verify sageox-plan-review-0.5.0.tgz -R sageox/ox
+gh attestation verify sageox-plan-review-0.5.0.tgz -R sageox/ox \
+  --signer-workflow sageox/ox/.github/workflows/plan-review-release.yml \
+  --source-ref refs/tags/packages/plan-review/v0.5.0
 ```
 
 ## Frame a plan
@@ -267,13 +270,13 @@ Edit `src/`, never `internal/plan/assets/review.*`.
 1. Raise `version` in `package.json`, run `make plan-review`, and merge the
    source with the regenerated assets.
 2. Tag that commit `packages/plan-review/v<version>` and push the tag.
-3. Run the **Publish @sageox/plan-review** workflow from `main` with the
-   version. Its build job, which can only read, checks out the tag, refuses
-   one whose commit is not on `main`, runs `make plan-review-check`, and packs
-   the tarball. Its publish job runs none of the build's code: it checks the
-   tarball's SHA-256, attests it, publishes it with no lifecycle scripts under
-   the dist-tag `latest` (`next` for a prerelease), and writes its integrity
-   to the run summary.
+3. Run the **Publish @sageox/plan-review** workflow on the tag:
+   `gh workflow run "Publish @sageox/plan-review" --ref packages/plan-review/v<version>`.
+   Its build job, which can only read, refuses a tag whose commit is not on
+   `main`, runs `make plan-review-check`, and packs the tarball. Its publish
+   job runs none of the build's code: it checks the tarball's SHA-256, attests
+   it, publishes it with no lifecycle scripts under the dist-tag `latest`
+   (`next` for a prerelease), and writes its integrity to the run summary.
 4. After the first publish only, set the package's visibility to *internal*
    in its GitHub settings, and grant read access to each repository that
    installs it.

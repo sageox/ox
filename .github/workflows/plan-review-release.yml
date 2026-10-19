@@ -1,24 +1,21 @@
 name: Publish @sageox/plan-review
 
-# Publishes packages/plan-review to GitHub Packages from the tag
-# packages/plan-review/v<version>. Steps for maintainers are in
-# packages/plan-review/README.md ("Releasing").
+# Publishes packages/plan-review to GitHub Packages. Run it on the release tag:
+#   gh workflow run "Publish @sageox/plan-review" --ref packages/plan-review/v<version>
+# Steps for maintainers are in packages/plan-review/README.md ("Releasing").
 #
 # The package's host controls run in every host page that mounts them, so the
 # job that runs the build's tools (npm ci, esbuild, tsc) holds no write
 # permission, and the job that holds one runs none of the build's code: it
-# checks the tarball's SHA-256, attests it, and publishes it.
+# checks the tarball's SHA-256, attests it, and publishes it. Running on the
+# tag, not on main, makes the attestation name the commit the tarball was
+# built from.
 
 on:
   workflow_dispatch:
-    inputs:
-      version:
-        description: 'Package version (e.g. 0.1.0); the tag packages/plan-review/v<version> must exist'
-        required: true
-        type: string
 
 concurrency:
-  group: plan-review-release-${{ inputs.version }}
+  group: plan-review-release-${{ github.ref_name }}
   cancel-in-progress: false
 
 permissions:
@@ -26,26 +23,28 @@ permissions:
 
 jobs:
   build:
-    # Dispatch from main, so the copy of this workflow that runs is the merged one.
-    if: github.repository == 'sageox/ox' && github.ref == 'refs/heads/main'
+    if: github.repository == 'sageox/ox' && startsWith(github.ref, 'refs/tags/packages/plan-review/v')
     runs-on: ubuntu-latest
     permissions:
       contents: read
     outputs:
+      version: ${{ steps.version.outputs.version }}
       sha256: ${{ steps.pack.outputs.sha256 }}
-    env:
-      VERSION: ${{ inputs.version }}
     steps:
-      - name: Require a release version
+      - name: Read the version from the tag
+        id: version
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
-          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
-            echo "::error::Not a release version: $VERSION"
+          version=${TAG#packages/plan-review/v}
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Not a release tag: $TAG"
             exit 1
           fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: refs/tags/packages/plan-review/v${{ inputs.version }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -53,7 +52,7 @@ jobs:
       - name: Require the tagged commit to be on main
         run: |
           if ! git merge-base --is-ancestor HEAD origin/main; then
-            echo "::error::packages/plan-review/v$VERSION is not on main"
+            echo "::error::$GITHUB_REF_NAME is not on main"
             exit 1
           fi
 
@@ -61,11 +60,13 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Require the tag to carry this version
+      - name: Require the tag to carry its version
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           tagged=$(node -p "require('./packages/plan-review/package.json').version")
           if [ "$tagged" != "$VERSION" ]; then
-            echo "::error::packages/plan-review/v$VERSION holds version $tagged"
+            echo "::error::$GITHUB_REF_NAME holds version $tagged"
             exit 1
           fi
 
@@ -77,6 +78,8 @@ jobs:
       - name: Pack the tarball to publish
         id: pack
         working-directory: packages/plan-review
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           mkdir "$RUNNER_TEMP/pack"
           npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP/pack" > /dev/null
@@ -85,7 +88,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: plan-review-tarball
-          path: ${{ runner.temp }}/pack/sageox-plan-review-${{ inputs.version }}.tgz
+          path: ${{ runner.temp }}/pack/sageox-plan-review-${{ steps.version.outputs.version }}.tgz
           if-no-files-found: error
           retention-days: 7
 
@@ -100,7 +103,7 @@ jobs:
       id-token: write # the Sigstore certificate for the attestation
       attestations: write # store the attestation
     env:
-      VERSION: ${{ inputs.version }}
+      VERSION: ${{ needs.build.outputs.version }}
       SHA256: ${{ needs.build.outputs.sha256 }}
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -109,15 +112,15 @@ jobs:
 
       - name: Require the tarball the build packed
         run: |
-          if ! [[ "$SHA256" =~ ^[0-9a-f]{64}$ ]]; then
-            echo "::error::The build reported no SHA-256"
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ && "$SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::The build reported no version or SHA-256"
             exit 1
           fi
           echo "$SHA256  sageox-plan-review-$VERSION.tgz" | sha256sum --check --strict
 
       - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
-          subject-path: sageox-plan-review-${{ inputs.version }}.tgz
+          subject-path: sageox-plan-review-${{ needs.build.outputs.version }}.tgz
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -139,5 +142,7 @@ jobs:
               "", "- dist-tag: " + process.argv[1], "- integrity: `" + r.integrity + "`",
               "- shasum: `" + r.shasum + "`", "- sha256: `" + process.argv[2] + "`",
               "- protocol: " + m.protocol, "- source_sha256: `" + m.source_sha256 + "`",
-              "- verify: `gh attestation verify sageox-plan-review-" + r.version + ".tgz -R sageox/ox`"].join("\n"));
+              "- verify: `gh attestation verify sageox-plan-review-" + r.version + ".tgz -R sageox/ox" +
+              " --signer-workflow sageox/ox/.github/workflows/plan-review-release.yml" +
+              " --source-ref " + process.env.GITHUB_REF + "`"].join("\n"));
           ' "$tag" "$SHA256" >> "$GITHUB_STEP_SUMMARY"

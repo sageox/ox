@@ -663,6 +663,7 @@
     return (s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
   }
   var STATE_TAG = { addressed: "addressed", verified: "verified", wontfix: "wontfix" };
+  var TEXT_FIELDS = ["section", "label", "quote", "note", "reviewer", "resolutionNote"];
   function glyphFor(id) {
     for (let i = 0; i < STATUS.length; i++) if (STATUS[i].id === id) return STATUS[i].glyph;
     return "◌";
@@ -698,7 +699,7 @@
       committed = /* @__PURE__ */ Object.create(null);
       invalid = 0;
       items.forEach((x) => {
-        if (typeof x.anchor !== "string" || STATUSES.indexOf(x.status) < 0 || STATES.indexOf(x.state) < 0) {
+        if (!x || typeof x.anchor !== "string" || STATUSES.indexOf(x.status) < 0 || STATES.indexOf(x.state) < 0 || TEXT_FIELDS.some((k) => x[k] !== void 0 && typeof x[k] !== "string")) {
           invalid++;
           return;
         }
