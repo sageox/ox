@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -188,5 +190,81 @@ func TestLogout_KeepsLoginSavedDuringLogout(t *testing.T) {
 	assert.NotContains(t, output, "Logged out from", "a live login is still on disk")
 	mu.Lock()
 	assert.Equal(t, []string{envToken, "s1-refresh"}, revoked, "only the credentials logout found are revoked")
+	mu.Unlock()
+}
+
+// TestLogout_LoginChangedOnOneEndpointStillLogsOutTheRest drives `ox logout
+// --force` across two endpoints where the login on the first one changes
+// during logout.
+// Failure prevented: the changed login stopped the loop and left the second
+// endpoint logged in, or the second endpoint's clean logout cleared the
+// failure, so logout exited 0 with a live, unrevoked login on disk.
+func TestLogout_LoginChangedOnOneEndpointStillLogsOutTheRest(t *testing.T) {
+	const envToken = "oxp_test_4bDZfN"
+	var mu sync.Mutex
+	var revoked []string
+	var changedEP string
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != auth.RevokeEndpoint || r.Method != http.MethodPost {
+			http.NotFound(w, r)
+			return
+		}
+		assert.NoError(t, r.ParseForm())
+		tok := r.PostForm.Get("token")
+		mu.Lock()
+		revoked = append(revoked, tok)
+		ep := changedEP
+		mu.Unlock()
+		if tok == "changed-refresh" {
+			assert.NoError(t, auth.SaveTokenForEndpoint(ep, &auth.StoredToken{AccessToken: "changed2-access", RefreshToken: "changed2-refresh", ExpiresAt: time.Now().Add(time.Hour)}))
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	eps := []string{
+		endpoint.NormalizeEndpoint(testguard.SafeMockServer(t, handler).URL),
+		endpoint.NormalizeEndpoint(testguard.SafeMockServer(t, handler).URL),
+	}
+	slices.Sort(eps)
+	cleanEP := eps[1]
+	mu.Lock()
+	changedEP = eps[0] // logout runs in sorted order, so the change comes first
+	mu.Unlock()
+
+	t.Chdir(t.TempDir()) // logout strips PATs from the current repo's remotes
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("OX_XDG_DISABLE", "")
+	t.Setenv("OX_GIT_CREDENTIALS_FILE", filepath.Join(t.TempDir(), "git-credentials.json"))
+	// SAGEOX_TOKEN shadows the first endpoint's stored login, which opens the
+	// window: the stored login is revoked in a second request.
+	t.Setenv("SAGEOX_ENDPOINT", eps[0])
+	t.Setenv(auth.EnvVarToken, envToken)
+	require.NoError(t, auth.SaveTokenForEndpoint(eps[0], &auth.StoredToken{AccessToken: "changed-access", RefreshToken: "changed-refresh", ExpiresAt: time.Now().Add(time.Hour)}))
+	require.NoError(t, auth.SaveTokenForEndpoint(cleanEP, &auth.StoredToken{AccessToken: "clean-access", RefreshToken: "clean-refresh", ExpiresAt: time.Now().Add(time.Hour)}))
+
+	prevForce, prevAll, prevEndpoint := logoutForce, logoutAll, logoutEndpoint
+	logoutForce, logoutAll, logoutEndpoint = true, false, ""
+	t.Cleanup(func() { logoutForce, logoutAll, logoutEndpoint = prevForce, prevAll, prevEndpoint })
+
+	var runErr error
+	output := captureStdoutForPlanCLI(t, func() { runErr = logoutCmd.RunE(logoutCmd, nil) })
+
+	changedLine := strings.Index(output, "Revoked on the server for "+eps[0]+", but the login changed during logout and was kept")
+	cleanLine := strings.Index(output, "Logged out from "+cleanEP)
+	require.GreaterOrEqual(t, changedLine, 0, "output: %s", output)
+	require.Greater(t, cleanLine, changedLine, "the second endpoint must still be logged out after the first one's login changed; output: %s", output)
+	require.Error(t, runErr, "a later clean logout must not clear the kept login's failure; output: %s", output)
+	assert.Contains(t, runErr.Error(), "run `ox logout` again")
+
+	t.Setenv(auth.EnvVarToken, "")
+	kept, err := auth.GetTokenForEndpoint(eps[0])
+	require.NoError(t, err)
+	if assert.NotNil(t, kept, "the login saved during logout must be kept") {
+		assert.Equal(t, "changed2-refresh", kept.RefreshToken)
+	}
+	clean, err := auth.GetTokenForEndpoint(cleanEP)
+	require.NoError(t, err)
+	assert.Nil(t, clean, "the second endpoint's login must be removed")
+	mu.Lock()
+	assert.ElementsMatch(t, []string{envToken, "changed-refresh", "clean-refresh"}, revoked)
 	mu.Unlock()
 }

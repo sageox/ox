@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -143,6 +144,8 @@ func logoutOutcome(ep string, status auth.RevocationStatus, localErr error) (lin
 
 // collectLogoutEndpoints retains usable environment credentials even if auth.json
 // cannot be read, so a storage error does not prevent revoking credentials we can still identify.
+// The result is sorted: auth.json is a map, and an unsorted list numbered the
+// selection prompt and ordered the logouts differently on every run.
 func collectLogoutEndpoints() ([]string, error) {
 	endpoints, listErr := auth.ListEndpoints()
 	known := make(map[string]struct{}, len(endpoints))
@@ -155,6 +158,7 @@ func collectLogoutEndpoints() ([]string, error) {
 			known[ep] = struct{}{}
 		}
 	}
+	slices.Sort(endpoints)
 	return endpoints, listErr
 }
 
