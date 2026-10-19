@@ -768,12 +768,9 @@
       port.send({ type: "paint", items: paintItems() });
     }
     function onPlaced(items) {
-      placed = items;
       const seen = /* @__PURE__ */ Object.create(null);
       seen[WHOLE.a] = true;
-      placed.forEach((p) => {
-        seen[p.anchor] = true;
-      });
+      placed = items.filter((p) => !seen[p.anchor] && (seen[p.anchor] = true));
       unplaced = Object.keys(committed).concat(Object.keys(ds)).filter((a, i, all) => !seen[a] && all.indexOf(a) === i);
       const orphans = [];
       Object.keys(committed).forEach((a) => {
@@ -858,11 +855,7 @@
         }
       }
       add(null, WHOLE.a, WHOLE.section, WHOLE.label, "");
-      const nth = /* @__PURE__ */ Object.create(null);
-      placed.forEach((p) => {
-        const k = nth[p.anchor] = nth[p.anchor] === void 0 ? 0 : nth[p.anchor] + 1;
-        add({ anchor: p.anchor, nth: k }, p.anchor, p.section, p.label, p.quote || "");
-      });
+      placed.forEach((p) => add({ anchor: p.anchor, nth: 0 }, p.anchor, p.section, p.label, p.quote || ""));
       unplaced.forEach((a) => {
         const m = ds[a];
         const its = (committed[a] || []).concat(m ? [m] : []);

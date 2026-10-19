@@ -213,11 +213,12 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
     port.send({ type: 'paint', items: paintItems() }); // answered by 'placed'
   }
   function onPlaced(items: Placed[]) {
-    placed = items;
     // the whole plan names nothing on the page, so it is never unplaced
     const seen: Record<string, boolean> = Object.create(null);
     seen[WHOLE.a] = true;
-    placed.forEach((p) => { seen[p.anchor] = true; });
+    // one row per comment, however often the page repeats its anchor: the
+    // plan's own scripts can send this answer with 10,000 copies of one
+    placed = items.filter((p) => !seen[p.anchor] && (seen[p.anchor] = true));
     // comments whose text is gone from the page — rewritten by the agent, or
     // edited while this tab was away — keep a rail row, so an addressed one can
     // still be accepted or reopened
@@ -288,11 +289,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
       }
     }
     add(null, WHOLE.a, WHOLE.section, WHOLE.label, '');
-    const nth: Record<string, number> = Object.create(null);
-    placed.forEach((p) => {
-      const k = nth[p.anchor] = (nth[p.anchor] === undefined ? 0 : nth[p.anchor] + 1);
-      add({ anchor: p.anchor, nth: k }, p.anchor, p.section, p.label, p.quote || '');
-    });
+    placed.forEach((p) => add({ anchor: p.anchor, nth: 0 }, p.anchor, p.section, p.label, p.quote || ''));
     unplaced.forEach((a) => {
       const m = ds[a];
       const its: Array<CommittedItem | Mark> = (committed[a] || []).concat(m ? [m as unknown as CommittedItem] : []);

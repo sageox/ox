@@ -187,6 +187,7 @@ The controls hold to that:
 - Nothing the frame sends (`target`, `dismiss`, `key`, `refused`) closes or
   replaces a note the reviewer has typed into; their own Esc, Save and Delete
   still do.
+- An anchor the frame places more than once is listed once in the rail.
 - A committed item whose `status` or `state` is outside `STATUSES` or
   `STATES` is left out and counted with `problems`; Ledger text is escaped and
   never becomes a class name.

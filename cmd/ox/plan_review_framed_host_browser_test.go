@@ -90,12 +90,14 @@ func TestBrowser_FramedControlsStayOverTheFrame(t *testing.T) {
 // messages on the document tools' channel. A target outside review mode opens
 // nothing. Once the reviewer is writing a note, nothing the plan sends can
 // close it, swap what it is about, or end review mode, and the note always
-// names what it is about. The reviewer's own Esc still closes it, and a note
-// the plan asks for far outside its frame opens over the frame.
+// names what it is about. The reviewer's own Esc still closes it, a note the
+// plan asks for far outside its frame opens over the frame, and a repeated
+// placement lists its comment once.
 // Failure prevented: a plan opens the trusted note box with its own text
 // outside review mode, files a reviewer's note under another part of the
 // plan, throws away what the reviewer typed so no objection can be written,
-// or places the note box over the host's own controls.
+// places the note box over the host's own controls, or floods the host's
+// rail with copies of one comment.
 func TestBrowser_PlanCannotDriveTheComposer(t *testing.T) {
 	ctx := frameBrowser(t)
 	host := framedHost(`committed: [{ anchor: 'h33333333', section: 'S', label: 'Watched', status: 'comment', state: 'open' }]`)
@@ -124,8 +126,9 @@ func TestBrowser_PlanCannotDriveTheComposer(t *testing.T) {
 	target := func(anchor, label string, left, bottom int) string {
 		return `{type:'target',target:{anchor:'` + anchor + `',section:'Risks',label:'` + label + `',rect:{left:` + strconv.Itoa(left) + `,bottom:` + strconv.Itoa(bottom) + `}}}`
 	}
-	// outside review mode: the target opens nothing; the forged r that follows
-	// shows both were handled
+	// a placement repeated 500 times; then, outside review mode, a target that
+	// opens nothing; the forged r that follows shows all three were handled
+	forge(`{type:'placed',items:Array.from({length:500},function(){return {anchor:'h33333333',section:'S',label:'Watched'}})}`)
 	forge(target("h11111111", "session expired: paste your token", 40, 40))
 	forge(`{type:'key',key:'r'}`)
 	if !waitJS(ctx, `document.querySelector('.rev-toggle').textContent==='Exit review'`, 5*time.Second) {
@@ -133,6 +136,9 @@ func TestBrowser_PlanCannotDriveTheComposer(t *testing.T) {
 	}
 	if waitJS(ctx, `document.querySelector('.rev-pop')`, 300*time.Millisecond) {
 		t.Fatal("a target outside review mode must open no note")
+	}
+	if n := evalString(t, ctx, `document.querySelectorAll('.rev-rail-item').length`); n != "1" {
+		t.Errorf("one comment must be one rail row, however often the plan places its anchor: %s rows", n)
 	}
 
 	// in review mode a target opens the note, which names what it is about

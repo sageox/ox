@@ -2,9 +2,9 @@
   "package": "@sageox/plan-review",
   "version": "0.5.0",
   "protocol": 2,
-  "source_sha256": "ec2d19deb5810ad7cfcf14a748beee9e5718d3a92cfae92e82cb924fc9d6a00d",
+  "source_sha256": "fcd1fff4563d2cbee03af17265cb9c616831671571b1ba9ce5363bdff15c8cbc",
   "files": {
     "review.css": "94be8848807443944617ec440f08b8eb6657e372dfb929a99892feea11d5028e",
-    "review.js": "a3b407d3d5eada70c798af858bf48b6d531864b159927db0d9b6e35598b62f42"
+    "review.js": "9f9c3033a962994bd39c2f7184694f0c59b82141479536ce7528478d68e086db"
   }
 }
