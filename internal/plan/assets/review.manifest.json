@@ -1,8 +1,8 @@
 {
   "package": "@sageox/plan-review",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "protocol": 2,
-  "source_sha256": "2008f2bcc73d7b07bcac0d56a7232029b872c2e3c7d10b6319a370ecd7a4a036",
+  "source_sha256": "286ef665ba6f6f1b11ed58362150dec309d224d348ada6d912a9d8103afc0a80",
   "files": {
     "review.css": "fc7431c4102bf198a1d86ebb131f1eb4034c64ceb6d598ca228a5654dfd52d10",
     "review.js": "899d68c026fe4459d2838bc908c7f80e8e41464177680283fb4bd258d137e836"

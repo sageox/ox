@@ -44,3 +44,22 @@ test('the document tools go before the last </body>, verbatim', () => {
     '<body><script>var s = "</body>";</script><p>x</p><script data-instance="load-0001">tools("$&")</script></body></html>');
   assert.throws(() => framePlan(page, { documentTools: true, instance: '"><x' }));
 });
+
+// Failure prevented: an unterminated <script> tag pins the host's thread while
+// framePlan backtracks (the patterns this replaced took ~45 s on 1 MiB).
+test('an unterminated script tag frames in linear time', () => {
+  for (const run of [' type=module', ` src="${CDN}/dist/mermaid.js"`]) {
+    const page = DIAGRAM + '<script' + run.repeat(Math.ceil((1 << 20) / run.length));
+    const start = performance.now();
+    assert.equal(framePlan(page, { documentTools: true }), page + '<script>' + TOOLS + '</script>');
+    const ms = performance.now() - start;
+    assert.ok(ms < 1000, `${run.trim()}: ${Math.round(ms)} ms on 1 MiB`);
+  }
+});
+
+// Failure prevented: a dotted capital I lengthens the lowercased page, the
+// splice lands inside </body>, and the tools print as page text.
+test('the tools splice before </body> after a dotted capital I', () => {
+  const page = '<body><p>İİİ</p></body></html>';
+  assert.equal(framePlan(page, { documentTools: true }), '<body><p>İİİ</p><script>' + TOOLS + '</script></body></html>');
+});

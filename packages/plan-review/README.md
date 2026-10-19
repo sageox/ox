@@ -46,7 +46,7 @@ settings grant your repository read access.
 Pin the exact version and commit your lockfile:
 
 ```sh
-npm install --save-exact @sageox/plan-review@0.4.0
+npm install --save-exact @sageox/plan-review@0.4.1
 ```
 
 Pinning matters because the host end and the document script must come from
