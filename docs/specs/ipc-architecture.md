@@ -284,6 +284,9 @@ Each workspace (repo) gets its own daemon instance:
 │     every few seconds. Quiet past it = ErrCheckoutInProgress: a Ledger clone   │
 │     goes on in the daemon, so doctor reports it as cloning in the background.  │
 │     A team context has the same 60s in the daemon, so doctor reports failure.  │
+│  Already running: another clone of the path holds its pre-clone lock, so the   │
+│     daemon starts none and answers at once with in_progress (no clone slot is  │
+│     taken). Client returns ErrCloneAlreadyRunning; doctor reports cloning.     │
 │  🔶 CRITICAL PATH: If fails, CLI falls back to direct git clone               │
 │     (see cmd/ox/doctor_git_repos.go:cloneViaDaemon)                            │
 │                                                                                 │
@@ -471,6 +474,11 @@ Each workspace (repo) gets its own daemon instance:
   }
 }
 ```
+
+When another clone of the same path is already running, the daemon starts
+none and answers at once with `"in_progress": true` (neither `already_exists`
+nor `cloned`). `Client.Checkout` turns it into `ErrCloneAlreadyRunning`, which
+wraps `ErrCheckoutInProgress`.
 
 **If this fails**: Daemon's anti-entropy process will detect the missing repo and clone it on next cycle. User experiences delay, not failure.
 

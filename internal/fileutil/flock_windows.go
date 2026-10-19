@@ -11,4 +11,7 @@ import "os"
 // acquireInProcess) is the only guarantee Windows callers get.
 func tryFlock(*os.File) error { return nil }
 
+// flockContended is never true: tryFlock never fails on Windows.
+func flockContended(error) bool { return false }
+
 func unlockFlock(*os.File) error { return nil }

@@ -484,7 +484,11 @@ func fixMissingRepos(gitRoot string, localCfg *config.LocalConfig) checkResult {
 			continue
 		}
 
-		if err := cloneViaDaemon(tc.cloneURL, tcPath, "team-context", projectEndpoint); err != nil {
+		if err := cloneViaDaemon(tc.cloneURL, tcPath, "team-context", projectEndpoint); errors.Is(err, daemon.ErrCheckoutInProgress) {
+			cloning++
+			fmt.Println()
+			continue
+		} else if err != nil {
 			fmt.Printf("    Clone failed: %v\n", err)
 			skipped++
 			continue
@@ -635,6 +639,12 @@ func cloneViaDaemon(cloneURL, targetPath, repoType, endpointURL string) error {
 
 		progress := &checkoutProgressPrinter{}
 		result, err := client.Checkout(payload, progress.print)
+		if errors.Is(err, daemon.ErrCloneAlreadyRunning) {
+			// the daemon started nothing: an earlier clone of this repo is
+			// still running, and lands on its own
+			fmt.Println(alreadyCloningNote)
+			return err
+		}
 		if errors.Is(err, daemon.ErrCheckoutInProgress) {
 			if repoType == "team-context" {
 				// its clone has the same 60s budget in the daemon, so a quiet
@@ -691,14 +701,27 @@ func cloneViaDaemon(cloneURL, targetPath, repoType, endpointURL string) error {
 		gitserver.ValidateTeamContextClone(targetPath, result.ManifestConfig)
 	} else {
 		// ledger: full clone, on a backstop and curl's stall check, not ctx
-		if err := directCloneLedger(cloneURL, targetPath, endpointURL); err != nil {
+		cloned, err := directCloneLedger(cloneURL, targetPath, endpointURL)
+		if errors.Is(err, daemon.ErrCloneAlreadyRunning) {
+			fmt.Println(alreadyCloningNote)
+			return err
+		}
+		if err != nil {
 			return fmt.Errorf("direct clone failed: %w", err)
+		}
+		if !cloned {
+			fmt.Println("    Repository already exists.")
+			return nil
 		}
 	}
 
 	fmt.Println("    Cloned successfully (direct).")
 	return nil
 }
+
+// alreadyCloningNote is what doctor prints for a repo another ox process is
+// already cloning: the daemon's background clone, or an earlier doctor run.
+const alreadyCloningNote = "    Already being cloned by another ox process; it continues in the background."
 
 // Budgets for a direct clone, used when the daemon is not running. Vars so
 // tests can shrink them.
@@ -726,24 +749,84 @@ var (
 // are not translated, so it holds in any locale.
 const curlLowSpeedAbort = "Operation too slow"
 
-// directCloneLedger clones a Ledger without the daemon, on the budget the
-// daemon gives one: a long backstop, with curl's stall check ending a dead
-// link. A full Ledger clone can run for many minutes, so doctor prints how
-// much has arrived while it does.
-func directCloneLedger(cloneURL, targetPath, endpointURL string) error {
+// directCloneLedger clones a Ledger without the daemon, the way the daemon
+// does. The clone runs under the pre-clone lock for targetPath, so a daemon
+// that starts meanwhile, or a second doctor run, reports it as already
+// cloning instead of starting another. It downloads into a temp sibling and
+// is renamed into place only once HEAD resolves, so a clone that dies
+// mid-download (kill -9, a laptop that sleeps) leaves nothing at targetPath
+// for anything to take for a Ledger: no half-written .git whose HEAD points
+// at refs/heads/.invalid.
+//
+// The budget is the daemon's too: a long backstop, with curl's stall check
+// ending a dead link. A full Ledger clone can run for many minutes, so doctor
+// prints how much has arrived while it does.
+//
+// cloned is false with a nil error when a complete Ledger was already at
+// targetPath once the lock was held. The error is ErrCloneAlreadyRunning when
+// another ox process holds the lock.
+func directCloneLedger(cloneURL, targetPath, endpointURL string) (cloned bool, err error) {
+	acquired, err := gitutil.TryWithPreCloneLock(targetPath, func() error {
+		// a peer that held the lock may have finished while doctor looked
+		if _, statErr := os.Stat(filepath.Join(targetPath, ".git")); statErr == nil {
+			return nil
+		}
+		if err := clearCloneTarget(targetPath); err != nil {
+			return err
+		}
+		cloned = true
+		return directCloneLedgerLocked(cloneURL, targetPath, endpointURL)
+	})
+	if err != nil {
+		return false, err
+	}
+	if !acquired {
+		return false, daemon.ErrCloneAlreadyRunning
+	}
+	return cloned, nil
+}
+
+// clearCloneTarget readies targetPath to receive a renamed clone, before
+// anything downloads: an empty directory is removed, a CodeDB cache-only
+// skeleton is kept (MoveCloneIntoPlace adopts it), and any other content is
+// refused, since the clone could never be renamed onto it.
+func clearCloneTarget(targetPath string) error {
+	entries, err := os.ReadDir(targetPath)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return nil
+	case err != nil:
+		return fmt.Errorf("read clone target: %w", err)
+	case len(entries) == 0:
+		return os.Remove(targetPath)
+	case gitserver.IsCacheOnlyDir(targetPath):
+		return nil
+	}
+	return fmt.Errorf("%w: %s", gitserver.ErrPathExists, targetPath)
+}
+
+// directCloneLedgerLocked is directCloneLedger's clone, with the pre-clone
+// lock held.
+func directCloneLedgerLocked(cloneURL, targetPath, endpointURL string) error {
 	budget := directLedgerCloneTimeout
 	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 
+	tempPath := fmt.Sprintf("%s.tmp-%d", targetPath, time.Now().UnixNano())
+	defer func() { _ = os.RemoveAll(tempPath) }() // no-op once renamed away
+
 	var output bytes.Buffer
-	stopProgress := watchDirectClone(targetPath, time.Now())
-	err := gitserver.CloneFromURLWithEndpoint(ctx, cloneURL, targetPath, endpointURL,
+	stopProgress := watchDirectClone(tempPath, time.Now())
+	err := gitserver.CloneFromURLWithEndpoint(ctx, cloneURL, tempPath, endpointURL,
 		&gitserver.CheckoutOptions{Quiet: true, Output: &output})
 	received := stopProgress()
 	if err != nil {
 		return directLedgerCloneError(ctx, budget, received, output.String(), err)
 	}
-	return nil
+	if err := gitserver.VerifyClone(ctx, tempPath); err != nil {
+		return err
+	}
+	return gitserver.MoveCloneIntoPlace(tempPath, targetPath)
 }
 
 // watchDirectClone samples how large the clone at dir has grown while git

@@ -385,3 +385,73 @@ func TestWithFileLockTimeout_OpenFileFails(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "open lock file")
 }
+
+// TestTryWithFileLock_HeldLockReturnsAtOnce verifies a held lock is reported
+// as held, immediately and without running fn, whether the holder is another
+// goroutine or another process; and that a free lock runs fn and is released.
+// Failure prevented: a caller that only needs to know "is someone already on
+// this" waits out a holder that may run for many minutes (a Ledger clone),
+// tying up whatever it holds meanwhile.
+func TestTryWithFileLock_HeldLockReturnsAtOnce(t *testing.T) {
+	mustNotRun := func() error { t.Error("fn ran while another holder had the lock"); return nil }
+
+	t.Run("held by a goroutine in this process", func(t *testing.T) {
+		target := filepath.Join(t.TempDir(), "in-process.dat")
+		release, held := make(chan struct{}), make(chan struct{})
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			_ = WithFileLock(context.Background(), target, func() error { close(held); <-release; return nil })
+		}()
+		<-held
+		defer func() { close(release); <-done }()
+
+		start := time.Now()
+		acquired, err := TryWithFileLock(target, mustNotRun)
+		require.NoError(t, err)
+		assert.False(t, acquired)
+		assert.Less(t, time.Since(start), time.Second, "a held lock must be reported at once, not waited out")
+	})
+
+	t.Run("held by another process", func(t *testing.T) {
+		if !crossProcessFlockAvailable() {
+			t.Skip("cross-process flock not available on this platform")
+		}
+		target := filepath.Join(t.TempDir(), "cross-process.dat")
+		holder, release := startLockHolder(t, target)
+		defer release()
+		<-holder.acquired
+
+		acquired, err := TryWithFileLock(target, mustNotRun)
+		require.NoError(t, err, "contention is not a lock failure")
+		assert.False(t, acquired)
+	})
+
+	t.Run("free lock runs fn and releases it", func(t *testing.T) {
+		target := filepath.Join(t.TempDir(), "free.dat")
+		fnErr := errors.New("fn's own error")
+		acquired, err := TryWithFileLock(target, func() error { return fnErr })
+		assert.True(t, acquired)
+		require.ErrorIs(t, err, fnErr, "fn's error is returned as is")
+
+		err = WithFileLockTimeout(context.Background(), target, 100*time.Millisecond, func() error { return nil })
+		require.NoError(t, err, "the lock must be released once fn returns")
+	})
+}
+
+// TestTryWithFileLock_OpenFailureIsAnError verifies a lock that cannot be
+// tried is reported as an error, not as held.
+// Failure prevented: a broken lock directory renders as "someone else is on
+// it", so the work is skipped forever and nothing announces why.
+func TestTryWithFileLock_OpenFailureIsAnError(t *testing.T) {
+	notADir := filepath.Join(t.TempDir(), "not-a-directory")
+	require.NoError(t, os.WriteFile(notADir, []byte("x"), 0o644))
+	t.Setenv("TMPDIR", notADir)
+
+	acquired, err := TryWithFileLock("/some/target", func() error {
+		return errors.New("must not run — the lock could not have been acquired")
+	})
+	assert.False(t, acquired)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "open lock file")
+}

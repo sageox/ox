@@ -117,8 +117,9 @@ func (s *SyncScheduler) cloneInBackground(ctx context.Context, cloneURL, repoPat
 			return
 		}
 
-		// ox-baz5.6: another actor is already cloning this exact path (a
-		// concurrent trigger lost the pre-clone lock race) — same "not our
+		// A clone of this path already running comes back as
+		// result.InProgress (below), not as an error. This still catches an
+		// error that wraps a lock timeout or a context error — same "not our
 		// fault, just wait" shape as the semaphore case above, not a real
 		// clone failure worth escalating backoff over.
 		if gitutil.IsPreCloneLockBusy(err) {
@@ -179,6 +180,13 @@ func (s *SyncScheduler) cloneInBackground(ctx context.Context, cloneURL, repoPat
 		s.logger.Warn("clone retry scheduled",
 			"type", repoType, "attempts", newAttempts, "backoff", backoff,
 			"permanent", permanent, "next_retry", nextRetry)
+		return
+	}
+
+	// another actor is already cloning this exact path (ox-baz5.6): not a
+	// clone failure, so no backoff; the next cycle sees its result
+	if result.InProgress {
+		s.logger.Info("another clone already in progress for this path, will retry next cycle", "type", repoType, "path", repoPath)
 		return
 	}
 
