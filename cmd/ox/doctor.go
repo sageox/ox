@@ -1377,6 +1377,9 @@ var ledgerGitHealthOrder = []string{
 	CheckSlugLedgerStuckOperation,
 	CheckSlugLedgerCleanWorkdir,
 	CheckSlugLedgerBranchStatus,
+	// after branch-status, whose push can land review records still waiting
+	// in the retry queue, so their entries are cleared instead of reported.
+	CheckSlugPlanPendingWrites,
 	// ox-eeqi: post-migration the PAT lives in the credential helper, not the
 	// origin URL. Flags + strips any leftover oauth2:TOKEN@ that survived from a
 	// pre-eeqi clone, and catches the silent-success trap of a bare origin URL

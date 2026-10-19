@@ -15,7 +15,7 @@ import (
 // rendered from its structured data (internal/planhero; never a browser
 // screenshot, so ox carries no headless-browser/Chromium dependency) — and is
 // the PRIMARY producer for plan gallery thumbnails. Wired into
-// savePlanArtifacts (plan.go), between plan.Save and commitPlanToLedger, so
+// savePlanArtifacts (plan.go), between plan.Save and the save's commit, so
 // the existing `git add --sparse <dir>` there sweeps hero.svg into the same
 // commit as plan.html with no separate commit path.
 

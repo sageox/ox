@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -19,6 +20,7 @@ import (
 	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/gitutil"
+	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/plan"
 	"github.com/sageox/ox/pkg/planreview"
 )
@@ -72,16 +74,18 @@ var planLedgerPathFor = func(gitRoot string) (string, error) {
 	return ledgerPath, nil
 }
 
-// commitPlanToLedger durably commits a captured plan directory to the ledger
-// and pushes it. This closes a real gap: plan.Save only materializes files into
-// the ledger working tree, and commitAndPushLedger stages only sessions/<name>/
-// — so without this, saved plans sit dirty-but-uncommitted indefinitely.
+// commitPlanToLedger commits and pushes session stop's change to a plan, its
+// meta.json, as the lifecycle verbs commit theirs: planEventFiles and nothing
+// else in the dir, so an author's unsaved plan.md stays out. While a whole-dir
+// retry is pending for the plan, its latest save is not yet shared, so it
+// commits nothing: that retry commits meta.json with the rest of the save, and
+// the stop never publishes part of it. Saves and lifecycle events commit their
+// own files and, in a Ledger checkout, leave a retry marker when they cannot.
 //
-// Commit AND push are synchronous (the chosen durability model: the plan is on
-// the remote before the caller returns). On any failure a pending marker is
-// recorded so `ox agent prime` retries the push later through the full gate
-// stack (see plan_push_pending.go) — the error is still returned for callers
-// to log.
+// Commit AND push are synchronous. On any failure a pending marker owing
+// planEventFiles is recorded so `ox agent prime` retries the push later
+// through the full gate stack (see plan_push_pending.go); the error is still
+// returned for callers to log.
 func commitPlanToLedger(gitRoot, planDir string) error {
 	ledgerPath, err := planLedgerPathFor(gitRoot)
 	if err != nil {
@@ -93,10 +97,17 @@ func commitPlanToLedger(gitRoot, planDir string) error {
 	if !gitutil.IsGitRepo(ledgerPath) {
 		return fmt.Errorf("ledger %s is not a git checkout", ledgerPath)
 	}
+	rel, err := ledgerRelPath(ledgerPath, planDir)
+	if err != nil {
+		return err
+	}
+	if m, err := readPlanPushMarker(planPushMarkerPath(ledgerPath, rel)); err == nil && len(m.Files) == 0 {
+		return nil
+	}
 	ctx := context.Background()
 	started := time.Now()
-	err = commitAndPushPlanDir(ctx, ledgerPath, planDir)
-	recordPlanPushOutcome(ctx, ledgerPath, planDir, started, err)
+	err = commitAndPushPlanDir(ctx, ledgerPath, planDir, planEventFiles...)
+	recordPlanPushOutcome(ctx, ledgerPath, planDir, started, err, planEventFiles...)
 	return err
 }
 
@@ -114,18 +125,29 @@ func commitPlanToLedger(gitRoot, planDir string) error {
 //
 // Add+commit run under gitutil.WithRepoLock (cross-process) and planCommitMu
 // (in-process, held through the push as well). The push runs outside the repo
-// lock because PushWithRetry takes it itself when it must pull.
+// lock because PushWithRetry takes it itself when it must pull. A whole-dir
+// commit uploads a plan.html an earlier upload left plain before taking
+// either lock (see planUploads); while that page is still not stored, it
+// commits the rest of the dir and returns an error, so the retry stays owed.
 func commitAndPushPlanDir(ctx context.Context, ledgerPath, planDir string, files ...string) error {
-	planCommitMu.Lock()
-	defer planCommitMu.Unlock()
-
 	rel, err := ledgerRelPath(ledgerPath, planDir)
 	if err != nil {
 		return err
 	}
+	var up planUploads
+	if len(files) == 0 && plan.HasLargePlainHTML(planDir) {
+		page, err := os.ReadFile(filepath.Join(planDir, planHTMLFileName))
+		if err != nil {
+			return fmt.Errorf("read %s awaiting upload: %w", planHTMLFileName, err)
+		}
+		up = uploadPlanPages(findGitRoot(), page)
+	}
+
+	planCommitMu.Lock()
+	defer planCommitMu.Unlock()
 	err = gitutil.WithRepoLock(ctx, ledgerPath, func() error {
 		if len(files) == 0 {
-			return commitPlanDirLocked(ctx, ledgerPath, planDir, "")
+			return commitPlanDirLocked(ctx, ledgerPath, planDir, "", up.refs...)
 		}
 		return commitPlanPathsLocked(ctx, ledgerPath, "plan: "+filepath.Base(planDir), rel, files)
 	})
@@ -136,6 +158,9 @@ func commitAndPushPlanDir(ctx context.Context, ledgerPath, planDir string, files
 	// may be the one still waiting on a failed push.
 	if err := pushLedger(ctx, ledgerPath); err != nil {
 		return fmt.Errorf("push plan %s: %w", rel, err)
+	}
+	if len(files) == 0 && plan.HasLargePlainHTML(planDir) {
+		return fmt.Errorf("%s is awaiting upload: %w", planHTMLFileName, up.failure())
 	}
 	return nil
 }
@@ -566,11 +591,59 @@ func ledgerRelPath(ledgerPath, planDir string) (string, error) {
 	return filepath.ToSlash(rel), nil
 }
 
+// planUploads is what a plan write uploaded to the LFS store before taking the
+// Ledger's repo lock. An upload is network I/O bounded only by the LFS client's
+// timeouts, and while the lock is held the daemon's sync skips its cycles and
+// other Ledger writes give up after gitutil.RepoLockTimeout, so no upload runs
+// under it. Under the lock, plan.PointerizeHTML swaps in the pointer for a page
+// whose bytes match one of refs.
+type planUploads struct {
+	refs    []lfs.UploadedRef
+	err     error // the first upload that failed
+	noStore bool  // no LFS client could be built, so nothing was uploaded
+}
+
+// errPlanHTMLChanged: plan.html no longer holds the bytes uploaded for it, as
+// when another save of the plan landed between the upload and the lock.
+var errPlanHTMLChanged = errors.New("plan.html changed after its upload")
+
+var errNoContentStore = errors.New("no content store is reachable")
+
+// failure is why a page these uploads were made for is not stored as a
+// pointer.
+func (up planUploads) failure() error {
+	switch {
+	case up.err != nil:
+		return up.err
+	case up.noStore:
+		return errNoContentStore
+	}
+	return errPlanHTMLChanged
+}
+
+// uploadPlanPages uploads each of pages that is above the LFS threshold.
+func uploadPlanPages(gitRoot string, pages ...[]byte) planUploads {
+	client := planLFSClientFn(gitRoot)
+	up := planUploads{noStore: client == nil}
+	for _, page := range pages {
+		ref, ok, err := planUploadHTML(client, page)
+		if err != nil {
+			slog.Warn("plan: plan.html upload failed", "error", err)
+		}
+		if ok {
+			up.refs = append(up.refs, ref)
+		}
+		up.err = cmp.Or(up.err, err)
+	}
+	return up
+}
+
 // commitPlanDirLocked stages one plan dir and commits it through
 // commitPlanSnapshot, for a caller that holds the repo lock. msgPrefix
 // defaults to "plan: ". "Nothing to commit" is success (an idempotent
-// re-save).
-func commitPlanDirLocked(ctx context.Context, ledgerPath, planDir, msgPrefix string) error {
+// re-save). A large plain plan.html becomes a pointer when uploaded holds its
+// bytes, and is otherwise left out of the commit, awaiting upload.
+func commitPlanDirLocked(ctx context.Context, ledgerPath, planDir, msgPrefix string, uploaded ...lfs.UploadedRef) error {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), lockedCommitTimeout)
 	defer cancel()
 	rel, err := ledgerRelPath(ledgerPath, planDir)
@@ -588,10 +661,14 @@ func commitPlanDirLocked(ctx context.Context, ledgerPath, planDir, msgPrefix str
 	gitserver.EnsureGitignoreBeforeCommitCtx(ctx, ledgerPath)
 	// --sparse: ledger repos use sparse-checkout (cone mode).
 	addArgs := []string{"add", "--sparse", "--", rel}
-	if planHTMLAwaitingUpload(planDir) {
-		// a large plain plan.html left by a failed upload must never be committed:
-		// it would bury multi-megabyte HTML in history and the pointer retry would
-		// then find nothing to dehydrate
+	if _, err := plan.PointerizeHTML(planDir, uploaded...); err != nil {
+		slog.Warn("plan: plan.html pointer not written", "error", err, "dir", planDir)
+	}
+	if plan.HasLargePlainHTML(planDir) {
+		// a large plain plan.html (a failed upload, or no store reachable) must
+		// never be committed: it would bury multi-megabyte HTML in history and
+		// the pointer retry would then find nothing to dehydrate
+		slog.Warn("plan: plan.html is awaiting upload, leaving it out of the commit", "dir", planDir)
 		addArgs = append(addArgs, ":(exclude)"+rel+"/"+planHTMLFileName)
 		// an earlier add may already have staged the plain page; the exclude
 		// above does not touch the index, so unstage it explicitly
@@ -610,10 +687,10 @@ func commitPlanDirLocked(ctx context.Context, ledgerPath, planDir, msgPrefix str
 
 // commitPlanBackfillToLedger stages every backfilled plan rename, in-place
 // plan edit, and session produced_plans fix into ONE commit and pushes it —
-// the batch counterpart to commitPlanToLedger (which commits a single saved
-// plan). A repair run can touch hundreds of plans; landing that as one
+// the batch counterpart to commitAndPushPlanDir (which commits a single plan
+// dir). A repair run can touch hundreds of plans; landing that as one
 // reviewable commit beats one commit per directory. Mirrors
-// commitPlanToLedger's pattern (--sparse, --no-verify, pushLedger with
+// commitAndPushPlanDir's pattern (--sparse, --no-verify, pushLedger with
 // pull-rebase retry) rather than hand-rolling new git plumbing.
 //
 // Only the final push is best-effort. Every git op at or before `git
@@ -680,27 +757,4 @@ func commitPlanBackfillToLedger(ledgerPath string, renames [][2]string, touchedP
 	// landed locally, so a failure past this point must NOT match
 	// errBackfillCommitFailed — see the caller's best-effort push contract.
 	return pushLedger(context.Background(), ledgerPath)
-}
-
-// planHTMLAwaitingUpload reports whether planDir holds a large plain plan.html
-// that could not be moved to the LFS store. It re-attempts the upload first, so a
-// transient failure heals on the next commit pass. With no reachable store the
-// file stays plain by design (see plan.DehydrateHTML) and is committed as is.
-func planHTMLAwaitingUpload(planDir string) bool {
-	if !plan.HasLargePlainHTML(planDir) {
-		return false
-	}
-	gitRoot := findGitRoot()
-	client := planLFSClientFn(gitRoot)
-	if client == nil {
-		// no store reachable: the page is still awaiting upload (a nil client is
-		// not a successful dehydration); keep it out of the commit
-		slog.Warn("plan: no content store reachable, leaving the large plan.html out of the commit", "dir", planDir)
-		return true
-	}
-	if _, err := planDehydrateHTML(planDir, client); err != nil {
-		slog.Warn("plan: plan.html upload failed, leaving it out of the commit", "error", err, "dir", planDir)
-		return true
-	}
-	return plan.HasLargePlainHTML(planDir)
 }

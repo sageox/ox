@@ -329,8 +329,8 @@ func writePlanPushMarker(path string, m planPushPending) error {
 	return nil
 }
 
-// listPlanPushPending returns the pending markers in a Ledger. A missing
-// marker dir means nothing is pending.
+// listPlanPushPending returns the readable pending markers in a Ledger. A
+// missing marker dir means nothing is pending.
 func listPlanPushPending(ledgerPath string) ([]planPushPending, error) {
 	entries, err := os.ReadDir(filepath.Join(ledgerPath, filepath.FromSlash(planPushPendingDir)))
 	if err != nil {
@@ -344,17 +344,30 @@ func listPlanPushPending(ledgerPath string) ([]planPushPending, error) {
 		if !isPendingEntry(e) {
 			continue
 		}
-		b, err := os.ReadFile(filepath.Join(ledgerPath, filepath.FromSlash(planPushPendingDir), e.Name()))
+		m, err := readPlanPushMarker(filepath.Join(ledgerPath, filepath.FromSlash(planPushPendingDir), e.Name()))
 		if err != nil {
-			continue
-		}
-		var m planPushPending
-		if json.Unmarshal(b, &m) != nil || m.PlanDir == "" || !filepath.IsLocal(filepath.FromSlash(m.PlanDir)) {
 			continue
 		}
 		out = append(out, m)
 	}
 	return out, nil
+}
+
+// readPlanPushMarker reads one marker, refusing one that names no plan dir
+// inside the Ledger.
+func readPlanPushMarker(path string) (planPushPending, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return planPushPending{}, err
+	}
+	var m planPushPending
+	if err := json.Unmarshal(b, &m); err != nil {
+		return planPushPending{}, fmt.Errorf("parse plan push marker %s: %w", path, err)
+	}
+	if m.PlanDir == "" || !filepath.IsLocal(filepath.FromSlash(m.PlanDir)) {
+		return planPushPending{}, fmt.Errorf("plan push marker %s names no plan dir inside the Ledger", path)
+	}
+	return m, nil
 }
 
 // flushPendingPlanPushes retries every pending plan through commitAndPushPlanDir
@@ -408,18 +421,7 @@ func kickPendingPlanPushes(projectRoot string) {
 	if err != nil {
 		return
 	}
-	markers, err := listPlanPushPending(ledgerPath)
-	if err != nil {
-		return
-	}
-	// counted, not parsed: an entry carries a whole record
-	entries, _ := os.ReadDir(filepath.Join(ledgerPath, filepath.FromSlash(planReviewPendingDir)))
-	pending := len(markers)
-	for _, de := range entries {
-		if isPendingEntry(de) {
-			pending++
-		}
-	}
+	pending := planRetriesPending(ledgerPath)
 	if pending == 0 {
 		return
 	}
@@ -460,28 +462,55 @@ var planFlushPendingCmd = &cobra.Command{
 		ctx, cancel := context.WithTimeout(cmd.Context(), planPushFlushTimeout)
 		defer cancel()
 
-		// Single-flight across processes: two primes in quick succession must
-		// not run two flushes against one clone. A busy lock means another
-		// flush is already on it — not an error.
-		lockTarget := filepath.Join(ledgerPath, filepath.FromSlash(planPushPendingDir), ".flush")
-		var ok, failed int
-		lockErr := fileutil.WithFileLockTimeout(ctx, lockTarget, time.Second, func() error {
-			rok, rfailed, rerr := flushPendingReviewRecords(ctx, ledgerPath)
-			pok, pfailed, perr := flushPendingPlanPushes(ctx, ledgerPath)
-			ok, failed = rok+pok, rfailed+pfailed
-			return errors.Join(rerr, perr)
-		})
-		var busy *fileutil.ErrLockTimeout
-		if errors.As(lockErr, &busy) {
+		ok, failed, err := flushPlanRetries(ctx, ledgerPath)
+		if errors.Is(err, errPlanFlushBusy) {
 			slog.InfoContext(ctx, "plan push retry skipped: another flush is running")
 			return nil
 		}
-		if lockErr != nil {
-			return fmt.Errorf("flush-pending: %w", lockErr)
+		if err != nil {
+			return fmt.Errorf("flush-pending: %w", err)
 		}
 		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "plan push retry: %d pushed, %d still pending\n", ok, failed)
 		return nil
 	},
+}
+
+// planRetriesPending counts a Ledger's readable plan retry markers and its
+// review recovery entries; an entry is counted, not parsed, since it carries
+// a whole record.
+func planRetriesPending(ledgerPath string) int {
+	markers, _ := listPlanPushPending(ledgerPath)
+	entries, _ := os.ReadDir(filepath.Join(ledgerPath, filepath.FromSlash(planReviewPendingDir)))
+	n := len(markers)
+	for _, de := range entries {
+		if isPendingEntry(de) {
+			n++
+		}
+	}
+	return n
+}
+
+// errPlanFlushBusy: another flush holds the clone's flush lock, so this one
+// retried nothing.
+var errPlanFlushBusy = errors.New("another plan retry is already running")
+
+// flushPlanRetries runs one pass over a Ledger's retry queues, review records
+// first, and reports how many landed and how many are still pending. It is
+// single-flight across processes: two primes in quick succession, or a prime
+// and `ox doctor --fix`, must not run two flushes against one clone.
+func flushPlanRetries(ctx context.Context, ledgerPath string) (ok, failed int, err error) {
+	lockTarget := filepath.Join(ledgerPath, filepath.FromSlash(planPushPendingDir), ".flush")
+	err = fileutil.WithFileLockTimeout(ctx, lockTarget, time.Second, func() error {
+		rok, rfailed, rerr := flushPendingReviewRecords(ctx, ledgerPath)
+		pok, pfailed, perr := flushPendingPlanPushes(ctx, ledgerPath)
+		ok, failed = rok+pok, rfailed+pfailed
+		return errors.Join(rerr, perr)
+	})
+	var busy *fileutil.ErrLockTimeout
+	if errors.As(err, &busy) {
+		return 0, 0, errPlanFlushBusy
+	}
+	return ok, failed, err
 }
 
 func init() {

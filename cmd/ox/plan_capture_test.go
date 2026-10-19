@@ -392,11 +392,11 @@ func TestPlanSessionLink_DisabledAttributionExpectsNoLink(t *testing.T) {
 }
 
 // TestSavePlanArtifacts_LargeRenderStaysPlainWhenLFSUnreachable is the #810
-// composition-root fail-safe: driving the REAL savePlanArtifacts path (Save →
-// DehydrateHTML → commit) with a >1MiB render and no reachable LFS client, the
-// committed plan.html must be PLAIN — retrievable and pushable, never a poisoned
-// pointer. This test ledger has no configured remote/credentials, so planLFSClient
-// resolves to nil and dehydration falls back to plain, exactly as an offline save.
+// composition-root fail-safe: driving the REAL savePlanArtifacts path (upload,
+// Save, pointer swap, commit) with a >1MiB render and no reachable LFS client,
+// plan.html must stay PLAIN on disk, never a poisoned pointer. This test ledger
+// has no configured remote/credentials, so planLFSClient resolves to nil and
+// nothing is uploaded, exactly as in an offline save.
 //
 // Failure prevented: a regression where the composition root writes (or leaves) a
 // pointer with no uploaded blob — the wedge #810 was about — at the layer where
@@ -424,9 +424,7 @@ func TestSavePlanArtifacts_LargeRenderStaysPlainWhenLFSUnreachable(t *testing.T)
 		t.Fatalf("read plan.html: %v", err)
 	}
 	// The FULL render must survive, not just a stray marker: the body repeats the
-	// marker 100000 times and every one must be on disk, plain. dehydrate rewrites
-	// plan.html BEFORE commitPlanToLedger stages the working tree, so this on-disk
-	// file is exactly what a commit would carry.
+	// marker 100000 times and every one must be on disk, plain.
 	if n := bytes.Count(got, []byte("PRESERVE-ME")); n != 100000 {
 		t.Fatalf("plan.html retained %d of 100000 markers — the render was truncated or replaced", n)
 	}

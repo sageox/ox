@@ -200,8 +200,9 @@ func planDirDirty(ledgerPath string, paths ...string) bool {
 // commits, so this is a no-op; it matters exactly when an earlier save's commit
 // failed, which is when the prior revision would otherwise exist nowhere but
 // the working tree the new save is about to overwrite. Sacred tier: a revision
-// must stay recoverable from ledger history. The caller holds the repo lock.
-func snapshotPriorRevision(ctx context.Context, gitRoot, ledgerPath, planDir string) error {
+// must stay recoverable from ledger history. The caller holds the repo lock, and
+// up is what it uploaded before taking it.
+func snapshotPriorRevision(ctx context.Context, ledgerPath, planDir string, up planUploads) error {
 	if ledgerPath == "" {
 		return nil // nowhere to snapshot to; Save will fail on the same condition
 	}
@@ -213,17 +214,13 @@ func snapshotPriorRevision(ctx context.Context, gitRoot, ledgerPath, planDir str
 	if !planDirDirty(ledgerPath, planDir) {
 		return nil
 	}
-	// a failed upload left a large plain plan.html behind; finish the upload before
-	// the snapshot, and refuse the save if it still fails rather than lose or
-	// commit that render
+	// a failed upload left a large plain plan.html behind; store it as the pointer
+	// the save uploaded for it, and refuse the save when there is none rather
+	// than lose or commit that render
 	if plan.HasLargePlainHTML(planDir) {
-		client := planLFSClientFn(gitRoot)
-		if client == nil {
-			// a nil client makes dehydration a no-op, which is not an upload
-			return fmt.Errorf("prior plan.html is awaiting upload and no content store is reachable")
-		}
-		if _, err := planDehydrateHTML(planDir, client); err != nil {
-			return fmt.Errorf("prior plan.html is awaiting upload: %w", err)
+		_, perr := plan.PointerizeHTML(planDir, up.refs...)
+		if plan.HasLargePlainHTML(planDir) {
+			return fmt.Errorf("prior plan.html is awaiting upload: %w", cmp.Or(perr, up.failure()))
 		}
 	}
 	return commitPlanDirLocked(ctx, ledgerPath, planDir, "plan: prior revision of ")

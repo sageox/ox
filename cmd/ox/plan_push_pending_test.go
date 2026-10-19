@@ -253,9 +253,12 @@ func TestFlushPending_StillFailingKeepsEntriesAndCounts(t *testing.T) {
 	}
 
 	runGitInDir(t, f.ledger, "remote", "set-url", "origin", filepath.Join(t.TempDir(), "gone.git"))
-	if err := commitPlanToLedger("root", f.planDir); err == nil {
+	started := time.Now()
+	saveErr := commitAndPushPlanDir(context.Background(), f.ledger, f.planDir)
+	if saveErr == nil {
 		t.Fatal("an authoring push to a missing remote must fail")
 	}
+	recordPlanPushOutcome(context.Background(), f.ledger, f.planDir, started, saveErr)
 	ok, failed, err = flushPendingPlanPushes(context.Background(), f.ledger)
 	if err != nil || ok != 0 || failed != 1 {
 		t.Fatalf("plan-dir flush: ok=%d failed=%d err=%v", ok, failed, err)
@@ -321,9 +324,13 @@ func TestFlushPending_LandsRetriesCarriedByADaemonReclone(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(f.planDir, "plan.md"), []byte("# Durable v2\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := commitPlanToLedger("root", f.planDir); err == nil {
+	// a save's whole-dir commit, refused the same way, records its retry
+	started := time.Now()
+	saveErr := commitAndPushPlanDir(context.Background(), f.ledger, f.planDir)
+	if saveErr == nil {
 		t.Fatal("a plan commit under a live index.lock must fail")
 	}
+	recordPlanPushOutcome(context.Background(), f.ledger, f.planDir, started, saveErr)
 	if err := os.Remove(lock); err != nil {
 		t.Fatal(err)
 	}

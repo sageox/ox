@@ -1760,12 +1760,12 @@ func writeInitialSessionMeta(sessionDir, agentID string, builder *lfs.SessionMet
 
 // reconcileProducedPlansAtStop records the session id + a "stopped" outcome
 // in the meta.json Provenance of every plan a just-stopped session produced
-// (plan.ReconcileSessionOutcome), then commits each plan dir (data/plans/ is
-// not covered by the session commit). It leaves events.jsonl alone: those
-// lines are never edited (internal/plan/events.go). Slug-driven — no
-// directory scan — and best-effort: a meta.json write that fails is logged at
-// debug and skipped; a commit that fails is retried by the next
-// `ox agent prime`.
+// (plan.ReconcileSessionOutcome), then commits each plan's events.jsonl and
+// meta.json, never the rest of its dir (commitPlanToLedger; data/plans/ is not
+// covered by the session commit). It leaves events.jsonl alone: those lines
+// are never edited (internal/plan/events.go). Slug-driven — no directory scan
+// — and best-effort: a meta.json write that fails is logged at debug and
+// skipped; a commit that fails is retried by the next `ox agent prime`.
 func reconcileProducedPlansAtStop(projectRoot string, slugs []string, sessionID string) {
 	for _, slug := range slugs {
 		if err := plan.ReconcileSessionOutcome(projectRoot, slug, sessionID, plan.SessionOutcomeStopped); err != nil {

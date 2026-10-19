@@ -15,7 +15,7 @@ package plan
 //	meta.json        # always plain git (topic, slug, authors, timestamps, …)
 //	plan.html        # only if a render was passed in. Save writes it PLAIN;
 //	                 # a large render is dehydrated to an LFS pointer by the CLI
-//	                 # caller (DehydrateHTML) AFTER its blob is uploaded, never
+//	                 # caller (PointerizeHTML) AFTER its blob is uploaded, never
 //	                 # before — see the GH #810 note at the plan.html write below.
 //
 // CLI WRITES files into the ledger working tree (daemon-git split): we never
@@ -23,6 +23,7 @@ package plan
 // capture, which writes meta.json + content and lets a later push carry it.
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -165,6 +166,11 @@ type Meta struct {
 	Provenance *Provenance `json:"provenance,omitempty"`
 	// Collaboration holds the deterministic collaboration-effort counts.
 	Collaboration *CollabSignals `json:"collaboration,omitempty"`
+
+	// NewPlanID is the pln_ id Save gives a plan this save creates; Save mints
+	// one when it is empty, and a revision keeps the plan's own id. Never
+	// stored in meta.json: the id lives in events.jsonl. See SavedHTML.
+	NewPlanID string `json:"-"`
 }
 
 // PlanInfo is the listing-level view of a captured plan, assembled from
@@ -291,7 +297,7 @@ func priorSaveOfSource(ledger, sourcePath string) (string, Meta, bool) {
 // It writes plan.md (from in.Raw), annotations.json (res), and meta.json as
 // plain git-tracked text. plan.html is written ONLY when html != nil, and always
 // as PLAIN bytes — dehydration of a large render to an LFS pointer is the CLI
-// caller's job (DehydrateHTML), post-upload. Save never renders HTML, never
+// caller's job (PointerizeHTML), post-upload. Save never renders HTML, never
 // uploads, and never commits — it only materializes files in the working tree.
 // Returns the absolute plan directory.
 //
@@ -370,7 +376,7 @@ func Save(gitRoot string, in Input, res Result, html []byte, meta Meta) (string,
 			existingEvents = nil
 		}
 		firstSave := len(existingEvents) == 0
-		planID = planid.GeneratePlanID()
+		planID = cmp.Or(meta.NewPlanID, planid.GeneratePlanID())
 		if !firstSave {
 			planID = existingEvents[0].PlanID
 		}
@@ -460,8 +466,9 @@ func Save(gitRoot string, in Input, res Result, html []byte, meta Meta) (string,
 		// exactly GH #810 — the render is lost AND the poisoned pointer makes the
 		// remote reject every future push, wedging the whole team's ledger.
 		// Dehydration of a large render to an LFS pointer happens in the CLI
-		// caller (savePlanArtifacts → DehydrateHTML) AFTER a confirmed upload, and
-		// only overwrites this plain file once the blob is provably in the store.
+		// caller (savePlanArtifacts → UploadHTML, then PointerizeHTML) AFTER a
+		// confirmed upload, and only overwrites this plain file once the blob is
+		// provably in the store.
 		// If that step is skipped or the store is unreachable, the plan stays
 		// plain: larger in git, but retrievable and pushable — never lost, never
 		// poisoned. That is the structural property the size-gate-here design
@@ -562,6 +569,37 @@ func ResolveSaveDir(gitRoot string, meta Meta) (string, error) {
 	}
 	dir, _, err := resolveSaveDir(ledger, meta)
 	return dir, err
+}
+
+// SavedHTML returns the plan.html Save writes for html when it saves meta:
+// html stamped with the id, slug and title of the plan meta resolves to. For a
+// plan the save would create, it mints meta.NewPlanID when that is empty and
+// returns meta carrying it, so Save stamps the same id. The CLI uploads this
+// page before it takes the Ledger's repo lock. A save of the same plan that
+// lands in between can change what Save writes, so a caller compares the
+// written bytes before relying on them.
+func SavedHTML(gitRoot string, meta Meta, html []byte) ([]byte, Meta, error) {
+	ledger := ledgerPathFor(gitRoot)
+	if ledger == "" {
+		return nil, meta, fmt.Errorf("no ledger configured for %q: cannot save plan", gitRoot)
+	}
+	if meta.CreatedAt.IsZero() {
+		meta.CreatedAt = time.Now().UTC()
+	}
+	dir, resolved, err := resolveSaveDir(ledger, meta)
+	if err != nil {
+		return nil, meta, err
+	}
+	// the id rule Save applies: the plan's own once it has events (an
+	// unreadable log counts as none), else the new id
+	id := meta.NewPlanID
+	if events, err := LoadEvents(dir); err == nil && len(events) > 0 {
+		id = events[0].PlanID
+	} else if id == "" {
+		id = planid.GeneratePlanID()
+		meta.NewPlanID = id
+	}
+	return StampHTMLMeta(html, id, resolved.Slug, resolved.Topic), meta, nil
 }
 
 // resolveSaveDir decides which plan directory a save lands in and returns meta

@@ -135,7 +135,12 @@ The CLI reads and writes review records only through `pkg/planreview`.
   backfill` renames plan dirs, records included) is cleared once the remote
   tip holds its bytes anywhere among the plans, and kept otherwise. Plan-dir
   markers remain for authoring commits (the whole dir) and lifecycle events
-  (their files).
+  (their files). `ox doctor` (`plan-pending-writes`) lists every entry and
+  marker still waiting, with its age and why it has not landed (its plan dir
+  is gone, it cannot be read, or it is committed but not on the remote). Its
+  fix runs on every `ox doctor`, as the session upload retry does, and is the
+  retry `ox plan flush-pending` runs, which clears only an entry whose bytes
+  the remote tip holds and a marker whose plan dir is gone.
 - **Read** (`plan.ReadReview`): `Capture` of the worktree, the Ledger's git dir
   passed for the replay check, then `Assemble`. A clone with `core.autocrlf`
   checks records out with CRLF endings, so the worktree is not byte-exact
@@ -156,14 +161,29 @@ The CLI reads and writes review records only through `pkg/planreview`.
   clears a failure recorded after its own attempt began. A verb that records
   nothing new still commits and pushes, retrying an earlier event, and says
   so when that left the plan unshared. With no Ledger checkout the event is
-  recorded and reported not committed, and no git command runs.
-- **Saves** (`savePlanArtifacts`): while the Ledger is mid-rebase, locked, or
-  holds unmerged entries a save writes nothing. Otherwise the prior
-  revision's snapshot, the writes (companion pages included), plan.html's
-  upload and the commit run in one hold of the repo lock, so a daemon pull
-  never finds a save half written; the push follows outside it. A save whose
-  commit or push still fails writes a whole-dir marker, which
-  `ox plan flush-pending` retries with the dir as it is then.
+  recorded and reported not committed, and no git command runs. Session stop
+  (`reconcileProducedPlansAtStop`) records the session's id and outcome in
+  `meta.json`, outside the repo lock, and commits only `events.jsonl` and
+  `meta.json`, with the same file-scoped marker. While a whole-dir marker is
+  pending for the plan it commits nothing: the plan's latest save is not yet
+  shared, and that retry carries `meta.json` with the rest of it.
+- **Saves** (`savePlanArtifacts`): a large plan.html, stamped as `Save` will
+  write it (`plan.SavedHTML`), is uploaded first, before the repo lock is
+  taken: the upload's timeouts run to minutes on a stalled network, and while
+  the lock is held the daemon's sync skips its cycles and other Ledger writes
+  wait on it. Then, under the lock, a save writes nothing while the Ledger is
+  mid-rebase, locked, or holds unmerged entries; otherwise the prior
+  revision's snapshot, the writes (companion pages included), the pointer swap
+  and the commit run in that one hold, so a daemon pull never finds a save
+  half written. The push follows outside it. The pointer replaces plan.html
+  only while the file holds exactly the uploaded bytes; when the store did not
+  take the page, or the page changed after its upload, the save commits
+  nothing. With no store reachable it commits everything but the page. Each of
+  these, and a failed commit or push, leaves a whole-dir marker in a Ledger
+  checkout, which `ox plan flush-pending` retries with the dir as it is then:
+  it uploads a page still awaiting upload before it takes the lock, and while
+  the page stays unstored it commits and pushes the rest of the dir and keeps
+  the marker.
 - **Pushes** (`pushLedger`) ignore their caller's cancellation: a cancel
   during the pull-rebase that a rejected push runs kills git and skips its
   abort, leaving the clone mid-rebase. `PushWithRetry`'s own timeouts bound

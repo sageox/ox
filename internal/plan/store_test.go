@@ -147,7 +147,7 @@ func TestSaveListLoad_RoundTrip(t *testing.T) {
 // uploading the blob, so the content named by the pointer existed nowhere — lost,
 // and the poisoned pointer wedged the ledger push. Save is the no-network layer
 // now, so it writes plain at every size; pointerizing a large render is the CLI
-// caller's job (DehydrateHTML), only AFTER a confirmed upload.
+// caller's job (UploadHTML, then PointerizeHTML), only AFTER a confirmed upload.
 //
 // The old test asserted the LARGE case produced a pointer with the right OID —
 // which the bug produced too. That is test theater: it passed while the content

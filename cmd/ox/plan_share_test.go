@@ -309,16 +309,16 @@ func TestSavePlanArtifacts_HoldsTheLedgerFromWriteToCommit(t *testing.T) {
 	}
 	root := newPlanCaptureTestRepo(t)
 	ledger, _ := newSharedLedger(t, root, true)
-	prev := planDehydrateHTML
-	t.Cleanup(func() { planDehydrateHTML = prev })
+	prev := planPointerizeHTML
+	t.Cleanup(func() { planPointerizeHTML = prev })
 	var probeErr error
-	planDehydrateHTML = func(dir string, c *lfs.Client) (bool, error) {
+	planPointerizeHTML = func(dir string, uploaded ...lfs.UploadedRef) (bool, error) {
 		// runs after the save's writes and before its commit: the daemon's pull
 		// takes this same lock
 		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 		defer cancel()
 		probeErr = gitutil.WithRepoLock(ctx, ledger, func() error { return nil })
-		return prev(dir, c)
+		return prev(dir, uploaded...)
 	}
 
 	var r planSaveReport
@@ -410,14 +410,17 @@ func TestSavePlanArtifacts_CloneThatFinishesMidSaveGetsARetry(t *testing.T) {
 	mustRunGit(t, clone, "commit", "-q", "-m", "init")
 	mustRunGit(t, clone, "push", "-q", "-u", "origin", "main")
 
-	prev := planDehydrateHTML
-	t.Cleanup(func() { planDehydrateHTML = prev })
-	planDehydrateHTML = func(dir string, c *lfs.Client) (bool, error) {
+	prev := planUploadHTML
+	t.Cleanup(func() { planUploadHTML = prev })
+	planUploadHTML = func(c *lfs.Client, page []byte) (lfs.UploadedRef, bool, error) {
 		// mid-save, after the checkout was checked: the clone lands
+		if err := os.MkdirAll(ledger, 0o755); err != nil {
+			t.Fatal(err)
+		}
 		if err := os.Rename(filepath.Join(clone, ".git"), filepath.Join(ledger, ".git")); err != nil {
 			t.Fatal(err)
 		}
-		return prev(dir, c)
+		return prev(c, page)
 	}
 
 	var r planSaveReport

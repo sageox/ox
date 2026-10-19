@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -306,8 +308,8 @@ func savePlanWithProvenance(gitRoot string, in plan.Input, result plan.Result, h
 
 // planLFSClient builds an LFS client for the project's ledger, or nil when one
 // can't be resolved (not logged in, offline, no configured remote). A nil client
-// makes plan.DehydrateHTML leave plan.html plain — safe, and never fatal to a
-// save: the plain render is still retrievable and pushable.
+// makes plan.UploadHTML upload nothing: a large plan.html then stays plain and
+// out of the commit, with a retry marker, and the save itself is not failed.
 func planLFSClient(gitRoot string) *lfs.Client {
 	ctx, err := config.LoadProjectContext(gitRoot)
 	if err != nil || ctx == nil {
@@ -328,11 +330,13 @@ func planLFSClient(gitRoot string) *lfs.Client {
 // not be uploaded to the LFS store and the save therefore committed nothing.
 const planHTMLUploadFailedReason = "plan.html upload failed; nothing was committed; re-run ox plan save to retry"
 
-// planLFSClientFn and planDehydrateHTML are indirected so tests can drive the
-// upload-failure path without a real ledger remote.
+// planLFSClientFn and planUploadHTML are indirected so tests can drive the
+// upload-failure path without a real ledger remote, and planPointerizeHTML so a
+// test can act between a save's writes and its commit.
 var (
-	planLFSClientFn   = planLFSClient
-	planDehydrateHTML = plan.DehydrateHTML
+	planLFSClientFn    = planLFSClient
+	planUploadHTML     = plan.UploadHTML
+	planPointerizeHTML = plan.PointerizeHTML
 )
 
 // planSaveOpts carries the optional, caller-supplied facts about a save that
@@ -440,11 +444,15 @@ func savePlanArtifacts(gitRoot string, in plan.Input, result plan.Result, html [
 	}
 	checkout := gitutil.IsGitRepo(ledgerPath)
 	started := time.Now()
+	// uploads run before the lock (see planUploads); meta gains the plan id the
+	// uploaded page is stamped with
+	up := uploadSavePages(gitRoot, &meta, html)
 	var (
 		dir       string
 		savedKind plan.EventKind
 		slug      string
 		commitErr error
+		uploadErr error  // a reachable store did not take the page
 		ended     bool   // the save stopped early, report filled in
 		endDir    string // what savePlanArtifacts returns then
 	)
@@ -468,7 +476,7 @@ func savePlanArtifacts(gitRoot string, in plan.Input, result plan.Result, html [
 		// once the ledger is fixed.
 		if target, rerr := plan.ResolveSaveDir(gitRoot, meta); rerr == nil {
 			if _, serr := os.Stat(filepath.Join(target, "meta.json")); serr == nil {
-				if err := snapshotPriorRevision(ctx, gitRoot, ledgerPath, target); err != nil {
+				if err := snapshotPriorRevision(ctx, ledgerPath, target, up); err != nil {
 					report.Err = fmt.Errorf("prior revision of %s is uncommitted and could not be snapshotted, so it was NOT overwritten (resolve the error below, then re-run `ox plan save`): %w", filepath.Base(target), err)
 					slog.Warn("plan: refused revision, prior revision could not be snapshotted", "error", err, "dir", target)
 					ended = true
@@ -534,19 +542,22 @@ func savePlanArtifacts(gitRoot string, in plan.Input, result plan.Result, html [
 			slog.Warn("plan: reverse link (produced_plans) failed", "error", err, "slug", slug)
 		}
 
-		// Dehydrate a large plan.html to an LFS pointer BEFORE committing, so the
-		// commit carries a pointer and dehydrated clones stay lean — but only after
-		// the blob is uploaded, so a pointer whose object is missing never reaches the
-		// remote (the GH #810 wedge). Small renders and offline saves stay plain by
-		// design. When the upload of a large render FAILS, nothing is committed: the
-		// plain plan.html stays on disk (the bytes are safe), the plan dir is not
-		// shared, and re-running the save retries the upload. Committing the plain
-		// multi-megabyte page instead would bury the failure in ledger history.
+		// Swap a large plan.html for an LFS pointer BEFORE committing, so the
+		// commit carries a pointer and dehydrated clones stay lean — but only for
+		// the page uploaded before the lock, and only while plan.html holds exactly
+		// its bytes, so a pointer whose object is missing never reaches the remote
+		// (the GH #810 wedge). Small renders stay plain by design, and with no
+		// store reachable a large one is left out of the commit (see after
+		// sharePlanDir). When a reachable store did not take the page, nothing is
+		// committed: the plain plan.html stays on disk (the bytes are safe), the
+		// plan dir is not shared, and a retry marker has `ox agent prime` retry
+		// the save, as re-running it does. Committing the plain multi-megabyte
+		// page instead would bury the failure in ledger history.
 		if html != nil {
-			// DehydrateHTML reads the on-disk (stamped) plan.html itself, so the
-			// uploaded blob's OID matches the committed file — see its doc comment.
-			if pointerized, derr := planDehydrateHTML(dir, planLFSClientFn(gitRoot)); derr != nil {
-				slog.Warn("plan: plan.html LFS upload failed, nothing committed", "error", derr, "dir", dir)
+			_, perr := planPointerizeHTML(dir, up.refs...)
+			if plan.HasLargePlainHTML(dir) && !up.noStore {
+				uploadErr = cmp.Or(perr, up.failure())
+				slog.Warn("plan: plan.html LFS upload failed, nothing committed", "error", uploadErr, "dir", dir)
 				planID := planIDForDir(dir)
 				*report = planSaveReport{
 					Dir:      dir,
@@ -562,8 +573,6 @@ func savePlanArtifacts(gitRoot string, in plan.Input, result plan.Result, html [
 				}
 				ended, endDir = true, dir
 				return nil
-			} else if pointerized {
-				slog.Debug("plan: plan.html dehydrated to LFS pointer", "dir", dir)
 			}
 		}
 
@@ -583,6 +592,9 @@ func savePlanArtifacts(gitRoot string, in plan.Input, result plan.Result, html [
 		return ""
 	}
 	if ended {
+		if uploadErr != nil && checkout {
+			recordPlanPushOutcome(context.Background(), ledgerPath, endDir, started, uploadErr)
+		}
 		return endDir
 	}
 
@@ -591,6 +603,12 @@ func savePlanArtifacts(gitRoot string, in plan.Input, result plan.Result, html [
 	// the next push / `ox doctor` — but no longer silent: the verdict goes back
 	// to the caller, which tells the human whether teammates can see the plan.
 	share := sharePlanDir(ledgerPath, dir, started, commitErr)
+	// with no store reachable the page was left out of the commit; it stays
+	// owed until a retry stores it
+	if checkout && plan.HasLargePlainHTML(dir) {
+		recordPlanPushOutcome(context.Background(), ledgerPath, dir, started,
+			fmt.Errorf("%s is awaiting upload: %w", planHTMLFileName, up.failure()))
+	}
 	if !share.Shared {
 		slog.Warn("plan: saved but not shared", "dir", dir, "reason", share.Reason, "ahead", share.Ahead, "behind", share.Behind)
 	}
@@ -640,6 +658,32 @@ func savePlanArtifacts(gitRoot string, in plan.Input, result plan.Result, html [
 		"duration_s", collabCount(collab, "duration_seconds"))
 
 	return dir
+}
+
+// uploadSavePages uploads, before a save takes the repo lock, the plan.html the
+// save writes and, when an earlier save left the plan's page awaiting upload,
+// that page too: the snapshot of the prior revision stores it. meta gains the
+// plan id the new page is stamped with, so Save stamps the same one.
+func uploadSavePages(gitRoot string, meta *plan.Meta, html []byte) planUploads {
+	var pages [][]byte
+	if html != nil {
+		page, m, err := plan.SavedHTML(gitRoot, *meta, html)
+		if err != nil {
+			return planUploads{err: err}
+		}
+		*meta = m
+		pages = append(pages, page)
+	}
+	if dir, err := plan.ResolveSaveDir(gitRoot, *meta); err == nil && plan.HasLargePlainHTML(dir) {
+		// a retry of the same page finds its own bytes there
+		if prior, err := os.ReadFile(filepath.Join(dir, planHTMLFileName)); err == nil && (len(pages) == 0 || !bytes.Equal(prior, pages[0])) {
+			pages = append(pages, prior)
+		}
+	}
+	if len(pages) == 0 {
+		return planUploads{}
+	}
+	return uploadPlanPages(gitRoot, pages...)
 }
 
 // planSavedSlug reports the slug plan.Save actually recorded for a save. The
