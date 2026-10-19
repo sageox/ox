@@ -401,6 +401,12 @@ func Save(gitRoot string, in Input, res Result, html []byte, meta Meta) (string,
 		var status PlanStatus // meta.json's, after this save
 		if err := MutatePlanMeta(context.Background(), dir, func(existing *Meta) (*Meta, error) {
 			merged := meta
+			// a copy: the event this save appends is stamped from the
+			// caller's provenance, which the merge below must not rewrite
+			if meta.Provenance != nil {
+				prov := *meta.Provenance
+				merged.Provenance = &prov
+			}
 			if existing != nil {
 				if existing.Status != "" {
 					merged.Status = existing.Status

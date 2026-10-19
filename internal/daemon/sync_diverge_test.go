@@ -396,6 +396,101 @@ func TestPullTeamContext_ConflictReportsIssue(t *testing.T) {
 	assert.True(t, foundDiverged, "should report IssueTypeDiverged for team context conflict")
 }
 
+// Upstream deletes one discussion and adds another whose files differ only in
+// IDs, while the local tree already holds the same deletion uncommitted (the
+// 2026-10-12 SageOx Internal wedge). With rename detection on, the autostash
+// re-apply pairs old/* with new/* and leaves rename/delete conflicts behind.
+func TestPullTeamContext_LookAlikeDiscussions_NoFalseRenameConflict(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
+
+	tmpDir := t.TempDir()
+	cloneDir := filepath.Join(tmpDir, "clone")
+	require.NoError(t, os.MkdirAll(cloneDir, 0755))
+	setupGitRepo(t, cloneDir)
+	bareDir := bareRepoPath(cloneDir)
+
+	discussionFiles := func(recID, createdAt string) map[string]string {
+		r := strings.NewReplacer("{rec}", recID, "{at}", createdAt)
+		return map[string]string{
+			"metadata.json": r.Replace(`{
+  "recording_id": "rec_{rec}",
+  "title": "",
+  "created_at": "{at}",
+  "user_id": "usr_owner",
+  "context_type": "team",
+  "context_id": "team_test"
+}
+`),
+			"layers.json": r.Replace(`{
+  "recording_id": "rec_{rec}",
+  "layers": [
+    {"kind": "transcript", "id": "clyr_{rec}_t", "format": "json", "status": "complete"},
+    {"kind": "summary", "id": "clyr_{rec}_s", "format": "json", "status": "complete"},
+    {"kind": "audio", "id": "clyr_{rec}_a", "format": "opus", "status": "complete"}
+  ]
+}
+`),
+			"layers/transcript/layer.json": r.Replace(`{
+  "id": "clyr_{rec}_t",
+  "kind": "transcript",
+  "recording_id": "rec_{rec}",
+  "created_at": "{at}",
+  "schema_version": 1,
+  "source": "pipeline",
+  "status": "complete"
+}
+`),
+		}
+	}
+	writeDiscussion := func(root, name string, files map[string]string) {
+		for rel, body := range files {
+			p := filepath.Join(root, "discussions", name, filepath.FromSlash(rel))
+			require.NoError(t, os.MkdirAll(filepath.Dir(p), 0o755))
+			require.NoError(t, os.WriteFile(p, []byte(body), 0o644))
+		}
+	}
+
+	writeDiscussion(cloneDir, "old", discussionFiles("aaaa1111", "2026-10-07T21:57:53Z"))
+	gitCmd(t, cloneDir, "add", "discussions")
+	gitCmd(t, cloneDir, "commit", "-m", "add old discussion")
+	gitCmd(t, cloneDir, "push", "origin", "HEAD:main")
+
+	// upstream: the old recording is deleted, then a new one lands
+	newFiles := discussionFiles("bbbb2222", "2026-10-13T01:15:17Z")
+	upstream := filepath.Join(t.TempDir(), "upstream")
+	gitCmd(t, t.TempDir(), "clone", bareDir, upstream)
+	gitCmd(t, upstream, "rm", "-r", "-q", "discussions/old")
+	gitCmd(t, upstream, "commit", "-m", "delete old recording")
+	writeDiscussion(upstream, "new", newFiles)
+	gitCmd(t, upstream, "add", "discussions")
+	gitCmd(t, upstream, "commit", "-m", "add new discussion")
+	gitCmd(t, upstream, "push", "origin", "HEAD")
+
+	// local already applied the deletion but never committed it
+	require.NoError(t, os.RemoveAll(filepath.Join(cloneDir, "discussions", "old")))
+
+	s := newPullTestScheduler(t, cloneDir)
+
+	_, err := s.pullTeamContext(context.Background(), cloneDir)
+	require.NoError(t, err)
+
+	assert.Empty(t, gitCmd(t, cloneDir, "ls-files", "-u"), "no unmerged entries")
+	assert.Empty(t, gitCmd(t, cloneDir, "status", "--porcelain"), "tree matches upstream")
+	assert.Empty(t, gitCmd(t, cloneDir, "stash", "list"), "autostash applied and dropped")
+	assert.NoDirExists(t, filepath.Join(cloneDir, "discussions", "old"))
+	for rel, want := range newFiles {
+		got, readErr := os.ReadFile(filepath.Join(cloneDir, "discussions", "new", filepath.FromSlash(rel)))
+		require.NoError(t, readErr)
+		assert.Equal(t, want, string(got), rel)
+	}
+	for _, issue := range s.issues.GetIssues() {
+		assert.NotEqual(t, IssueTypeMergeConflict, issue.Type, issue.Summary)
+		assert.NotEqual(t, IssueTypeDiverged, issue.Type, issue.Summary)
+	}
+}
+
 // verifyAutoResolvePaths confirms the ledger default resolve rules include data/.
 // This is a guard against accidental removal of the auto-resolve config that
 // would break the ConflictInSafePath test above.
