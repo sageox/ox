@@ -165,6 +165,36 @@ func TestReconcile_PushRangeScope_IgnoresPointersTheRemoteAlreadyHas(t *testing.
 	}
 }
 
+// TestReconcile_PushRangeIgnoresPointerLookalikes: an unpushed file that starts
+// like a pointer but is over maxPointerSize, or a pointer with no size line, is
+// not a pointer, so the reconcile scans none and needs no LFS client.
+// pointer.Parse skips lines it does not know, so for the large file the size
+// filter is the only guard. Failure prevented: content mistaken for a pointer is
+// probed, reported missing, and pauses the push.
+func TestReconcile_PushRangeIgnoresPointerLookalikes(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git remote")
+	}
+	for _, tc := range []struct{ name, content string }{
+		{"over the pointer size", lfsPointerContent(strings.Repeat("a", 64), 999) + strings.Repeat("x", maxPointerSize)},
+		{"no size line", "version https://git-lfs.github.com/spec/v1\noid sha256:" + strings.Repeat("b", 64) + "\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ledger, _ := initLedgerWithRemote(t)
+			writeAndCommit(t, ledger, "pointer look-alike", map[string]string{"sessions/s/raw.jsonl": tc.content})
+
+			result, err := reconcileUnpushedPointers(context.Background(), ledger, nil, func() (*Client, error) {
+				t.Fatal("a push range with no pointer needs no LFS client")
+				return nil, nil
+			})
+
+			require.NoError(t, err)
+			assert.Zero(t, result.ScannedPointers)
+			assert.False(t, result.Changed())
+		})
+	}
+}
+
 // Failure prevented: a missing object referenced only by an intermediate
 // unpushed commit is invisible to a tip-only repair ("no changes"), so the push
 // stayed rejected forever. GitLab checks every commit in the pack. The incident

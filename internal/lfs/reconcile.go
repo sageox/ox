@@ -26,7 +26,7 @@ import (
 
 // ReconcileResult describes what ReconcileUnpushedPointers found and fixed.
 type ReconcileResult struct {
-	ScannedPointers  int  // distinct pointers in the push range
+	ScannedPointers  int  // pointers in the push range: tip pointers by path, history-only pointers by OID
 	MissingOnRemote  int  // pointers whose LFS OIDs are not in the remote store
 	HistoryOnly      int  // missing OIDs referenced only by intermediate unpushed commits, not the tip
 	RecoveredUploads int  // missing OIDs restored from exact local recovery-cache content
@@ -134,10 +134,10 @@ func (p *pointerSet) total() int {
 }
 
 // reconcileUnpushedPointers is the client-injectable core of
-// ReconcileUnpushedPointers. newClient is invoked ONLY when orphan candidates are
-// found, preserving the "no pointers → no client, no error" behavior that clean
-// ledgers with no configured remote rely on. Tests inject a fake-LFS-server
-// client to exercise the recovery-upload and squash paths.
+// ReconcileUnpushedPointers. newClient is invoked ONLY when the push range holds
+// pointers, so a push range without any needs no LFS client and returns no
+// error. Tests inject a fake-LFS-server client to exercise the recovery-upload
+// and squash paths.
 func reconcileUnpushedPointers(ctx context.Context, ledgerPath string, logger *slog.Logger, newClient func() (*Client, error)) (*ReconcileResult, error) {
 	if logger == nil {
 		logger = slog.Default()
@@ -527,8 +527,8 @@ func ensureReconcileGitSafe(ctx context.Context, ledgerPath string) error {
 // scanPushRange collects the pointers GitLab's pre-receive hook would check for
 // a push of HEAD: the pointer-sized blobs introduced by the commits in
 // @{upstream}..HEAD, whatever path or commit holds them. Missing or divergent
-// upstream state is an error: push-triggered repair must never fall back to a
-// whole-tree deletion pass.
+// upstream state is an error: without an upstream that HEAD descends from, the
+// push range is unknown.
 func scanPushRange(ctx context.Context, ledgerPath string, logger *slog.Logger) (*pointerSet, error) {
 	upstreamOut, err := gitPlumbing(ctx, ledgerPath, nil, "rev-parse", "--verify", "--quiet", "@{upstream}")
 	if err != nil {

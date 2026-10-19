@@ -123,10 +123,10 @@ func TestReconcile_WaitsForRepoWriter(t *testing.T) {
 // --- Guarantee 1: content is never lost ---
 
 // TestReconcileUnpushedPointers_FailsClosed: a reconcile that runs mid-merge,
-// cannot scan the push range (no upstream), or cannot reach the LFS store
-// returns an error and leaves HEAD and the pointer as they were. Failure
-// prevented: a push-triggered repair that cannot safely see what the push
-// carries changes the Ledger anyway.
+// cannot scan the push range (no upstream), or cannot build an LFS client (no
+// credentials) returns an error and leaves HEAD and the pointer as they were.
+// Failure prevented: a push-triggered repair that cannot safely see what the
+// push carries changes the Ledger anyway.
 func TestReconcileUnpushedPointers_FailsClosed(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: real git repos")
