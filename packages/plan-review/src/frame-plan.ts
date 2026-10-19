@@ -14,7 +14,9 @@ declare const __OX_DOCUMENT_TOOLS__: string;
 // ">", and the CDN checks run only inside a tag or a module script's text,
 // which no other check reads again. A pattern with an unbounded run on both
 // sides of a literal backtracks quadratically on an unterminated tag.
-const SCRIPT_TAG = /<script\b[^<>]*>/gi;
+// A tag name ends at whitespace, "/" or ">": <script-x> and </scripture> are
+// not script tags.
+const SCRIPT_TAG = /<script(?=[\t\n\f\r />])[^<>]*>/gi;
 // An attribute starts after whitespace or "/": "\bsrc" would also take data-src.
 const CDN_SRC =
   /[\s/]src\s*=\s*["']https:\/\/cdn\.jsdelivr\.net\/npm\/mermaid(?:@[^"'/<]+)?\/dist\/mermaid(?:\.min)?\.js["']/i;
@@ -23,7 +25,7 @@ const CDN_SRC =
 const MODULE_TYPE = /[\s/]type\s*=\s*(?:(["'])module\1|module(?=[\s>]))/;
 const MODULE_IMPORT =
   /\bimport\s+mermaid\s+from\s*["']https:\/\/cdn\.jsdelivr\.net\/npm\/mermaid(?:@[^"'/<]+)?\/dist\/mermaid\.esm(?:\.min)?\.mjs["']\s*;?/;
-const SCRIPT_CLOSE = /<\/script/gi;
+const SCRIPT_CLOSE = /<\/script(?=[\t\n\f\r />])/gi;
 const BODY_CLOSE = /<\/body>/gi;
 // ox's renderer adds the CDN tag to every plan; only a page with a diagram
 // needs the 2.7 MB build.

@@ -34,7 +34,7 @@ test('an ES-module import reads the global; the build follows the page and the t
 // the framed plan draws no diagram.
 test('the import is found anywhere in its module script', () => {
   const imp = `import mermaid from '${CDN}/dist/mermaid.esm.min.mjs';`;
-  const page = `${DIAGRAM}<script type="module">const smaller = 1 < 2;\n${imp}\nmermaid.run()</script>`;
+  const page = `${DIAGRAM}<script type="module">const smaller = 1 < 2, s = "</scripture>";\n${imp}\nmermaid.run()</script>`;
   assert.equal(framePlan(page), page.replace(imp, 'const mermaid = globalThis.mermaid;') + '<script>' + ESCAPED + '</script>');
 });
 
@@ -44,7 +44,8 @@ test('the import is found anywhere in its module script', () => {
 test('only a script tag\'s own src and type count', () => {
   const imp = `import mermaid from '${CDN}/dist/mermaid.esm.min.mjs';`;
   const page = DIAGRAM + `<script data-src="${CDN}/dist/mermaid.min.js">var a = 1</script>` +
-    `<script type="module-template">${imp}</script><script data-type=module type=text/plain>${imp}</script>`;
+    `<script type="module-template">${imp}</script><script data-type=module type=text/plain>${imp}</script>` +
+    `<script-x type="module">${imp}</script-x>`;
   assert.equal(framePlan(page), page);
 });
 
