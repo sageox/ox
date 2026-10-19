@@ -1,0 +1,7 @@
+{
+  "summary": "Two reviewers comment on the plan as a whole, as anchor plan with the label Whole plan. A resolution naming plan closes Sam's mark, raised before it; Avery's, raised after, stays open. A reader that does not know whole-plan marks shows each by its anchor, label and note.",
+  "items": [
+    {"anchor": "plan", "reviewer": "Sam", "status": "request-change", "label": "Whole plan", "note": "Split the rollout into two sprints.", "open": false, "resolution": "addressed"},
+    {"anchor": "plan", "reviewer": "Avery", "status": "comment", "label": "Whole plan", "note": "Agree with the split.", "open": true, "resolution": "addressed"}
+  ]
+}

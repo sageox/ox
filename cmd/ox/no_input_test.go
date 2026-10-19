@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -29,12 +30,14 @@ func TestNoInputCLI(t *testing.T) {
 
 	t.Run("logout", func(t *testing.T) {
 		for _, tt := range []struct {
-			name      string
-			args      []string
-			endpoints int
-			input     string
-			wantError []string
+			name         string
+			args         []string
+			endpoints    int
+			input        string
+			expiredToken bool
+			wantError    []string
 		}{
+			{name: "no endpoints is a successful no-op", args: []string{"--no-input"}},
 			{name: "requires consent", args: []string{"--no-input"}, endpoints: 1, wantError: []string{cli.ErrConfirmationRequired.Error()}},
 			{name: "ignores piped consent", args: []string{"--no-input"}, endpoints: 1, input: "y\n", wantError: []string{cli.ErrConfirmationRequired.Error()}},
 			{name: "requires endpoint choice", args: []string{"--no-input"}, endpoints: 2, wantError: []string{"--no-input requires --endpoint", "--all"}},
@@ -43,6 +46,7 @@ func TestNoInputCLI(t *testing.T) {
 			{name: "stray endpoint is rejected before logout", args: []string{"--no-input", "--force", "other-endpoint"}, endpoints: 2, wantError: []string{`unknown command "other-endpoint"`}},
 			{name: "explicit false still requires consent", args: []string{"--no-input", "--force=false"}, endpoints: 1, wantError: []string{cli.ErrConfirmationRequired.Error()}},
 			{name: "yes authorizes single endpoint", args: []string{"--no-input", "--yes"}, endpoints: 1},
+			{name: "yes authorizes logout of expired stored token", args: []string{"--no-input", "--yes"}, endpoints: 1, expiredToken: true},
 			{name: "all and yes authorize every endpoint", args: []string{"--no-input", "--all", "--yes"}, endpoints: 2},
 			{name: "force authorizes every endpoint", args: []string{"--no-input", "--force"}, endpoints: 2},
 			{name: "no-interactive still accepts piped consent", args: []string{"--no-interactive"}, endpoints: 1, input: "y"},
@@ -61,10 +65,20 @@ func TestNoInputCLI(t *testing.T) {
 						http.NotFound(w, r)
 					}))
 					endpoints = append(endpoints, server.URL)
+					expiresAt := time.Now().Add(time.Hour)
+					if tt.expiredToken {
+						expiresAt = time.Now().Add(-time.Hour)
+					}
 					require.NoError(t, auth.SaveTokenForEndpoint(server.URL, &auth.StoredToken{
 						AccessToken: "test-access", RefreshToken: "test-refresh", TokenType: "Bearer",
-						ExpiresAt: time.Now().Add(time.Hour),
+						ExpiresAt: expiresAt,
 					}))
+				}
+				if tt.endpoints == 0 {
+					// ListEndpoints treats a missing auth file as an error, so leave
+					// behind a valid empty store to exercise the no-login case.
+					require.NoError(t, auth.SaveTokenForEndpoint("https://unused.example.com", &auth.StoredToken{AccessToken: "temporary"}))
+					require.NoError(t, auth.RemoveTokenForEndpoint("https://unused.example.com"))
 				}
 				authPath, err := auth.GetAuthFilePath()
 				require.NoError(t, err)
@@ -97,6 +111,84 @@ func TestNoInputCLI(t *testing.T) {
 				}
 			})
 		}
+	})
+
+	// An unreadable auth.json must not hide a usable SAGEOX_TOKEN: the compiled
+	// command revokes it first, then fails with the listing error instead of
+	// exiting 0 as if the store were fine.
+	t.Run("logout revokes env token before reporting an unreadable auth store", func(t *testing.T) {
+		env := noInputCLIEnv(t)
+		var revocations atomic.Int32
+		server := testguard.SafeMockServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == auth.RevokeEndpoint && r.Method == http.MethodPost {
+				revocations.Add(1)
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			http.NotFound(w, r)
+		}))
+		for i, pair := range env {
+			switch key, _, _ := strings.Cut(pair, "="); key {
+			case "SAGEOX_ENDPOINT":
+				env[i] = key + "=" + server.URL
+			case auth.EnvVarToken:
+				env[i] = key + "=oxp_test_4bDZfN"
+			}
+		}
+
+		authPath, err := auth.GetAuthFilePath()
+		require.NoError(t, err)
+		require.NoError(t, os.MkdirAll(filepath.Dir(authPath), 0o700))
+		require.NoError(t, os.WriteFile(authPath, []byte("not-json"), 0o600))
+
+		output, runErr := runNoInputCLI(t, oxBin, t.TempDir(), env, nil, "logout", "--no-input", "--yes")
+		require.Error(t, runErr, "output: %s", output)
+		assert.Contains(t, output, "failed to list stored authentication endpoints")
+		assert.EqualValues(t, 1, revocations.Load(), "the env token must be revoked before the error; output: %s", output)
+		assert.Contains(t, output, "Revoked on the server for")
+		assert.NotContains(t, output, "Failed to logout", "a revocation the server confirmed is not a failed logout")
+		assert.NotContains(t, output, "server-side sessions may still be active", "the server confirmed the revocation")
+	})
+
+	// SAGEOX_TOKEN shadows a stored login on the same endpoint. Logout must
+	// revoke both before deleting the stored one, or its refresh token stays
+	// live on the server with no local copy left to retry.
+	t.Run("logout revokes env token and the stored login it shadows", func(t *testing.T) {
+		env := noInputCLIEnv(t)
+		var mu sync.Mutex
+		var revoked []string
+		server := testguard.SafeMockServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == auth.RevokeEndpoint && r.Method == http.MethodPost {
+				require.NoError(t, r.ParseForm())
+				mu.Lock()
+				revoked = append(revoked, r.PostForm.Get("token"))
+				mu.Unlock()
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			http.NotFound(w, r)
+		}))
+		for i, pair := range env {
+			switch key, _, _ := strings.Cut(pair, "="); key {
+			case "SAGEOX_ENDPOINT":
+				env[i] = key + "=" + server.URL
+			case auth.EnvVarToken:
+				env[i] = key + "=oxp_test_4bDZfN"
+			}
+		}
+		require.NoError(t, auth.SaveTokenForEndpoint(server.URL, &auth.StoredToken{
+			AccessToken: "test-access", RefreshToken: "test-refresh", TokenType: "Bearer",
+			ExpiresAt: time.Now().Add(time.Hour),
+		}))
+
+		output, runErr := runNoInputCLI(t, oxBin, t.TempDir(), env, nil, "logout", "--no-input", "--yes")
+		require.NoError(t, runErr, "output: %s", output)
+		mu.Lock()
+		assert.ElementsMatch(t, []string{"oxp_test_4bDZfN", "test-refresh"}, revoked, "both credentials must be revoked; output: %s", output)
+		mu.Unlock()
+		token, err := auth.GetTokenForEndpoint(server.URL)
+		require.NoError(t, err)
+		assert.Nil(t, token, "the stored login must be removed")
 	})
 
 	t.Run("typed uninstall", func(t *testing.T) {

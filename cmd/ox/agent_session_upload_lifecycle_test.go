@@ -101,7 +101,7 @@ func scriptedSessionUploadEffects(calls *[]string, refs map[string]lfs.FileRef, 
 		commitRetry: func(_, _ string, _ bool) error {
 			return mark("commit_retry")
 		},
-		reconcilePlans: func(_ string, _ []string, _, _ string) {
+		reconcilePlans: func(_ string, _ []string, _ string) {
 			_ = mark("reconcile_plans")
 		},
 		finalizeLinkage: func(_, _ string, _ *lfs.SessionMeta, _ string) []api.PRLinkMiss {

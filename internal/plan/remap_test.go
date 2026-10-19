@@ -73,6 +73,25 @@ func TestRemapFeedback_RecordsAMoveTheReviewFollows(t *testing.T) {
 // while part of the review cannot be read. Failure prevented: an item whose
 // resolution is unreadable looks open, and its reviewer's words are rebound to
 // another element for good.
+// TestRemapFeedback_NeverMovesAMarkOnTheWholePlan saves a plan that gained an
+// element labeled like a whole-plan mark.
+// Failure prevented: saving a plan moves a reviewer's comment on the whole plan
+// onto that element, for good.
+func TestRemapFeedback_NeverMovesAMarkOnTheWholePlan(t *testing.T) {
+	dir := t.TempDir()
+	writeRound(t, dir, "sam", time.Now(), planreview.Item{
+		Anchor: planreview.WholePlanAnchor, Label: "Whole plan",
+		Status: planreview.StatusComment, Note: "split the rollout",
+	})
+	moves, err := RemapFeedback(dir, renderFor(t, "# T\n\n## Scope\n\n- Whole plan\n"), time.Now())
+	if err != nil {
+		t.Fatalf("remap: %v", err)
+	}
+	if records, _ := filepath.Glob(filepath.Join(dir, "feedback", "remaps", "*.json")); len(moves) != 0 || len(records) != 0 {
+		t.Fatalf("a mark on the whole plan must stay put, got moves %+v and records %v", moves, records)
+	}
+}
+
 func TestRemapFeedback_SkipsAnIncompleteReview(t *testing.T) {
 	dir := t.TempDir()
 	writeRound(t, dir, "ryan", time.Now(), planreview.Item{

@@ -411,7 +411,14 @@ func (c *AuthClient) GetTokenForEndpoint(ep string) (*StoredToken, error) {
 	if envTok != nil {
 		return envTok, nil
 	}
+	return c.storedTokenForEndpoint(ep)
+}
 
+// storedTokenForEndpoint loads the token saved in auth.json for ep, ignoring
+// SAGEOX_TOKEN. Only revocation needs it: an env token shadows a stored login
+// on the same endpoint, and that login must still be revoked before it is
+// deleted. ep must already be normalized.
+func (c *AuthClient) storedTokenForEndpoint(ep string) (*StoredToken, error) {
 	authPath, err := c.GetAuthFilePath()
 	if err != nil {
 		return nil, err

@@ -118,6 +118,7 @@ const ACCOUNT = 'local';
     committed,
     problems: Number(body.getAttribute('data-review-problems')) || 0,
     transport: base ? { send } : undefined,
+    resolve: true, // any reviewer of a local review may Accept or Reopen
     approve: base ? approve : undefined,
     restartCommand: 'ox plan review ' + slug,
   });

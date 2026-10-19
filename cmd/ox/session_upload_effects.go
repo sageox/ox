@@ -18,7 +18,7 @@ type sessionUploadEffects struct {
 	uploadTraces    func(projectRoot, cacheDir, sessionDir string) (map[string]lfs.FileRef, error)
 	commitInitial   func(ledgerPath, sessionName string) error
 	commitRetry     func(ledgerPath, sessionName string, includeSummary bool) error
-	reconcilePlans  func(projectRoot string, slugs []string, sessionName, sessionID string)
+	reconcilePlans  func(projectRoot string, slugs []string, sessionID string)
 	finalizeLinkage func(projectRoot, sessionDir string, meta *lfs.SessionMeta, sessionName string) []api.PRLinkMiss
 }
 

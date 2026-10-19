@@ -90,18 +90,14 @@ const (
 // without the session present. Duplication is the feature, not a smell.
 type Provenance struct {
 	// Join keys (may dangle if the session was aborted / never uploaded).
-	//
-	// Two-phase population, because the canonical ses_ SessionID is minted
-	// fresh at session-STOP and is NOT knowable mid-recording:
-	//   - SessionName is the durable identifier available at plan-save time
-	//     (the recording's folder name, what `ox session view <name>` resolves).
-	//     It is the primary join key and is always set when a recording is live.
-	//   - SessionID (ses_<UUIDv7>) is BACKFILLED at session-stop, in the same
-	//     reconciliation that sets SessionOutcome=stopped — we have the real id
-	//     and the produced-plan slugs in hand there. Empty for aborted sessions
-	//     (no stop) and for plans saved outside a recording.
+	// Both are set at save time when a recording is live:
+	//   - SessionName is the recording's folder name, what `ox session view
+	//     <name>` resolves.
+	//   - SessionID (ses_<UUIDv7>) is minted when the recording starts. Session
+	//     stop (ReconcileSessionOutcome) fills it for a recording an older ox
+	//     started without one. Empty for plans saved outside a recording.
 	SessionName string `json:"session_name,omitempty"`
-	SessionID   string `json:"session_id,omitempty"` // ses_<UUIDv7>, backfilled at stop
+	SessionID   string `json:"session_id,omitempty"` // ses_<UUIDv7>, minted at recording start
 	AgentID     string `json:"agent_id,omitempty"`   // Ox#### stable agent instance
 	RepoID      string `json:"repo_id,omitempty"`
 
@@ -405,6 +401,12 @@ func Save(gitRoot string, in Input, res Result, html []byte, meta Meta) (string,
 		var status PlanStatus // meta.json's, after this save
 		if err := MutatePlanMeta(context.Background(), dir, func(existing *Meta) (*Meta, error) {
 			merged := meta
+			// a copy: the event this save appends is stamped from the
+			// caller's provenance, which the merge below must not rewrite
+			if meta.Provenance != nil {
+				prov := *meta.Provenance
+				merged.Provenance = &prov
+			}
 			if existing != nil {
 				if existing.Status != "" {
 					merged.Status = existing.Status
@@ -424,10 +426,10 @@ func Save(gitRoot string, in Input, res Result, html []byte, meta Meta) (string,
 				if merged.Primary == "" {
 					merged.Primary = existing.Primary
 				}
-				// SessionID and SessionOutcome are system-managed (backfilled /
-				// reconciled at stop), never set by a save-time caller — preserve
-				// them across a re-save even when the caller supplies fresh
-				// provenance for the other (snapshot) fields.
+				// A re-save keeps the SessionID and SessionOutcome already
+				// recorded, so it cannot reset a stopped outcome to active or
+				// replace the producing session's id with its own; the other
+				// (snapshot) provenance fields take the caller's values.
 				if existing.Provenance != nil {
 					if existing.Provenance.SessionID != "" || existing.Provenance.SessionOutcome != "" {
 						if merged.Provenance == nil {
@@ -875,10 +877,10 @@ func SetSessionOutcome(gitRoot, slug, outcome string) error {
 	})
 }
 
-// ReconcileSessionOutcome backfills the producing session's canonical id and
-// final outcome onto a plan (by slug) at session-stop, where both are known.
-// sessionID is the ses_<UUIDv7> minted at stop (skipped when ""); outcome is a
-// SessionOutcome* constant. Single flocked write so it can't race a re-save.
+// ReconcileSessionOutcome records the producing session's id and final outcome
+// in a plan's meta.json (by slug) at session-stop. sessionID is the session's
+// ses_<UUIDv7> (skipped when ""); outcome is a SessionOutcome* constant.
+// Single flocked write so it can't race a re-save.
 func ReconcileSessionOutcome(gitRoot, slug, sessionID, outcome string) error {
 	dir, err := resolvePlanDirForSlug(gitRoot, slug)
 	if err != nil {

@@ -33,6 +33,10 @@ type Spot = { p: Placed; at: Element | Range };
 
 const INLINE = /^(A|ABBR|B|BDI|BDO|CITE|CODE|DATA|DEL|DFN|EM|I|INS|KBD|MARK|Q|S|SAMP|SMALL|SPAN|STRONG|SUB|SUP|TIME|U|VAR|WBR)$/;
 const TINTS = ['sage', 'amber', 'red', 'gold', 'faint'];
+// A plan's own controls, which a click in review mode leaves to do their job:
+// a tab's label checks its radio, a summary opens its details. A link inside
+// one stays a pick, since following it would navigate away from the review.
+const OWN = 'input, select, textarea, label, summary';
 
 /** startDocumentTools runs the document tools against a host on the other end of port. */
 export function startDocumentTools(port: DocumentPort, opts: DocumentToolsOptions = {}): void {
@@ -314,7 +318,8 @@ export function startDocumentTools(port: DocumentPort, opts: DocumentToolsOption
     if (!on) { port.send({ type: 'dismiss' }); return; }
     // a selection means a drag or double-click just ended: comment on those
     // words. A plain click on highlighted words reopens that highlight; any
-    // other click marks the element under it.
+    // other click marks the element under it, unless one of the plan's own
+    // controls takes it.
     let t = (madeSelection(ev) && selectionTarget()) || highlightAt(ev);
     if (t && 'refuse' in t) {
       ev.preventDefault();
@@ -322,7 +327,7 @@ export function startDocumentTools(port: DocumentPort, opts: DocumentToolsOption
       return;
     }
     if (!t) {
-      const el = el0.closest(SELECTOR);
+      const el = el0.closest(OWN) && !el0.closest('a[href]') ? null : el0.closest(SELECTOR);
       if (!el) { port.send({ type: 'dismiss' }); return; }
       t = { anchor: anchorFor(el), section: headingOf(el), label: labelFor(el) };
     }

@@ -478,6 +478,25 @@ func TestBrowser_ReviewModeExitIsVisibleAndEscapable(t *testing.T) {
 	}
 }
 
+// TestBrowser_FirstVisitHintLeavesTheBarClickable: on Avery's first visit to
+// ox's live page a hint points at Review, and every button on the review bar
+// stays clickable under it.
+// Failure prevented: the hint sits on the bar's row, so a first-time
+// reviewer's click on Review, or a button beside it, lands on the hint and
+// does nothing.
+func TestBrowser_FirstVisitHintLeavesTheBarClickable(t *testing.T) {
+	ctx := frameBrowser(t)
+	base, _, _ := serveLivePlanReview(t)
+	if err := chromedp.Run(ctx, chromedp.Navigate(base+"/"), chromedp.WaitVisible(".rev-hint", chromedp.ByQuery)); err != nil {
+		t.Fatalf("the first visit must show the hint: %v", err)
+	}
+	// the buttons whose center the browser hit-tests to something else
+	if got := evalString(t, ctx, `Array.prototype.filter.call(document.querySelectorAll('.rev-bar button'),function(b){var r=b.getBoundingClientRect();`+
+		`return !b.contains(document.elementFromPoint(r.left+r.width/2,r.top+r.height/2))}).map(function(b){return b.textContent}).join(', ')`); got != "" {
+		t.Errorf("the hint covers %s", got)
+	}
+}
+
 // TestBrowser_ReviewModeSurvivesLiveReload proves the continuity beat of the
 // live loop: the page reloads whenever the agent addresses an item, and a
 // reviewer mid-review must land back IN review mode — silently, with no entry
@@ -1372,6 +1391,46 @@ func TestBrowser_LeftoverSelectionDoesNotHijackAClick(t *testing.T) {
 	}
 }
 
+// TestBrowser_PlanControlsWorkInReviewMode: with review mode on, Devon picks
+// a paragraph, then switches the plan's tab, ticks its checkbox and opens its
+// notes. Each does what it does outside review mode and closes the composer
+// instead of picking; a link inside a summary is still picked.
+// Failure prevented: a click on a tab opens the composer on its section
+// instead, so the reviewer must leave review mode to reach another tab's
+// content; or a link inside a summary is followed, away from the review.
+func TestBrowser_PlanControlsWorkInReviewMode(t *testing.T) {
+	ctx := frameBrowser(t)
+	gitRoot := newPlanStatusTestRepo(t)
+	html := `<!doctype html><html><head><meta charset="utf-8"><title>Controls</title><meta name="ox-plan-slug" content="controls">` +
+		`<style>.panel{display:none}#tab-a:checked~#panel-a,#tab-b:checked~#panel-b{display:block}</style></head><body><h1>Controls</h1>` +
+		`<section data-ox-section="Rollout"><h2>Rollout</h2>` +
+		`<input type="radio" name="tab" id="tab-a" checked><label for="tab-a">Canary</label>` +
+		`<input type="radio" name="tab" id="tab-b"><label for="tab-b">Full</label>` +
+		`<div class="panel" id="panel-a"><p>Canary first.</p></div><div class="panel" id="panel-b"><p>Everyone at once.</p></div>` +
+		`<p><input type="checkbox" id="box"></p>` +
+		`<details><summary>Runbook: <a id="link" href="https://example.com/">open it</a></summary><p>Step one.</p></details>` +
+		`<details id="notes"><summary>Implementation notes</summary><p>Flag name: rollout-v2.</p></details>` +
+		`<p id="para">Ship behind a flag.</p></section></body></html>`
+	dir := savePlanArtifacts(gitRoot, plan.Input{Raw: "# Controls\n"}, plan.Result{}, []byte(html), plan.PrimaryHTML)
+	base, _, _ := serveSavedPlanReview(t, gitRoot, "controls", dir)
+	openReviewer(t, ctx, base)
+	if err := chromedp.Run(ctx, chromedp.Click(".rev-toggle", chromedp.ByQuery),
+		chromedp.Click("#para", chromedp.ByQuery), chromedp.WaitVisible(".rev-pop", chromedp.ByQuery),
+		chromedp.Click(`label[for="tab-b"]`, chromedp.ByQuery), chromedp.Click("#box", chromedp.ByQuery), chromedp.Click("#notes summary", chromedp.ByQuery)); err != nil {
+		t.Fatalf("click the plan's controls in review mode: %v", err)
+	}
+	if got := evalString(t, ctx, `[document.getElementById('tab-b').checked,document.getElementById('box').checked,document.getElementById('notes').open,!!document.querySelector('.rev-pop')].join()`); got != "true,true,true,false" {
+		t.Errorf("in review mode the plan's controls must do their job and pick nothing (tab,box,notes,composer): %s", got)
+	}
+	// a followed link would leave the page: poll briefly rather than wait out the context
+	if err := chromedp.Run(ctx, chromedp.Click("#link", chromedp.ByQuery)); err != nil {
+		t.Fatalf("click the link: %v", err)
+	}
+	if !waitJS(ctx, `document.querySelector('.rev-pop')`, 5*time.Second) {
+		t.Error("a link inside a summary must be picked, not followed")
+	}
+}
+
 // TestBrowser_HighlightStopsAtElementEdges proves a highlight takes only the
 // words the reviewer picked when the markup runs elements together: on an
 // authored plan whose table cells, and the lines around a <br>, sit side by
@@ -1543,5 +1602,52 @@ func TestBrowser_ReopenedHighlightKeepsItsWords(t *testing.T) {
 	}
 	if d := plan.FeedbackDigest(plan.ReadReview(planDir).Items); !strings.Contains(d, "“"+phrase+"”") {
 		t.Fatalf("the agent's digest must quote the reopened highlight's words:\n%s", d)
+	}
+}
+
+// TestBrowser_WholePlanCommentReachesTheLedger: Devon comments on the plan as
+// a whole from the rail and submits it. It reaches the Ledger as his mark on
+// the whole plan, and the page that reloads lists it once, first in the rail,
+// with no "text changed" tag and no banner of notes no longer anchored. Once
+// the author addresses it, the button still starts a new comment.
+// Failure prevented: a comment on the plan's direction or scope has to be
+// pinned to some section; once stored, it reads as a note whose text is gone;
+// or, once one is addressed, the button offers to resolve it instead.
+func TestBrowser_WholePlanCommentReachesTheLedger(t *testing.T) {
+	ctx := frameBrowser(t)
+	base, planDir, _ := serveLivePlanReview(t)
+	openReviewer(t, ctx, base)
+	const note = "Split the rollout into two sprints."
+	markSection(t, ctx, ".rev-rail-plan", note)
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`window.oldPage=true`, nil), chromedp.Click(".rev-submit", chromedp.ByQuery)); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	it := waitForOneRound(t, planDir, 15*time.Second)
+	if it.Anchor != planreview.WholePlanAnchor || it.Label != "Whole plan" || it.Section != "" || it.Note != note || it.Reviewer != "Devon" {
+		t.Fatalf("the round must carry Devon's mark on the whole plan: %+v", it)
+	}
+	// the rail's first row: its heading, its tags, and its note
+	const firstRow = `(function(){var li=document.querySelector('.rev-rail-item');if(!li)return '';` +
+		`var tags=Array.prototype.map.call(li.querySelectorAll('.rev-rail-tag'),function(x){return x.textContent}).join(',');` +
+		`return li.querySelector('.rev-rail-sec-t').textContent+'|'+tags+'|'+((li.querySelector('.rev-rail-note')||{}).textContent||'')})()`
+	if !waitForNewPage(ctx, firstRow+`==='Whole plan||'+`+jsString(note), 10*time.Second) {
+		t.Fatalf("the reloaded page must list the stored comment first, untagged (heading|tags|note): %q", evalString(t, ctx, firstRow))
+	}
+	if got := evalString(t, ctx, `document.querySelectorAll('.rev-rail-item').length+'|'+!!document.querySelector('.rev-orphans')`); got != "1|false" {
+		t.Fatalf("the rail must list it once, with no banner of notes no longer anchored (rows|banner): %q", got)
+	}
+
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`window.oldPage=true`, nil)); err != nil {
+		t.Fatalf("mark the page: %v", err)
+	}
+	resolveForTest(t, planDir, planreview.WholePlanAnchor, planreview.StateAddressed, "Split into two sprints.")
+	if !waitForNewPage(ctx, `!!document.querySelector('.rev-rail-tag.addressed')`, 10*time.Second) {
+		t.Fatal("the page must reload with the comment addressed")
+	}
+	if err := chromedp.Run(ctx, chromedp.Click(".rev-rail-plan", chromedp.ByQuery), chromedp.WaitVisible(".rev-pop", chromedp.ByQuery)); err != nil {
+		t.Fatalf("comment on the whole plan again: %v", err)
+	}
+	if got := evalString(t, ctx, `['rev-accept','rev-reopen','rev-save'].filter(function(c){return document.querySelector('.rev-pop .'+c)}).join(' ')`); got != "rev-save" {
+		t.Errorf("once a whole-plan comment is addressed, the button must still start a new one; it offered %q", got)
 	}
 }

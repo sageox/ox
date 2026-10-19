@@ -61,13 +61,14 @@ func canonical(anchors []string, remaps []Remap) map[string]string {
 
 // Rebind computes the remaps a new render of the plan needs: for each open
 // item whose anchor page no longer has, the element it most plausibly moved
-// to. Highlights ("q" anchors) are never rebound, because the page finds them
-// by their words. Rebind writes nothing; only the plan's author records its
-// result (RemapRecord), never a submission.
+// to. Only element anchors ("h") are rebound: the page finds a highlight ("q")
+// by its words, and other anchors, such as WholePlanAnchor, name no element.
+// Rebind writes nothing; only the plan's author records its result
+// (RemapRecord), never a submission.
 func Rebind(items []Merged, page []byte, at time.Time) ([]Remap, error) {
 	var open []Merged
 	for _, it := range items {
-		if it.Open && it.Anchor != "" && !strings.HasPrefix(it.Anchor, "q") {
+		if it.Open && strings.HasPrefix(it.Anchor, "h") {
 			open = append(open, it)
 		}
 	}

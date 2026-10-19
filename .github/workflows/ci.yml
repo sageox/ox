@@ -510,8 +510,8 @@ jobs:
           # no session bus on the runner: Chrome fails fast instead of waiting on one
           DBUS_SESSION_BUS_ADDRESS: /dev/null
         run: |
-          go test -tags=browser -count=1 -v -run 'TestBrowser_(DocumentToolsMatchSharedPageVectors|DocumentToolsAnchorADiagramOnceItDraws|ReviewClicksWaitForDiagrams|HostControlsAroundAFramedPlan|UnstorableReviewIsNeverSent|LostAnswerAndAnEditDuringSendDeliverOnce|TwoTabsKeepEachOthersMarks|ReopenedHighlightKeepsItsWords)$' ./cmd/ox/ | tee browser.log
-          test "$(grep -c -E '^--- PASS: TestBrowser_' browser.log)" -eq 8
+          go test -tags=browser -count=1 -v -run 'TestBrowser_(DocumentToolsMatchSharedPageVectors|DocumentToolsAnchorADiagramOnceItDraws|ReviewClicksWaitForDiagrams|HostControlsAroundAFramedPlan|UnstorableReviewIsNeverSent|LostAnswerAndAnEditDuringSendDeliverOnce|TwoTabsKeepEachOthersMarks|ReopenedHighlightKeepsItsWords|PlanControlsWorkInReviewMode|ResolveOfferedOnlyToReviewersWhoMay|WholePlanCommentReachesTheLedger|FirstVisitHintLeavesTheBarClickable)$' ./cmd/ox/ | tee browser.log
+          test "$(grep -c -E '^--- PASS: TestBrowser_' browser.log)" -eq 12
 
   # The skill installer is the one subsystem where Windows is a first-class
   # target rather than an aspiration: copy materialization IS what Windows gets,

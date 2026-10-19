@@ -43,7 +43,7 @@ require (
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c
 	github.com/sageox/agentx v0.1.14
 	github.com/sageox/frictionax v0.1.2
-	github.com/sageox/ox/pkg/planreview v0.2.0
+	github.com/sageox/ox/pkg/planreview v0.3.0
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10

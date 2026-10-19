@@ -150,16 +150,19 @@ func TestSavePlanArtifacts_LinksBothDirectionsWithoutAgentID(t *testing.T) {
 		t.Errorf("provenance.session_id = %q, want %q", meta.Provenance.SessionID, rec.SessionID)
 	}
 
-	// events.jsonl is the PERMANENCE vector: BackfillSessionID matches on
-	// SessionName, so an event line written without one can never be repaired.
-	// This is the 4.7% half of the loss, and the half the PR's first regression
-	// test did not cover.
+	// events.jsonl is the PERMANENCE vector: its lines are never edited, so
+	// the session a save does not stamp is never attached. This is the 4.7%
+	// half of the loss, and the half the PR's first regression test did not
+	// cover.
 	events, err := plan.LoadEvents(dir)
 	if err != nil || len(events) == 0 {
 		t.Fatalf("LoadEvents: err=%v n=%d", err, len(events))
 	}
 	if got := events[len(events)-1].SessionName; got != wantSession {
-		t.Errorf("events.jsonl session_name = %q, want %q — unrepairable: BackfillSessionID matches on this field", got, wantSession)
+		t.Errorf("events.jsonl session_name = %q, want %q — unrepairable: event lines are never edited", got, wantSession)
+	}
+	if got := events[len(events)-1].SessionID; got != rec.SessionID {
+		t.Errorf("events.jsonl session_id = %q, want %q — unrepairable: event lines are never edited", got, rec.SessionID)
 	}
 
 	// Reverse link, read back from the file session stop will read.
@@ -257,8 +260,8 @@ func TestAppendProducedPlan_DoesNotResurrectStoppedRecording(t *testing.T) {
 // `if agentID == "" { return nil }` inside loadPlanRecordingState left the whole
 // suite green, because asserting AuthorName alone keeps prov non-nil.
 //
-// This is the permanent half — with SessionName blank, plan.BackfillSessionID
-// (which matches on SessionName) can never attach the ses_ id afterwards.
+// This is the permanent half: event lines are never edited, so a session the
+// save drops is never attached afterwards.
 func TestResolvePlanProvenance_SessionSurvivesMissingAgentID(t *testing.T) {
 	root := newPlanCaptureTestRepo(t)
 	t.Setenv("SAGEOX_AGENT_ID", "")
@@ -284,6 +287,11 @@ func TestResolvePlanProvenance_SessionSurvivesMissingAgentID(t *testing.T) {
 	}
 	if prov.SessionOutcome != plan.SessionOutcomeActive {
 		t.Errorf("SessionOutcome = %q, want %q", prov.SessionOutcome, plan.SessionOutcomeActive)
+	}
+	// lifecycle events and the review page's Approve take their session from
+	// here, and their lines are never edited, so the id must arrive with them
+	if f := planEventFieldsFromProvenance(root); f.SessionID != rec.SessionID || f.SessionName != want {
+		t.Errorf("lifecycle event session = (%q, %q), want (%q, %q)", f.SessionName, f.SessionID, want, rec.SessionID)
 	}
 }
 

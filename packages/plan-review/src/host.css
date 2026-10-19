@@ -47,12 +47,13 @@ body.rev-on .rev-orphans li:hover{outline:none;cursor:auto}
 .rev-orphans ul{margin:.3em 0;padding-left:1.1em}
 .rev-orphans .rev-orphans-x{margin-top:6px;background:var(--panel2, #171b17);border:1px solid var(--hair2, var(--hair, #212620));color:var(--dim, #b7b6a3);border-radius:5px;padding:3px 9px;font-size:11px;cursor:pointer;font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace}
 
-/* first-visit discoverability bubble near the Review toggle */
+/* first-visit discoverability bubble above the Review toggle */
 /* A quiet outlined chip, not a filled shout — it sits over the plan's own
    bottom-left corner and must not win the reader's first fixation. The infinite
    1.4s bob it used to run repeated forever without ever communicating anything
-   new; one settle on entry says "I just appeared" and then stops. */
-.rev-hint{position:fixed;left:96px;bottom:20px;z-index:2147483003;background:var(--panel, #111411);border:1px solid var(--sage, #99c693);color:var(--sage, #99c693);border-radius:7px;padding:6px 10px;font-size:12px;font-weight:500;box-shadow:var(--shadow, 0 1px 0 rgba(255,255,255,.02), 0 8px 30px rgba(0,0,0,.35));animation:rev-hint-in .25s ease-out both}
+   new; one settle on entry says "I just appeared" and then stops. Above the
+   bar, never on its row, where it would take a button's click. */
+.rev-hint{position:fixed;bottom:64px;z-index:2147483003;background:var(--panel, #111411);border:1px solid var(--sage, #99c693);color:var(--sage, #99c693);border-radius:7px;padding:6px 10px;font-size:12px;font-weight:500;box-shadow:var(--shadow, 0 1px 0 rgba(255,255,255,.02), 0 8px 30px rgba(0,0,0,.35));animation:rev-hint-in .25s ease-out both}
 @keyframes rev-hint-in{from{opacity:0;transform:translateX(-6px)}to{opacity:1;transform:none}}
 @media (prefers-reduced-motion:reduce){.rev-hint{animation:none}}
 
@@ -69,6 +70,9 @@ body.rev-on .rev-orphans li:hover{outline:none;cursor:auto}
 .rev-rail-show:hover{color:var(--ink, #f4f2ef)}
 .rev-rail-n{background:var(--panel2, #171b17);border:1px solid var(--hair2, var(--hair, #212620));border-radius:8px;padding:0 6px;font-size:10.5px;color:var(--faint, #8c8e7e)}
 .rev-rail-empty{color:var(--faint, #8c8e7e);font-size:12px;line-height:1.5}
+/* in review mode: a comment on the plan as a whole, which no click on the plan can pick */
+.rev-rail-plan{display:block;width:100%;margin:0 0 8px;background:none;border:1px dashed var(--hair2, var(--hair, #212620));border-radius:7px;color:var(--dim, #b7b6a3);padding:5px 8px;font:12px/1.4 Inter,system-ui,sans-serif;text-align:left;cursor:pointer}
+.rev-rail-plan:hover{color:var(--ink, #f4f2ef);border-color:var(--sage, #99c693)}
 .rev-rail-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
 .rev-rail-item{display:flex;gap:8px;padding:7px 8px;background:var(--bg, #0b0d0b);border:1px solid var(--hair2, var(--hair, #212620));border-left:3px solid var(--hair, #212620);border-radius:7px;cursor:pointer}
 .rev-rail-item:hover{border-color:var(--hair, #212620);background:var(--panel2, #171b17)}
