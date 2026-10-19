@@ -92,6 +92,9 @@ func TestCheckPlanPendingWrites_ReportsAReviewThatNeverLands(t *testing.T) {
 // a marker no retry can read is reported too. Failure prevented: a plan save
 // or approval whose push keeps failing is never reported.
 func TestCheckPlanPendingWrites_ReportsPlanRetryMarkers(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real ledger git repo whose push to a missing remote retries with backoff")
+	}
 	ledger := reviewTestLedger(t)
 	runGitInDir(t, ledger, "remote", "set-url", "origin", filepath.Join(t.TempDir(), "gone.git"))
 	if err := os.MkdirAll(filepath.Join(ledger, "data", "plans", "2026-10-01-live"), 0o755); err != nil {
