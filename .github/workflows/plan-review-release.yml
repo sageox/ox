@@ -3,6 +3,11 @@ name: Publish @sageox/plan-review
 # Publishes packages/plan-review to GitHub Packages from the tag
 # packages/plan-review/v<version>. Steps for maintainers are in
 # packages/plan-review/README.md ("Releasing").
+#
+# The package's host controls run in every host page that mounts them, so the
+# job that runs the build's tools (npm ci, esbuild, tsc) holds no write
+# permission, and the job that holds one runs none of the build's code: it
+# checks the tarball's SHA-256, attests it, and publishes it.
 
 on:
   workflow_dispatch:
@@ -20,13 +25,14 @@ permissions:
   contents: read
 
 jobs:
-  publish:
+  build:
     # Dispatch from main, so the copy of this workflow that runs is the merged one.
     if: github.repository == 'sageox/ox' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
+    outputs:
+      sha256: ${{ steps.pack.outputs.sha256 }}
     env:
       VERSION: ${{ inputs.version }}
     steps:
@@ -54,7 +60,6 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '22'
-          registry-url: 'https://npm.pkg.github.com'
 
       - name: Require the tag to carry this version
         run: |
@@ -64,22 +69,75 @@ jobs:
             exit 1
           fi
 
-      # Fails when the tag's committed CLI assets are not what its source builds.
+      # Fails when the tag's committed CLI assets are not what its source builds,
+      # or when two packs of one build differ.
       - name: Check, test and pack the package
         run: make plan-review-check
 
-      - name: Publish to GitHub Packages
+      - name: Pack the tarball to publish
+        id: pack
         working-directory: packages/plan-review
+        run: |
+          mkdir "$RUNNER_TEMP/pack"
+          npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP/pack" > /dev/null
+          echo "sha256=$(sha256sum "$RUNNER_TEMP/pack/sageox-plan-review-$VERSION.tgz" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: plan-review-tarball
+          path: ${{ runner.temp }}/pack/sageox-plan-review-${{ inputs.version }}.tgz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    # Required reviewers for a release are set on this environment in the
+    # repository's settings.
+    environment: plan-review-release
+    permissions:
+      packages: write # npm publish
+      id-token: write # the Sigstore certificate for the attestation
+      attestations: write # store the attestation
+    env:
+      VERSION: ${{ inputs.version }}
+      SHA256: ${{ needs.build.outputs.sha256 }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: plan-review-tarball
+
+      - name: Require the tarball the build packed
+        run: |
+          if ! [[ "$SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::The build reported no SHA-256"
+            exit 1
+          fi
+          echo "$SHA256  sageox-plan-review-$VERSION.tgz" | sha256sum --check --strict
+
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: sageox-plan-review-${{ inputs.version }}.tgz
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          registry-url: 'https://npm.pkg.github.com'
+
+      # --ignore-scripts: no lifecycle script from the tarball runs beside the token.
+      - name: Publish to GitHub Packages
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           tag=latest
           case "$VERSION" in *-*) tag=next ;; esac
-          npm publish --tag "$tag" --json > publish.json
+          npm publish "./sageox-plan-review-$VERSION.tgz" --tag "$tag" --ignore-scripts --json > publish.json
+          tar -xOzf "sageox-plan-review-$VERSION.tgz" package/dist/manifest.json > manifest.json
           node -e '
-            const r = require("./publish.json"), m = require("./dist/manifest.json");
+            const r = require("./publish.json"), m = require("./manifest.json");
             console.log(["## @sageox/plan-review " + r.version,
               "", "- dist-tag: " + process.argv[1], "- integrity: `" + r.integrity + "`",
-              "- shasum: `" + r.shasum + "`", "- protocol: " + m.protocol,
-              "- source_sha256: `" + m.source_sha256 + "`"].join("\n"));
-          ' "$tag" >> "$GITHUB_STEP_SUMMARY"
+              "- shasum: `" + r.shasum + "`", "- sha256: `" + process.argv[2] + "`",
+              "- protocol: " + m.protocol, "- source_sha256: `" + m.source_sha256 + "`",
+              "- verify: `gh attestation verify sageox-plan-review-" + r.version + ".tgz -R sageox/ox`"].join("\n"));
+          ' "$tag" "$SHA256" >> "$GITHUB_STEP_SUMMARY"

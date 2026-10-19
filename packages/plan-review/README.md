@@ -53,6 +53,14 @@ Pinning matters because the host end and the document script must come from
 one version: the protocol moves with the package. `manifest.json` names the
 protocol a build speaks.
 
+Each release's tarball has a provenance attestation from this repository's
+release workflow. Check a tarball before you pin it:
+
+```sh
+npm pack @sageox/plan-review@0.5.0
+gh attestation verify sageox-plan-review-0.5.0.tgz -R sageox/ox
+```
+
 ## Frame a plan
 
 1. **Name the frame load.** Mint an instance id for every load: 8–64
@@ -255,10 +263,12 @@ Edit `src/`, never `internal/plan/assets/review.*`.
    source with the regenerated assets.
 2. Tag that commit `packages/plan-review/v<version>` and push the tag.
 3. Run the **Publish @sageox/plan-review** workflow from `main` with the
-   version. It checks out the tag, refuses one whose commit is not on `main`,
-   runs `make plan-review-check`, publishes under the dist-tag `latest`
-   (`next` for a prerelease), and writes the tarball's integrity to the run
-   summary.
+   version. Its build job, which can only read, checks out the tag, refuses
+   one whose commit is not on `main`, runs `make plan-review-check`, and packs
+   the tarball. Its publish job runs none of the build's code: it checks the
+   tarball's SHA-256, attests it, publishes it with no lifecycle scripts under
+   the dist-tag `latest` (`next` for a prerelease), and writes its integrity
+   to the run summary.
 4. After the first publish only, set the package's visibility to *internal*
    in its GitHub settings, and grant read access to each repository that
    installs it.
