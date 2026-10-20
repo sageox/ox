@@ -1,39 +1,40 @@
 Feature: Every Session Reaches the Ledger Before the Machine Goes Away
   Some AI coworkers run on a machine that goes away after each job, such as a
-  CI-like pod. Before it goes away, the job's runner asks ox to finish and upload
-  every session recorded there and to say how many reached the Ledger. A session
-  that cannot reach the Ledger fails the job instead of disappearing with the
-  machine.
+  CI-like pod. There, as on a laptop, the ox daemon summarizes and uploads each
+  session. Before the machine goes away, the job's runner waits until the
+  daemon has put every session recorded there in the Ledger, and learns how
+  many made it. A session that cannot reach the Ledger fails the job instead
+  of disappearing with the machine.
 
   See also: session-recording/auto-record.feature
 
-  Rule: A recording whose AI coworker crashed is finished the way its session end would have been
+  Rule: The runner waits for the daemon to upload each session, with its summary
 
-    Scenario: Avery crashes before the session ends
-      Given Avery recorded a session on a pod and crashed before the session ended
+    Scenario: Avery's session ends normally
+      Given Avery's session on a pod ended and was handed to the daemon
       When the runner waits for the pod's sessions
-      Then ox finishes Avery's recording and uploads it to the "Acme Engineering" Ledger
-      And a recording whose AI coworker is still running is reported, not finished
-
-  Rule: Sessions still on the machine reach the Ledger and are counted
+      Then the runner waits until the daemon has uploaded it, with its summary, to the "Acme Engineering" Ledger
+      And the report counts it
 
     Scenario: A session from an earlier job never reached the Ledger
       Given the pod's home holds a session from an earlier job that never reached the Ledger
       When the runner waits for the pod's sessions
-      Then ox uploads it to the "Acme Engineering" Ledger
+      Then the daemon uploads it to the "Acme Engineering" Ledger
       And the report lists it as an older pending session
 
-    Scenario: A session's upload was committed but its push failed
-      Given a session was committed to the pod's copy of the Ledger but never pushed
+  Rule: A crashed AI coworker's session is the daemon's to finish
+
+    Scenario: Avery crashes before the session ends
+      Given Avery recorded a session on a pod and crashed before the session ended
       When the runner waits for the pod's sessions
-      Then ox pushes it to the "Acme Engineering" Ledger
-      And the report counts it
+      Then the runner waits while the daemon notices the crash and finishes Avery's session
+      And a recording whose AI coworker is still running is reported, not finished
 
-  Rule: The runner learns when a session cannot reach the Ledger
+  Rule: The runner learns when a session did not reach the Ledger
 
-    Scenario: The content store refuses an upload
-      Given a session Avery recorded during this job is waiting to upload
-      And the content store refuses the upload
+    Scenario: The daemon does not finish in time
+      Given a session Avery recorded during this job is waiting for the daemon
+      And the daemon does not upload it before the runner's timeout
       When the runner waits for the pod's sessions
       Then ox reports the session as not in the Ledger, with the reason
       And the command exits with a failure
@@ -46,11 +47,11 @@ Feature: Every Session Reaches the Ledger Before the Machine Goes Away
       And ox never uploads it
       And the command exits with a failure
 
-  Rule: Where the daemon uploads sessions, waiting never uploads beside it
+  Rule: Waiting uploads nothing itself
 
-    Scenario: Devon waits on a laptop whose daemon uploads the sessions
-      Given Devon's laptop runs the ox daemon, which uploads Devon's sessions
-      And a session is waiting for the daemon
-      When Devon waits for the laptop's sessions
-      Then ox reports the session as waiting for the daemon
-      And ox uploads nothing itself
+    Scenario: Devon waits on a machine without a daemon
+      Given Devon's machine runs no ox daemon
+      And a session on it never reached the Ledger
+      When Devon waits for the machine's sessions
+      Then ox reports the session with the command that publishes it
+      And ox uploads nothing
