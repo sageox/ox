@@ -300,26 +300,30 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 		attemptCtx, cancel := context.WithTimeout(ctx, opTimeout)
 		var outStr string
 		var err error
-		if opts.ValidatePush == nil {
-			outStr, err = RunGit(attemptCtx, repoPath, "push", "--quiet")
-		} else {
-			validationErr := WithRepoLock(attemptCtx, repoPath, func() error {
-				if err := IsSafeForGitOps(repoPath); err != nil {
-					return fmt.Errorf("repo blocked: %w", err)
-				}
-				alreadyPublished, validationErr := opts.ValidatePush(attemptCtx, repoPath)
-				if validationErr != nil {
-					return validationErr
-				}
-				if !alreadyPublished {
-					outStr, err = RunGit(attemptCtx, repoPath, "push", "--quiet")
-				}
-				return nil
-			})
-			if validationErr != nil {
-				cancel()
-				return validationErr
+		// Every supported ledger pusher shares this mandatory boundary, including
+		// daemon retries and callers without an optional ValidatePush callback.
+		validationErr := WithRepoLock(attemptCtx, repoPath, func() error {
+			if err := IsSafeForGitOps(repoPath); err != nil {
+				return fmt.Errorf("repo blocked: %w", err)
 			}
+			if opts.ValidatePush != nil {
+				alreadyPublished, err := opts.ValidatePush(attemptCtx, repoPath)
+				if err != nil {
+					return err
+				}
+				if alreadyPublished {
+					return nil
+				}
+			}
+			if err := ValidateSessionPublication(attemptCtx, repoPath); err != nil {
+				return err
+			}
+			outStr, err = RunGit(attemptCtx, repoPath, "push", "--quiet")
+			return nil
+		})
+		if validationErr != nil {
+			cancel()
+			return validationErr
 		}
 		cancel()
 		if err == nil {

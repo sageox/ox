@@ -107,6 +107,7 @@ func (s *fakeUploadStore) handlePut(w http.ResponseWriter, r *http.Request) {
 // A 5 MB plan.html upload must carry Content-Length, and one connection reset
 // must not lose the object: the second attempt is a fresh request.
 func TestUploadBlob_SendsContentLengthAndRetriesOnceOnReset(t *testing.T) {
+	useBundledSessionRules(t)
 	client, store := newFakeUploadStore(t, true, false)
 	content := []byte(strings.Repeat("<html>plan</html>\n", 300000))
 
@@ -125,6 +126,7 @@ func TestUploadBlob_SendsContentLengthAndRetriesOnceOnReset(t *testing.T) {
 // A PUT the store answers 200 for but never persists must fail the upload: the
 // Batch download probe reports the object missing, so no pointer may be minted.
 func TestUploadBlob_FailsWhenStoreDoesNotHoldObjectAfterUpload(t *testing.T) {
+	useBundledSessionRules(t)
 	client, store := newFakeUploadStore(t, false, true)
 
 	_, err := UploadBlob(client, []byte("<html>plan that vanishes</html>\n"))
@@ -137,6 +139,7 @@ func TestUploadBlob_FailsWhenStoreDoesNotHoldObjectAfterUpload(t *testing.T) {
 // the transport can report a connection reset as net.ErrClosed during a large
 // write; retry must replay the same complete bytes through the real store.
 func TestUploadBlob_RetriesClosedConnection(t *testing.T) {
+	useBundledSessionRules(t)
 	client, store := newFakeUploadStore(t, false, false)
 	previous := lfsHTTPClient
 	transport := previous.Transport

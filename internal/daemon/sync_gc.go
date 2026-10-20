@@ -1038,10 +1038,8 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 // Returns nil if there are no unpushed commits or if push succeeds.
 // Returns an error if unpushed commits exist and push fails.
 //
-// NOTE: This intentionally does NOT use gitutil.PushWithRetry. The GC push
-// injects credentials directly into the remote URL and uses "push origin HEAD",
-// which is fundamentally different from PushWithRetry's "push --quiet" approach.
-// The credential injection + URL restore pattern is GC-specific (reclone context).
+// GC uses explicit credential-helper arguments and a destination ref. Its push
+// still shares mandatory exact-history validation with every other publisher.
 func (s *SyncScheduler) gcPushUnpushedCommits(ctx context.Context, ws WorkspaceState) error {
 	// count unpushed commits against the upstream tracking branch
 	countOutput, err := gitutil.RunGit(ctx, ws.Path, "rev-list", "--count", "@{upstream}..HEAD")
@@ -1072,12 +1070,26 @@ func (s *SyncScheduler) gcPushUnpushedCommits(ctx context.Context, ws WorkspaceS
 	}
 	helperCmd := gitserver.DefaultHelperCommand()
 
+	// Hold the ledger lock from validation through each attempt. Never interpret
+	// a validation refusal as an LFS failure eligible for a fallback push.
+	push := func(args ...string) error {
+		return gitutil.WithRepoLock(ctx, ws.Path, func() error {
+			if err := gitutil.IsSafeForGitOps(ws.Path); err != nil {
+				return err
+			}
+			if err := gitutil.ValidateSessionPublication(ctx, ws.Path); err != nil {
+				return err
+			}
+			_, err := gitutil.RunGit(ctx, ws.Path, args...)
+			return err
+		})
+	}
 	pushArgs := []string{
 		"-c", "credential.helper=",
 		"-c", "credential.helper=" + helperCmd,
 		"push", "origin", "HEAD", "--quiet",
 	}
-	if _, pushErr := gitutil.RunGit(ctx, ws.Path, pushArgs...); pushErr != nil {
+	if pushErr := push(pushArgs...); pushErr != nil {
 		errMsg := pushErr.Error()
 		if strings.Contains(errMsg, "LFS") || strings.Contains(errMsg, "lfs") || strings.Contains(errMsg, "allowincompletepush") {
 			s.logger.Warn("gc: LFS objects missing, retrying push with allowincompletepush",
@@ -1088,7 +1100,7 @@ func (s *SyncScheduler) gcPushUnpushedCommits(ctx context.Context, ws WorkspaceS
 				"-c", "lfs.allowincompletepush=true",
 				"push", "origin", "HEAD", "--quiet",
 			}
-			if _, retryErr := gitutil.RunGit(ctx, ws.Path, retryArgs...); retryErr != nil {
+			if retryErr := push(retryArgs...); retryErr != nil {
 				return fmt.Errorf("push failed (even with allowincompletepush): %w", retryErr)
 			}
 			s.logger.Info("gc: push succeeded with allowincompletepush", "path", ws.Path)

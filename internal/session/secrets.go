@@ -1,9 +1,12 @@
 package session
 
 import (
+	"encoding/json"
 	"regexp"
 	"strings"
 	"sync"
+
+	"github.com/sageox/ox/internal/secretguard"
 )
 
 // SecretPattern defines a pattern for detecting secrets
@@ -464,14 +467,14 @@ type Redactor struct {
 
 // NewRedactor creates a new Redactor with default patterns
 func NewRedactor() *Redactor {
-	r := &Redactor{patterns: DefaultPatterns()}
+	r := &Redactor{patterns: append(DefaultPatterns(), DefaultExtraDetectors()...)}
 	r.catalogVersion, r.catalogHash = computeCatalogIdentity(r.patterns)
 	return r
 }
 
 // NewRedactorWithPatterns creates a Redactor with custom patterns
 func NewRedactorWithPatterns(patterns []SecretPattern) *Redactor {
-	r := &Redactor{patterns: patterns}
+	r := &Redactor{patterns: append(append([]SecretPattern(nil), patterns...), DefaultExtraDetectors()...)}
 	r.catalogVersion, r.catalogHash = computeCatalogIdentity(r.patterns)
 	return r
 }
@@ -537,7 +540,33 @@ func (r *Redactor) RedactString(input string) (output string, found []string) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	output = input
+	guarded, foundMap, _ := r.guardWithLegacy(input)
+	output = guarded
+	var additive map[string]bool
+	output, additive = r.redactPatterns(output)
+	for name := range additive {
+		foundMap[name] = true
+	}
+	var mandatory []string
+
+	// Replacement text is configuration too; it cannot reintroduce credentials.
+	output, mandatory = secretguard.RedactText(output)
+	for _, name := range mandatory {
+		foundMap[name] = true
+	}
+
+	// convert map to slice
+	for name := range foundMap {
+		found = append(found, name)
+	}
+
+	return output, found
+}
+
+// redactPatterns requires the caller's read lock and applies additive rules.
+func (r *Redactor) redactPatterns(input string) (string, map[string]bool) {
+
+	output := input
 	lowerInput := strings.ToLower(input)
 	foundMap := make(map[string]bool)
 
@@ -562,12 +591,7 @@ func (r *Redactor) RedactString(input string) (output string, found []string) {
 		}
 	}
 
-	// convert map to slice
-	for name := range foundMap {
-		found = append(found, name)
-	}
-
-	return output, found
+	return output, foundMap
 }
 
 // RedactStringWithDetails provides detailed redaction results.
@@ -577,8 +601,9 @@ func (r *Redactor) RedactStringWithDetails(input string) (output string, results
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	output = input
-	lowerInput := strings.ToLower(input)
+	output, _, results = r.guardWithLegacy(input)
+
+	lowerInput := strings.ToLower(output)
 
 	for _, p := range r.patterns {
 		if p.Pattern == nil {
@@ -610,6 +635,11 @@ func (r *Redactor) RedactStringWithDetails(input string) (output string, results
 		})
 	}
 
+	var mandatory []string
+	output, mandatory = secretguard.RedactText(output)
+	for _, name := range mandatory {
+		results = append(results, RedactionResult{PatternName: name})
+	}
 	return output, results
 }
 
@@ -694,6 +724,9 @@ func (r *Redactor) RedactCapturedHistory(history *CapturedHistory) (count int) {
 // Applies the SecretPattern.Keywords pre-screen so a bare-UUID pattern
 // gated only by Keywords doesn't fire on every UUID-shaped input.
 func (r *Redactor) ContainsSecrets(input string) bool {
+	if _, found := secretguard.RedactText(input); len(found) > 0 {
+		return true
+	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -737,7 +770,7 @@ func (r *Redactor) ScanForSecrets(input string) []string {
 
 	lowerInput := strings.ToLower(input)
 
-	var found []string
+	_, found := secretguard.RedactText(input)
 	for _, p := range r.patterns {
 		if p.Pattern == nil {
 			continue
@@ -767,7 +800,8 @@ func (r *Redactor) ScanForSecrets(input string) []string {
 func (r *Redactor) RedactWithAllowlist(input string, allowlist []string) (output string, found []string) {
 	// create placeholder map for allowlist items
 	placeholders := make(map[string]string)
-	output = input
+	output, found = r.RedactString(input)
+	initialFound := append([]string(nil), found...)
 
 	// replace allowlist items with unique placeholders
 	for i, allowed := range allowlist {
@@ -778,12 +812,17 @@ func (r *Redactor) RedactWithAllowlist(input string, allowlist []string) (output
 
 	// perform normal redaction
 	output, found = r.RedactString(output)
+	found = append(found, initialFound...)
 
 	// restore allowlist items
 	for placeholder, original := range placeholders {
 		output = strings.ReplaceAll(output, placeholder, original)
 	}
 
+	// An allowlist may relax additive custom rules, never mandatory protection.
+	var mandatory []string
+	output, mandatory = secretguard.RedactText(output)
+	found = append(found, mandatory...)
 	return output, found
 }
 
@@ -796,26 +835,44 @@ func generatePlaceholder(index int) string {
 // Useful for redacting raw JSON entries before storage.
 // Returns true if any secrets were found and redacted.
 func (r *Redactor) RedactMap(data map[string]any) bool {
-	redacted := false
-	for key, value := range data {
-		switch v := value.(type) {
-		case string:
-			output, found := r.RedactString(v)
-			if len(found) > 0 {
-				data[key] = output
-				redacted = true
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	// One full mandatory scan per serialized object retains sibling context and
+	// avoids running the upstream catalog again for every already-scanned leaf.
+	changed := r.redactStructuredMapWithLegacy(data)
+	additiveChanged := r.redactMapPatterns(data)
+	finalChanged := redactStructuredMap(data)
+	return changed || additiveChanged || finalChanged
+}
+func (r *Redactor) redactMapPatterns(value any) bool {
+	changed := false
+	switch data := value.(type) {
+	case map[string]any:
+		for key, val := range data {
+			if text, ok := val.(string); ok {
+				out, found := r.redactPatterns(text)
+				if len(found) > 0 {
+					data[key] = out
+					changed = true
+				}
+			} else {
+				changed = r.redactMapPatterns(val) || changed
 			}
-		case map[string]any:
-			if r.RedactMap(v) {
-				redacted = true
-			}
-		case []any:
-			if r.RedactSlice(v) {
-				redacted = true
+		}
+	case []any:
+		for i, val := range data {
+			if text, ok := val.(string); ok {
+				out, found := r.redactPatterns(text)
+				if len(found) > 0 {
+					data[i] = out
+					changed = true
+				}
+			} else {
+				changed = r.redactMapPatterns(val) || changed
 			}
 		}
 	}
-	return redacted
+	return changed
 }
 
 // RedactSlice redacts secrets from string values in a slice.
@@ -852,4 +909,105 @@ func RedactHistorySecrets(history *CapturedHistory) int {
 	}
 	redactor := NewRedactor()
 	return redactor.RedactCapturedHistory(history)
+}
+
+// redactStructuredMap preserves sibling name/value context before leaf rules.
+func redactStructuredMap(data map[string]any) bool {
+	encoded, err := json.Marshal(data)
+	if err != nil {
+		return false
+	}
+	out, found := secretguard.RedactText(string(encoded))
+	if len(found) == 0 {
+		return false
+	}
+	var normalized map[string]any
+	decoder := json.NewDecoder(strings.NewReader(out))
+	decoder.UseNumber()
+	if decoder.Decode(&normalized) != nil {
+		return false
+	}
+	for key := range data {
+		delete(data, key)
+	}
+	for key, value := range normalized {
+		data[key] = value
+	}
+	return true
+}
+
+// guardWithLegacy preserves fixed markers only after the mandatory guard
+// proves their removal spans cover every detected original value. Pattern
+// names and sources cannot confer trust or suppress that original scan.
+func (r *Redactor) guardWithLegacy(input string) (string, map[string]bool, []RedactionResult) {
+	var edits []secretguard.TextReplacement
+	var legacy []RedactionResult
+	lower := strings.ToLower(input)
+	for _, pattern := range r.patterns {
+		if pattern.Pattern == nil || !pattern.MatchesKeyword(lower) || !secretguard.IsFixedRedactionMarker(pattern.Redact) {
+			continue
+		}
+		for _, span := range pattern.Pattern.FindAllStringIndex(input, -1) {
+			if span[0] == span[1] || matchSkipped(input[span[0]:span[1]], pattern.SkipIf) {
+				continue
+			}
+			overlap := false
+			for _, edit := range edits {
+				if span[0] < edit.End && span[1] > edit.Start {
+					overlap = true
+					break
+				}
+			}
+			if overlap {
+				continue
+			}
+			edits = append(edits, secretguard.TextReplacement{Start: span[0], End: span[1], Marker: pattern.Redact})
+			legacy = append(legacy, RedactionResult{PatternName: pattern.Name, Original: input[span[0]:span[1]], Position: span[0]})
+		}
+	}
+	output, mandatory, used := secretguard.RedactTextWithReplacements(input, edits)
+	found := map[string]bool{}
+	var details []RedactionResult
+	if used {
+		details = legacy
+		for _, result := range legacy {
+			found[result.PatternName] = true
+		}
+	}
+	for _, name := range mandatory {
+		found[name] = true
+		details = append(details, RedactionResult{PatternName: name})
+	}
+	return output, found, details
+}
+func (r *Redactor) redactStructuredMapWithLegacy(data map[string]any) bool {
+	encoded, err := json.Marshal(data)
+	if err != nil {
+		return false
+	}
+	out, _, _ := r.guardWithLegacy(string(encoded))
+	if out == string(encoded) {
+		return false
+	}
+	var normalized map[string]any
+	decode := func(text string) error {
+		decoder := json.NewDecoder(strings.NewReader(text))
+		decoder.UseNumber()
+		return decoder.Decode(&normalized)
+	}
+	if decode(out) != nil {
+		// A legacy whole-match marker can include surrounding JSON punctuation.
+		// Keep valid framing by using the mandatory serializer in that case.
+		out, _ = secretguard.RedactText(string(encoded))
+		if decode(out) != nil {
+			return false
+		}
+	}
+	for key := range data {
+		delete(data, key)
+	}
+	for key, value := range normalized {
+		data[key] = value
+	}
+	return true
 }

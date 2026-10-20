@@ -15,6 +15,7 @@ import (
 // accepting a PUT is insufficient: an unverifiable object must never yield an
 // UploadedRef that allows callers to replace their original bytes with a stub.
 func TestUploadBlob_RefusesUnverifiableStoreAcknowledgment(t *testing.T) {
+	useBundledSessionRules(t)
 	for _, tc := range []struct {
 		name      string
 		status    int

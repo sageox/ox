@@ -15,6 +15,7 @@ import (
 
 	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/lfs/pointer"
+	"github.com/sageox/ox/internal/secretguard"
 	"github.com/sageox/ox/internal/session/pipeline"
 )
 
@@ -103,6 +104,13 @@ func ValidateLedgerBlob(path string, data []byte) error {
 func validateLedgerBlob(path string, data []byte, storage string) error {
 	if HasConflictMarkersBytes(data) {
 		return fmt.Errorf("%s contains an unresolved conflict", path)
+	}
+	// Inspect immutable tree bytes, including storage=git imports and session
+	// metadata. Pointer-only checks cannot protect alternate storage or headers.
+	if isSessionPath(path) {
+		if err := secretguard.ValidateContent(path, data); err != nil {
+			return fmt.Errorf("%s refused: %w", path, err)
+		}
 	}
 	if isSessionContentPath(path) && storage != "git" {
 		if _, _, err := pointer.Parse(string(data)); err != nil {

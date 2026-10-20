@@ -38,21 +38,9 @@ type PrePushFinding struct {
 	Line     int    // 1-indexed line number
 }
 
-// prePushScannerSkipExts skips obvious non-text and high-volume binary types
-// that the detectors would never meaningfully match. Keeps the scan O(diff)
-// instead of O(diff * regex-corpus * bytes-per-binary-file).
-var prePushScannerSkipExts = map[string]bool{
-	".png": true, ".jpg": true, ".jpeg": true, ".gif": true, ".webp": true,
-	".pdf": true, ".zip": true, ".gz": true, ".tar": true, ".tgz": true,
-	".bin": true, ".woff": true, ".woff2": true, ".ttf": true, ".otf": true,
-	".mp3": true, ".mp4": true, ".mov": true, ".wav": true,
-}
-
-// prePushScannerSizeCap is the maximum file size the scanner will read. Above
-// this, the file is skipped with a slog.Warn — secret regexes don't usefully
-// fire on large binary blobs anyway, and reading e.g. a 500MB pointer-free
-// blob would defeat the perf budget. LFS pointer files are tiny so legitimate
-// session content always fits.
+// prePushScannerSizeCap bounds scanner allocation. Larger session artifacts
+// require repair or a separately bounded upload path; a limit is never evidence
+// that uninspected bytes are safe to publish.
 const prePushScannerSizeCap = 8 * 1024 * 1024 // 8 MiB
 
 // prePushScannerScopePrefixes restricts the gate to ledger paths the
@@ -153,10 +141,9 @@ func scanAllTrackedFiles(ctx context.Context, ledgerPath string) (*PrePushScanRe
 }
 
 // scanPaths runs the redactor against the working-tree content of every
-// path in paths, recording detector matches as PrePushFindings. Skip rules:
-// out-of-scope paths (see prePushScannerScopePrefixes), binary extensions,
-// files over prePushScannerSizeCap, files that no longer exist in the
-// working tree (legitimately deleted in the commit range).
+// path in paths, recording detector matches as PrePushFindings. Only paths
+// outside sessions/ and legitimately deleted files are skipped. Extensions and
+// scan limits cannot authorize uninspected session content for publication.
 func scanPaths(ledgerPath string, paths []string) (*PrePushScanResult, error) {
 	redactor := session.NewRedactor()
 	result := &PrePushScanResult{}
@@ -168,19 +155,20 @@ func scanPaths(ledgerPath string, paths []string) (*PrePushScanResult, error) {
 		if !inPrePushScannerScope(rel) {
 			continue
 		}
-		if prePushScannerSkipExts[strings.ToLower(filepath.Ext(rel))] {
-			continue
-		}
 		abs := filepath.Join(ledgerPath, rel)
 		info, err := os.Stat(abs)
 		if err != nil {
-			// File deleted in this push — nothing to scan.
-			continue
+			if os.IsNotExist(err) {
+				// The immutable publication scan still checks deleted Git blobs.
+				continue
+			}
+			return nil, fmt.Errorf("inspect session path %s: %w", rel, err)
+		}
+		if !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("session path %s is not a regular file", rel)
 		}
 		if info.Size() > prePushScannerSizeCap {
-			slog.Warn("pre-push scan: file exceeds size cap, skipping",
-				"path", rel, "size", info.Size(), "cap", prePushScannerSizeCap)
-			continue
+			return nil, fmt.Errorf("session path %s exceeds scan limit; publication pending", rel)
 		}
 		result.FilesScanned++
 
@@ -260,8 +248,7 @@ func FormatPrePushFindings(r *PrePushScanResult) string {
 	b.WriteString("  1. Inspect the flagged paths and remove or redact the credential.\n")
 	b.WriteString("     Run `ox session audit` for a per-line audit, then `ox session redact` for interactive cleanup.\n")
 	b.WriteString("  2. Amend the holding commit, then retry the push.\n")
-	b.WriteString("  3. If this is a false positive, set OX_ALLOW_SECRETS=1 to override.\n")
-	b.WriteString("     The override is logged and emits a loud warning.\n")
+	b.WriteString("  3. Retry only after the session content passes verification.\n")
 	return b.String()
 }
 
@@ -273,47 +260,16 @@ func countDistinctPaths(findings []PrePushFinding) int {
 	return len(seen)
 }
 
-// prePushSecretsAllowed returns true if the user has explicitly opted out of
-// the pre-push gate via OX_ALLOW_SECRETS=1. Any non-empty value other than
-// "0" / "false" / "no" enables the override — we err on the side of "the user
-// meant to override" because the failure mode of mis-parsing this flag is
-// blocking a legitimate push, not leaking a credential.
-func prePushSecretsAllowed() bool {
-	v := strings.ToLower(strings.TrimSpace(os.Getenv("OX_ALLOW_SECRETS")))
-	if v == "" {
-		return false
-	}
-	switch v {
-	case "0", "false", "no", "off":
-		return false
-	}
-	return true
-}
-
-// runPrePushSecretGate is the entry point used by pushLedger. As of
-// ox-y3ok the gate NEVER blocks the push: a single bad session must not
-// hold up other sessions and unrelated commits from syncing. Instead the
-// gate runs a recovery pipeline:
-//
-//  1. Scan (scoped to sessions/ per ox-cqdo).
-//  2. Auto-redact every JSONL finding via the canonical chokepoint
-//     (autoRedactSessionFindings → redactFileInPlace + meta.json
-//     RedactionPass + amend). Re-scan.
-//  3. Anything still remaining is quarantined: the file is atomically
-//     moved to <ledger>/.sageox/cache/quarantine/ (preserved, just
-//     outside the daemon's session-finalize surface) and its path is
-//     carved out of the holding commit. A debt marker is written under
-//     <ledger>/.sageox/cache/redaction-debt/ so `ox doctor` can surface
-//     the persistent state.
-//
-// Always returns nil. Scan errors and recovery errors are logged and
-// the push proceeds; making the gate impassable is a worse outcome than
-// publishing whatever the chokepoint missed (the same content already
-// hit the chokepoint at write time).
+// runPrePushSecretGate repairs or quarantines current session artifacts, then
+// verifies the immutable session blobs actually reachable by the push. Any
+// uninspected or still-sensitive content keeps publication pending.
 func runPrePushSecretGate(ctx context.Context, ledgerPath string) error {
-	return runSessionSecretGate(ctx, ledgerPath, func() (*PrePushScanResult, error) {
+	if err := runSessionSecretGate(ctx, ledgerPath, func() (*PrePushScanResult, error) {
 		return scanPrePushForSecrets(ctx, ledgerPath)
-	}, true)
+	}, true); err != nil {
+		return err
+	}
+	return nil
 }
 
 // prepareSessionUpload runs the same redaction and quarantine policy on real
@@ -333,44 +289,28 @@ func prepareSessionUpload(ctx context.Context, ledgerPath, sessionName string) e
 func runSessionSecretGate(ctx context.Context, ledgerPath string, scan func() (*PrePushScanResult, error), amendCommit bool) error {
 	result, err := scan()
 	if err != nil {
-		if !amendCommit {
-			return fmt.Errorf("scan session content for secrets: %w", err)
-		}
-		slog.Warn("pre-push secret gate: scan failed, allowing push", "error", err)
-		return nil
+		return fmt.Errorf("scan session content for secrets: %w", err)
+	}
+	if result == nil {
+		return errors.New("session secret scan returned no verification result")
 	}
 	if len(result.Findings) == 0 {
 		slog.Debug("pre-push secret gate: clean", "files_scanned", result.FilesScanned)
 		return nil
 	}
-	if prePushSecretsAllowed() {
-		slog.Warn("pre-push secret gate: OVERRIDDEN by OX_ALLOW_SECRETS",
-			"findings", len(result.Findings),
-			"files", countDistinctPaths(result.Findings))
-		fmt.Fprintln(os.Stderr,
-			"WARNING: ox pre-push secret gate overridden by OX_ALLOW_SECRETS — "+
-				"credentials may be published to the cloud Ledger")
-		return nil
-	}
 
-	// Try the canonical chokepoint first; it can clear anything the
-	// scanner found (they share a detector catalog).
+	// Recovery may repair a failed redact pass by preserving sensitive files
+	// outside publication, but only an actual final clean scan authorizes it.
 	auto, redactErr := autoRedactSessionFindings(ctx, ledgerPath, result, amendCommit)
 	if redactErr != nil {
-		slog.Warn("pre-push secret gate: auto-redact failed; will quarantine remainder",
-			"error", redactErr)
+		slog.Warn("pre-push secret gate: auto-redact failed; will quarantine remainder", "error", redactErr)
 	}
-
-	// Re-scan post-redact. Anything left is either non-JSONL or hit a
-	// per-file error in the redact pass.
-	rescan, rescanErr := scan()
-	if rescanErr != nil {
-		if !amendCommit {
-			return fmt.Errorf("rescan session content for secrets: %w", rescanErr)
-		}
-		slog.Warn("pre-push secret gate: rescan after auto-redact failed; allowing push",
-			"error", rescanErr)
-		return nil
+	rescan, err := scan()
+	if err != nil {
+		return fmt.Errorf("rescan session content for secrets: %w", err)
+	}
+	if rescan == nil {
+		return errors.New("session secret rescan returned no verification result")
 	}
 	if len(rescan.Findings) == 0 {
 		if auto != nil && len(auto.FixedPaths) > 0 {
@@ -380,20 +320,21 @@ func runSessionSecretGate(ctx context.Context, ledgerPath string, scan func() (*
 		}
 		return nil
 	}
-
-	// Quarantine the remainder so the rest of the push can proceed.
-	q, qErr := quarantineUnredactableFindings(ledgerPath, rescan.Findings, amendCommit)
-	if qErr != nil {
-		if !amendCommit {
-			return fmt.Errorf("prepare session quarantine: %w", qErr)
-		}
-		slog.Warn("pre-push secret gate: quarantine partial; push will still proceed",
-			"error", qErr)
-	}
-
-	// Loud user-visible summary. Stderr (not the structured slog) so
-	// `ox session stop` callers see it even when slog is at WARN level.
+	q, err := quarantineUnredactableFindings(ledgerPath, rescan.Findings, amendCommit)
 	emitQuarantineWarning(os.Stderr, auto, q, rescan)
+	if err != nil {
+		return fmt.Errorf("prepare session quarantine: %w", err)
+	}
+	verified, err := scan()
+	if err != nil {
+		return fmt.Errorf("verify session quarantine: %w", err)
+	}
+	if verified == nil {
+		return errors.New("session quarantine scan returned no verification result")
+	}
+	if len(verified.Findings) != 0 {
+		return fmt.Errorf("%s", FormatPrePushFindings(verified))
+	}
 	return nil
 }
 
@@ -414,9 +355,9 @@ func emitQuarantineWarning(w *os.File, auto *autoRedactResult, q *quarantineResu
 			fmt.Fprintf(&b, "    %s\n", p)
 		}
 		b.WriteString("  Bytes preserved under .sageox/cache/quarantine/<session>/.\n")
-		b.WriteString("  Run `ox doctor` for next steps. Other sessions and unrelated commits will sync normally.\n")
+		b.WriteString("  Run `ox doctor` for next steps. Publication resumes only after verification passes.\n")
 	} else if rescan != nil && len(rescan.Findings) > 0 {
-		b.WriteString("  Some findings could not be quarantined; they remain in the push.\n")
+		b.WriteString("  Some findings could not be quarantined; publication is blocked pending repair.\n")
 	}
 	fmt.Fprint(w, b.String())
 }

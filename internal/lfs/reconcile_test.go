@@ -97,6 +97,7 @@ func unpushedCount(t *testing.T, dir string) int {
 }
 
 func TestReconcile_WaitsForRepoWriter(t *testing.T) {
+	useBundledSessionRules(t)
 	dir := initLedgerRepo(t)
 	locked := make(chan struct{})
 	release := make(chan struct{})
@@ -128,6 +129,7 @@ func TestReconcile_WaitsForRepoWriter(t *testing.T) {
 // Failure prevented: a push-triggered repair that cannot safely see what the
 // push carries changes the Ledger anyway.
 func TestReconcileUnpushedPointers_FailsClosed(t *testing.T) {
+	useBundledSessionRules(t)
 	if testing.Short() {
 		t.Skip("short: real git repos")
 	}
@@ -183,6 +185,7 @@ func TestReconcileUnpushedPointers_FailsClosed(t *testing.T) {
 // A 404 after upload must not turn a recoverable session into an empty commit
 // whose successful push lets the caller prune the only surviving source cache.
 func TestReconcile_PreservesRecoverableSessionCache(t *testing.T) {
+	useBundledSessionRules(t)
 	if testing.Short() {
 		t.Skip("short: real git history and mocked LFS batch API")
 	}
@@ -287,6 +290,7 @@ func TestReconcile_PreservesRecoverableSessionCache(t *testing.T) {
 // staged by another writer could ride along with an unrelated pointer repair.
 // Refuse before changing either history or the pointer working copy.
 func TestReconcile_RefusesPreexistingStagedConflict(t *testing.T) {
+	useBundledSessionRules(t)
 	if testing.Short() {
 		t.Skip("short: real git history and mocked LFS batch API")
 	}
@@ -319,6 +323,7 @@ func TestReconcile_RefusesPreexistingStagedConflict(t *testing.T) {
 }
 
 func TestReconcile_RefusesConflictInUnpushedHistory(t *testing.T) {
+	useBundledSessionRules(t)
 	if testing.Short() {
 		t.Skip("short: real git history and mocked LFS batch API")
 	}
@@ -351,6 +356,7 @@ func TestReconcile_RefusesConflictInUnpushedHistory(t *testing.T) {
 // --- Guarantee 2: history squash collapses unpushed commits ---
 
 func TestReconcile_Squash_CollapsesMultipleCommits(t *testing.T) {
+	useBundledSessionRules(t)
 	if testing.Short() {
 		t.Skip("short: git operations")
 	}
@@ -388,6 +394,7 @@ func TestReconcile_Squash_CollapsesMultipleCommits(t *testing.T) {
 }
 
 func TestReconcile_Squash_PushSucceedsAfter(t *testing.T) {
+	useBundledSessionRules(t)
 	if testing.Short() {
 		t.Skip("short: git operations")
 	}
@@ -420,6 +427,7 @@ func TestReconcile_Squash_PushSucceedsAfter(t *testing.T) {
 }
 
 func TestReconcile_Squash_NoUpstream_FailsGracefully(t *testing.T) {
+	useBundledSessionRules(t)
 	if testing.Short() {
 		t.Skip("short: git operations")
 	}
@@ -437,6 +445,7 @@ func TestReconcile_Squash_NoUpstream_FailsGracefully(t *testing.T) {
 }
 
 func TestReconcile_Squash_SingleCommit_NoOp(t *testing.T) {
+	useBundledSessionRules(t)
 	if testing.Short() {
 		t.Skip("short: git operations")
 	}

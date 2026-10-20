@@ -81,6 +81,7 @@ func fakeLFSDownloadServer(t *testing.T, codeByOID map[string]int) *Client {
 // paused. A plan cannot be regenerated, so reconcile never removes it, not even
 // when it is the only unrecoverable pointer.
 func TestReconcile_MissingPlanPointerIsReportedNeverRemoved(t *testing.T) {
+	useBundledSessionRules(t)
 	ledger, _ := initLedgerWithRemote(t)
 
 	oid := strings.Repeat("d", 64)
@@ -118,6 +119,7 @@ func TestReconcile_MissingPlanPointerIsReportedNeverRemoved(t *testing.T) {
 //
 // Failure prevented: a flaky endpoint blanking real content to empty bytes.
 func TestReconcile_TransientErrorNeverBlanks(t *testing.T) {
+	useBundledSessionRules(t)
 	for _, code := range []int{http.StatusUnauthorized, http.StatusServiceUnavailable} {
 		t.Run(http.StatusText(code), func(t *testing.T) {
 			ledger, _ := initLedgerWithRemote(t)

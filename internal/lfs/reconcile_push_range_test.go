@@ -90,6 +90,7 @@ func mustPush(t *testing.T, ledger string) {
 // missing pointer, the push is accepted after reconcile even though the
 // coworker's session is still broken on the remote.
 func TestReconcile_PushRangeScope_IgnoresPointersTheRemoteAlreadyHas(t *testing.T) {
+	useBundledSessionRules(t)
 	if testing.Short() {
 		t.Skip("short: real git remote and mocked LFS batch API")
 	}
@@ -172,6 +173,7 @@ func TestReconcile_PushRangeScope_IgnoresPointersTheRemoteAlreadyHas(t *testing.
 // filter is the only guard. Failure prevented: content mistaken for a pointer is
 // probed, reported missing, and pauses the push.
 func TestReconcile_PushRangeIgnoresPointerLookalikes(t *testing.T) {
+	useBundledSessionRules(t)
 	if testing.Short() {
 		t.Skip("short: real git remote")
 	}
@@ -204,6 +206,7 @@ func TestReconcile_PushRangeIgnoresPointerLookalikes(t *testing.T) {
 // Observable difference: the pre-receive hook declines the push before reconcile
 // and accepts it after.
 func TestReconcile_SquashesMissingObjectReferencedOnlyByIntermediateCommit(t *testing.T) {
+	useBundledSessionRules(t)
 	if testing.Short() {
 		t.Skip("short: real git remote and mocked LFS batch API")
 	}
@@ -244,6 +247,7 @@ func TestReconcile_SquashesMissingObjectReferencedOnlyByIntermediateCommit(t *te
 // destroy a pointer path whose file no longer matches what was committed, and it
 // must not guess about a missing object it has no way to clean up.
 func TestReconcile_RefusesWhatItCannotRepairSafely(t *testing.T) {
+	useBundledSessionRules(t)
 	if testing.Short() {
 		t.Skip("short: real git remote and mocked LFS batch API")
 	}
@@ -306,6 +310,7 @@ func writeFile(t *testing.T, path, content string) {
 // every run and could not tell one stuck path from many. In range, disagreement
 // still fails closed (never silently rewriting metadata) — but deterministically.
 func TestReconcile_InRangeMetadataDisagreementIsReportedInSortedOrder(t *testing.T) {
+	useBundledSessionRules(t)
 	if testing.Short() {
 		t.Skip("short: real git remote and mocked LFS batch API")
 	}
@@ -334,6 +339,7 @@ func TestReconcile_InRangeMetadataDisagreementIsReportedInSortedOrder(t *testing
 // Failure prevented: reset --soft to an upstream HEAD does not contain commits
 // the index back over whatever HEAD lacks, reverting a coworker's work.
 func TestSquashUnpushed_RefusesDivergedBranch(t *testing.T) {
+	useBundledSessionRules(t)
 	if testing.Short() {
 		t.Skip("short: real git remote")
 	}

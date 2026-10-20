@@ -17,6 +17,7 @@ import (
 // Failure to preserve or upload an own recording must stop before any pointer,
 // metadata, staged content, or history is replaced.
 func TestReconcile_OwnArtifactFailuresKeepOriginalState(t *testing.T) {
+	useBundledSessionRules(t)
 	if testing.Short() {
 		t.Skip("short: repeated full reconciliation against real Git repositories")
 	}

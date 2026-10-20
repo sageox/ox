@@ -536,20 +536,18 @@ check-session-meta-rmw: ## Ensure sessions/*/meta.json is only rewritten via lfs
 		exit 1; \
 	fi
 
-sync-gitleaks-rules: ## Regenerate the gitleaks-derived detector catalog from a pinned gitleaks.toml
-	@echo "Regenerating internal/session/gitleaks_generated.go..."
-	@cd internal/session/cmd/gitleaks-port && go run . \
-		-in gitleaks-v8.30.1.toml \
-		-out ../../gitleaks_generated.go \
-		-gitleaks-version v8.30.1
+sync-gitleaks-rules: ## Refresh the complete latest upstream Gitleaks offline fallback
+	@go run ./internal/secretguard/cmd/update
+	@go test ./internal/secretguard
 
-check-raw-writer-chokepoint: ## Ensure raw.jsonl is only opened via session.RawWriter (ox-h20u)
+check-raw-writer-chokepoint: ## Enforce session encoder ownership and reject raw-file bypasses
+	@go test ./internal/session -run '^TestSessionRedactionArchitecture' -count=1
 	@# Any os.OpenFile/Create/WriteFile of a raw.jsonl path outside the
 	@# canonical chokepoint (internal/session/raw_writer.go) is a redaction
 	@# bypass risk. Test files and the chokepoint itself are allowed.
 	@# Pass 1: literal raw.jsonl path passed straight to a writer call.
 	@violations=$$(grep -rnE '(os\.OpenFile|os\.Create|os\.WriteFile)\([^)]*raw[._]?jsonl' \
-		--include='*.go' . 2>/dev/null \
+		--include='*.go' cmd internal pkg 2>/dev/null \
 		| grep -v '_test\.go:' \
 		| grep -v 'vendor/' \
 		| grep -v 'internal/session/raw_writer\.go:' \

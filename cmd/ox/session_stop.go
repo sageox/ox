@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"log/slog"
 
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
@@ -84,9 +83,8 @@ func processSession(projectRoot string, state *session.RecordingState) (*process
 	// before storage to prevent credential leaks in ledgers
 	redactor, parseErrs := session.NewRedactorWithCustomRules(projectRoot)
 	if len(parseErrs) > 0 {
-		for _, pe := range parseErrs {
-			slog.Warn("redaction rule parse error", "file", pe.Path, "line", pe.Line, "error", pe.Message)
-		}
+		// A partial policy cannot authorize publishing any reconstructed session.
+		return nil, fmt.Errorf("invalid redaction policy (%d errors)", len(parseErrs))
 	}
 
 	// convert raw entries to session entries and redact secrets
@@ -158,7 +156,7 @@ func processSession(projectRoot string, state *session.RecordingState) (*process
 	}
 
 	// write raw session (with secrets redacted)
-	rawWriter, err := store.CreateRaw(filename)
+	rawWriter, err := store.CreateRawForProject(filename, projectRoot)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create raw session: %w", err)
 	}

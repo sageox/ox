@@ -1,6 +1,9 @@
 package lfs
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+)
 
 // UploadedRef is evidence that a FileRef's content is present in the LFS store.
 //
@@ -58,12 +61,16 @@ func AssertUploadedManifest(files map[string]FileRef) map[string]UploadedRef {
 // A blob the server reports as already present (UploadAll skips it) is a success
 // — it is in the store, which is all UploadedRef attests.
 func UploadBlob(client *Client, content []byte) (UploadedRef, error) {
-	ref := NewFileRef(content)
+	proof, err := prepareUpload(context.Background(), "blob", content)
+	if err != nil {
+		return UploadedRef{}, err
+	}
+	ref := NewFileRef(proof.content)
 	resp, err := client.BatchUpload([]BatchObject{{OID: ref.BareOID(), Size: ref.Size}})
 	if err != nil {
 		return UploadedRef{}, fmt.Errorf("LFS batch upload: %w", err)
 	}
-	for _, r := range UploadAll(resp, map[string][]byte{ref.BareOID(): content}, 1) {
+	for _, r := range uploadAllGuarded(resp, map[string]guardedUpload{ref.BareOID(): proof}, 1) {
 		if r.Error != nil {
 			return UploadedRef{}, fmt.Errorf("LFS upload OID %s: %w", r.OID, r.Error)
 		}

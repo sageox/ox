@@ -616,7 +616,8 @@ func TestPushWithRetry_RebaseAppearingAfterPreflightIsPreserved(t *testing.T) {
 	})
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "rebase started after push preflight")
+	// Mandatory locked validation can refuse before the remote push detects it.
+	assert.Contains(t, err.Error(), "rebase")
 	assert.True(t, IsRebaseInProgress(repo), "the retry must not abort a rebase it did not create")
 	assert.Equal(t, headBefore, strings.TrimSpace(captureGit(t, repo, "rev-parse", "HEAD")))
 }

@@ -1181,9 +1181,8 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	// create redactor for secret scrubbing
 	redactor, parseErrs := session.NewRedactorWithCustomRules(projectRoot)
 	if len(parseErrs) > 0 {
-		for _, pe := range parseErrs {
-			slog.Warn("redaction rule parse error", "file", pe.Path, "line", pe.Line, "error", pe.Message)
-		}
+		// A partial policy cannot authorize publishing any reconstructed session.
+		return nil, fmt.Errorf("invalid redaction policy (%d errors)", len(parseErrs))
 	}
 
 	// convert raw entries to session entries and redact secrets
@@ -1219,7 +1218,7 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	}
 
 	// write raw session (with secrets redacted)
-	rawWriter, err := store.CreateRaw(filename)
+	rawWriter, err := store.CreateRawForProject(filename, projectRoot)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create raw session: %w", err)
 	}

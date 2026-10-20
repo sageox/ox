@@ -10,6 +10,7 @@ import (
 // meta.json can vanish between the ownership read and the lock; the mutator then
 // receives nil and must refuse rather than panic or invent a manifest.
 func TestRecordFileRef_NilMetaIsAnErrorNotAPanic(t *testing.T) {
+	useBundledSessionRules(t)
 	mutate := recordFileRef("ses_1", "raw.jsonl", FileRef{OID: "sha256:abc", Size: 3})
 
 	got, err := mutate(nil)

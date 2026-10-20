@@ -14,6 +14,7 @@ import (
 )
 
 func TestComputeOID(t *testing.T) {
+	useBundledSessionRules(t)
 	// SHA256 of empty string
 	oid := ComputeOID([]byte(""))
 	assert.Equal(t, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", oid)
@@ -24,6 +25,7 @@ func TestComputeOID(t *testing.T) {
 }
 
 func TestUploadObject(t *testing.T) {
+	useBundledSessionRules(t)
 	content := []byte("test upload data")
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -50,12 +52,14 @@ func TestUploadObject(t *testing.T) {
 }
 
 func TestUploadObject_NilAction(t *testing.T) {
+	useBundledSessionRules(t)
 	err := UploadObject(nil, []byte("data"))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no upload action")
 }
 
 func TestUploadObject_ServerError(t *testing.T) {
+	useBundledSessionRules(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
 		w.Write([]byte("forbidden"))
@@ -68,6 +72,7 @@ func TestUploadObject_ServerError(t *testing.T) {
 }
 
 func TestDownloadObject(t *testing.T) {
+	useBundledSessionRules(t)
 	expected := []byte("downloaded content")
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -82,12 +87,14 @@ func TestDownloadObject(t *testing.T) {
 }
 
 func TestDownloadObject_NilAction(t *testing.T) {
+	useBundledSessionRules(t)
 	_, err := DownloadObject(nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no download action")
 }
 
 func TestDownloadAndVerifyObject_OIDMatch(t *testing.T) {
+	useBundledSessionRules(t)
 	content := []byte("verified content")
 	bareOID := ComputeOID(content)
 
@@ -110,6 +117,7 @@ func TestDownloadAndVerifyObject_OIDMatch(t *testing.T) {
 }
 
 func TestDownloadAndVerifyObject_OIDMismatch(t *testing.T) {
+	useBundledSessionRules(t)
 	content := []byte("actual content")
 	wrongOID := ComputeOID([]byte("different content"))
 
@@ -132,6 +140,7 @@ func TestDownloadAndVerifyObject_OIDMismatch(t *testing.T) {
 }
 
 func TestUploadAll(t *testing.T) {
+	useBundledSessionRules(t)
 	oid := ComputeOID([]byte("test data"))
 	content := []byte("test data")
 
@@ -160,6 +169,7 @@ func TestUploadAll(t *testing.T) {
 }
 
 func TestUploadAll_AlreadyExists(t *testing.T) {
+	useBundledSessionRules(t)
 	// When the server returns no upload action, the object already exists
 	resp := &BatchResponse{
 		Objects: []BatchResponseObject{
@@ -177,6 +187,7 @@ func TestUploadAll_AlreadyExists(t *testing.T) {
 }
 
 func TestUploadAll_ObjectError(t *testing.T) {
+	useBundledSessionRules(t)
 	resp := &BatchResponse{
 		Objects: []BatchResponseObject{
 			{
@@ -197,6 +208,7 @@ func TestUploadAll_ObjectError(t *testing.T) {
 }
 
 func TestDownloadAll(t *testing.T) {
+	useBundledSessionRules(t)
 	expected := []byte("file content")
 	oid := ComputeOID(expected)
 
@@ -225,6 +237,7 @@ func TestDownloadAll(t *testing.T) {
 }
 
 func TestDownloadAll_NoAction(t *testing.T) {
+	useBundledSessionRules(t)
 	resp := &BatchResponse{
 		Objects: []BatchResponseObject{
 			{
@@ -242,6 +255,7 @@ func TestDownloadAll_NoAction(t *testing.T) {
 }
 
 func TestDownloadAll_ServerError(t *testing.T) {
+	useBundledSessionRules(t)
 	resp := &BatchResponse{
 		Objects: []BatchResponseObject{
 			{
@@ -263,6 +277,7 @@ func TestDownloadAll_ServerError(t *testing.T) {
 }
 
 func TestDownloadAll_PartialFailure(t *testing.T) {
+	useBundledSessionRules(t)
 	goodContent := []byte("good file")
 	goodOID := ComputeOID(goodContent)
 
@@ -316,6 +331,7 @@ func TestDownloadAll_PartialFailure(t *testing.T) {
 }
 
 func TestDownloadAll_MixedErrors(t *testing.T) {
+	useBundledSessionRules(t)
 	// One server error object, one missing-action object, one OK
 	goodContent := []byte("content")
 	goodOID := ComputeOID(goodContent)
@@ -363,6 +379,7 @@ func TestDownloadAll_MixedErrors(t *testing.T) {
 }
 
 func TestUploadAll_PartialFailure(t *testing.T) {
+	useBundledSessionRules(t)
 	goodOID := ComputeOID([]byte("good"))
 	badOID := ComputeOID([]byte("bad"))
 
@@ -417,6 +434,7 @@ func TestUploadAll_PartialFailure(t *testing.T) {
 }
 
 func TestUploadAll_MissingContent(t *testing.T) {
+	useBundledSessionRules(t)
 	resp := &BatchResponse{
 		Objects: []BatchResponseObject{
 			{
@@ -442,6 +460,7 @@ func TestUploadAll_MissingContent(t *testing.T) {
 // is the same one — or leave it out of its response, and either reads as
 // uploaded.
 func TestUploadAll_RefusesPointerContent(t *testing.T) {
+	useBundledSessionRules(t)
 	plain := []byte("session content\n")
 	plainOID := ComputeOID(plain)
 	for _, shape := range []struct {
@@ -494,6 +513,7 @@ func TestUploadAll_RefusesPointerContent(t *testing.T) {
 }
 
 func TestSharedHTTPClient_ConnectionReuse(t *testing.T) {
+	useBundledSessionRules(t)
 	// verify that upload and download use the shared client (connection reuse)
 	// by checking that multiple sequential operations to the same server reuse connections
 	var requestCount int
@@ -526,6 +546,7 @@ func TestSharedHTTPClient_ConnectionReuse(t *testing.T) {
 }
 
 func TestSharedHTTPClient_Timeout(t *testing.T) {
+	useBundledSessionRules(t)
 	// verify the shared client has the expected timeout
 	assert.Equal(t, 5*time.Minute, lfsHTTPClient.Timeout, "shared LFS client should have 5-minute timeout")
 }

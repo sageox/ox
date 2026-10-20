@@ -18,14 +18,13 @@ import "regexp"
 //   - Local control over allowlist semantics and slug naming matches
 //     ox's existing detector conventions.
 //
-// Ongoing updates: when gitleaks ships new rules, port the high-value
-// ones here in a follow-up PR. The rule IDs in comments below make
-// drift checks straightforward.
+// These patterns retain compatibility with existing detector names. The
+// mandatory complete catalog lives in internal/secretguard and intentionally
+// follows current upstream rules automatically at publication; new rules must
+// never depend on somebody hand-porting another pattern into this subset.
 
-// DefaultExtraDetectors returns gitleaks-derived patterns used by
-// RawWriter as a third layer behind the cmd-allowlist redactor and the
-// built-in DefaultPatterns. Slugs follow the [REDACTED_<CLASS>] style
-// so downstream consumers can grep across both detector tiers.
+// DefaultExtraDetectors retains legacy Gitleaks-derived names and marker slugs.
+// It is not the complete mandatory catalog or a separate RawWriter layer.
 func DefaultExtraDetectors() []SecretPattern {
 	return []SecretPattern{
 		// --- Cloud platforms ---

@@ -241,8 +241,20 @@ func reconcileUnpushedPointers(ctx context.Context, ledgerPath string, logger *s
 		return result, fmt.Errorf("validate unpushed Ledger before LFS reconcile: %w", err)
 	}
 
+	recoveryFiles := make(map[string][]byte, len(recoverable))
 	for _, upload := range recoverable {
-		if err := uploadRecoveryBlob(ctx, client, upload); err != nil {
+		recoveryFiles[upload.entry.relPath] = upload.content
+	}
+	var recoveryProofs map[string]guardedUpload
+	if len(recoveryFiles) > 0 {
+		recoveryProofs, err = prepareUploads(ctx, recoveryFiles)
+		if err != nil {
+			return result, fmt.Errorf("restore LFS objects: %w", err)
+		}
+	}
+
+	for _, upload := range recoverable {
+		if err := uploadGuardedRecoveryBlob(ctx, client, upload.entry, recoveryProofs[upload.entry.relPath]); err != nil {
 			return result, fmt.Errorf("restore LFS object for %s from recovery cache: %w", upload.entry.relPath, err)
 		}
 	}
@@ -363,7 +375,19 @@ func preflightMissingPointer(ledgerPath string, p pointerEntry) ([]byte, error) 
 // batch, upload, and verify requests. A nil error is proof the object is
 // present; the pointer, metadata, and cache remain untouched.
 func uploadRecoveryBlob(ctx context.Context, client *Client, upload recoveryUpload) error {
-	ref := upload.entry.ref
+	proof, err := prepareUpload(ctx, upload.entry.relPath, upload.content)
+	if err != nil {
+		return err
+	}
+	return uploadGuardedRecoveryBlob(ctx, client, upload.entry, proof)
+}
+func uploadGuardedRecoveryBlob(ctx context.Context, client *Client, entry pointerEntry, proof guardedUpload) error {
+
+	ref := entry.ref
+	actual := NewFileRef(proof.content)
+	if actual.BareOID() != ref.BareOID() || actual.Size != ref.Size {
+		return ErrOIDMismatch
+	}
 	resp, err := client.BatchUploadContext(ctx, []BatchObject{{OID: ref.BareOID(), Size: ref.Size}})
 	if err != nil {
 		return fmt.Errorf("LFS batch upload: %w", err)
@@ -381,7 +405,7 @@ func uploadRecoveryBlob(ctx context.Context, client *Client, upload recoveryUplo
 		if obj.Actions == nil || obj.Actions.Upload == nil {
 			return nil // object became present between the download and upload batches
 		}
-		if err := putRecoveryObject(ctx, obj.Actions.Upload, upload.content); err != nil {
+		if err := putGuardedRecoveryObject(ctx, obj.Actions.Upload, proof); err != nil {
 			return err
 		}
 		if obj.Actions.Verify != nil {
@@ -395,6 +419,15 @@ func uploadRecoveryBlob(ctx context.Context, client *Client, upload recoveryUplo
 }
 
 func putRecoveryObject(ctx context.Context, action *Action, content []byte) error {
+	proof, err := prepareUpload(ctx, "recovery-blob", content)
+	if err != nil {
+		return err
+	}
+	return putGuardedRecoveryObject(ctx, action, proof)
+}
+func putGuardedRecoveryObject(ctx context.Context, action *Action, proof guardedUpload) error {
+	content := proof.content
+
 	if err := validateActionHref(action); err != nil {
 		return fmt.Errorf("upload: %w", err)
 	}
