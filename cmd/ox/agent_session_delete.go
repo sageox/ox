@@ -171,13 +171,9 @@ func runAgentSessionDelete(inst *agentinstance.Instance, cmd *cobra.Command, arg
 }
 
 // refuseLedgerDeleteForTeamToken refuses to remove a session from the Ledger
-// when SAGEOX_TOKEN holds a team token; people delete those sessions on the
-// web. It reads the token at the endpoint the token is bound to, not the
-// project's, so a project on another endpoint does not skip the check.
-// auth.json only holds `ox login` tokens, so a team token can only come from
-// SAGEOX_TOKEN and its prefix is all this checks before returning nil.
-// ledgerPath may be empty: the link then names the session page by name
-// instead of by ses_ id.
+// under a team token, which only SAGEOX_TOKEN can hold; a person deletes it on
+// the web. The token is read at its own endpoint, so a project on another
+// endpoint cannot skip this. With no ledgerPath the link names the session.
 func refuseLedgerDeleteForTeamToken(projectRoot, ledgerPath, sessionName string) error {
 	if !auth.EnvTokenIsTeamFamily(auth.EnvTokenEndpoint()) {
 		return nil
