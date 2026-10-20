@@ -10,25 +10,17 @@ Wait until this machine's sessions reach the Ledger, and report what did
 
 ### Synopsis
 
-Make sure every session recorded on this machine reached the Ledger, for a
-machine that goes away after its job, such as a CI-like pod. Run it from the
-project after the AI coworkers on the machine have exited.
+Make sure every session recorded on this machine is in the Ledger before the
+machine goes away, such as a CI-like pod. Run it after the AI coworkers exit.
 
-Where the ox daemon outlives the session, the daemon summarizes and uploads
-sessions, as on a laptop. wait starts the daemon if it is not running, hands
-it every session whose recording has ended, as session end does, and waits up
-to --timeout until the daemon has put this machine's sessions in the Ledger. A
-recording whose AI coworker crashed is the daemon's to finish; it notices the
-crash within minutes. wait uploads nothing itself.
+Where the daemon uploads sessions, as on a laptop or a pod, wait hands it every
+session that has ended and waits up to --timeout for the daemon to upload them.
+A crashed AI coworker's session is the daemon's to finish. Elsewhere session end
+has already uploaded, and wait only reports. wait never uploads anything itself.
 
-Where the daemon does not outlive the session (the daemon is off, or the
-machine goes away with its AI coworker), session end uploads before returning,
-and wait only reports.
-
-It reports how many sessions finished since --since and how many of those are
-in the Ledger, the older pending sessions it found, and every session that is
-not in the Ledger with the reason. It exits 0 only when every session is in
-the Ledger.
+The report counts the sessions finished since --since and how many of them are
+in the Ledger, lists older pending sessions, and names every session that is
+not in the Ledger with the reason. wait exits 0 only when all are in the Ledger.
 
 Examples:
   ox session wait --since 2026-10-12T19:00:00Z --json

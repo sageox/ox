@@ -23,25 +23,17 @@ import (
 var sessionWaitCmd = &cobra.Command{
 	Use:   "wait --since <time>",
 	Short: "Wait until this machine's sessions reach the Ledger, and report what did",
-	Long: `Make sure every session recorded on this machine reached the Ledger, for a
-machine that goes away after its job, such as a CI-like pod. Run it from the
-project after the AI coworkers on the machine have exited.
+	Long: `Make sure every session recorded on this machine is in the Ledger before the
+machine goes away, such as a CI-like pod. Run it after the AI coworkers exit.
 
-Where the ox daemon outlives the session, the daemon summarizes and uploads
-sessions, as on a laptop. wait starts the daemon if it is not running, hands
-it every session whose recording has ended, as session end does, and waits up
-to --timeout until the daemon has put this machine's sessions in the Ledger. A
-recording whose AI coworker crashed is the daemon's to finish; it notices the
-crash within minutes. wait uploads nothing itself.
+Where the daemon uploads sessions, as on a laptop or a pod, wait hands it every
+session that has ended and waits up to --timeout for the daemon to upload them.
+A crashed AI coworker's session is the daemon's to finish. Elsewhere session end
+has already uploaded, and wait only reports. wait never uploads anything itself.
 
-Where the daemon does not outlive the session (the daemon is off, or the
-machine goes away with its AI coworker), session end uploads before returning,
-and wait only reports.
-
-It reports how many sessions finished since --since and how many of those are
-in the Ledger, the older pending sessions it found, and every session that is
-not in the Ledger with the reason. It exits 0 only when every session is in
-the Ledger.
+The report counts the sessions finished since --since and how many of them are
+in the Ledger, lists older pending sessions, and names every session that is
+not in the Ledger with the reason. wait exits 0 only when all are in the Ledger.
 
 Examples:
   ox session wait --since 2026-10-12T19:00:00Z --json`,
@@ -108,14 +100,15 @@ func runSessionWait(cmd *cobra.Command, _ []string) error {
 	return err
 }
 
-// ensureDaemonForWait starts the daemon if it is not running, so sessions left
-// on disk reach one even after a crash took it down. A variable so tests never
-// start a daemon process.
+// ensureDaemonForWait starts the daemon if a crash took it down. A variable so
+// tests never start one.
 var ensureDaemonForWait = daemon.EnsureDaemon
 
-// waitForSessions waits, where the daemon uploads sessions, until it has put
-// this machine's sessions in the Ledger, then reports. It uploads nothing
-// itself, so it never works on a session beside the daemon.
+// sessionWaitPoll is how often wait checks whether the daemon is done.
+const sessionWaitPoll = 2 * time.Second
+
+// waitForSessions waits for the daemon to upload this machine's sessions, where
+// it uploads them, then reports. It never uploads beside the daemon.
 func waitForSessions(ctx context.Context, projectRoot, ledgerPath string, since time.Time, timeout time.Duration) (sessionWaitOutput, error) {
 	out := sessionWaitOutput{OlderPending: []string{}, Failed: []sessionWaitFailure{}}
 	daemonUploads := daemonOutlivesSession()
@@ -141,15 +134,11 @@ func waitForSessions(ctx context.Context, projectRoot, ledgerPath string, since 
 				})
 			}
 		}
-		poll := timeout / 10
-		if poll > 2*time.Second {
-			poll = 2 * time.Second
-		}
 		for deadline := time.Now().Add(timeout); time.Now().Before(deadline) && slices.ContainsFunc(outside, pending); {
 			select {
 			case <-ctx.Done():
 				return out, ctx.Err()
-			case <-time.After(poll):
+			case <-time.After(sessionWaitPoll):
 			}
 			if outside, err = sessionsOutsideLedger(ctx, projectRoot, ledgerPath, daemonUploads); err != nil {
 				return out, err
@@ -172,21 +161,23 @@ func waitForSessions(ctx context.Context, projectRoot, ledgerPath string, since 
 	return out, nil
 }
 
-// outsideSession is a session of this machine's that is not on the Ledger's
+// outsideSession is one of this machine's sessions that is not on the Ledger's
 // remote.
 type outsideSession struct {
 	name, reason string
 	finished     time.Time // zero when unknown
 	pending      bool      // the daemon will still upload it
-	cacheDir     string    // set when its recording has ended, so the daemon can be handed it
+	cacheDir     string    // where the daemon uploads: an ended session's folder, to hand it over
 }
 
 // sessionsOutsideLedger lists this machine's sessions that are not on the
-// Ledger's remote, and why. pending is set only where daemonUploads.
+// Ledger's remote, and why.
 func sessionsOutsideLedger(ctx context.Context, projectRoot, ledgerPath string, daemonUploads bool) ([]outsideSession, error) {
 	var out []outsideSession
+	seen := map[string]bool{}
 	add := func(s outsideSession) {
-		if !slices.ContainsFunc(out, func(o outsideSession) bool { return o.name == s.name }) {
+		if !seen[s.name] {
+			seen[s.name] = true
 			out = append(out, s)
 		}
 	}
@@ -203,69 +194,70 @@ func sessionsOutsideLedger(ctx context.Context, projectRoot, ledgerPath string, 
 		case rec.IsAgentAlive():
 			add(outsideSession{name: name, reason: "still recording"})
 		default:
-			gone := outsideSession{
+			// not handed over: the daemon's dead-agent check drains the last entries first
+			crashed := outsideSession{
 				name:     name,
-				reason:   "its AI coworker exited without ending the session; recover it with ox agent " + rec.AgentID + " session recover",
+				reason:   "AI coworker exited without ending the session; run ox agent " + rec.AgentID + " session recover",
 				finished: session.ResolveStoppedAt(rec.StoppedAt, filepath.Join(rec.SessionPath, ledgerFileRaw), time.Now()),
 			}
 			if daemonUploads {
-				// the daemon's dead-agent check drains its last entries first
-				gone.reason, gone.pending = "its AI coworker exited without ending the session; waiting for the daemon to finish it", true
+				crashed.reason, crashed.pending = "AI coworker exited without ending the session; waiting for the daemon", true
 			}
-			add(gone)
+			add(crashed)
 		}
 	}
 
 	unpublished := listUnpublishedCacheSessions(ledgerPath)
 	for _, name := range unpublished.Held {
-		add(outsideSession{name: name, reason: "held on this machine; publish it with ox session upload " + name})
+		add(outsideSession{name: name, reason: "held on this machine; run ox session upload " + name})
 	}
 	for _, name := range unpublished.Waiting {
+		// not ok: it reached the Ledger since the listing
 		_, cacheDir, ok, err := findPublishableCacheSession(ledgerPath, name)
-		if err != nil {
+		switch {
+		case err != nil:
 			add(outsideSession{name: name, reason: err.Error()})
-			continue
+		case ok:
+			waiting := outsideSession{
+				name:     name,
+				reason:   "not uploaded; run ox session upload " + name,
+				finished: session.ResolveStoppedAt(nil, filepath.Join(cacheDir, ledgerFileRaw), time.Now()),
+			}
+			if daemonUploads {
+				waiting.reason, waiting.pending, waiting.cacheDir = "waiting for the daemon to upload it", true, cacheDir
+			}
+			add(waiting)
 		}
-		if !ok {
-			continue // reached the Ledger since the listing
-		}
-		waiting := outsideSession{
-			name:     name,
-			reason:   "not uploaded; publish it with ox session upload " + name,
-			finished: session.ResolveStoppedAt(nil, filepath.Join(cacheDir, ledgerFileRaw), time.Now()),
-		}
-		if daemonUploads {
-			waiting.reason, waiting.pending, waiting.cacheDir = "waiting for the daemon to upload it", true, cacheDir
-		}
-		add(waiting)
 	}
 
-	// committed but not pushed reads as published in the clone
-	log, err := gitutil.RunGit(ctx, ledgerPath, "log", "@{upstream}..HEAD", "--format=", "--name-only", "--", "sessions/")
+	// A session being written, committed or pushed already reads as published in
+	// the clone above, so compare the clone with its remote.
+	changed, err := gitutil.RunGit(ctx, ledgerPath, "diff", "--name-only", "@{upstream}", "--", "sessions/")
 	if err != nil {
-		return nil, fmt.Errorf("check the Ledger for unpushed commits: %w", err)
+		return nil, fmt.Errorf("check the Ledger for unpushed changes: %w", err)
 	}
-	for _, name := range sessionNamesIn(log) {
-		add(outsideSession{name: name, reason: "committed on this machine but not pushed", pending: daemonUploads})
+	untracked, err := gitutil.RunGit(ctx, ledgerPath, "ls-files", "--others", "--exclude-standard", "--", "sessions/")
+	if err != nil {
+		return nil, fmt.Errorf("check the Ledger for unpushed changes: %w", err)
+	}
+	for _, name := range sessionNamesIn(changed + "\n" + untracked) {
+		add(outsideSession{name: name, reason: "in the Ledger clone but not pushed", pending: daemonUploads})
 	}
 	return out, nil
 }
 
-// publishedSince counts sessions on ledgerPath's remote that finished at or
-// after since and whose commit since then carries this clone's Git author. ox
-// commits a session from the machine that recorded it, so this also counts
-// sessions whose local copy is already gone. The author names a person or an
-// AI coworker rather than a machine, so the count includes that author's
-// sessions from other machines that this clone has pulled.
+// publishedSince counts sessions on the Ledger's remote that finished at or
+// after since and were committed by this clone's Git author. The author is a
+// person or an AI coworker, not a machine, so it also counts that author's
+// sessions from other machines.
 func publishedSince(ctx context.Context, ledgerPath string, since time.Time) (int, error) {
 	ident, err := gitutil.RunGit(ctx, ledgerPath, "var", "GIT_AUTHOR_IDENT")
 	if err != nil {
 		return 0, err
 	}
 	author, _, _ := strings.Cut(ident, ">") // "Name <email"; the timestamp follows
-	// --since stops the walk at the first commit older than its date, so a day
-	// of margin keeps a commit made on a skewed clock from hiding later ones;
-	// the stop time applies the exact cutoff below.
+	// --since stops at the first older commit, so a day of margin keeps a skewed
+	// clock from hiding later ones; the exact cutoff is applied below.
 	log, err := gitutil.RunGit(ctx, ledgerPath, "log", "@{upstream}", "--since="+since.Add(-24*time.Hour).Format(time.RFC3339),
 		"--fixed-strings", "--author="+author+">", "--format=", "--name-only", "--", "sessions/")
 	if err != nil {

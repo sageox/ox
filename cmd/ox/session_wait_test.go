@@ -1,10 +1,7 @@
 package main
 
-// `ox session wait` (#1131) is a runner's last step on a machine that goes away
-// after its job. Where the daemon outlives the session it uploads sessions, as
-// on a laptop, and wait waits for it; elsewhere wait only reports. These tests
-// prove what wait decides: what it hands the daemon, what it waits for and
-// counts, and that it uploads nothing itself. A fake stands in for the daemon.
+// `ox session wait` (#1131): where the daemon uploads sessions, wait hands them
+// to it and waits; elsewhere it only reports. A fake stands in for the daemon.
 
 import (
 	"bytes"
@@ -27,14 +24,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// waitFixture is a project whose Ledger is cloned where ox keeps it, on the
-// data home, from a bare remote, with a fake content store. The daemon is off
-// unless a test hands uploads to a fake one.
+// waitFixture is a project whose Ledger is cloned where ox keeps it, from a
+// bare remote, with a fake content store. The daemon is off unless a test hands
+// uploads to a fake one.
 type waitFixture struct {
 	projectRoot string
 	ledgerPath  string
 	barePath    string
-	store       *fakeLFSStore
 }
 
 func newWaitFixture(t *testing.T) *waitFixture {
@@ -83,7 +79,7 @@ func newWaitFixture(t *testing.T) *waitFixture {
 	runGit(t, ledgerPath, "remote", "set-url", "--push", "origin", barePath)
 
 	t.Chdir(projectRoot)
-	return &waitFixture{projectRoot: projectRoot, ledgerPath: ledgerPath, barePath: barePath, store: store}
+	return &waitFixture{projectRoot: projectRoot, ledgerPath: ledgerPath, barePath: barePath}
 }
 
 // record starts a recording owned by ownerPID, with two captured turns.
@@ -107,17 +103,6 @@ func (f *waitFixture) leftover(t *testing.T, name, agentID string, at time.Time)
 	return dir
 }
 
-// stranded publishes a leftover whose push fails, so its commit is only in the
-// Ledger clone.
-func (f *waitFixture) stranded(t *testing.T, name, agentID string) {
-	t.Helper()
-	dir := f.leftover(t, name, agentID, time.Now())
-	runGit(t, f.ledgerPath, "remote", "set-url", "--push", "origin", filepath.Join(t.TempDir(), "missing.git"))
-	require.Error(t, publishCachedSession(f.projectRoot, f.ledgerPath, name, dir))
-	runGit(t, f.ledgerPath, "remote", "set-url", "--push", "origin", f.barePath)
-	require.NotContains(t, remoteTree(t, f.barePath), "sessions/"+name+"/meta.json", "precondition")
-}
-
 // writeWaitTranscript writes a recorded session's raw.jsonl: a header and two
 // turns at the given time.
 func writeWaitTranscript(t *testing.T, dir, agentID string, at time.Time) {
@@ -138,18 +123,15 @@ func deadOwnerPID(t *testing.T) int {
 	return owner.Process.Pid
 }
 
-// fakeDaemon stands in for the daemon behind the finalize request session end
-// sends. Like the daemon, it uploads after the request returns, one session at
-// a time, here through ox's own publish path, which lands a session in the
-// Ledger as the daemon's upload would.
+// fakeDaemon stands in for the daemon: it uploads what it is handed after the
+// request returns, one session at a time, through ox's own publish path.
 type fakeDaemon struct {
 	started bool
 	asked   []string
 }
 
-// daemonOwnsUploads makes this a machine whose daemon outlives the session,
-// with a fake in its place. uploads says whether the fake uploads what it is
-// handed.
+// daemonOwnsUploads makes the daemon own uploads here, with a fake in its
+// place that uploads what it is handed only when uploads is set.
 func (f *waitFixture) daemonOwnsUploads(t *testing.T, uploads bool) *fakeDaemon {
 	t.Helper()
 	t.Setenv("SAGEOX_DAEMON", "")
@@ -159,8 +141,7 @@ func (f *waitFixture) daemonOwnsUploads(t *testing.T, uploads bool) *fakeDaemon 
 	go func() {
 		defer close(idle)
 		for p := range queue {
-			// the daemon summarizes first, so a session lands well after the request
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(100 * time.Millisecond) // the daemon summarizes first
 			if err := publishCachedSession(f.projectRoot, f.ledgerPath, p.SessionName, p.CachePath); err != nil {
 				t.Errorf("fake daemon: upload %s: %v", p.SessionName, err)
 			}
@@ -209,9 +190,8 @@ func runWait(t *testing.T, since time.Time, timeout time.Duration) (sessionWaitO
 	return out, err
 }
 
-// Where the daemon outlives the session, wait starts it, hands it every
-// session whose recording has ended, as session end does, and waits until the
-// daemon has put them in the Ledger. One from an earlier job is older pending.
+// wait hands the daemon every ended session and waits until both are in the
+// Ledger; the one from an earlier job is older pending.
 func TestSessionWait_WaitsForTheDaemonToUploadEachSession(t *testing.T) {
 	f := newWaitFixture(t)
 	d := f.daemonOwnsUploads(t, true)
@@ -230,14 +210,17 @@ func TestSessionWait_WaitsForTheDaemonToUploadEachSession(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-// What the daemon has not uploaded when the timeout passes is reported with
-// why, and fails the run. wait hands the daemon neither a crashed recording,
-// whose last entries the daemon's dead-agent check drains first, nor a held
-// session, and it publishes and pushes nothing itself.
+// After the timeout, every session the daemon did not upload is reported with
+// why. wait hands over neither a crashed recording nor a held session, and it
+// publishes and pushes nothing itself.
 func TestSessionWait_ReportsEverySessionTheDaemonDidNotUpload(t *testing.T) {
 	f := newWaitFixture(t)
+	// a session committed in the clone whose push failed, made while the CLI owns uploads
 	const stranded = "2026-10-20T09-30-coworker-OxPsh1"
-	f.stranded(t, stranded, "OxPsh1") // while the CLI owns uploads, so no daemon is reached
+	dir := f.leftover(t, stranded, "OxPsh1", time.Now())
+	runGit(t, f.ledgerPath, "remote", "set-url", "--push", "origin", filepath.Join(t.TempDir(), "missing.git"))
+	require.Error(t, publishCachedSession(f.projectRoot, f.ledgerPath, stranded, dir))
+	runGit(t, f.ledgerPath, "remote", "set-url", "--push", "origin", f.barePath)
 	d := f.daemonOwnsUploads(t, false)
 	cfg.JSON = false
 	crashed := f.record(t, "OxGone1", deadOwnerPID(t))
@@ -247,6 +230,11 @@ func TestSessionWait_ReportsEverySessionTheDaemonDidNotUpload(t *testing.T) {
 	const waiting, held = "2026-10-20T10-00-coworker-OxLeft1", "2026-10-20T09-00-coworker-OxManu1"
 	f.leftover(t, waiting, "OxLeft1", time.Now())
 	require.NoError(t, session.WriteHoldMarker(f.leftover(t, held, "OxManu1", time.Now()), session.HoldManualPublishing, "stop"))
+	// a session the daemon is still writing into the clone reads as published there
+	const writing = "2026-10-20T09-45-coworker-OxMid1"
+	f.leftover(t, writing, "OxMid1", time.Now())
+	require.NoError(t, os.MkdirAll(filepath.Join(f.ledgerPath, "sessions", writing), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(f.ledgerPath, "sessions", writing, "meta.json"), []byte(`{"session_name":"`+writing+`"}`), 0o644))
 	cmd := waitCommand(time.Now().Add(-time.Hour), 200*time.Millisecond)
 	var report bytes.Buffer
 	cmd.SetOut(&report)
@@ -258,21 +246,21 @@ func TestSessionWait_ReportsEverySessionTheDaemonDidNotUpload(t *testing.T) {
 	assert.NotContains(t, tree, "sessions/"+waiting+"/meta.json", "wait uploads nothing itself")
 	assert.NotContains(t, tree, "sessions/"+stranded+"/meta.json", "wait pushes nothing itself")
 	for name, reason := range map[string]string{
-		crashed:     "its AI coworker exited without ending the session; waiting for the daemon to finish it",
+		crashed:     "AI coworker exited without ending the session; waiting for the daemon",
 		live:        "still recording",
 		quarantined: "held for ownership review",
 		waiting:     "waiting for the daemon to upload it",
-		held:        "held on this machine; publish it with ox session upload " + held,
-		stranded:    "committed on this machine but not pushed",
+		held:        "held on this machine; run ox session upload " + held,
+		stranded:    "in the Ledger clone but not pushed",
+		writing:     "in the Ledger clone but not pushed",
 	} {
 		assert.Contains(t, report.String(), "Not in the Ledger: "+name+": "+reason+"\n")
 	}
 	assert.Error(t, err)
 }
 
-// Where no daemon outlives the session, session end has uploaded what it
-// could. wait starts no daemon and does not wait; it names what will publish
-// each session that is left.
+// With no daemon uploading, wait starts none and does not wait; it names the
+// command that publishes each session left.
 func TestSessionWait_OnlyReportsWhereNoDaemonUploads(t *testing.T) {
 	f := newWaitFixture(t)
 	priorEnsure, priorSend := ensureDaemonForWait, sendHookFinalizeIPC
@@ -294,16 +282,15 @@ func TestSessionWait_OnlyReportsWhereNoDaemonUploads(t *testing.T) {
 
 	assert.Less(t, time.Since(start), 30*time.Second, "wait has nothing to wait for")
 	assert.Equal(t, []sessionWaitFailure{
-		{Session: crashed, Error: "its AI coworker exited without ending the session; recover it with ox agent OxGone2 session recover"},
-		{Session: waiting, Error: "not uploaded; publish it with ox session upload " + waiting},
+		{Session: crashed, Error: "AI coworker exited without ending the session; run ox agent OxGone2 session recover"},
+		{Session: waiting, Error: "not uploaded; run ox session upload " + waiting},
 	}, out.Failed)
 	assert.NotContains(t, remoteTree(t, f.barePath), "sessions/"+waiting+"/meta.json")
 	assert.Error(t, err)
 }
 
-// A Ledger whose remote state cannot be read is not reported as empty: the
-// run fails, so a runner never reads "nothing missing" off a check that did
-// not happen.
+// A Ledger whose remote cannot be read fails the run instead of reading as
+// "nothing missing".
 func TestSessionWait_UnreadableLedgerRemoteFailsTheRun(t *testing.T) {
 	f := newWaitFixture(t)
 	runGit(t, f.ledgerPath, "branch", "--unset-upstream")
@@ -311,7 +298,7 @@ func TestSessionWait_UnreadableLedgerRemoteFailsTheRun(t *testing.T) {
 	_, err := runWait(t, time.Now().Add(-time.Hour), time.Minute)
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "check the Ledger for unpushed commits")
+	assert.Contains(t, err.Error(), "check the Ledger for unpushed changes")
 }
 
 func TestSessionWait_RejectsUnusableInvocation(t *testing.T) {
@@ -325,18 +312,22 @@ func TestSessionWait_RejectsUnusableInvocation(t *testing.T) {
 
 	tests := []struct {
 		name, since, want string
-		legacyDir         bool // a bare .sageox folder, as the legacy ~/.sageox leaves in $HOME
+		sageox            string // "": no .sageox folder; "bare": as the legacy ~/.sageox leaves in $HOME; "initialized": no Ledger cloned yet
 	}{
-		{"missing --since", "", "--since needs a time", false},
-		{"malformed --since", "yesterday", "--since must be RFC3339", false},
-		{"outside a SageOx project", "2026-10-12", "not in a SageOx project", false},
-		{"under a legacy .sageox folder", "2026-10-12", "not in a SageOx project", true},
+		{"missing --since", "", "--since needs a time", ""},
+		{"malformed --since", "yesterday", "--since must be RFC3339", ""},
+		{"outside a SageOx project", "2026-10-12", "not in a SageOx project", ""},
+		{"under a legacy .sageox folder", "2026-10-12", "not in a SageOx project", "bare"},
+		{"before the Ledger is cloned", "2026-10-12", "ox doctor --fix", "initialized"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cwd := t.TempDir()
-			if tt.legacyDir {
+			if tt.sageox != "" {
 				require.NoError(t, os.Mkdir(filepath.Join(cwd, ".sageox"), 0o755))
+			}
+			if tt.sageox == "initialized" {
+				require.NoError(t, os.WriteFile(filepath.Join(cwd, ".sageox", "config.json"), []byte(`{"config_version":"2","repo_id":"repo_noledger"}`), 0o644))
 			}
 			t.Chdir(cwd)
 			cmd := &cobra.Command{}
