@@ -1521,6 +1521,20 @@ func daemonOutlivesSession() bool {
 	return !daemon.IsDaemonDisabled() && !runtime.Caps().HostEndsWithAgent
 }
 
+// summaryForMeta drops a local summary that meta.json's writer would refuse.
+// With no user message to name a topic, session.LocalSummary returns only its
+// stats line ("0 user messages, 1 assistant responses. ..."), which is the
+// exact shape the writer rejects as a leaked failure stub (ox-qqka). That
+// failed every upload of an Amp orb session, whose recording starts after the
+// thread's first prompt (sageox/ox#1318, #1425). An empty summary is legal,
+// and the summarizer fills it later.
+func summaryForMeta(summary string) string {
+	if lfs.IsLeakySummaryString(summary) {
+		return ""
+	}
+	return summary
+}
+
 // uploadSessionToLedger uploads cached blobs to LFS, then commits and pushes
 // their pointers together with session metadata.
 // If this fails, the session data is safe in the local cache and doctor can retry.
@@ -1587,7 +1601,7 @@ func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionRe
 		Model(result.Model).
 		Title(state.Title).
 		EntryCount(result.EntryCount).
-		Summary(result.Summary).
+		Summary(summaryForMeta(result.Summary)).
 		StopReason(session.StopReasonStopped).
 		ContinuedFromSessionID(state.ContinuedFromSessionID).
 		ProducedCommits(state.ProducedCommits).

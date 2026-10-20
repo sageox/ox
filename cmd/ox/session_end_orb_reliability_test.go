@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/ledger"
+	"github.com/sageox/ox/internal/lfs"
 	oxruntime "github.com/sageox/ox/internal/runtime"
 	"github.com/sageox/ox/internal/session"
 )
@@ -128,4 +130,39 @@ func TestStartSessionRecording_OrbRecordsBeforeTheLedgerIsCloned(t *testing.T) {
 			assert.Equal(t, tc.wantRecording, state != nil, "a live recording exists")
 		})
 	}
+}
+
+// TestSessionEnd_AmpOrbUploadsATurnWithoutItsPrompt reproduces the real orb:
+// prime starts recording after the thread's prompt, so the bridge sidecar the
+// stop reads holds Amp's reply and no user message. The local summary is then
+// only a stats line, which meta.json's writer rejected as a leaked failure
+// stub, so every such upload failed. It must land, with an empty summary.
+func TestSessionEnd_AmpOrbUploadsATurnWithoutItsPrompt(t *testing.T) {
+	f := newOrbSessionFixture(t)
+	t.Setenv("AMP_ORB", "1")
+	state, err := session.LoadRecordingStateForAgent(f.projectRoot, f.agentID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	reply, err := json.Marshal(map[string]string{
+		"type": "assistant", "content": orbReply,
+		"timestamp": state.StartedAt.UTC().Add(2 * time.Second).Format(time.RFC3339Nano),
+	})
+	require.NoError(t, err)
+	sidecar := filepath.Join(os.Getenv("HOME"), ".cache", "amp", "ox-sessions", nativeThreadKey(orbThreadURL)+".jsonl")
+	require.NoError(t, os.WriteFile(sidecar, append(reply, '\n'), 0o600))
+
+	f.sendSessionEnd(t)
+
+	dirs := remoteSessionDirs(t, f.barePath)
+	require.Len(t, dirs, 1, "a turn without its prompt must still reach the Ledger before the orb pauses")
+	var meta lfs.SessionMeta
+	require.NoError(t, json.Unmarshal([]byte(runGit(t, f.barePath, "show", "HEAD:sessions/"+dirs[0]+"/meta.json")), &meta))
+	assert.Empty(t, meta.Summary, "a stats-only summary must not be published as the session's summary")
+}
+
+func TestSummaryForMeta(t *testing.T) {
+	assert.Equal(t, "", summaryForMeta("0 user messages, 1 assistant responses. 3 tool calls. Tools: Bash"))
+	assert.Equal(t, "", summaryForMeta(""))
+	withTopic := "Rename the retry helper\n\n1 user messages, 1 assistant responses"
+	assert.Equal(t, withTopic, summaryForMeta(withTopic), "a summary that names its topic is kept")
 }
