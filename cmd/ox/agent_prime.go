@@ -1625,6 +1625,19 @@ func startSessionRecordingUnlocked(projectRoot, agentID, agentType, parentAgentI
 			UserNotification: "[ox] Cursor recording is waiting for the next prompt to establish its source boundary."}
 	}
 
+	// A coworker who aborted ox's recording of this native conversation
+	// discarded it; resuming the conversation must not quietly record and
+	// publish it again. An explicit session start still can. An unreadable
+	// record fails closed, as import does.
+	if aborted, ok, err := abortedNativeSession(projectRoot, agentSessionID); err != nil || ok {
+		notice := "[ox] Not recording: the record of conversations you aborted cannot be read. Run 'ox doctor' to repair it."
+		if err == nil {
+			notice = fmt.Sprintf("[ox] Not recording: you aborted ox's recording of this conversation on %s. To record it anyway, run 'ox agent %s session start'.",
+				aborted.AbortedAt.Local().Format("2006-01-02"), agentID)
+		}
+		return &sessionStatus{Recording: false, Mode: resolved.Mode, Source: string(resolved.Source), UserNotification: notice}
+	}
+
 	// generate session file path
 	timestamp := time.Now().Format("2006-01-02-150405")
 	outputFile := filepath.Join(projectRoot, ".sageox", "sessions", fmt.Sprintf("%s-%s.md", timestamp, agentID))

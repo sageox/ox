@@ -13,14 +13,16 @@ import (
 	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/nativeimport"
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// --- Rule: A session whose recording the coworker aborted is never imported
+// --- Rule: A session whose recording the coworker aborted is not recorded or imported again unless they ask
 
 // abortedPrompt is what the coworker discarded. It must never reach the
 // summarizer or the LFS store.
@@ -202,6 +204,7 @@ func TestImportE2E_AbortedRecordingIsNeverImported(t *testing.T) {
 			assert.True(t, control.Selected)
 			assert.Contains(t, preview.report.NextCommand, e2eCodexA)
 			assert.NotContains(t, preview.report.NextCommand, e2eClaudeA, "the printed upload command must not carry it")
+			assert.Contains(t, preview.report.Guidance, "never add --include-aborted on your own")
 
 			text := f.run(t, importOptions{dryRun: true})
 			require.NoError(t, text.err, text.out)
@@ -268,24 +271,32 @@ func TestImportE2E_AbortSurvivesLaterRecordings(t *testing.T) {
 	assert.Equal(t, string(stateReady), r.session(t, e2eCodexA).State)
 }
 
-// The record of aborted sessions fails closed: an unreadable record stops
-// the import instead of reading as "nothing aborted", and a later abort leaves
-// it untouched instead of replacing it with only its own entry.
+// A damaged record of aborted sessions fails closed and is repaired without
+// forgetting an abort: import refuses with its own code instead of reading
+// "nothing aborted"; a later abort goes to the repo's other record and leaves
+// the damaged one untouched; `ox doctor` keeps every ID the damaged bytes
+// still hold and sets them aside.
 //
 // Failure prevented: a damaged file silently reopens every session the
-// coworker discarded.
-func TestImportE2E_UnreadableAbortRecordFailsClosed(t *testing.T) {
+// coworker discarded, or a repair that deletes it does the same.
+func TestImportE2E_DamagedAbortRecordFailsClosedAndDoctorRepairsIt(t *testing.T) {
+	damagedNamingCodex := `{"sessions": {"` + e2eCodexA + `": `
 	cases := []struct {
-		name   string
-		damage func(t *testing.T, path string)
-		intact func(t *testing.T, path string)
+		name     string
+		damage   func(t *testing.T, path string)
+		intact   func(t *testing.T, path string)
+		salvages bool // the damage still names e2eCodexA
 	}{
-		{name: "truncated JSON", damage: writeDamage(`{"sessions": {"` + e2eClaudeB + `": `), intact: unchangedDamage(`{"sessions": {"` + e2eClaudeB + `": `)},
+		{name: "truncated JSON", damage: writeDamage(damagedNamingCodex), intact: unchangedDamage(damagedNamingCodex), salvages: true},
 		{name: "null record", damage: writeDamage("null"), intact: unchangedDamage("null")},
 		{
-			name:   "directory where the file belongs",
-			damage: func(t *testing.T, path string) { require.NoError(t, os.MkdirAll(path, 0o700)) },
-			intact: func(t *testing.T, path string) { assert.DirExists(t, path) },
+			name: "directory where the file belongs",
+			damage: func(t *testing.T, path string) {
+				require.NoError(t, os.MkdirAll(path, 0o700))
+				require.NoError(t, os.WriteFile(filepath.Join(path, "stray"), []byte(damagedNamingCodex), 0o600))
+			},
+			intact:   func(t *testing.T, path string) { assert.DirExists(t, path) },
+			salvages: true,
 		},
 	}
 	for _, tc := range cases {
@@ -300,17 +311,127 @@ func TestImportE2E_UnreadableAbortRecordFailsClosed(t *testing.T) {
 			require.ErrorIs(t, r.err, cli.ErrSilent)
 			refusal := map[string]any{}
 			require.NoError(t, json.Unmarshal([]byte(r.out), &refusal), r.out)
-			assert.Equal(t, importErrLedgerUnreadable, refusal["error"])
-			assert.Contains(t, refusal["guidance"], path, "the guidance must name the record")
+			assert.Equal(t, importErrAbortRecordUnreadable, refusal["error"], "a damaged abort record is not a damaged Ledger")
+			assert.Contains(t, refusal["message"], path, "the refusal must name the record")
+			assert.Contains(t, refusal["guidance"], "Run ox doctor")
 			assert.Contains(t, refusal["guidance"], "Never delete the file")
 
 			_, err := session.StartRecording(f.projectRoot, session.StartRecordingOptions{
 				AgentID: "OxAbrt", AdapterName: "claude-code", AgentSessionID: e2eClaudeA, SessionFile: nativePath,
 			})
 			require.NoError(t, err)
-			abortOut := abortWithWarning(t, "OxAbrt")
-			assert.Contains(t, abortOut.Warning, "'ox session import', which may offer this session again")
+			abortAs(t, "OxAbrt") // recorded in the repo's other record, so no warning
 			tc.intact(t, path)
+			pending, err := loadAbortRecordFile(pendingAbortRecordPath(e2eRepoID))
+			require.NoError(t, err)
+			assert.Contains(t, pending.Sessions, e2eClaudeA)
+
+			repair := checkAbortRecord(true)
+			require.True(t, repair.passed, repair.message+" "+repair.detail)
+			assert.Contains(t, repair.message, "repaired")
+			matches, err := filepath.Glob(path + ".damaged-*")
+			require.NoError(t, err)
+			assert.Len(t, matches, 1, "the damaged record is set aside, not deleted")
+			assert.True(t, checkAbortRecord(false).passed, "the repaired record reads")
+
+			after := f.run(t, importOptions{dryRun: true, jsonOut: true})
+			require.NoError(t, after.err, after.out)
+			assert.Equal(t, "aborted", after.session(t, e2eClaudeA).State)
+			if tc.salvages {
+				assert.Equal(t, "aborted", after.session(t, e2eCodexA).State, "the repair keeps every ID the damaged record held")
+			} else {
+				assert.Equal(t, string(stateReady), after.session(t, e2eCodexA).State)
+			}
+		})
+	}
+}
+
+// An abort made while the repo has no Ledger clone is still recorded, and
+// the import honors it once the Ledger is there.
+//
+// Failure prevented: the abort completes with only a warning, and the first
+// import after the Ledger is cloned offers the discarded session as ready.
+func TestImportE2E_AbortWithoutALedgerIsStillHonored(t *testing.T) {
+	f, nativePath := newAbortFixture(t)
+	cfg = &config.Config{}
+	_, err := session.StartRecording(f.projectRoot, session.StartRecordingOptions{
+		AgentID: "OxAbrt", AdapterName: "claude-code", AgentSessionID: e2eClaudeA, SessionFile: nativePath,
+	})
+	require.NoError(t, err)
+	parked := f.ledgerPath + ".not-cloned-yet"
+	require.NoError(t, os.Rename(f.ledgerPath, parked))
+	abortAs(t, "OxAbrt")
+	require.NoError(t, os.Rename(parked, f.ledgerPath))
+
+	r := f.run(t, importOptions{dryRun: true, jsonOut: true})
+	require.NoError(t, r.err, r.out)
+	assert.Equal(t, "aborted", r.session(t, e2eClaudeA).State)
+	assert.Equal(t, string(stateReady), r.session(t, e2eCodexA).State)
+}
+
+// An abort that fails while the recording can still upload takes its record
+// back; one that failed after the recording was disarmed keeps it.
+//
+// Failure prevented: a failed abort leaves a live recording that uploads at
+// stop while its native session is marked aborted forever.
+func TestAbort_FailedAbortTakesItsRecordBack(t *testing.T) {
+	cases := []struct {
+		name   string
+		record func(t *testing.T, f *importFixture) string // returns the session name to abort
+		breaks func(t *testing.T, f *importFixture, name string)
+	}{
+		{
+			name: "local capture whose recording state cannot be removed",
+			record: func(t *testing.T, f *importFixture) string {
+				name := "2026-10-19T09-00-devon-OxCapt"
+				dir := filepath.Join(session.GetContextPath(e2eRepoID), "sessions", name)
+				require.NoError(t, os.MkdirAll(dir, 0o755))
+				require.NoError(t, os.WriteFile(filepath.Join(dir, ledgerFileRaw), []byte(captureHeader(e2eClaudeA)), 0o600))
+				return name
+			},
+			breaks: func(t *testing.T, _ *importFixture, name string) {
+				// a non-empty directory where .recording.json belongs cannot be removed
+				stuck := filepath.Join(session.GetContextPath(e2eRepoID), "sessions", name, ".recording.json")
+				require.NoError(t, os.MkdirAll(stuck, 0o755))
+				require.NoError(t, os.WriteFile(filepath.Join(stuck, "x"), []byte("x"), 0o600))
+			},
+		},
+		{
+			name: "finalized session the Ledger cannot remove",
+			record: func(t *testing.T, f *importFixture) string {
+				name := "2026-10-19T09-00-devon-OxFinl"
+				dir := filepath.Join(f.ledgerPath, "sessions", name)
+				require.NoError(t, os.MkdirAll(dir, 0o755))
+				seen := abortStart
+				require.NoError(t, lfs.WriteSessionMetaOnly(dir, &lfs.SessionMeta{
+					SessionName: name, SessionID: sessionScopedID(name), AgentType: "claude-code", CreatedAt: seen,
+					Files:          map[string]lfs.FileRef{ledgerFileRaw: {OID: "sha256:abc", Size: 10}},
+					NativeSessions: []lfs.NativeSession{{ID: e2eClaudeA, FirstSeen: seen, LastSeen: seen}},
+				}))
+				require.NoError(t, ensureSessionsGitignore(filepath.Join(f.ledgerPath, "sessions")))
+				commitAndPushFinalized(t, f.draftLedgerFixture, name)
+				return name
+			},
+			breaks: func(t *testing.T, f *importFixture, _ string) {
+				// a garbage index makes git rm fail before it touches the session
+				require.NoError(t, os.WriteFile(filepath.Join(f.ledgerPath, ".git", "index"), []byte("garbage"), 0o644))
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f, _ := newAbortFixture(t)
+			cfg = &config.Config{}
+			name := tc.record(t, f)
+			tc.breaks(t, f, name)
+			setForceFlag(t, true)
+			agentCmd.SetOut(&bytes.Buffer{})
+			t.Cleanup(func() { agentCmd.SetOut(nil) })
+			require.Error(t, runAgentSessionAbort(&agentinstance.Instance{AgentID: "OxOthr"}, agentCmd, []string{name}))
+
+			record, err := loadAbortRecords(f.ledgerPath, e2eRepoID)
+			require.NoError(t, err)
+			assert.NotContains(t, record.Sessions, e2eClaudeA, "a failed abort must take its record back")
 		})
 	}
 }
@@ -368,15 +489,124 @@ func TestRecordAbortedSessions_ConcurrentAbortsKeepEveryEntry(t *testing.T) {
 	errs := make(chan error, n)
 	for i := 0; i < n; i++ {
 		go func() {
-			errs <- recordAbortedSessions(ledgerPath, fmt.Sprintf("rec-%d", i), "", []abortedNative{{agent: "claude-code", id: fmt.Sprintf("native-%d", i)}}, time.Now())
+			_, err := recordAbortedSessions(abortedSessionsPath(ledgerPath), fmt.Sprintf("rec-%d", i), "",
+				[]abortedNative{{agent: "claude-code", id: fmt.Sprintf("native-%d", i)}}, time.Now())
+			errs <- err
 		}()
 	}
 	for i := 0; i < n; i++ {
 		require.NoError(t, <-errs)
 	}
-	record, err := loadAbortedSessions(ledgerPath)
+	record, err := loadAbortRecordFile(abortedSessionsPath(ledgerPath))
 	require.NoError(t, err)
 	assert.Len(t, record.Sessions, n)
+}
+
+// Devon changes their mind about one aborted session: naming it with
+// --session and --include-aborted uploads exactly that session, after a
+// confirmation that says it was aborted. Nothing else widens.
+//
+// Failure prevented: an abort that can never be undone, or an override that
+// reaches sessions the coworker did not name.
+func TestImportE2E_IncludeAbortedUploadsOnlyTheNamedSession(t *testing.T) {
+	f, nativePath := newAbortFixture(t)
+	cfg = &config.Config{}
+	later := f.add(t, pastSession{agent: nativeimport.AgentClaude, id: e2eClaudeB, start: abortStart.Add(3 * time.Hour),
+		prompt: abortedPrompt + " either, it is about the same deal", reply: "Understood."})
+	for _, rec := range []struct{ agent, native, file string }{{"OxAbrt", e2eClaudeA, nativePath}, {"OxSecd", e2eClaudeB, later}} {
+		_, err := session.StartRecording(f.projectRoot, session.StartRecordingOptions{
+			AgentID: rec.agent, AdapterName: "claude-code", AgentSessionID: rec.native, SessionFile: rec.file,
+		})
+		require.NoError(t, err)
+		abortAs(t, rec.agent)
+	}
+
+	// Without --session the flag is refused before anything runs.
+	cmd := &cobra.Command{Use: "import"}
+	cmd.PersistentFlags().Bool("json", true, "")
+	addSessionImportFlags(cmd.Flags())
+	require.NoError(t, cmd.ParseFlags([]string{"--include-aborted"}))
+	_, refusal := parseImportOptions(cmd)
+	require.NotNil(t, refusal)
+	assert.Equal(t, importErrBadFlag, refusal.Code)
+	assert.Contains(t, refusal.Message, "--include-aborted requires --session")
+
+	unnamed := f.run(t, importOptions{dryRun: true, jsonOut: true, includeAborted: true, sessions: []string{e2eCodexA}})
+	require.NoError(t, unnamed.err, unnamed.out)
+	assert.Equal(t, "aborted", unnamed.session(t, e2eClaudeA).State, "the override reaches only the sessions it names")
+
+	preview := f.run(t, importOptions{dryRun: true, jsonOut: true, agentCtx: true, includeAborted: true, sessions: []string{e2eClaudeA}})
+	require.NoError(t, preview.err, preview.out)
+	named := preview.session(t, e2eClaudeA)
+	assert.Equal(t, string(stateReady), named.State)
+	assert.True(t, named.Selected)
+	assert.True(t, named.IncludedAborted)
+	assert.Contains(t, named.Reason, "included by --include-aborted")
+	assert.Equal(t, "aborted", preview.session(t, e2eClaudeB).State, "an aborted session it does not name stays aborted")
+	assert.Contains(t, preview.report.NextCommand, "--include-aborted")
+
+	text := f.run(t, importOptions{dryRun: true, includeAborted: true, sessions: []string{e2eClaudeA}})
+	require.NoError(t, text.err, text.out)
+	assert.Contains(t, text.out, nativeShortID(e2eClaudeA)+"  (you aborted its recording)")
+
+	// At a terminal, the confirmation says what is being undone.
+	var asked string
+	f.interactive = true
+	f.confirm = func(prompt string) (bool, error) { asked = prompt; return false, nil }
+	declined := f.run(t, importOptions{includeAborted: true, sessions: []string{e2eClaudeA}})
+	require.NoError(t, declined.err, declined.out)
+	assert.Contains(t, asked, "including 1 whose recording you aborted")
+	assert.Zero(t, f.store.count(), "a declined confirmation uploads nothing")
+	f.interactive, f.confirm = false, nil
+
+	uploaded := f.run(t, optionsFromCommand(t, preview.report.NextCommand))
+	require.NoError(t, uploaded.err, uploaded.out)
+	assert.Equal(t, "uploaded", uploaded.session(t, e2eClaudeA).Outcome)
+	assert.Contains(t, remoteSessionDirs(t, f.barePath), named.SessionName)
+	assert.Empty(t, uploaded.session(t, e2eClaudeB).Outcome)
+}
+
+// Resuming a conversation whose recording Devon aborted does not start a new
+// recording; prime says why, and an unrelated conversation still records. A
+// damaged record stops auto-recording until ox doctor repairs it.
+//
+// Failure prevented: SessionStart prime on resume quietly records the
+// discarded conversation again and publishes it at stop.
+func TestPrime_DoesNotAutoRecordAnAbortedConversation(t *testing.T) {
+	f, _ := newAbortFixture(t)
+	cfg = &config.Config{}
+	defaultLedger, err := ledger.DefaultPath()
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Join(defaultLedger, ".git"), 0o755))
+	oxConfigSetRepo(t, "session_recording", "auto")
+
+	first := startSessionRecording(f.projectRoot, "OxPrm1", "claude-code", "", "", e2eClaudeA)
+	require.NotNil(t, first)
+	require.True(t, first.Recording, "control: prime records a new conversation")
+	abortAs(t, "OxPrm1")
+
+	resumed := startSessionRecording(f.projectRoot, "OxPrm1", "claude-code", "", "", e2eClaudeA)
+	require.NotNil(t, resumed)
+	assert.False(t, resumed.Recording, "a resumed aborted conversation must not be recorded again")
+	assert.Contains(t, resumed.UserNotification, "you aborted ox's recording of this conversation on ")
+	assert.Contains(t, resumed.UserNotification, "ox agent OxPrm1 session start")
+	state, err := session.LoadRecordingStateForAgent(f.projectRoot, "OxPrm1")
+	require.NoError(t, err)
+	assert.Nil(t, state, "no recording may start")
+
+	other := startSessionRecording(f.projectRoot, "OxPrm2", "claude-code", "", "", e2eClaudeB)
+	require.NotNil(t, other)
+	assert.True(t, other.Recording, "another conversation still records")
+
+	require.NoError(t, os.WriteFile(abortedSessionsPath(f.ledgerPath), []byte("{"), 0o600))
+	blocked := startSessionRecording(f.projectRoot, "OxPrm3", "claude-code", "", "", e2eClaudeC)
+	require.NotNil(t, blocked)
+	assert.False(t, blocked.Recording, "an unreadable record fails closed")
+	assert.Contains(t, blocked.UserNotification, "ox doctor")
+	require.True(t, checkAbortRecord(true).passed)
+	repaired := startSessionRecording(f.projectRoot, "OxPrm3", "claude-code", "", "", e2eClaudeC)
+	require.NotNil(t, repaired)
+	assert.True(t, repaired.Recording, "after the repair, an unrelated conversation records again")
 }
 
 // coveringRecording is the recording the preview says holds a session: named

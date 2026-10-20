@@ -24,10 +24,12 @@ type importJSONSession struct {
 	SessionName  string `json:"session_name"`
 	SessionID    string `json:"session_id"`
 	Selected     bool   `json:"selected"`
-	Outcome      string `json:"outcome,omitempty"`
-	Detail       string `json:"detail,omitempty"`
-	URL          string `json:"url,omitempty"`
-	Retry        string `json:"retry,omitempty"`
+	// IncludedAborted: aborted by the coworker, ready only through --include-aborted.
+	IncludedAborted bool   `json:"included_aborted,omitempty"`
+	Outcome         string `json:"outcome,omitempty"`
+	Detail          string `json:"detail,omitempty"`
+	URL             string `json:"url,omitempty"`
+	Retry           string `json:"retry,omitempty"`
 }
 
 type importJSONOutput struct {
@@ -59,7 +61,7 @@ func jsonImportSession(c *importCandidate) importJSONSession {
 		StartedAt: s.StartedAt.Format("2006-01-02T15:04:05Z"), LastActivity: s.LastActivity.Format("2006-01-02T15:04:05Z"),
 		Messages: s.Messages(), SizeBytes: s.Size, Branch: s.Branch,
 		State: string(c.State), Reason: c.Reason, CoveredBy: c.Covered,
-		SessionName: c.Name, SessionID: c.SessionID, Selected: c.Selected,
+		SessionName: c.Name, SessionID: c.SessionID, Selected: c.Selected, IncludedAborted: c.IncludedAborted,
 		Outcome: c.Outcome, Detail: c.Detail, URL: c.URL, Retry: c.Retry,
 	}
 }
@@ -80,6 +82,9 @@ func renderImportPreview(w io.Writer, opts importOptions, dest importDestination
 			out.Guidance = importAgentGuidance
 			if len(selected) == 0 {
 				out.Guidance = importNothingGuidance
+			}
+			if out.Counts[string(stateAborted)] > 0 || includeAbortedFlag(selected) != "" {
+				out.Guidance += importAbortedGuidance
 			}
 		}
 		return cli.PrintJSONTo(w, out)
@@ -106,8 +111,12 @@ func renderImportPreview(w io.Writer, opts importOptions, dest importDestination
 		if len(branch) > 14 {
 			branch = branch[:13] + "…"
 		}
-		fmt.Fprintf(w, "  %s  %-6s %4d msgs  %8s  %-14s %s\n",
-			s.StartedAt.Local().Format("2006-01-02"), s.Agent, s.Messages(), formatBytes(s.Size), branch, nativeShortID(s.NativeID))
+		note := ""
+		if c.IncludedAborted {
+			note = "  (you aborted its recording)"
+		}
+		fmt.Fprintf(w, "  %s  %-6s %4d msgs  %8s  %-14s %s%s\n",
+			s.StartedAt.Local().Format("2006-01-02"), s.Agent, s.Messages(), formatBytes(s.Size), branch, nativeShortID(s.NativeID), note)
 	}
 
 	skipped := map[string]int{}

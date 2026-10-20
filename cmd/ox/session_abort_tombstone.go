@@ -14,6 +14,7 @@ import (
 
 	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/lfs"
+	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/session"
 )
 
@@ -21,12 +22,14 @@ import (
 // Codex sessions whose ox recording the coworker aborted. Abort deletes
 // everything keyed by the recording, but the native transcript stays where
 // the agent wrote it, so without this record `ox session import` would offer
-// the discarded session as ready once it went quiet.
+// the discarded session as ready once it went quiet, and prime would start
+// recording it again when the conversation resumed.
 //
 // It lives in the Ledger's gitignored cache beside the import's verdicts:
 // shared by every worktree of the repo, carried across GC reclones, never
-// pushed. Nothing clears an entry: importing the same native session later
-// would publish the part the coworker discarded.
+// pushed. An abort made before the Ledger is cloned goes to the repo's session
+// cache instead, and readers merge both. Nothing clears an entry; only an
+// explicit `ox session import --include-aborted` uploads one.
 type abortedSessions struct {
 	Sessions map[string]abortedSession `json:"sessions"` // by native session ID
 	// Recordings holds the aborted recordings' ses_ IDs. Prime writes each
@@ -51,27 +54,71 @@ func abortedSessionsPath(ledgerPath string) string {
 	return filepath.Join(ledgerPath, ".sageox", "cache", "session-import", "aborted.json")
 }
 
-// loadAbortedSessions reads the record. A missing file is an empty record; an
-// unreadable one is an error, never an empty record, because reading it as
-// empty would offer every aborted session again.
-func loadAbortedSessions(ledgerPath string) (*abortedSessions, error) {
-	path := abortedSessionsPath(ledgerPath)
-	record := &abortedSessions{}
-	data, err := os.ReadFile(path)
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return nil, fmt.Errorf("read the sessions you aborted: %w", err)
+// pendingAbortRecordPath holds aborts made while the repo had no Ledger
+// clone. It sits beside the recordings themselves, outside sessions/.
+func pendingAbortRecordPath(repoID string) string {
+	return filepath.Join(paths.SessionCacheDir(repoID), "aborted.json")
+}
+
+// abortRecordPaths lists every place an abort record can be, for readers.
+func abortRecordPaths(ledgerPath, repoID string) []string {
+	var out []string
+	if ledgerPath != "" {
+		out = append(out, abortedSessionsPath(ledgerPath))
 	}
-	if err == nil {
-		// Decode through a pointer: a record of `null` would otherwise leave
-		// the empty record in place and read as "nothing aborted".
-		var decoded *abortedSessions
-		if err := json.Unmarshal(data, &decoded); err != nil {
-			return nil, fmt.Errorf("read the sessions you aborted at %s: %w", path, err)
+	if repoID != "" {
+		out = append(out, pendingAbortRecordPath(repoID))
+	}
+	return out
+}
+
+// errAbortRecordUnreadable marks a record that exists but cannot be read.
+var errAbortRecordUnreadable = errors.New("the record of sessions you aborted cannot be read")
+
+// loadAbortRecords merges every record of the repo. A missing file is an
+// empty record; an unreadable one is an error, never an empty record, because
+// reading it as empty would offer every aborted session again.
+func loadAbortRecords(ledgerPath, repoID string) (*abortedSessions, error) {
+	merged := newAbortedSessions()
+	for _, path := range abortRecordPaths(ledgerPath, repoID) {
+		record, err := loadAbortRecordFile(path)
+		if err != nil {
+			return nil, err
 		}
-		if decoded == nil {
-			return nil, fmt.Errorf("read the sessions you aborted at %s: the record is null", path)
+		for id, a := range record.Sessions {
+			if _, ok := merged.Sessions[id]; !ok {
+				merged.Sessions[id] = a
+			}
 		}
-		record = decoded
+		for id, a := range record.Recordings {
+			if _, ok := merged.Recordings[id]; !ok {
+				merged.Recordings[id] = a
+			}
+		}
+	}
+	return merged, nil
+}
+
+func newAbortedSessions() *abortedSessions {
+	return &abortedSessions{Sessions: map[string]abortedSession{}, Recordings: map[string]abortedSession{}}
+}
+
+func loadAbortRecordFile(path string) (*abortedSessions, error) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return newAbortedSessions(), nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s: %w", errAbortRecordUnreadable, path, err)
+	}
+	// Decode through a pointer: a record of `null` would otherwise leave the
+	// empty record in place and read as "nothing aborted".
+	var record *abortedSessions
+	if err := json.Unmarshal(data, &record); err != nil {
+		return nil, fmt.Errorf("%w: %s: %w", errAbortRecordUnreadable, path, err)
+	}
+	if record == nil {
+		return nil, fmt.Errorf("%w: %s: the record is null", errAbortRecordUnreadable, path)
 	}
 	if record.Sessions == nil {
 		record.Sessions = map[string]abortedSession{}
@@ -82,48 +129,112 @@ func loadAbortedSessions(ledgerPath string) (*abortedSessions, error) {
 	return record, nil
 }
 
-// recordAbortedSessions adds an aborted recording to the record under a file
-// lock, so two AI coworkers aborting at once cannot drop each other's entry.
-// A record it cannot read is left alone rather than replaced.
-func recordAbortedSessions(ledgerPath, recording, sessionID string, natives []abortedNative, at time.Time) error {
-	if len(natives) == 0 && sessionID == "" {
-		return nil
-	}
-	path := abortedSessionsPath(ledgerPath)
+// abortRecordKeys are the entries one abort added, so a failed abort can take
+// back exactly those and leave earlier aborts alone.
+type abortRecordKeys struct {
+	path       string
+	natives    []string
+	recordings []string
+}
+
+// updateAbortRecord rewrites one record under a file lock, so two AI
+// coworkers aborting at once cannot drop each other's entry. A record it
+// cannot read is left alone rather than replaced.
+func updateAbortRecord(path string, change func(*abortedSessions)) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
 	return fileutil.WithFileLock(context.Background(), path, func() error {
-		record, err := loadAbortedSessions(ledgerPath)
+		record, err := loadAbortRecordFile(path)
 		if err != nil {
 			return err
 		}
-		for _, n := range natives {
-			record.Sessions[n.id] = abortedSession{Agent: n.agent, Recording: recording, AbortedAt: at.UTC()}
-		}
-		if sessionID != "" {
-			record.Recordings[sessionID] = abortedSession{Recording: recording, AbortedAt: at.UTC()}
-		}
+		change(record)
 		return fileutil.AtomicWriteJSON(path, record, 0o600)
 	})
 }
 
-// rememberAbort records, before abort deletes anything, the recording's ses_
-// ID and the native sessions it covered. Like the draft removal it never
-// stops the abort: a failure comes back as the warning the coworker needs.
-func rememberAbort(recording, sessionID string, natives []abortedNative) string {
+// recordAbortedSessions adds an aborted recording to the record at path and
+// returns the entries it added.
+func recordAbortedSessions(path, recording, sessionID string, natives []abortedNative, at time.Time) (abortRecordKeys, error) {
+	added := abortRecordKeys{path: path}
 	if len(natives) == 0 && sessionID == "" {
-		return ""
+		return added, nil
 	}
-	ledgerPath, err := resolveLedgerPath()
-	if err == nil {
-		err = recordAbortedSessions(ledgerPath, recording, sessionID, natives, time.Now())
+	err := updateAbortRecord(path, func(record *abortedSessions) {
+		for _, n := range natives {
+			if _, ok := record.Sessions[n.id]; !ok {
+				record.Sessions[n.id] = abortedSession{Agent: n.agent, Recording: recording, AbortedAt: at.UTC()}
+				added.natives = append(added.natives, n.id)
+			}
+		}
+		if _, ok := record.Recordings[sessionID]; sessionID != "" && !ok {
+			record.Recordings[sessionID] = abortedSession{Recording: recording, AbortedAt: at.UTC()}
+			added.recordings = append(added.recordings, sessionID)
+		}
+	})
+	return added, err
+}
+
+// rememberAbort records, before abort deletes anything, the recording's ses_
+// ID and the native sessions it covered: in the Ledger's cache, or the repo's
+// session cache when the Ledger is missing or its record cannot be written.
+// Writing first means a crash mid-abort still leaves the session discarded;
+// the returned undo takes the entries back when the abort fails while the
+// recording is still armed. Like the draft removal it never stops the abort:
+// a failure to record comes back as the warning the coworker needs.
+func rememberAbort(projectRoot, recording, sessionID string, natives []abortedNative) (string, func()) {
+	noUndo := func() {}
+	if len(natives) == 0 && sessionID == "" {
+		return "", noUndo
 	}
+	var targets []string
+	if ledgerPath, err := resolveLedgerPath(); err == nil {
+		targets = append(targets, abortedSessionsPath(ledgerPath))
+	}
+	targets = append(targets, pendingAbortRecordPath(getRepoIDOrDefault(projectRoot)))
+	var errs []error
+	for _, path := range targets {
+		added, err := recordAbortedSessions(path, recording, sessionID, natives, time.Now())
+		if err == nil {
+			return "", func() { undoAbortRecord(added) }
+		}
+		errs = append(errs, err)
+	}
+	err := errors.Join(errs...)
+	slog.Warn("could not record aborted native sessions", "session", recording, "error", err)
+	return fmt.Sprintf("could not record the abort for 'ox session import', which may offer this session again: %v", err), noUndo
+}
+
+// undoAbortRecord removes what one abort added.
+func undoAbortRecord(added abortRecordKeys) {
+	if len(added.natives) == 0 && len(added.recordings) == 0 {
+		return
+	}
+	if err := updateAbortRecord(added.path, func(record *abortedSessions) {
+		for _, id := range added.natives {
+			delete(record.Sessions, id)
+		}
+		for _, id := range added.recordings {
+			delete(record.Recordings, id)
+		}
+	}); err != nil {
+		slog.Warn("could not take back the abort record of a failed abort", "path", added.path, "error", err)
+	}
+}
+
+// abortedNativeSession reports whether the coworker aborted a recording of
+// this native session, reading every record of the project's repo.
+func abortedNativeSession(projectRoot, nativeID string) (abortedSession, bool, error) {
+	if nativeID == "" {
+		return abortedSession{}, false, nil
+	}
+	record, err := loadAbortRecords(getLedgerPath(), getRepoIDOrDefault(projectRoot))
 	if err != nil {
-		slog.Warn("could not record aborted native sessions", "session", recording, "error", err)
-		return fmt.Sprintf("could not record the abort for 'ox session import', which may offer this session again: %v", err)
+		return abortedSession{}, false, err
 	}
-	return ""
+	a, ok := record.Sessions[nativeID]
+	return a, ok, nil
 }
 
 // nativeSessionsOfRecording lists the native sessions a local recording

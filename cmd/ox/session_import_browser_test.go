@@ -295,7 +295,7 @@ func TestImportBrowserLaunchFailureAndCancellationCloseListener(t *testing.T) {
 // Prevents missing timestamp/eligibility metadata from presenting an
 // unavailable session as ready, or leaking classifier details into the reader.
 func TestImportBrowserExplainsEveryEligibilityStateAndMissingDates(t *testing.T) {
-	states := []importState{stateReady, stateAlreadyImported, stateRecordedLive, stateInProgress, stateNeedsSummarizer, stateNotShared, stateIneligible}
+	states := []importState{stateReady, stateAlreadyImported, stateRecordedLive, stateInProgress, stateNeedsSummarizer, stateNotShared, stateAborted, stateIneligible}
 	for _, state := range states {
 		t.Run(string(state), func(t *testing.T) {
 			c := importBrowserCandidates()[0]
