@@ -10,8 +10,9 @@ import (
 )
 
 // TestMurmursRetriever_SkipsOutsideNews feeds `ox decision enrich` a new-PR
-// murmur, in the typed shape SageOx's server writes, that matches the
-// decision's topic as well as a teammate's murmur does.
+// murmur that matches the decision's topic as well as a teammate's murmur
+// does. Its metadata is typed rather than all-string, so the test also shows
+// such a file is read, not reported as a corrupt source.
 // Failure prevented: a stranger's PR title is offered to the AI coworker as
 // "active work" on the decision.
 func TestMurmursRetriever_SkipsOutsideNews(t *testing.T) {

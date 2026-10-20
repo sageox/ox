@@ -37,11 +37,12 @@ type MurmurFile struct {
 }
 
 // UnmarshalJSON decodes a murmur file whose metadata values need not be JSON
-// strings. ox writes every value as a string, but SageOx's server writes
-// outside news with a PR number as a number and its files as an array. A
-// number or boolean keeps its JSON text, an array of strings and numbers
-// becomes a comma-separated list (the metadata["files"] convention), and an
-// object or nested array is dropped instead of failing the whole file.
+// strings. Every writer, ox and SageOx's server alike, writes metadata values
+// as strings. This is defensive tolerance: a writer that sends a number or an
+// array (an older or misbehaving one) must not make the whole file
+// unreadable. A number or boolean keeps its JSON text, an array of strings
+// and numbers becomes a comma-separated list (the metadata["files"]
+// convention), and an object or nested array is dropped.
 func (m *MurmurFile) UnmarshalJSON(data []byte) error {
 	type murmurFields MurmurFile // no methods, so decoding it cannot recurse
 	var decoded struct {

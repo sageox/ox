@@ -143,10 +143,11 @@ func TestParseOutsideNewsPR(t *testing.T) {
 
 // --- C. Typed metadata ---
 
-// TestMurmurFile_TypedMetadataDecodes reads the shape SageOx's server writes
-// for outside news: a PR number as a JSON number and files as an array.
-// Failure prevented: the whole murmur file fails to parse, so the news is
-// silently dropped by every reader.
+// TestMurmurFile_TypedMetadataDecodes reads outside news from a writer that
+// breaks the all-string metadata contract: a PR number as a JSON number and
+// files as an array.
+// Failure prevented: one misbehaving writer makes the whole murmur file
+// unreadable, so the news is silently dropped by every reader.
 func TestMurmurFile_TypedMetadataDecodes(t *testing.T) {
 	raw := `{
 		"schema_version": "1",
