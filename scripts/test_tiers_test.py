@@ -34,7 +34,7 @@ class TestTierContractTest(unittest.TestCase):
         flags = test_tiers.go_test_flags(self.config, "full")
         self.assertNotIn("-short", flags)
         self.assertFalse(any(flag.startswith("-tags=short") for flag in flags))
-        self.assertIn("-timeout=15m", flags)
+        self.assertIn("-timeout=25m", flags)
         self.assertIn("-count=1", flags)
 
     def test_rejects_split_short_semantics(self):
@@ -128,7 +128,7 @@ class TestTierContractTest(unittest.TestCase):
         with _env(OX_TEST_P=None, OX_TEST_PARALLEL=None):
             self.assertEqual(
                 test_tiers.go_test_flags(self.config, "full"),
-                ["-race", "-count=1", "-p", "8", "-parallel", "32", "-timeout=15m"],
+                ["-race", "-count=1", "-p", "8", "-parallel", "32", "-timeout=25m"],
             )
 
     def test_rejects_nonsense_concurrency_override(self):
