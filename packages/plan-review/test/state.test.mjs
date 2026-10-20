@@ -1,6 +1,7 @@
 // The host controls' drafts and outbox, over a fake Storage. The real-Chrome
 // tests (cmd/ox, build tag `browser`) cover the same paths end to end.
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { load } from './load.mjs';
 
@@ -153,6 +154,20 @@ test('requests name the reviewer only for a host without sign-in', () => {
   assert.deepEqual(JSON.parse(submitBody('op-00000001', 'Devon', ds)), { id: 'op-00000001', reviewer: 'Devon', items: [{ anchor: 'q00ff00ff', section: 'Risks', label: 'q00ff00ff', quote: 'retry path', status: 'request-change', note: 'n' }] });
   assert.ok(!('reviewer' in JSON.parse(submitBody('op-00000001', '', ds))));
   assert.deepEqual(JSON.parse(acceptBody('op-00000002', 'Devon', 'h00000001')), { id: 'op-00000002', reviewer: 'Devon', anchor: 'h00000001', state: 'verified', note: 'accepted by reviewer' });
+});
+
+// Failure prevented: a draft whose drawing another version of the package
+// wrote is frozen into a round the server refuses on every send, or dropped
+// with the reviewer's note.
+test('a stored draft whose drawing no longer reads as one keeps its note', () => {
+  const region = JSON.parse(readFileSync(new URL('../../../pkg/planreview/testdata/drawn-context/captures.json', import.meta.url), 'utf8')).records[0];
+  const s = fakeStorage(), st = openStore(s, 'acct', 'pln_1');
+  assert.ok(st.save({ anchor: 'q-' + region.id, status: 'flag', note: 'here', region }));
+  assert.equal(st.drafts()[0].region.id, region.id);
+  const key = 'ox-review:acct:pln_1:draft:q-' + region.id;
+  s.setItem(key, JSON.stringify({ ...JSON.parse(s.getItem(key)), region: { ...region, v: 2 } }));
+  const [d] = st.drafts();
+  assert.deepEqual([d.anchor, d.note, d.region], ['q-' + region.id, 'here', undefined]);
 });
 
 test('operation ids fit the hosts\' pattern and never repeat', () => {

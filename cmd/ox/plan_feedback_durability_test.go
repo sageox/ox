@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -366,5 +367,82 @@ func TestPlanSurfaces_MarkAnIncompleteReview(t *testing.T) {
 		if b, err := os.ReadFile(page); err != nil || !strings.Contains(string(b), `data-review-problems="1"`) {
 			t.Fatalf("%s's page must carry the review's problem count (err %v)", slug, err)
 		}
+	}
+}
+
+// drawingExport is an export item for a drawing of captures.json's
+// r4-abort-item, and that record as decoded.
+func drawingExport(t *testing.T) (item string, region any) {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(packageDir, "..", "..", "pkg", "planreview", "testdata", "drawn-context", "captures.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var captures struct{ Records []json.RawMessage }
+	if err := json.Unmarshal(raw, &captures); err != nil {
+		t.Fatal(err)
+	}
+	_ = json.Unmarshal(captures.Records[3], &region)
+	return `{"anchor":"q-r4-abort-item","section":"Risks","label":"Drawing: Abort if the dead-letter rate doubles.","status":"flag","note":"Abort sooner.","region":` +
+		string(captures.Records[3]) + `}`, region
+}
+
+// applyExport runs `ox plan feedback apply` on body for the plan slug.
+func applyExport(t *testing.T, slug, body string) (string, error) {
+	t.Helper()
+	src := filepath.Join(t.TempDir(), "feedback.json")
+	if err := os.WriteFile(src, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := &cobra.Command{}
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	err := runPlanFeedbackApply(cmd, slug, src)
+	return out.String(), err
+}
+
+// TestRunPlanFeedbackApply_StoresAnExportedDrawingWhole applies an export as
+// the review page writes one with a drawing: its items under marks. Failure
+// prevented: the CLI's canonical re-freeze of an export drops marks or
+// changes the region, so the drawing reaches the Ledger without what was
+// drawn.
+func TestRunPlanFeedbackApply_StoresAnExportedDrawingWhole(t *testing.T) {
+	_, planDir := saveFeedbackTestPlan(t, "apply-drawn")
+	item, sent := drawingExport(t)
+	if _, err := applyExport(t, "apply-drawn", `{"reviewer":"Avery","items":[],"marks":[`+item+`]}`); err != nil {
+		t.Fatal(err)
+	}
+	rev := plan.ReadReview(planDir)
+	if len(rev.Items) != 1 || rev.Items[0].Anchor != "q-r4-abort-item" || rev.Items[0].Reviewer != "Avery" {
+		t.Fatalf("stored %+v, want Avery's one drawing", rev.Items)
+	}
+	var stored any
+	_ = json.Unmarshal(rev.Items[0].Region, &stored)
+	if !reflect.DeepEqual(stored, sent) {
+		t.Errorf("the stored region is not the drawing as exported:\n got %s", rev.Items[0].Region)
+	}
+}
+
+// TestAwaitSnapshot_HandsOverADrawingWithoutItsGeometry: a coworker waiting
+// on `ox plan review await` gets a drawing by its anchor, label, section and
+// note, without the record's stroke and boxes. Failure prevented: every open
+// drawing costs the coworker's context kilobytes of coordinates it cannot
+// act on.
+func TestAwaitSnapshot_HandsOverADrawingWithoutItsGeometry(t *testing.T) {
+	_, planDir := saveFeedbackTestPlan(t, "await-drawn")
+	item, _ := drawingExport(t)
+	if _, err := applyExport(t, "await-drawn", `{"reviewer":"Avery","items":[],"marks":[`+item+`]}`); err != nil {
+		t.Fatal(err)
+	}
+	res, done := awaitSnapshot(planDir)
+	if !done || len(res.Open) != 1 {
+		t.Fatalf("await found %+v (done %v), want the one drawing", res.Open, done)
+	}
+	out, err := json.Marshal(res)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), `"region"`) || !strings.Contains(string(out), `"label":"Drawing: Abort if the dead-letter rate doubles."`) || !strings.Contains(string(out), "Abort sooner.") {
+		t.Errorf("await hands over %s, want the drawing by label and note, without its region", out)
 	}
 }

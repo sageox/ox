@@ -5,9 +5,9 @@ SageOx plans. It has two halves that talk only through a small message
 protocol:
 
 - **Document tools** run inside the plan. They find what a reviewer points at
-  (an element, or the words they selected) and paint the marks the host sends.
-  They read no storage and make no request, so they run in an opaque-origin
-  frame.
+  (an element, or the words they selected) or draws a loop around, and paint
+  the marks and drawings the host sends. They read no storage and make no
+  request, so they run in an opaque-origin frame.
 - **The host** is trusted. It owns review mode, the composer, drafts,
   identity and submission: `mountHostControls` draws them, with an outbox
   that delivers what a reviewer submits. Nothing a document sends can
@@ -46,7 +46,7 @@ settings grant your repository read access.
 Pin the exact version and commit your lockfile:
 
 ```sh
-npm install --save-exact @sageox/plan-review@0.5.0
+npm install --save-exact @sageox/plan-review@0.6.0
 ```
 
 Pinning matters because the host end and the document script must come from
@@ -58,10 +58,10 @@ release workflow, naming the tag it was built from. Check a tarball before you
 pin it:
 
 ```sh
-npm pack @sageox/plan-review@0.5.0
-gh attestation verify sageox-plan-review-0.5.0.tgz -R sageox/ox \
+npm pack @sageox/plan-review@0.6.0
+gh attestation verify sageox-plan-review-0.6.0.tgz -R sageox/ox \
   --signer-workflow sageox/ox/.github/workflows/plan-review-release.yml \
-  --source-ref refs/tags/packages/plan-review/v0.5.0
+  --source-ref refs/tags/packages/plan-review/v0.6.0
 ```
 
 ## Frame a plan
@@ -126,26 +126,29 @@ gh attestation verify sageox-plan-review-0.5.0.tgz -R sageox/ox \
 
    | Host → document | Effect |
    |---|---|
-   | `{type:'mode', on, open}` | Review mode on or off, and whether your composer is open (so Esc is the document's to forward) |
-   | `{type:'paint', items}` | Paint these marks; answered by `placed` |
+   | `{type:'mode', on, open, draw}` | Review mode on or off, whether your composer is open (so Esc is the document's to forward), and whether the Draw tool is up: then a stroke on the plan draws instead of picking |
+   | `{type:'paint', items, drawings}` | Paint these marks and drawings; answered by `placed` |
    | `{type:'focus', anchor}` | Tint the words this anchor's note is about; `null` clears |
-   | `{type:'reveal', anchor, nth}` | Scroll to the `nth` placed mark with this anchor and flash it |
+   | `{type:'reveal', anchor, nth}` | Scroll to the `nth` placed mark with this anchor and flash it. For a drawing, first show it: reopen what its capture had open or checked |
 
    | Document → host | Meaning |
    |---|---|
    | `{type:'ready'}` | Listening: send `mode` and `paint` |
    | `{type:'target', target}` | In review mode the reviewer picked an element (`h` anchor) or highlighted words (`q` anchor, with `quote`). `target.rect` is where your composer opens below, in the frame's viewport pixels |
-   | `{type:'refused', reason}` | A highlight that cannot anchor: `cross-section`, or `repeated` with the `quote` and its `count` |
+   | `{type:'capture', capture, rect}` | With the Draw tool up, the reviewer drew a loop: the stroke, the ellipse fitted to it, the elements it encloses and what lay under them. It is a proposal, as fresh fields only; your controls stamp it (see below). `rect` is where your composer opens below |
+   | `{type:'refused', reason}` | A highlight that cannot anchor: `cross-section`, or `repeated` with the `quote` and its `count`. A stroke that made no capture: `no-target`, `too-large`, `too-small`, `layout-changed` or `cancelled` (Esc) |
    | `{type:'dismiss'}` | A click that picked nothing, in review mode or out of it: close your composer. In review mode a click on the plan's own form control, label or summary picks nothing and does its own job, such as switching a tab; a link stays a pick |
-   | `{type:'placed', items}` | Every painted mark in reading order, with its section and label. A mark you painted that is not here has lost its text |
+   | `{type:'placed', items}` | Every painted mark in reading order, with its section and label. A mark you painted that is not here has lost its text. Every drawing is here with its `outcome` (`exact`, `moved`, `reflowed`, `hidden`, `missing`, `ambiguous`); a missing or ambiguous one comes last and is not on the page. It is sent again when a resize, a toggle or a scrolled panel moves a drawing |
    | `{type:'key', key}` | `r` or `Escape`, pressed inside the frame |
 
    A `PaintItem` is `{anchor, kind: 'unsent'|'committed', status, state?, glyph,
    tint, quote?, section?, label?}`, with `glyph` inserted as text. Only
    anchors the document computes, `h` or `q` plus eight hex digits, can be
    painted; a message carrying any other is dropped whole, so list the rest
-   (drawings, say, or the whole plan's `plan`) only in your own UI. See
-   `src/protocol.ts`.
+   (the whole plan's `plan`, say) only in your own UI. A `DrawingPaint` is
+   `{anchor: 'q-<id>', kind, tint, ellipse, targets, open, checked}`: what
+   placement needs from a drawing's record, and nothing about who drew it.
+   See `src/protocol.ts`; `paintItem` and `drawingPaint` check one item each.
 
 ## Mount the review controls
 
@@ -168,6 +171,7 @@ const controls = mountHostControls(port, {
   transport: { send },
   resolve: canResolve,       // this reviewer may Accept or Reopen what the author addressed
   reviewing: true,           // the reviewer asked to review: open in review mode
+  revision: plan.revision,   // "sha256:<hex>" of the bytes the frame shows: offers Draw
 });
 controls.update(items, problems); // after you read the review again
 controls.destroy(); // before another account signs in, or another plan mounts
@@ -176,6 +180,37 @@ controls.destroy(); // before another account signs in, or another plan mounts
 Leave `resolve` off for a reviewer your server will not let resolve: an
 addressed item then opens the mark-up composer instead of offering Accept and
 Reopen.
+
+### Drawings
+
+Pass `revision`, the SHA-256 of the plan bytes your frame shows, and the bar
+offers **Draw**: the reviewer loops around part of the plan, sees the ellipse
+fitted to the stroke, and writes a note. Your page never reads the bytes its
+frame loads, so frame a named revision, and have your server serve no other
+bytes for it. Without `revision` there is no Draw.
+
+- **The controls stamp, the plan proposes.** A capture from the frame is
+  checked by the rules your server applies through `ParseRoundRequest` in
+  `pkg/planreview` (both run `testdata/drawn-context/regions.json`), keeps
+  only the fields a region names, and gets an id the controls mint, your
+  `revision` and the time. It opens a note only while the reviewer has the
+  Draw tool up.
+- **Each drawing is its own comment:** anchor `q-<id>`, label `Drawing: …`,
+  and the record in `region`. A `CommittedItem` with a `region` is painted
+  where the plan's current text puts it, listed in the rail with its outcome,
+  and opens its note from its row; a mark on it, a reopen and an edit carry
+  its region.
+- **View original** redraws a drawing in your page from its record alone:
+  what lay under it, its revision and layout, and whether that is the revision
+  shown. Record text goes in as text.
+- **Requests:** a round with a drawing sends its items under `marks`, with
+  `items` empty, so a server that predates drawings refuses it instead of
+  storing it without them. `pkg/planreview` v0.4.0 and later accepts it.
+- **Esc** ends a stroke, then closes a note, then puts the pen down, then
+  leaves review mode.
+
+The format, its limits and the placement rules are in
+`docs/specs/plan-review-drawn-context.md` in the ox repository.
 
 With `frame`, the bar, rail, note and status lines sit over the frame's box
 rather than the window, so your page's own navigation and actions stay clear;

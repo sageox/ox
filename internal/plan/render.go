@@ -3,6 +3,7 @@ package plan
 import (
 	"bytes"
 	"embed"
+	"encoding/json"
 	"fmt"
 	"html"
 	"html/template"
@@ -67,6 +68,10 @@ type RenderOptions struct {
 	// under: its directory, unique in its Ledger, which also names its review
 	// server's port. Empty: the page keys them by Slug.
 	ReviewPlan string
+	// ReviewRevision is "sha256:" and the hex SHA-256 of the plan bytes the
+	// page was rendered from; every drawing made on the page is stamped with
+	// it. Empty: the page offers no Draw.
+	ReviewRevision string
 	// PriorArtURL resolves a prior-art source (its kind + ref/slug) to a SageOx
 	// web URL, opened in a new tab from the enrichment panel. Nil-safe: when nil
 	// or when it returns "", the prior-art entry renders as crisp text with no
@@ -113,6 +118,8 @@ type reviewStateItem struct {
 	Reviewer string `json:"reviewer,omitempty"`
 	// ResolutionNote is the author's note on the latest resolution, while it stands.
 	ResolutionNote string `json:"resolutionNote,omitempty"`
+	// Region is a drawing's record, which the page places and shows.
+	Region json.RawMessage `json:"region,omitempty"`
 }
 
 // mermaid fences come out of goldmark as <pre><code class="language-mermaid">…;
@@ -197,6 +204,7 @@ type renderData struct {
 	ReviewEndpoint string      // set only when served by `ox plan review`
 	ReviewToken    string
 	ReviewPlan     string
+	ReviewRevision string
 	ReviewProblems int
 	Review         reviewSummary
 	TOC            []tocEntry
@@ -282,6 +290,7 @@ func RenderHTMLOpts(in Input, res Result, opts RenderOptions) ([]byte, error) {
 		ReviewEndpoint: opts.ReviewEndpoint,
 		ReviewToken:    opts.ReviewToken,
 		ReviewPlan:     opts.ReviewPlan,
+		ReviewRevision: opts.ReviewRevision,
 		ReviewProblems: opts.ReviewProblems,
 		FooterCredit:   len(res.Annotations) > 0 || len(res.Context) > 0,
 		SessionURL:     opts.SessionURL,

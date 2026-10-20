@@ -508,17 +508,18 @@ jobs:
 
       # The built package in real Chrome: the document tools against the
       # anchors Go computes for the same pages
-      # (pkg/planreview/testdata/anchors.json), and the review controls and
-      # outbox, on ox's page and around a framed plan. These tests skip
-      # without Chrome or dist/, so a skip has to fail here.
+      # (pkg/planreview/testdata/anchors.json), the review controls and
+      # outbox, on ox's page and around a framed plan, and drawings on the
+      # drawn-context revisions. These tests skip without Chrome or dist/, so
+      # a skip has to fail here.
       - name: Document tools anchor what Go anchors; the outbox sends once
         shell: bash
         env:
           # no session bus on the runner: Chrome fails fast instead of waiting on one
           DBUS_SESSION_BUS_ADDRESS: /dev/null
         run: |
-          go test -tags=browser -count=1 -v -run 'TestBrowser_(DocumentToolsMatchSharedPageVectors|DocumentToolsAnchorADiagramOnceItDraws|ReviewClicksWaitForDiagrams|HostControlsAroundAFramedPlan|UnstorableReviewIsNeverSent|LostAnswerAndAnEditDuringSendDeliverOnce|TwoTabsKeepEachOthersMarks|ReopenedHighlightKeepsItsWords|PlanControlsWorkInReviewMode|ResolveOfferedOnlyToReviewersWhoMay|WholePlanCommentReachesTheLedger|FirstVisitHintLeavesTheBarClickable|FramedControlsStayOverTheFrame|PlanCannotDriveTheComposer|LedgerTextCannotStyleOrScriptTheRail)$' ./cmd/ox/ | tee browser.log
-          test "$(grep -c -E '^--- PASS: TestBrowser_' browser.log)" -eq 15
+          go test -tags=browser -count=1 -v -run 'TestBrowser_(DocumentToolsMatchSharedPageVectors|DocumentToolsAnchorADiagramOnceItDraws|ReviewClicksWaitForDiagrams|HostControlsAroundAFramedPlan|UnstorableReviewIsNeverSent|LostAnswerAndAnEditDuringSendDeliverOnce|TwoTabsKeepEachOthersMarks|ReopenedHighlightKeepsItsWords|PlanControlsWorkInReviewMode|ResolveOfferedOnlyToReviewersWhoMay|WholePlanCommentReachesTheLedger|FirstVisitHintLeavesTheBarClickable|FramedControlsStayOverTheFrame|PlanCannotDriveTheComposer|LedgerTextCannotStyleOrScriptTheRail|DrawingsLandByTheirTargets|DrawAroundReachesTheHostStamped|ViewOriginalAfterAnEdit|DrawingsStayIndependentThroughEditAndReopen|ForgedCapturesAreCheckedAndRestamped|DrawOnTheLocalReviewPage|DrawingNeverEnclosesTheReviewControls)$' ./cmd/ox/ | tee browser.log
+          test "$(grep -c -E '^--- PASS: TestBrowser_' browser.log)" -eq 22
 
   # The skill installer is the one subsystem where Windows is a first-class
   # target rather than an aspiration: copy materialization IS what Windows gets,

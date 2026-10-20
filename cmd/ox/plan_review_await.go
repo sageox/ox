@@ -159,6 +159,9 @@ func awaitSnapshot(planDir string) (awaitResult, bool) {
 	reviewers := map[string]bool{}
 	for _, it := range rev.Items {
 		if it.Open && it.Status != planreview.StatusApprove {
+			// a drawing's record is the review page's geometry, kilobytes the
+			// coworker cannot act on; its label, section and note say what and why
+			it.Region = nil
 			res.Open = append(res.Open, it)
 			if it.Reviewer != "" {
 				reviewers[it.Reviewer] = true

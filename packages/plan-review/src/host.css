@@ -10,6 +10,8 @@
 .rev-bar button{background:var(--panel2, #171b17);border:1px solid var(--hair2, var(--hair, #212620));color:var(--dim, #b7b6a3);border-radius:6px;padding:4px 9px;font-size:12px;cursor:pointer;font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace}
 .rev-bar button:hover{color:var(--ink, #f4f2ef)}
 .rev-bar .rev-toggle.on{background:var(--sage, #99c693);border-color:var(--sage, #99c693);color:#111411}
+/* the Draw tool, selected: the bar shows which tool a stroke on the plan uses */
+.rev-bar .rev-draw.on{background:var(--gold, #d9b654);border-color:var(--gold, #d9b654);color:#111411}
 .rev-bar .rev-submit{border-color:var(--sage, #99c693);color:var(--sage, #99c693)}
 .rev-bar .rev-count{font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:var(--faint, #8c8e7e)}
 .rev-bar .rev-who{max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--faint, #8c8e7e)}
@@ -21,7 +23,7 @@
    cursor and get no target outline — clicks there never mark up. The li
    rules outrank the document's generic li:hover target rule. */
 body.rev-on .rev-bar{border-color:var(--sage, #99c693)}
-body.rev-on .rev-bar,body.rev-on .rev-rail,body.rev-on .rev-pop,body.rev-on .rev-orphans,body.rev-on .rev-toast,body.rev-on .rev-sync,body.rev-on .rev-offline-bar{cursor:auto}
+body.rev-on .rev-bar,body.rev-on .rev-rail,body.rev-on .rev-pop,body.rev-on .rev-orphans,body.rev-on .rev-toast,body.rev-on .rev-sync,body.rev-on .rev-offline-bar,body.rev-on .rev-original{cursor:auto}
 body.rev-on .rev-rail li:hover{outline:none;cursor:pointer}
 body.rev-on .rev-orphans li:hover{outline:none;cursor:auto}
 
@@ -98,6 +100,20 @@ body.rev-on .rev-orphans li:hover{outline:none;cursor:auto}
 .rev-rail-tag.addressed,.rev-rail-tag.verified{color:var(--sage, #99c693);border-color:var(--sage, #99c693)}
 .rev-rail-tag.wontfix{color:var(--faint, #8c8e7e)}
 .rev-rail-quote{font-size:12px;line-height:1.4;color:var(--dim, #b7b6a3);border-left:2px solid var(--hair2, var(--hair, #212620));padding-left:6px;margin:1px 0 3px;overflow-wrap:anywhere}
+.rev-rail-orig{margin-top:4px;background:none;border:0;padding:0;color:var(--gold, #d9b654);font:11px/1.4 "Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;cursor:pointer}
+.rev-rail-orig:hover{text-decoration:underline}
+
+/* View original: a drawing redrawn from its record, over the plan */
+.rev-original{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:calc(var(--rev-z, 2147483000) + 5);max-width:min(900px,calc(100vw - 32px));max-height:calc(100vh - 64px);overflow:auto;background:var(--panel, #111411);border:1px solid var(--hair, #212620);border-radius:10px;padding:10px 12px;box-shadow:var(--shadow, 0 1px 0 rgba(255,255,255,.02), 0 8px 30px rgba(0,0,0,.35))}
+.rev-original-h{display:flex;align-items:center;gap:10px;font:11px/1.4 "Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--dim, #b7b6a3);margin-bottom:8px}
+.rev-original-x{margin-left:auto;background:var(--panel2, #171b17);border:1px solid var(--hair2, var(--hair, #212620));color:var(--dim, #b7b6a3);border-radius:5px;padding:2px 8px;font:inherit;cursor:pointer}
+.rev-original-svg{display:block;max-width:100%;height:auto;background:var(--bg, #0b0d0b);font-family:Inter,system-ui,sans-serif}
+.rev-orig-box{fill:none;stroke:var(--faint, #8c8e7e);stroke-width:.5}
+.rev-orig-label-box{fill:none;stroke:var(--teal, #97aebd);stroke-width:.5}
+.rev-orig-label{fill:var(--teal, #97aebd);font-size:11px}
+.rev-orig-text{fill:var(--dim, #b7b6a3);font-size:12px}
+.rev-orig-ink{color:var(--gold, #d9b654);opacity:.95}
+.rev-orig-cut{fill:var(--amber, #c6a23c);font-size:11px}
 /* narrow viewports: the fixed rail would cover the prose, so drop it into flow;
    the bottom margin keeps it above the fixed review bar when scrolled to the end */
 @media(max-width:1400px){.rev-rail{position:static;width:auto;max-height:none;margin:24px 16px 72px;right:auto;top:auto}}
@@ -131,6 +147,7 @@ body.rev-framed .rev-hint{bottom:calc(var(--rev-bottom) + 64px)}
 body.rev-framed .rev-rail{position:fixed;top:calc(var(--rev-top) + 16px);right:calc(var(--rev-right) + 16px);width:min(266px,calc(var(--rev-width) - 32px));max-height:calc(var(--rev-height) - 112px);margin:0}
 body.rev-framed .rev-orphans{top:calc(var(--rev-top) + 14px);left:calc(var(--rev-left) + var(--rev-width) / 2);max-width:min(680px,calc(var(--rev-width) - 32px));max-height:calc(var(--rev-height) * .4)}
 body.rev-framed .rev-offline-bar{top:var(--rev-top);left:var(--rev-left);right:var(--rev-right)}
+body.rev-framed .rev-original{left:calc(var(--rev-left) + var(--rev-width) / 2);top:calc(var(--rev-top) + var(--rev-height) / 2);max-width:min(900px,calc(var(--rev-width) - 32px));max-height:calc(var(--rev-height) - 32px)}
 
 /* print: the controls are a review surface, never part of the printed plan */
-@media print{.rev-bar,.rev-rail,.rev-orphans,.rev-hint,.rev-pop,.rev-offline-bar,.rev-toast,.rev-sync{display:none!important}}
+@media print{.rev-bar,.rev-rail,.rev-orphans,.rev-hint,.rev-pop,.rev-offline-bar,.rev-toast,.rev-sync,.rev-original{display:none!important}}
