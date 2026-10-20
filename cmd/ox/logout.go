@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -66,7 +67,7 @@ var logoutCmd = &cobra.Command{
 		}
 
 		// logout from each endpoint
-		var anyServerFailed bool
+		var anyServerFailed, anyLoginChanged bool
 		for _, ep := range endpointsToLogout {
 			client := auth.NewAuthClient().WithEndpoint(ep)
 			status, err := client.RevokeTokenStatus()
@@ -78,6 +79,7 @@ var logoutCmd = &cobra.Command{
 			line, serverUnconfirmed := logoutOutcome(ep, status, err)
 			fmt.Println(line)
 			anyServerFailed = anyServerFailed || serverUnconfirmed
+			anyLoginChanged = anyLoginChanged || errors.Is(err, auth.ErrLoginChanged)
 		}
 
 		if anyServerFailed {
@@ -102,6 +104,11 @@ var logoutCmd = &cobra.Command{
 		if listErr != nil {
 			return fmt.Errorf("failed to list stored authentication endpoints: %w", listErr)
 		}
+		// The kept login was never revoked, so it is still live: a script must
+		// not read this logout as done.
+		if anyLoginChanged {
+			return errors.New("login changed during logout; run `ox logout` again")
+		}
 		return nil
 	},
 }
@@ -112,6 +119,10 @@ var logoutCmd = &cobra.Command{
 // answer, so a revocation the server confirmed is not reported as failed.
 // serverUnconfirmed is true when the server-side session may still be active.
 func logoutOutcome(ep string, status auth.RevocationStatus, localErr error) (line string, serverUnconfirmed bool) {
+	if errors.Is(localErr, auth.ErrLoginChanged) {
+		// Not a failure to remove: a login saved during logout was kept on purpose.
+		localErr = errors.New("the login changed during logout and was kept")
+	}
 	switch status {
 	case auth.RevocationSuccess, auth.RevocationNoToken:
 		if localErr != nil {
@@ -133,6 +144,8 @@ func logoutOutcome(ep string, status auth.RevocationStatus, localErr error) (lin
 
 // collectLogoutEndpoints retains usable environment credentials even if auth.json
 // cannot be read, so a storage error does not prevent revoking credentials we can still identify.
+// The result is sorted: auth.json is a map, and an unsorted list numbered the
+// selection prompt and ordered the logouts differently on every run.
 func collectLogoutEndpoints() ([]string, error) {
 	endpoints, listErr := auth.ListEndpoints()
 	known := make(map[string]struct{}, len(endpoints))
@@ -145,6 +158,7 @@ func collectLogoutEndpoints() ([]string, error) {
 			known[ep] = struct{}{}
 		}
 	}
+	slices.Sort(endpoints)
 	return endpoints, listErr
 }
 

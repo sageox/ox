@@ -5,10 +5,15 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/sageox/ox/internal/auth"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/testguard"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -34,12 +39,14 @@ func TestCollectLogoutEndpoints_EnvLoginOnStoredEndpointIsOneTarget(t *testing.T
 }
 
 // TestLogoutOutcome_LocalFailureNeverRewritesServerAnswer covers every server
-// answer with and without a local copy left behind.
+// answer with and without a local copy left behind, including a login kept
+// because it changed during logout.
 // Failure prevented: a confirmed revocation reported as failed, or a line that
 // says "Logged out" while the local token is still on disk.
 func TestLogoutOutcome_LocalFailureNeverRewritesServerAnswer(t *testing.T) {
 	const ep = "https://sageox.ai"
 	localErr := fmt.Errorf("%w: failed to parse auth file", auth.ErrLocalTokenNotRemoved)
+	loginChanged := fmt.Errorf("%w: %w", auth.ErrLocalTokenNotRemoved, auth.ErrLoginChanged)
 	for _, tt := range []struct {
 		name            string
 		status          auth.RevocationStatus
@@ -54,6 +61,9 @@ func TestLogoutOutcome_LocalFailureNeverRewritesServerAnswer(t *testing.T) {
 		{name: "confirmed, local copy remains", status: auth.RevocationSuccess, localErr: localErr, wantLine: "Revoked on the server for " + ep + ", but failed to remove local token: failed to parse auth file"},
 		{name: "unreachable, local copy remains", status: auth.RevocationNetworkError, localErr: localErr, wantLine: "Could not reach the server for " + ep + ", and failed to remove local token: failed to parse auth file", wantUnconfirmed: true},
 		{name: "unconfirmed, local copy remains", status: auth.RevocationServerFailed, localErr: localErr, wantLine: "Server did not confirm revocation for " + ep + ", and failed to remove local token: failed to parse auth file", wantUnconfirmed: true},
+		{name: "confirmed, login changed", status: auth.RevocationSuccess, localErr: loginChanged, wantLine: "Revoked on the server for " + ep + ", but the login changed during logout and was kept"},
+		{name: "unreachable, login changed", status: auth.RevocationNetworkError, localErr: loginChanged, wantLine: "Could not reach the server for " + ep + ", and the login changed during logout and was kept", wantUnconfirmed: true},
+		{name: "unconfirmed, login changed", status: auth.RevocationServerFailed, localErr: loginChanged, wantLine: "Server did not confirm revocation for " + ep + ", and the login changed during logout and was kept", wantUnconfirmed: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			line, unconfirmed := logoutOutcome(ep, tt.status, tt.localErr)
@@ -124,4 +134,137 @@ func TestLogout_UnreadableAuthStore(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestLogout_KeepsLoginSavedDuringLogout drives `ox logout` while a new login is
+// saved during the revocation of the stored login SAGEOX_TOKEN shadows, as a
+// concurrent `ox login` or daemon token refresh would.
+// Failure prevented: logout deleted the new login without revoking it and
+// exited 0, so its refresh token stayed live with no local copy to revoke.
+func TestLogout_KeepsLoginSavedDuringLogout(t *testing.T) {
+	const envToken = "oxp_test_4bDZfN"
+	var mu sync.Mutex
+	var revoked []string
+	var serverURL string
+	server := testguard.SafeMockServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != auth.RevokeEndpoint || r.Method != http.MethodPost {
+			http.NotFound(w, r)
+			return
+		}
+		assert.NoError(t, r.ParseForm())
+		tok := r.PostForm.Get("token")
+		mu.Lock()
+		revoked = append(revoked, tok)
+		mu.Unlock()
+		if tok == "s1-refresh" {
+			assert.NoError(t, auth.SaveTokenForEndpoint(serverURL, &auth.StoredToken{AccessToken: "s2-access", RefreshToken: "s2-refresh", ExpiresAt: time.Now().Add(time.Hour)}))
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	serverURL = server.URL
+
+	t.Chdir(t.TempDir()) // logout strips PATs from the current repo's remotes
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("OX_XDG_DISABLE", "")
+	t.Setenv("OX_GIT_CREDENTIALS_FILE", filepath.Join(t.TempDir(), "git-credentials.json"))
+	t.Setenv("SAGEOX_ENDPOINT", server.URL)
+	t.Setenv(auth.EnvVarToken, envToken)
+	require.NoError(t, auth.SaveTokenForEndpoint(server.URL, &auth.StoredToken{AccessToken: "s1-access", RefreshToken: "s1-refresh", ExpiresAt: time.Now().Add(time.Hour)}))
+
+	prevForce, prevAll, prevEndpoint := logoutForce, logoutAll, logoutEndpoint
+	logoutForce, logoutAll, logoutEndpoint = true, false, ""
+	t.Cleanup(func() { logoutForce, logoutAll, logoutEndpoint = prevForce, prevAll, prevEndpoint })
+
+	var runErr error
+	output := captureStdoutForPlanCLI(t, func() { runErr = logoutCmd.RunE(logoutCmd, nil) })
+
+	t.Setenv(auth.EnvVarToken, "")
+	stored, err := auth.GetTokenForEndpoint(server.URL)
+	require.NoError(t, err)
+	if assert.NotNil(t, stored, "the login saved during logout was deleted without being revoked; output: %s", output) {
+		assert.Equal(t, "s2-refresh", stored.RefreshToken)
+	}
+	require.Error(t, runErr, "a logout that kept a live login must not exit 0; output: %s", output)
+	assert.Contains(t, runErr.Error(), "run `ox logout` again")
+	assert.Contains(t, output, "Revoked on the server for "+endpoint.NormalizeEndpoint(server.URL)+", but the login changed during logout and was kept")
+	assert.NotContains(t, output, "Logged out from", "a live login is still on disk")
+	mu.Lock()
+	assert.Equal(t, []string{envToken, "s1-refresh"}, revoked, "only the credentials logout found are revoked")
+	mu.Unlock()
+}
+
+// TestLogout_LoginChangedOnOneEndpointStillLogsOutTheRest drives `ox logout
+// --force` across two endpoints where the login on the first one changes
+// during logout.
+// Failure prevented: the changed login stopped the loop and left the second
+// endpoint logged in, or the second endpoint's clean logout cleared the
+// failure, so logout exited 0 with a live, unrevoked login on disk.
+func TestLogout_LoginChangedOnOneEndpointStillLogsOutTheRest(t *testing.T) {
+	const envToken = "oxp_test_4bDZfN"
+	var mu sync.Mutex
+	var revoked []string
+	var changedEP string
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != auth.RevokeEndpoint || r.Method != http.MethodPost {
+			http.NotFound(w, r)
+			return
+		}
+		assert.NoError(t, r.ParseForm())
+		tok := r.PostForm.Get("token")
+		mu.Lock()
+		revoked = append(revoked, tok)
+		ep := changedEP
+		mu.Unlock()
+		if tok == "changed-refresh" {
+			assert.NoError(t, auth.SaveTokenForEndpoint(ep, &auth.StoredToken{AccessToken: "changed2-access", RefreshToken: "changed2-refresh", ExpiresAt: time.Now().Add(time.Hour)}))
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	eps := []string{
+		endpoint.NormalizeEndpoint(testguard.SafeMockServer(t, handler).URL),
+		endpoint.NormalizeEndpoint(testguard.SafeMockServer(t, handler).URL),
+	}
+	slices.Sort(eps)
+	cleanEP := eps[1]
+	mu.Lock()
+	changedEP = eps[0] // logout runs in sorted order, so the change comes first
+	mu.Unlock()
+
+	t.Chdir(t.TempDir()) // logout strips PATs from the current repo's remotes
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("OX_XDG_DISABLE", "")
+	t.Setenv("OX_GIT_CREDENTIALS_FILE", filepath.Join(t.TempDir(), "git-credentials.json"))
+	// SAGEOX_TOKEN shadows the first endpoint's stored login, which opens the
+	// window: the stored login is revoked in a second request.
+	t.Setenv("SAGEOX_ENDPOINT", eps[0])
+	t.Setenv(auth.EnvVarToken, envToken)
+	require.NoError(t, auth.SaveTokenForEndpoint(eps[0], &auth.StoredToken{AccessToken: "changed-access", RefreshToken: "changed-refresh", ExpiresAt: time.Now().Add(time.Hour)}))
+	require.NoError(t, auth.SaveTokenForEndpoint(cleanEP, &auth.StoredToken{AccessToken: "clean-access", RefreshToken: "clean-refresh", ExpiresAt: time.Now().Add(time.Hour)}))
+
+	prevForce, prevAll, prevEndpoint := logoutForce, logoutAll, logoutEndpoint
+	logoutForce, logoutAll, logoutEndpoint = true, false, ""
+	t.Cleanup(func() { logoutForce, logoutAll, logoutEndpoint = prevForce, prevAll, prevEndpoint })
+
+	var runErr error
+	output := captureStdoutForPlanCLI(t, func() { runErr = logoutCmd.RunE(logoutCmd, nil) })
+
+	changedLine := strings.Index(output, "Revoked on the server for "+eps[0]+", but the login changed during logout and was kept")
+	cleanLine := strings.Index(output, "Logged out from "+cleanEP)
+	require.GreaterOrEqual(t, changedLine, 0, "output: %s", output)
+	require.Greater(t, cleanLine, changedLine, "the second endpoint must still be logged out after the first one's login changed; output: %s", output)
+	require.Error(t, runErr, "a later clean logout must not clear the kept login's failure; output: %s", output)
+	assert.Contains(t, runErr.Error(), "run `ox logout` again")
+
+	t.Setenv(auth.EnvVarToken, "")
+	kept, err := auth.GetTokenForEndpoint(eps[0])
+	require.NoError(t, err)
+	if assert.NotNil(t, kept, "the login saved during logout must be kept") {
+		assert.Equal(t, "changed2-refresh", kept.RefreshToken)
+	}
+	clean, err := auth.GetTokenForEndpoint(cleanEP)
+	require.NoError(t, err)
+	assert.Nil(t, clean, "the second endpoint's login must be removed")
+	mu.Lock()
+	assert.ElementsMatch(t, []string{envToken, "changed-refresh", "clean-refresh"}, revoked)
+	mu.Unlock()
 }

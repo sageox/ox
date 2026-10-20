@@ -609,6 +609,107 @@ func TestRevokeTokenStatus_SharedEndpointRevokesEveryCredential(t *testing.T) {
 	}
 }
 
+// TestRevokeTokenStatus_KeepsLoginSavedDuringRevocation verifies logout deletes
+// only the stored login it revoked.
+// Failure prevented: a concurrent `ox login` or daemon token refresh saved a new
+// login while logout waited on the server, then logout deleted it unrevoked, so
+// its refresh token stayed live on the server with no local copy left to revoke.
+// The negative controls: an unchanged login is still deleted, a login refreshed
+// before the re-read is revoked too, and a login another process already
+// removed is not reported as changed.
+func TestRevokeTokenStatus_KeepsLoginSavedDuringRevocation(t *testing.T) {
+	const envToken = "oxp_test_4bDZfN"
+	login := func(name string) *StoredToken {
+		return &StoredToken{AccessToken: name + "-access", RefreshToken: name + "-refresh", ExpiresAt: time.Now().Add(time.Hour)}
+	}
+	saveLogin := func(name string) func(*AuthClient) error {
+		return func(c *AuthClient) error { return c.SaveToken(login(name)) }
+	}
+	removeLogin := func(c *AuthClient) error { return c.RemoveToken() }
+
+	var mu sync.Mutex
+	var revoked []string
+	var client *AuthClient
+	var onRevoke map[string]func(*AuthClient) error
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.NoError(t, r.ParseForm())
+		tok := r.PostForm.Get("token")
+		mu.Lock()
+		revoked = append(revoked, tok)
+		change, c := onRevoke[tok], client
+		mu.Unlock()
+		// Change auth.json while this revocation is in flight, as a concurrent
+		// `ox login` or daemon token refresh would.
+		if change != nil {
+			assert.NoError(t, change(c))
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer mockServer.Close()
+	t.Setenv("SAGEOX_ENDPOINT", mockServer.URL)
+
+	for _, tt := range []struct {
+		name        string
+		envToken    string
+		onRevoke    map[string]func(*AuthClient) error
+		wantRevoked []string
+		wantKept    string // refresh token of the login left on disk; "" for none
+		wantChanged bool
+	}{
+		{
+			name: "login saved while the shadowed login is revoked is kept", envToken: envToken,
+			onRevoke:    map[string]func(*AuthClient) error{"s1-refresh": saveLogin("s2")},
+			wantRevoked: []string{envToken, "s1-refresh"}, wantKept: "s2-refresh", wantChanged: true,
+		},
+		{
+			name:        "login refreshed while its refreshed copy is revoked is kept",
+			onRevoke:    map[string]func(*AuthClient) error{"s1-refresh": saveLogin("s2"), "s2-refresh": saveLogin("s3")},
+			wantRevoked: []string{"s1-refresh", "s2-refresh"}, wantKept: "s3-refresh", wantChanged: true,
+		},
+		{
+			name:        "login refreshed before the re-read is revoked and deleted",
+			onRevoke:    map[string]func(*AuthClient) error{"s1-refresh": saveLogin("s2")},
+			wantRevoked: []string{"s1-refresh", "s2-refresh"},
+		},
+		{name: "unchanged login is deleted", envToken: envToken, wantRevoked: []string{envToken, "s1-refresh"}},
+		{
+			name: "login removed meanwhile is not a change", envToken: envToken,
+			onRevoke:    map[string]func(*AuthClient) error{"s1-refresh": removeLogin},
+			wantRevoked: []string{envToken, "s1-refresh"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(EnvVarToken, tt.envToken)
+			c := NewAuthClientWithDir(t.TempDir())
+			c.endpoint = mockServer.URL
+			require.NoError(t, c.SaveToken(login("s1")))
+			mu.Lock()
+			revoked, client, onRevoke = nil, c, tt.onRevoke
+			mu.Unlock()
+
+			status, err := c.RevokeTokenStatus()
+
+			t.Setenv(EnvVarToken, "")
+			stored, getErr := c.GetToken()
+			require.NoError(t, getErr)
+			if tt.wantKept == "" {
+				assert.Nil(t, stored, "the revoked login must be removed")
+			} else if assert.NotNil(t, stored, "a login saved during logout was deleted without being revoked") {
+				assert.Equal(t, tt.wantKept, stored.RefreshToken, "the login saved during logout must survive")
+			}
+			assert.Equal(t, RevocationSuccess, status, "the server's answer must survive a kept login")
+			mu.Lock()
+			assert.Equal(t, tt.wantRevoked, revoked)
+			mu.Unlock()
+			assert.Equal(t, tt.wantChanged, errors.Is(err, ErrLoginChanged), "error: %v", err)
+			assert.Equal(t, tt.wantChanged, errors.Is(err, ErrLocalTokenNotRemoved), "error: %v", err)
+			if !tt.wantChanged {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
 func TestRevokeTokenStatus_NetworkError(t *testing.T) {
 	t.Parallel()
 
