@@ -577,11 +577,11 @@
     // network is whether the page's policy lets a request leave. A failed fetch
     // cannot say: from an opaque origin every request is cross-origin and fails
     // CORS whatever connect-src allows. A no-cors request the policy blocks
-    // raises securitypolicyviolation, enforced and naming the request; one it
-    // allows does not.
+    // raises securitypolicyviolation, enforced and naming the request (as its
+    // URL, or only its origin); one it allows does not.
     var target = 'https://network-probe.invalid/', blocked = false;
     document.addEventListener('securitypolicyviolation', function (e) {
-      if (e.disposition === 'enforce' && e.blockedURI.indexOf('https://network-probe.invalid') === 0 && /^(connect|default)-src$/.test(e.effectiveDirective)) blocked = true;
+      if (e.disposition === 'enforce' && (e.blockedURI === target || e.blockedURI === 'https://network-probe.invalid') && /^(connect|default)-src$/.test(e.effectiveDirective)) blocked = true;
     });
     var settled = function () { setTimeout(function () { net(blocked ? 'denied' : 'allowed'); }, 100); };
     try { fetch(target, { mode: 'no-cors', cache: 'no-store' }).then(settled, settled); } catch (e) { settled(); }
