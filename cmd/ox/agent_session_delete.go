@@ -12,7 +12,6 @@ import (
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
-	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/ledger"
@@ -172,13 +171,15 @@ func runAgentSessionDelete(inst *agentinstance.Instance, cmd *cobra.Command, arg
 }
 
 // refuseLedgerDeleteForTeamToken refuses to remove a session from the Ledger
-// when the project's credential is a team token; people delete those sessions
-// on the web. auth.json only holds `ox login` tokens, so a team token can only
-// come from SAGEOX_TOKEN and its prefix is all this checks before returning nil.
+// when SAGEOX_TOKEN holds a team token; people delete those sessions on the
+// web. It reads the token at the endpoint the token is bound to, not the
+// project's, so a project on another endpoint does not skip the check.
+// auth.json only holds `ox login` tokens, so a team token can only come from
+// SAGEOX_TOKEN and its prefix is all this checks before returning nil.
 // ledgerPath may be empty: the link then names the session page by name
 // instead of by ses_ id.
 func refuseLedgerDeleteForTeamToken(projectRoot, ledgerPath, sessionName string) error {
-	if !auth.EnvTokenIsTeamFamily(endpoint.GetForProject(projectRoot)) {
+	if !auth.EnvTokenIsTeamFamily(auth.EnvTokenEndpoint()) {
 		return nil
 	}
 	where := "on the web"

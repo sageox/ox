@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -36,12 +37,14 @@ func TestLedgerSessionDelete_RefusedUnderTeamToken(t *testing.T) {
 		}},
 	}
 	tokens := []struct {
-		name    string
-		value   string
-		refused bool
+		name      string
+		value     string
+		elsewhere bool // the token is bound to production and the project to another endpoint
+		refused   bool
 	}{
-		{"team token", "oxt_test_1ljPfr", true},
-		{"personal token", "oxp_test_4bDZfN", false},
+		{"team token", "oxt_test_1ljPfr", false, true},
+		{"team token bound to another endpoint", "oxt_test_1ljPfr", true, true},
+		{"personal token", "oxp_test_4bDZfN", false, false},
 	}
 
 	for _, c := range commands {
@@ -53,6 +56,11 @@ func TestLedgerSessionDelete_RefusedUnderTeamToken(t *testing.T) {
 				seedFinalizedLedgerSessionWithArtifacts(t, f.ledgerPath, sessionName)
 				commitAndPushFinalized(t, f, sessionName)
 				t.Setenv("SAGEOX_TOKEN", tok.value)
+				if tok.elsewhere {
+					t.Setenv("SAGEOX_ENDPOINT", "")
+					require.NoError(t, os.WriteFile(filepath.Join(f.projectRoot, ".sageox", "config.json"),
+						[]byte(`{"config_version":"2","repo_id":"repo_draft_test","endpoint":"https://test-only-no-creds.invalid"}`), 0644))
+				}
 
 				var err error
 				captureStdoutForPlanCLI(t, func() { err = c.run(t) })
