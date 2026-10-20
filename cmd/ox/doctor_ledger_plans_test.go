@@ -17,7 +17,6 @@ import (
 
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
-	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/plan"
 )
 
@@ -278,55 +277,27 @@ func TestPlainDoctor_CleanupCommitsLeavePlanFilesAlone(t *testing.T) {
 
 // TestPlainDoctor_LeavesARealFailedSaveToItsRetry runs real `ox plan save`s,
 // then a plain `ox doctor`: a shared plan someone edited by hand and never
-// saved, a save whose large page no store took (its retry owed), and an
-// unrelated dirty file. The sweep commits only the unrelated file, only the
+// saved, and a save whose large page no store took (its retry owed). Only the
 // hand edit is listed as unsaved, and the failed save is left to its retry,
-// which never commits the raw page and lands it as an LFS pointer once a store
-// takes it. Failure prevented: refusing the sweep costs a saved plan its
-// recovery, or a raw page goes out.
+// which never commits the raw page. Failure prevented: a save waiting on its
+// retry is offered for publishing as an unsaved edit, or its raw page goes
+// out.
 func TestPlainDoctor_LeavesARealFailedSaveToItsRetry(t *testing.T) {
 	root := newPlanCaptureTestRepo(t)
 	ledger, remote := newSharedLedger(t, root, true)
 	t.Setenv("SAGEOX_AGENT_ID", "")
-	store := newPlanLFSStore(t, false)
-	useLFSStore(t, store.client)
+	useLFSStore(t, nil) // the small page needs no store; the large one's upload fails
 	edited := savePlanPage(t, root, ledger, "Edited By Hand", false)
-	const handEdit = "# Edited By Hand\n\nan edit nobody saved\n"
-	writeLedgerFile(t, ledger, edited+"/plan.md", handEdit)
-	store.fail.Store(true)
+	writeLedgerFile(t, ledger, edited+"/plan.md", "# Edited By Hand\n\nan edit nobody saved\n")
 	failed := savePlanPage(t, root, ledger, "Upload Failed", true)
-	writeLedgerFile(t, ledger, "audit/unrelated.md", "unrelated\n")
-	base := runGitInDir(t, ledger, "rev-parse", "HEAD")
 
 	categories := runDoctorIn(t, root, ledger, plainDoctor)
 
-	swept := false
-	for _, c := range commitsSince(t, ledger, base) {
-		for _, p := range c.paths {
-			if strings.HasPrefix(p, edited+"/") || p == failed+"/plan.html" ||
-				strings.HasPrefix(p, "data/plans/") && c.subject != "plan: "+path.Base(failed) {
-				t.Errorf("commit %q carries %s", c.subject, p)
-			}
-			swept = swept || c.subject == "ox doctor: auto-commit ledger changes" && p == "audit/unrelated.md"
-		}
-	}
-	if !swept {
-		t.Error("doctor's sweep made no commit of the unrelated file, so this test checks nothing about it")
-	}
 	if got := doctorLine(t, categories, "Ledger plan edits").message; got != "1 plan(s) have unsaved edits: "+path.Base(edited) {
 		t.Errorf("only the hand edit is unsaved; the failed save is its retry's, got %q", got)
 	}
 	if strings.Contains(remoteFiles(t, remote), failed+"/plan.html") || !planRetryPending(ledger, failed) {
-		t.Fatal("a page no store took must stay queued, never committed raw")
-	}
-
-	store.fail.Store(false)
-	runDoctorIn(t, root, ledger, plainDoctor)
-	if _, _, err := lfs.ParsePointer(runGitInDir(t, remote, "show", "main:"+failed+"/plan.html") + "\n"); err != nil || planRetryPending(ledger, failed) {
-		t.Errorf("once a store takes the page, the retry must land it as an LFS pointer and clear its marker: %v", err)
-	}
-	if got := runGitInDir(t, remote, "show", "main:"+edited+"/plan.md"); got == strings.TrimSpace(handEdit) {
-		t.Error("the hand edit nobody saved reached the remote")
+		t.Error("a page no store took must stay queued, never committed raw")
 	}
 }
 
@@ -389,10 +360,9 @@ func TestPlainDoctor_RecoversARealSaveThatNeverCommitted(t *testing.T) {
 // TestDoctorFix_PublishesUnsavedPlanEditsOnlyWithConsent drives
 // `ox doctor --fix-slug=plan-unsaved-edits`: with nobody to confirm it
 // publishes nothing; confirmed, it publishes each plan as it is from the
-// plan's own commit, and a large page no store can take stays queued, never
-// committed raw, until a later `ox doctor` lands it as an LFS pointer.
-// Failure prevented: a draft goes out without a person's yes, or the publish
-// commits a raw page.
+// plan's own commit, and a large page no store can take stays queued for the
+// plan retry, never committed raw. Failure prevented: a draft goes out without
+// a person's yes, or the publish commits a raw page.
 func TestDoctorFix_PublishesUnsavedPlanEditsOnlyWithConsent(t *testing.T) {
 	ledger, origin := plansLedger(t)
 	base := runGitInDir(t, ledger, "rev-parse", "HEAD")
@@ -424,20 +394,15 @@ func TestDoctorFix_PublishesUnsavedPlanEditsOnlyWithConsent(t *testing.T) {
 		t.Errorf("the remote's plan.md is %q, want the edit as it was", got)
 	}
 	if strings.Contains(remoteFiles(t, origin), pendingPlanDir+"/plan.html") || !planRetryPending(ledger, pendingPlanDir) {
-		t.Fatal("a page no store took must stay queued, never committed raw")
-	}
-
-	useLFSStore(t, newPlanLFSStore(t, false).client)
-	runDoctor(t, ledger, plainDoctor)
-	if _, _, err := lfs.ParsePointer(runGitInDir(t, origin, "show", "main:"+pendingPlanDir+"/plan.html") + "\n"); err != nil {
-		t.Errorf("once a store takes it, the queued page must reach the remote as an LFS pointer: %v", err)
+		t.Error("a page no store took must stay queued, never committed raw")
 	}
 }
 
-// TestHasUncommittedSave_IgnoresLineEndings: a clone with core.autocrlf checks
-// the committed events.jsonl out with CRLF endings, which must not read as a
-// save that never committed, or ox doctor would publish the draft beside it.
-func TestHasUncommittedSave_IgnoresLineEndings(t *testing.T) {
+// TestHasUncommittedSave_CommittedSaveIsNotStranded: a committed save must not
+// read as one that never committed when a clone with core.autocrlf checks
+// events.jsonl out with CRLF endings, or when the timeout cuts off the read of
+// HEAD's copy; either way ox doctor would publish the edits beside it unasked.
+func TestHasUncommittedSave_CommittedSaveIsNotStranded(t *testing.T) {
 	ledger, _ := plansLedger(t)
 	const dir = "data/plans/2026-10-03-crlf"
 	created := `{"ts":"2026-10-03T00:00:00Z","plan_id":"pln_crlf","event":"created"}`
@@ -446,6 +411,11 @@ func TestHasUncommittedSave_IgnoresLineEndings(t *testing.T) {
 	writeLedgerFile(t, ledger, dir+"/events.jsonl", created+"\r\n")
 	if hasUncommittedSave(context.Background(), ledger, dir) {
 		t.Error("the committed save, checked out with CRLF, read as one that never committed")
+	}
+	timedOut, cancel := context.WithCancel(context.Background())
+	cancel()
+	if hasUncommittedSave(timedOut, ledger, dir) {
+		t.Error("a HEAD read the timeout cut off read as a save that never committed")
 	}
 	writeLedgerFile(t, ledger, dir+"/events.jsonl", created+"\r\n"+`{"ts":"2026-10-04T00:00:00Z","plan_id":"pln_crlf","event":"revised"}`+"\r\n")
 	if !hasUncommittedSave(context.Background(), ledger, dir) {

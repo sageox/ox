@@ -1103,7 +1103,8 @@ func checkLedgerCleanWorkdir(fix bool) checkResult {
 			"Run `ox doctor --fix` to commit and sync ledger changes")
 	}
 
-	// plan changes are reported by Ledger plan saves and Ledger plan edits
+	// plan changes are reported by Ledger plan retries, Ledger plan saves and
+	// Ledger plan edits
 	return PassedCheck("Ledger clean workdir", "clean")
 }
 

@@ -1,12 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path"
 	"path/filepath"
 	"strings"
@@ -66,18 +66,10 @@ func init() {
 	})
 }
 
-// errSaveNeverCommitted and errPublishAsIs are the retry marker errors for
-// plan dirs the two checks below queue; `Ledger plan retries` shows them
-// until a retry lands.
-var (
-	errSaveNeverCommitted = errors.New("its save never committed; queued by ox doctor")
-	errPublishAsIs        = errors.New("queued to publish as is by ox doctor --fix-slug=" + CheckSlugPlanUnsavedEdits)
-)
-
 // checkPlanStrandedSaves queues each plan dir holding a save that never
 // committed. `ox plan save` appends a created or revised event to the plan's
-// events.jsonl in the same locked step that writes the plan, so such an event
-// missing from HEAD means the save ran and only its commit is missing: a
+// events.jsonl in the same locked step that writes the plan, so more such
+// events than HEAD holds means the save ran and only its commit is missing: a
 // crash, an older ox, or a retry marker lost to a re-clone. Queued, it
 // publishes like any failed save, through the plan's own commit path.
 func checkPlanStrandedSaves(ledgerPath string, fix bool) checkResult {
@@ -105,7 +97,8 @@ func checkPlanStrandedSaves(ledgerPath string, fix bool) checkResult {
 			"Run `ox doctor` to queue them for the plan retry.")
 	}
 	for _, dir := range stranded {
-		recordPlanPushOutcome(ctx, ledgerPath, filepath.Join(ledgerPath, filepath.FromSlash(dir)), time.Now(), errSaveNeverCommitted)
+		recordPlanPushOutcome(ctx, ledgerPath, filepath.Join(ledgerPath, filepath.FromSlash(dir)), time.Now(),
+			errors.New("its save never committed; queued by ox doctor"))
 	}
 	return PassedCheck(name, fmt.Sprintf("queued %d saved plan(s) for the plan retry: %s", len(stranded), planDirList(stranded)))
 }
@@ -139,9 +132,7 @@ func checkPlanUnsavedEdits(ledgerPath string, fix bool) checkResult {
 		}
 		hint = "Nothing was published: it needs a yes at a terminal, or --yes.\n" + hint
 	}
-	r := InfoCheck(name, fmt.Sprintf("%d plan(s) have unsaved edits: %s", len(dirs), list), hint)
-	r.slug, r.fixLevel = CheckSlugPlanUnsavedEdits, FixLevelConfirm
-	return r
+	return InfoCheck(name, fmt.Sprintf("%d plan(s) have unsaved edits: %s", len(dirs), list), hint)
 }
 
 // publishPlanDirs queues each plan dir as a whole-dir retry and runs the plan
@@ -152,7 +143,8 @@ func publishPlanDirs(ledgerPath string, dirs []string) checkResult {
 	ctx, cancel := context.WithTimeout(context.Background(), planPushFlushTimeout)
 	defer cancel()
 	for _, dir := range dirs {
-		recordPlanPushOutcome(ctx, ledgerPath, filepath.Join(ledgerPath, filepath.FromSlash(dir)), time.Now(), errPublishAsIs)
+		recordPlanPushOutcome(ctx, ledgerPath, filepath.Join(ledgerPath, filepath.FromSlash(dir)), time.Now(),
+			errors.New("queued to publish as is by ox doctor --fix-slug="+CheckSlugPlanUnsavedEdits))
 	}
 	// the outcome is read back per dir below, whatever the retry pass returns
 	_, _, _ = flushPlanRetries(ctx, ledgerPath)
@@ -174,10 +166,7 @@ func publishPlanDirs(ledgerPath string, dirs []string) checkResult {
 // and changed files other than review records a recovery entry lands.
 // Unmerged files are left to ledger-unmerged-paths.
 func unownedPlanDirs(ctx context.Context, ledgerPath string) ([]string, error) {
-	cmd := exec.CommandContext(ctx, "git", "-C", ledgerPath, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames", "--", "data/plans")
-	// as planDirDirty: no index refresh under index.lock, which a concurrent ox commit needs
-	cmd.Env = append(os.Environ(), "GIT_OPTIONAL_LOCKS=0")
-	out, err := cmd.Output()
+	out, err := gitOutputContext(ctx, ledgerPath, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames", "--", "data/plans")
 	if err != nil {
 		return nil, fmt.Errorf("git status: %w", err)
 	}
@@ -210,31 +199,34 @@ func unownedPlanDirs(ctx context.Context, ledgerPath string) ([]string, error) {
 	return dirs, nil
 }
 
-// hasUncommittedSave reports whether the plan dir's events.jsonl holds a
-// created or revised event that HEAD's does not. Line endings are ignored: a
-// clone with core.autocrlf checks the log out with CRLF.
+// hasUncommittedSave reports whether the plan dir's events.jsonl holds more
+// created or revised events than HEAD's: each `ox plan save` appends one.
 func hasUncommittedSave(ctx context.Context, ledgerPath, dir string) bool {
 	worktree, err := os.ReadFile(filepath.Join(ledgerPath, filepath.FromSlash(dir), "events.jsonl"))
 	if err != nil {
 		return false
 	}
-	committed := map[string]bool{}
-	if head, err := gitStdout(ctx, ledgerPath, nil, "cat-file", "blob", "HEAD:"+dir+"/events.jsonl"); err == nil {
-		for _, line := range strings.Split(string(head), "\n") {
-			committed[strings.TrimSuffix(line, "\r")] = true
-		}
+	// HEAD without the file is a first save that never committed. A read the
+	// timeout cut off looks the same, and would queue the dir, unsaved edits
+	// and all, for publishing without asking.
+	head, err := gitStdout(ctx, ledgerPath, nil, "cat-file", "blob", "HEAD:"+dir+"/events.jsonl")
+	if err != nil && ctx.Err() != nil {
+		return false
 	}
-	for _, line := range strings.Split(string(worktree), "\n") {
-		line = strings.TrimSuffix(line, "\r")
+	return countSaves(worktree) > countSaves(head)
+}
+
+// countSaves counts the created and revised events in an events.jsonl. A CRLF
+// checkout's lines parse too: JSON allows the trailing \r.
+func countSaves(events []byte) int {
+	n := 0
+	for _, line := range bytes.Split(events, []byte("\n")) {
 		var ev plan.Event
-		if committed[line] || json.Unmarshal([]byte(line), &ev) != nil {
-			continue
-		}
-		if ev.Kind == plan.EventCreated || ev.Kind == plan.EventRevised {
-			return true
+		if json.Unmarshal(line, &ev) == nil && (ev.Kind == plan.EventCreated || ev.Kind == plan.EventRevised) {
+			n++
 		}
 	}
-	return false
+	return n
 }
 
 // planRetryPending reports whether a plan retry marker exists for the plan dir.

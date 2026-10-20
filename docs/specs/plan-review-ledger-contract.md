@@ -197,7 +197,7 @@ The CLI reads and writes review records only through `pkg/planreview`.
 - **Plan changes no retry owns** (`ox doctor`, just before
   `plan-pending-writes`): a plan dir with uncommitted changes, no plan retry
   marker, and changes outside the review records an entry lands. If its
-  `events.jsonl` holds a `created` or `revised` event that HEAD does not, the
+  `events.jsonl` holds more `created` or `revised` events than HEAD's, the
   save ran and never committed (a crash, an older ox, a lost marker):
   `plan-stranded-saves`, automatic, gives it a whole-dir marker and this run's
   retry publishes it. Otherwise the change was never saved:

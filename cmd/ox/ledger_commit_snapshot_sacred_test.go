@@ -12,22 +12,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// seedSacredPlans writes n plan dirs (data/plans/<slug>/plan.md) and commits
-// them, so they form the parent tree the sacred-deletion guard diffs against.
-func seedSacredPlans(t *testing.T, repo string, n int) {
-	t.Helper()
-	for i := 0; i < n; i++ {
-		dir := filepath.Join(repo, "data", "plans", fmt.Sprintf("2026-06-%02d-plan", i+1))
-		require.NoError(t, os.MkdirAll(dir, 0o755))
-		require.NoError(t, os.WriteFile(filepath.Join(dir, "plan.md"),
-			[]byte(fmt.Sprintf("# plan %d\n", i)), 0o644))
-	}
-	mustRunGit(t, repo, "add", "data/plans")
-	mustRunGit(t, repo, "commit", "-m", "seed plans")
-}
-
 // seedSacredSessions writes n session dirs (sessions/<name>/meta.json) and
-// commits them.
+// commits them, so they form the parent tree the sacred-deletion guard diffs
+// against.
 func seedSacredSessions(t *testing.T, repo string, n int) {
 	t.Helper()
 	for i := 0; i < n; i++ {
@@ -39,28 +26,27 @@ func seedSacredSessions(t *testing.T, repo string, n int) {
 	mustRunGit(t, repo, "commit", "-m", "seed sessions")
 }
 
-// TestCommitLedgerSnapshot_RefusesSacredMassDeletion reproduces the 2026-08-25
+// TestCommitLedgerSnapshot_RefusesSacredMassDeletion replays the 2026-08-25
 // Ox Dot wipe at the guard boundary: an index that stages deletion of every
-// saved plan and session must be REFUSED and nothing committed — the sacred
-// trees stay in HEAD. The plans are outside this commit (allButPlansPathspec);
-// the sessions trip the guard.
+// session must be REFUSED and nothing committed — the sacred tree stays in
+// HEAD. The wipe took plans; this commit leaves data/plans/ out
+// (allButPlansPathspec), so sessions stand in for them.
 //
 // Failure prevented: a sparse/GC-reconciled index whose bulk deletions get
 // snapshotted into a ledger commit and pushed to origin (ADR-024). Without
-// assertNoSacredMassDeletion this commit succeeds and the plans are gone from
-// the tip — exactly what happened to repo_019d56e0.
+// assertNoSacredMassDeletion this commit succeeds and the sessions are gone
+// from the tip, as the plans were from repo_019d56e0's.
 func TestCommitLedgerSnapshot_RefusesSacredMassDeletion(t *testing.T) {
 	skipIntegration(t)
 	repo := newLedgerTestRepo(t)
 	ctx := context.Background()
 
-	seedSacredPlans(t, repo, sacred.MassDeleteThreshold+5)
 	seedSacredSessions(t, repo, sacred.MassDeleteThreshold+5)
 	headBefore, err := runIsolatedGit(t, repo, "rev-parse", "HEAD")
 	require.NoError(t, err)
 
-	// stage deletion of ALL plans and sessions — what the reconcile did before the bare commit
-	mustRunGit(t, repo, "rm", "-r", "-q", "data/plans", "sessions")
+	// stage deletion of ALL sessions — what the reconcile did to plans before the bare commit
+	mustRunGit(t, repo, "rm", "-r", "-q", "sessions")
 
 	committed, err := commitLedgerSnapshot(ctx, repo,
 		"chore: add .sageox/.gitignore to exclude daemon cache files")
@@ -68,13 +54,12 @@ func TestCommitLedgerSnapshot_RefusesSacredMassDeletion(t *testing.T) {
 	assert.False(t, committed)
 	assert.Contains(t, err.Error(), "sacred")
 
-	// no commit happened; the plans are still in HEAD
+	// no commit happened; the sessions are still in HEAD
 	headAfter, err := runIsolatedGit(t, repo, "rev-parse", "HEAD")
 	require.NoError(t, err)
 	assert.Equal(t, headBefore, headAfter, "HEAD must not advance on a refused wipe")
-	tree, err := runIsolatedGit(t, repo, "ls-tree", "-r", "--name-only", "HEAD", "--", "data/plans", "sessions")
+	tree, err := runIsolatedGit(t, repo, "ls-tree", "-r", "--name-only", "HEAD", "--", "sessions")
 	require.NoError(t, err)
-	assert.Contains(t, tree, "plan.md", "sacred plans must remain in HEAD after refusal")
 	assert.Contains(t, tree, "meta.json", "sacred sessions must remain in HEAD after refusal")
 }
 
