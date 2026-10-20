@@ -1465,7 +1465,9 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 		}
 	} else {
 		uploadStart := time.Now()
-		uploadErr := uploadSessionToLedger(projectRoot, result, state, ledgerPath, sessionName)
+		uploadErr := uploadSessionBeforeHostEnds(sessionName, daemonOutlivesSession(), func() error {
+			return uploadSessionToLedger(projectRoot, result, state, ledgerPath, sessionName)
+		}, time.Sleep)
 		result.UploadMs = time.Since(uploadStart).Milliseconds()
 		if uploadErr != nil {
 			if errors.Is(uploadErr, api.ErrReadOnly) {

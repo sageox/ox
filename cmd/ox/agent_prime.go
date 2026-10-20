@@ -1498,6 +1498,19 @@ func associateCursorStartupRecording(projectRoot, agentID, agentSessionID string
 	return fmt.Errorf("published Cursor recording is unavailable for source association")
 }
 
+// recordBeforeLedgerClone reports whether recording may start before the
+// Ledger is cloned. On a host that ends with the agent (an Amp orb), the first
+// prime always runs before the clone: prime starts the daemon only after its
+// output, and that daemon does the cloning. The agent usually primes once per
+// thread, so waiting for a later prime records nothing (seen in a real orb,
+// sageox/ox#1425). Starting now is safe: the recording lives under the
+// Ledger's .sageox/cache, which the clone adopts (gitserver.AdoptCacheOnlyTarget),
+// and the upload at session end comes minutes later, after the clone. With the
+// daemon disabled nothing would ever clone, so keep the old answer there.
+func recordBeforeLedgerClone() bool {
+	return runtime.Caps().HostEndsWithAgent && !daemon.IsDaemonDisabled()
+}
+
 func startSessionRecordingUnlocked(projectRoot, agentID, agentType, parentAgentID, continuedFromSessionID, agentSessionID string, cursorStartup *cursorRecordingStartup, cursorBoundaries ...*CursorSourceBoundary) *sessionStatus {
 	var cursorBoundary *CursorSourceBoundary
 	if len(cursorBoundaries) > 0 {
@@ -1529,7 +1542,7 @@ func startSessionRecordingUnlocked(projectRoot, agentID, agentType, parentAgentI
 	} else {
 		ledgerExists = ledger.Exists("")
 	}
-	if !ledgerExists {
+	if !ledgerExists && !recordBeforeLedgerClone() {
 		// return status indicating ledger needed
 		return &sessionStatus{
 			Recording:    false,
