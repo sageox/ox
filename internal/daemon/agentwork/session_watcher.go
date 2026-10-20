@@ -502,7 +502,13 @@ func (m *SessionWatcherManager) runWatcher(
 			case len(entries) > 0:
 				if err := validateWatcherSourceFrom(aw, cursor, sourceSnapshot); err != nil {
 					m.rejectWatcherSource(aw, err)
-					return nil
+					if errors.Is(err, claudesource.ErrUntrustedSource) {
+						return nil
+					}
+					// Retryable, as in pollSession: keep the cursor so the poll loop
+					// below reads these entries again. Returning here would end
+					// capture until the daemon's slow restart pass.
+					break
 				}
 				if newOffset <= cursor {
 					return fmt.Errorf("catch-up entries do not advance source cursor: %d <= %d", newOffset, cursor)
