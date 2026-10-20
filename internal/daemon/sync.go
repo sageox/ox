@@ -55,10 +55,6 @@ import (
 
 // Sync timing constants - extracted for clarity and testability.
 const (
-	// minTeamContextFetchAge is the minimum age before re-fetching a team context.
-	// Team contexts are shared across repos, so we use a shorter interval for fast sync.
-	minTeamContextFetchAge = 15 * time.Second
-
 	// teamDiscoveryInterval is how often we re-fetch the team list from the API,
 	// independent of credential token expiry. This ensures new teams are discovered
 	// without waiting for the next credential refresh.
@@ -2759,8 +2755,8 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 	return result, nil
 }
 
-// remoteRefCheck compares the remote tracking branch SHA to the local HEAD SHA via ls-remote.
-// Returns true if they match (nothing new to pull), false if different or on error.
+// remoteRefCheck checks whether the remote tracking branch tip is already in local HEAD.
+// Returns true if equal or an ancestor (nothing new to pull), false otherwise or on error.
 // On error, returns false to fall through to the existing fetch+pull path.
 //
 // Uses the local tracking branch (e.g. refs/heads/main) rather than remote HEAD,
@@ -2814,8 +2810,15 @@ func (s *SyncScheduler) remoteRefCheck(ctx context.Context, repoPath string) boo
 	localSHA := strings.TrimSpace(string(localOut))
 
 	match := remoteSHA == localSHA
+	if !match {
+		// Unpushed local commits already contain the remote's content. Comparing
+		// only tips would fetch on every poll until those local commits are pushed.
+		// Missing objects or incomplete history fall through to the normal fetch.
+		ancestorCmd := exec.CommandContext(lsCtx, "git", "-C", repoPath, "merge-base", "--is-ancestor", remoteSHA, localSHA)
+		match = ancestorCmd.Run() == nil
+	}
 	if match {
-		s.logger.Debug("remote ref unchanged", "path", repoPath, "ref", remoteRef, "sha", localSHA[:min(8, len(localSHA))])
+		s.logger.Debug("remote ref unchanged", "path", repoPath, "ref", remoteRef, "sha", remoteSHA[:min(8, len(remoteSHA))])
 	}
 	return match
 }
