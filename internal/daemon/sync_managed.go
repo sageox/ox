@@ -832,8 +832,8 @@ func skipProvesIndexReadable(reason string) bool {
 // still would keep reporting the failure until the remote next changed.
 func (s *SyncScheduler) clearDisprovedBySkip(repo, reason string) {
 	if reason == skipReasonRemoteUnchanged {
-		// HEAD is already the remote tip, where a successful pull leaves it, so
-		// no local commit is left to rebase. "recently fetched" proves less: the
+		// HEAD already contains the remote tip, so the histories are not
+		// diverged. "recently fetched" proves less: the
 		// fetch that wrote FETCH_HEAD may belong to a pull that then failed.
 		s.clearErrors(repo)
 		if s.issues != nil {

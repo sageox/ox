@@ -84,3 +84,39 @@ func TestManagedRepo_RecentFetchStillDeduplicates(t *testing.T) {
 	assert.False(t, result.PullRan)
 	assert.Equal(t, "v1\n", readF(t, clone))
 }
+
+// Unpushed local commits must not turn every poll into a pull, but a subsequent
+// remote commit must still arrive and rebase those local commits safely.
+func TestTeamContext_LocalAheadSkipsUntilRemoteAdvances(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git fetch and pull operations")
+	}
+	isolateCredentials(t)
+	bare := makeBareRepo(t, "local-ahead", "notes.md", "notes\n")
+	clone := filepath.Join(t.TempDir(), "team-context")
+	gitInDir(t, t.TempDir(), "clone", bare, clone)
+	gitConfig(t, clone)
+	require.NoError(t, os.WriteFile(filepath.Join(clone, "local.md"), []byte("local work\n"), 0o644))
+	gitInDir(t, clone, "add", "local.md")
+	gitInDir(t, clone, "commit", "-m", "local work")
+	scheduler := newTestScheduler(setupProjectWithConfig(t, ""))
+
+	outcome, err := scheduler.pullTeamContext(context.Background(), clone)
+	require.NoError(t, err)
+	require.False(t, outcome.PullRan, "local commits already contain the unchanged remote tip")
+
+	pushExtraCommit(t, bare, "discussion.md", "new discussion\n")
+	outcome, err = scheduler.pullTeamContext(context.Background(), clone)
+	require.NoError(t, err)
+	require.True(t, outcome.PullRan, "new remote commits must still be pulled while locally ahead")
+	body, err := os.ReadFile(filepath.Join(clone, "discussion.md"))
+	require.NoError(t, err)
+	assert.Equal(t, "new discussion\n", string(body))
+	body, err = os.ReadFile(filepath.Join(clone, "local.md"))
+	require.NoError(t, err)
+	assert.Equal(t, "local work\n", string(body))
+
+	outcome, err = scheduler.pullTeamContext(context.Background(), clone)
+	require.NoError(t, err)
+	assert.False(t, outcome.PullRan, "rebased unpushed commits must not cause repeated pulls")
+}
