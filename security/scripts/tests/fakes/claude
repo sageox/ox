@@ -24,6 +24,11 @@ Knobs (env):
                         call fails the way the real CLI does once its own retries
                         are spent on a rate limit (exit 1, is_error, a 429 result)
   FAKE_RATE_LIMIT_NO_SUBTYPE  "1": that failure envelope carries no subtype
+
+Like the real CLI, it loads the user's MCP servers from $HOME/.claude.json
+unless --strict-mcp-config is passed, and logs which ones each call loaded. A
+Haiku model does not defer MCP tool schemas, so with any loaded it fails the way
+the real cartographer did: exit 1, is_error, "Prompt is too long".
 """
 import json
 import os
@@ -43,6 +48,18 @@ def arg(name):
         return None
     i = argv.index(name)
     return argv[i + 1] if i + 1 < len(argv) else ""
+
+
+def user_mcp_servers():
+    """MCP servers the real CLI would load from user config: none under --strict-mcp-config."""
+    if "--strict-mcp-config" in sys.argv[1:]:
+        return []
+    try:
+        with open(os.path.join(os.environ.get("HOME", ""), ".claude.json")) as f:
+            servers = json.load(f).get("mcpServers") or {}
+    except (OSError, ValueError, AttributeError):
+        return []
+    return sorted(servers) if isinstance(servers, dict) else []
 
 
 def first_json_object(text):
@@ -130,6 +147,7 @@ def main():
             f.write(json.dumps({"role": role, "playbook": playbook, "stdin": stdin, "budget": budget,
                                 "schema": schema is not None, "tools": arg("--tools"),
                                 "model": arg("--model"), "setting_sources": arg("--setting-sources"),
+                                "mcp_servers": user_mcp_servers(),
                                 "env": {k: os.environ.get(k) for k in CONTEXT_ENV}}) + "\n")
     if budget is not None and os.environ.get("FAKE_HONOR_BUDGET", "1") == "1" and cost > float(budget):
         print(json.dumps({"type": "result", "subtype": "error_max_budget_usd", "is_error": True,
@@ -141,6 +159,12 @@ def main():
         if os.environ.get("FAKE_RATE_LIMIT_NO_SUBTYPE") == "1":
             del failure["subtype"]
         print(json.dumps(failure))
+        return 1
+    if user_mcp_servers() and "haiku" in (arg("--model") or ""):
+        # Measured on Claude Code 2.1.303: 248 user MCP tools put 199,058 tokens in the
+        # first turn; the next request overflowed and compaction had nothing to drop.
+        print(json.dumps({"type": "result", "subtype": "success", "is_error": True, "num_turns": 4,
+                          "result": "Prompt is too long", "total_cost_usd": 0, "permission_denials": []}))
         return 1
     payload = respond(role, playbook, stdin, schema is not None)
     envelope = {"type": "result", "subtype": "success", "is_error": False, "total_cost_usd": cost,

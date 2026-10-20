@@ -268,15 +268,25 @@ invoke_claude() {
     # It also skips the project SessionStart hook (`ox agent prime`), which can derail
     # subagent startup. User settings still give us OAuth/keychain auth.
     --setting-sources user
+    # --strict-mcp-config, with no --mcp-config: load no MCP server at all. User
+    # settings still bring the reviewer's own servers — ~/.claude.json, enabled
+    # plugins, claude.ai connectors — and --tools below does not remove MCP tools.
+    # That broke the "read-only tools" guarantee (a subagent could send mail or post
+    # to Slack), and it broke the map: a model that does not defer tool schemas
+    # (Haiku) got every one inline. One coworker's 248 MCP tools filled 199K of the
+    # cartographer's 200K window, so every chunk failed "Prompt is too long" and an
+    # auth change reported NO COVERAGE.
+    --strict-mcp-config
     # --no-session-persistence: subagent invocations are one-shot. We don't want
     # them appearing in /resume pickers or polluting session history.
     --no-session-persistence
     # --permission-mode dontAsk: subagents must not pop a permission prompt
     # mid-run (we're piping stdout to a parser).
     --permission-mode dontAsk
-    # --tools: read-only file tools and nothing else, whatever the user's
-    # permission rules allow. Subagents read the repo to trace what the diff
-    # doesn't show; they never run commands or edit files.
+    # --tools: read-only file tools and nothing else among the built-ins, whatever
+    # the user's permission rules allow (MCP tools are --strict-mcp-config's job).
+    # Subagents read the repo to trace what the diff doesn't show; they never run
+    # commands or edit files.
     --tools "Read,Grep,Glob"
   )
   if [[ -n "$budget" ]]; then
@@ -290,7 +300,7 @@ invoke_claude() {
 
   # mktemp + $BASHPID so parallel hunters don't clobber each other's raw output —
   # $$ is the parent shell's PID, shared across the subshells of one hunt wave.
-  local raw rc=0 parsed cost subtype is_error denials limited
+  local raw rc=0 parsed cost subtype is_error denials limited detail
   raw="$(mktemp "$OUT/.claude-raw.${BASHPID:-$$}.$(basename "$prompt").XXXXXX")"
   # The reviewed branch is untrusted, and so is its git metadata. Claude Code puts a
   # git status snapshot (branch name, recent commit messages) in the system prompt,
@@ -304,9 +314,9 @@ invoke_claude() {
   # Parse the envelope whatever the exit code: a budget stop exits 1 but still
   # reports what it spent.
   parsed="$(python3 "$LIB" envelope --raw "$raw" --output "$output" ${schema:+--structured})" \
-    || parsed=$'0\tenvelope-parse-crash\ttrue\t0\tfalse'
+    || parsed=$'0\tenvelope-parse-crash\ttrue\t0\tfalse\t-'
   rm -f "$raw"
-  IFS=$'\t' read -r cost subtype is_error denials limited <<< "$parsed"
+  IFS=$'\t' read -r cost subtype is_error denials limited detail <<< "$parsed"
   printf '%s\t%s\t%s\n' "${cost:-0}" "$label" "$model" >> "$COST_LEDGER"
   if [[ "${denials:-0}" != "0" ]]; then
     echo "$label: $denials tool call(s) denied" >> "$OUT/run-log.md"
@@ -324,7 +334,9 @@ invoke_claude() {
     return 1
   fi
   if (( rc != 0 )) || [[ "$is_error" == "true" ]]; then
-    echo "WARNING: claude CLI failed (exit $rc, ${subtype:-no envelope}) for $label; see run-log" | tee -a "$OUT/run-log.md"
+    local why="${subtype:-no envelope}"
+    [[ -n "${detail:-}" && "$detail" != "-" ]] && why="$why: $detail"
+    echo "WARNING: claude CLI failed (exit $rc, $why) for $label; see run-log" | tee -a "$OUT/run-log.md"
   fi
   return 0
 }
