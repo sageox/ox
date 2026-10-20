@@ -574,3 +574,40 @@ func TestReviewContractFixtures(t *testing.T) {
 		})
 	}
 }
+
+// TestReadReview_DrawingsReachTheReviewPage reads the region-items fixture
+// through ReadReview and the page's review state: each drawing keeps its own
+// record, under its own q-<id> anchor, and the element mark on the same
+// paragraph has none. Failure prevented: the page can list a drawing but never
+// place it, show it, or redraw it as it was drawn.
+func TestReadReview_DrawingsReachTheReviewPage(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if err := os.CopyFS(dir, os.DirFS("../../pkg/planreview/testdata/review-contract/region-items/plan")); err != nil {
+		t.Fatal(err)
+	}
+	rev := ReadReview(dir)
+	island, _ := buildReviewState(rev.Items)
+	var state []struct {
+		Anchor string
+		Region struct{ ID string }
+	}
+	if err := json.Unmarshal([]byte(island), &state); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for i, it := range state {
+		var r struct{ ID string }
+		if len(rev.Items[i].Region) > 0 {
+			_ = json.Unmarshal(rev.Items[i].Region, &r)
+		}
+		if r.ID != it.Region.ID {
+			t.Errorf("%s: ReadReview carries region %q, the page %q", it.Anchor, r.ID, it.Region.ID)
+		}
+		got = append(got, it.Anchor+"="+it.Region.ID)
+	}
+	want := []string{"h59e210da=", "q-r1-double-fire=r1-double-fire", "q-r2-double-fire-again=r2-double-fire-again"}
+	if !slices.Equal(got, want) {
+		t.Errorf("the page's review state holds %v, want %v", got, want)
+	}
+}

@@ -1,12 +1,14 @@
 // Document tools: run inside the plan document. They find what the reviewer
-// points at (an element, or the words they selected) and paint the marks the
-// host sends. They read no storage and make no request, so they run in an
-// opaque-origin frame as well as on the CLI's own review page; everything the
-// reviewer decides lives in the host.
+// points at (an element, or the words they selected) or draws around, and
+// paint the marks and drawings the host sends. They read no storage and make
+// no request, so they run in an opaque-origin frame as well as on the CLI's
+// own review page; everything the reviewer decides lives in the host.
 
 import { anchorFor, clip, headingOf, labelFor, markableSelector, norm, quoteAnchor } from './anchor.js';
+import { drawLayer, markables } from './draw.js';
 import type { DocumentPort } from './ports.js';
-import type { PaintItem, Placed, Target } from './protocol.js';
+import type { DrawingPaint, PaintItem, Placed, Target } from './protocol.js';
+import { DRAWING } from './region.js';
 
 export { localPorts, connectParent } from './ports.js';
 export type { DocumentPort, HostPort, Port } from './ports.js';
@@ -15,7 +17,7 @@ export type { DocumentPort, HostPort, Port } from './ports.js';
  * Host controls drawn into this document (the CLI's review page): never a
  * mark-up target, and clicks on them are the host's own.
  */
-export const CHROME = '.rev-bar, .rev-rail, .rev-orphans, .rev-toast, .rev-sync, .rev-offline-bar';
+export const CHROME = '.rev-bar, .rev-rail, .rev-orphans, .rev-toast, .rev-sync, .rev-offline-bar, .rev-original';
 
 export interface DocumentToolsOptions {
   /** Send the review keys (r, Esc) to the host: set when its controls live outside this document. */
@@ -50,6 +52,7 @@ export function startDocumentTools(port: DocumentPort, opts: DocumentToolsOption
   let on = false; // review mode, as the host last set it
   let open = false; // the host's composer is open
   let items: PaintItem[] = [];
+  let drawings: DrawingPaint[] = [];
   // anchor-keyed maps have no prototype: an anchor named like an Object
   // member ("constructor", "__proto__") must be just a key
   let qRanges: Record<string, Highlight> = Object.create(null); // anchor -> highlight the last paint found
@@ -57,13 +60,25 @@ export function startDocumentTools(port: DocumentPort, opts: DocumentToolsOption
   let picked: { a: string; range: Range } | null = null; // the words the last target named
   let focused: Range | null = null;
   let started = false; // ready sent: before it, a target would anchor on a diagram's source
+  let tool = false; // the host selected the Draw tool, which also waits on started
 
   function isRange(at: Element | Range): at is Range {
     return 'startContainer' in at;
   }
 
-  function paint(next: PaintItem[]) {
+  // The host's controls drawn into this document never take a mark and are
+  // never part of a drawing.
+  const NOT_PLAN = CHROME + ', .rev-pop';
+  // A stroke in the Draw tool becomes a capture the host checks and keeps; a
+  // layout change that moves a drawing is placed again, and the host told.
+  const draw = drawLayer(SELECTOR, NOT_PLAN,
+    (capture, rect) => port.send({ type: 'capture', capture, rect }),
+    (reason) => port.send({ type: 'refused', reason }),
+    () => paint(items, drawings));
+
+  function paint(next: PaintItem[], nextDrawings: DrawingPaint[]) {
     items = next;
+    drawings = nextDrawings;
     document.querySelectorAll('.rev-marked,.rev-committed').forEach((el) => {
       el.classList.remove('rev-marked', 'rev-committed');
       el.removeAttribute('data-rev');
@@ -74,8 +89,9 @@ export function startDocumentTools(port: DocumentPort, opts: DocumentToolsOption
     const byAnchor: Record<string, PaintItem> = Object.create(null);
     items.forEach((it) => { byAnchor[it.anchor] = it; });
     const marked: Array<{ el: Element; a: string }> = [];
-    document.querySelectorAll(SELECTOR).forEach((el) => {
-      const a = anchorFor(el);
+    // listed once, for the marks and the drawings both
+    const all = markables(SELECTOR, NOT_PLAN);
+    all.forEach(({ el, anchor: a }) => {
       const it = byAnchor[a];
       if (!it) return;
       const glyph = document.createElement('span');
@@ -93,7 +109,15 @@ export function startDocumentTools(port: DocumentPort, opts: DocumentToolsOption
     });
     const found: Spot[] = marked.map((m) => ({ p: { anchor: m.a, section: headingOf(m.el), label: labelFor(m.el) }, at: m.el }));
     paintQuotes(found);
-    // reading order, highlights interleaved with elements; the sort is stable
+    // a drawing whose targets are missing or ambiguous is not on the page: it
+    // is reported after everything that is
+    const lost: Placed[] = [];
+    draw.paint(drawings, all).forEach((d) => {
+      const p: Placed = { anchor: d.anchor, section: '', label: '', outcome: d.outcome };
+      if (d.el && d.outcome !== 'missing' && d.outcome !== 'ambiguous') found.push({ p, at: d.el });
+      else lost.push(p);
+    });
+    // reading order: highlights and drawings interleaved with elements; the sort is stable
     const pos = found.map((s) => {
       if (isRange(s.at)) return s.at;
       const r = document.createRange();
@@ -102,7 +126,7 @@ export function startDocumentTools(port: DocumentPort, opts: DocumentToolsOption
     });
     const order = found.map((_, i) => i).sort((x, y) => pos[x].compareBoundaryPoints(Range.START_TO_START, pos[y]));
     spots = order.map((i) => found[i]);
-    port.send({ type: 'placed', items: spots.map((s) => s.p) });
+    port.send({ type: 'placed', items: spots.map((s) => s.p).concat(lost) });
   }
 
   // paintQuotes finds each highlight's words on the page, records it for
@@ -153,6 +177,13 @@ export function startDocumentTools(port: DocumentPort, opts: DocumentToolsOption
     setTimeout(() => el.classList.remove('rev-flash'), 1200);
   }
   function reveal(anchor: string, nth: number) {
+    // a hidden drawing is shown first: what capture had open or checked, and
+    // any <details> around its targets, then it is placed again
+    const d = DRAWING.test(anchor) ? drawings.filter((x) => x.anchor === anchor)[0] : null;
+    if (d && spots.some((x) => x.p.anchor === anchor && x.p.outcome === 'hidden')) {
+      draw.show(d);
+      paint(items, drawings);
+    }
     const s = spots.filter((x) => x.p.anchor === anchor)[nth];
     if (!s) return;
     const range = isRange(s.at) ? s.at : null;
@@ -313,8 +344,9 @@ export function startDocumentTools(port: DocumentPort, opts: DocumentToolsOption
   function onClick(ev: MouseEvent) {
     if (!started) return;
     const el0 = ev.target as Element;
-    // the host's own controls, drawn into this document: the host handles them
-    if (el0.closest && el0.closest(CHROME + ', .rev-pop')) return;
+    // the host's own controls, drawn into this document, are the host's; a
+    // click on the ink layer ends a stroke, which made a capture or a refusal
+    if (el0.closest && el0.closest(CHROME + ', .rev-pop, .rev-ink')) return;
     if (!on) { port.send({ type: 'dismiss' }); return; }
     // a selection means a drag or double-click just ended: comment on those
     // words. A plain click on highlighted words reopens that highlight; any
@@ -364,9 +396,11 @@ export function startDocumentTools(port: DocumentPort, opts: DocumentToolsOption
         on = m.on;
         open = m.open;
         body.classList.toggle('rev-on', on);
+        tool = on && m.draw;
+        draw.setTool(tool && started);
         break;
       case 'paint':
-        paint(m.items);
+        paint(m.items, m.drawings);
         break;
       case 'focus': {
         // the words this anchor's note is about: the selection just picked,
@@ -383,9 +417,10 @@ export function startDocumentTools(port: DocumentPort, opts: DocumentToolsOption
   // An anchor hashes a diagram's drawn text, and Mermaid draws after load: a
   // host that painted, or a click that made a target, before then would use
   // the diagram's source. The CLI's host can turn review on before ready, so
-  // clicks wait on `started` too.
+  // clicks and strokes wait on `started` too.
   whenDiagramsDrawn(() => {
     started = true;
+    draw.setTool(tool);
     port.send({ type: 'ready' });
   });
 }

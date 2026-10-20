@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -553,6 +555,9 @@ func renderSavedReviewPage(gitRoot, slug, planDir string, in plan.Input, res pla
 	opts.Review = rev.Items
 	opts.ReviewProblems = rev.Problems()
 	opts.PriorArtURL = priorArtURLResolver(gitRoot)
+	// every drawing made on the page names the bytes it was rendered from:
+	// the plan's markdown, or the authored page served instead below
+	opts.ReviewRevision = planRevision([]byte(in.Raw))
 	meta, metaErr := plan.LoadMeta(planDir)
 	if metaErr == nil {
 		if meta.Provenance != nil && meta.Provenance.SessionID != "" {
@@ -561,6 +566,7 @@ func renderSavedReviewPage(gitRoot, slug, planDir string, in plan.Input, res pla
 		}
 		authored, ok, readErr := readStoredAuthoredPlanHTML(planDir, meta)
 		if readErr == nil && ok {
+			opts.ReviewRevision = planRevision(authored)
 			return plan.InjectChrome(authored, plan.BuildChromeData(res, opts)), nil
 		}
 		if meta.Primary == plan.PrimaryHTML {
@@ -569,6 +575,16 @@ func renderSavedReviewPage(gitRoot, slug, planDir string, in plan.Input, res pla
 		opts.Companions = plan.CompanionRefs(meta.Companions)
 	}
 	return plan.RenderHTMLOpts(in, res, opts)
+}
+
+// planRevision is a plan's revision as a drawing names it: "sha256:" and the
+// hex SHA-256 of the stored bytes a page was rendered from, read with LF line
+// endings. Git for Windows' core.autocrlf checks ox's LF files out with CRLF,
+// which would give one commit two revisions. For a plan.html over the LFS
+// threshold with LF line endings, as ox writes it, it is the pointer's oid.
+func planRevision(stored []byte) string {
+	sum := sha256.Sum256(bytes.ReplaceAll(stored, []byte("\r\n"), []byte("\n")))
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 // reviewWriteErrorCode is the status for a review write that saved nothing: a

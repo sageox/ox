@@ -25,6 +25,7 @@
     if (data.endpoint) body.setAttribute('data-review-endpoint', data.endpoint);
     if (data.token) body.setAttribute('data-review-token', data.token);
     if (data.plan) body.setAttribute('data-review-plan', data.plan);
+    if (data.revision) body.setAttribute('data-review-revision', data.revision);
     if (data.review_problems) body.setAttribute('data-review-problems', String(data.review_problems));
   } catch (e) {}
 

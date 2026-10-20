@@ -45,7 +45,7 @@ func buildReviewState(items []MergedItem) (template.JS, reviewSummary) {
 		slim = append(slim, reviewStateItem{
 			Anchor: it.Anchor, Section: it.Section, Label: it.Label, Quote: it.Quote,
 			Status: string(it.Status), State: state, Note: it.Note, Reviewer: it.Reviewer,
-			ResolutionNote: resolutionNote,
+			ResolutionNote: resolutionNote, Region: it.Region,
 		})
 	}
 	b, err := json.Marshal(slim)

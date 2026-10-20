@@ -3,18 +3,20 @@
 // submit. They are trusted host code and run in the host's own window: the
 // plan's own window for ox's local review page (local.ts), the page around
 // the plan's frame for a host that frames it. They reach the plan only
-// through the port to the document tools, which pick targets and paint, and
-// reach the host's store only through its transport. With a transport, a
-// reviewer the host lets resolve can also Accept (verify) or Reopen an item
-// the author addressed, and the rail keeps orphaned notes whose anchored text
-// changed (never lose feedback). Without one (a file:// page) Submit exports
-// the feedback as JSON.
+// through the port to the document tools, which pick targets, capture what
+// the reviewer draws around, and paint; and they reach the host's store only
+// through its transport. With a transport, a reviewer the host lets resolve
+// can also Accept (verify) or Reopen an item the author addressed, and the
+// rail keeps orphaned notes whose anchored text changed (never lose
+// feedback). Without one (a file:// page) Submit exports the feedback as JSON.
 
 import { clip } from './anchor.js';
 import { CHROME, typing } from './document-tools.js';
+import { originalView } from './original.js';
 import type { HostPort } from './ports.js';
-import { paintItem, STATES, STATUSES, type PaintItem, type Placed, type State, type Status, type Tint } from './protocol.js';
-import { acceptBody, deliver, newId, openStore, queued, reopenBody, submitBody, syncMessage, wireItem, type Act, type Approval, type Entry, type Mark, type Receipt, type SyncMessage, type Transport } from './state.js';
+import { drawingPaint, paintItem, STATES, STATUSES, type DrawingPaint, type PaintItem, type Placed, type State, type Status, type Tint } from './protocol.js';
+import { checkRegion, DRAWING, drawingLabel, type Region } from './region.js';
+import { acceptBody, deliver, newId, openStore, queued, reopenBody, roundItems, submitBody, syncMessage, wireItem, type Act, type Approval, type Entry, type Mark, type Receipt, type SyncMessage, type Transport } from './state.js';
 
 /** One committed review item, as the page's review-state island carries it (buildReviewState in internal/plan). */
 export interface CommittedItem {
@@ -28,6 +30,8 @@ export interface CommittedItem {
   reviewer?: string;
   /** The author's note on the item's latest resolution, while it stands. */
   resolutionNote?: string;
+  /** A drawing's record, on an item anchored "q-<its id>". */
+  region?: Region;
 }
 
 export interface HostControlsOptions {
@@ -54,6 +58,12 @@ export interface HostControlsOptions {
   reviewing?: boolean;
   /** How to bring the host back, shown with a copy button while it is offline. */
   restartCommand?: string;
+  /**
+   * The revision of the plan the reviewer sees: "sha256:" and the hex SHA-256
+   * of the bytes the page shows, which the host's server must serve and no
+   * other. Each drawing is stamped with it. Without it the bar offers no Draw.
+   */
+  revision?: string;
 }
 
 /** A mounted set of controls. */
@@ -87,6 +97,7 @@ interface Row {
   reviewer: string;
   tag: '' | 'unsent' | 'queued' | 'unsaved';
   answer: string; // the author's resolution note
+  region?: Region;
 }
 type Kind = SyncMessage['kind'] | 'info' | 'pending' | 'ask';
 type Action = { label: string; fn: (input?: string) => void };
@@ -98,6 +109,16 @@ const STATUS: Array<{ id: Status; glyph: string }> = [
   { id: 'comment', glyph: '◌' },
 ];
 const HL_TINT: Record<string, Tint> = { 'approve': 'sage', 'request-change': 'amber', 'flag': 'red', 'comment': 'gold' };
+// a committed mark's color: resolved, declined, or still open
+const stateTint = (state: string): Tint => (state === 'addressed' || state === 'verified' ? 'sage' : state === 'wontfix' ? 'faint' : 'amber');
+// why a stroke made no drawing, said to the reviewer; a cancel says nothing
+const DRAW_REFUSED: Record<string, string> = {
+  'no-target': 'Nothing in that loop can take a comment. Draw around a paragraph, an item, a row or part of a diagram.',
+  'too-large': 'That loop holds too much of the plan to keep. Draw around less of it.',
+  'too-small': 'Draw a loop around what you mean.',
+  'layout-changed': 'The page changed while you drew. Draw the loop again.',
+};
+const REVISION = /^sha256:[0-9a-f]{64}$/;
 // a comment on the plan as a whole: WholePlanAnchor in pkg/planreview, with
 // the label readers that predate it print (plan-review-ledger-contract.md 3.10)
 const WHOLE: About = { a: 'plan', section: '', label: 'Whole plan' };
@@ -154,6 +175,12 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
       // a member wrote the record: one of the wrong shape would stop the rail drawing
       if (!x || typeof x.anchor !== 'string' || STATUSES.indexOf(x.status) < 0 || STATES.indexOf(x.state) < 0 ||
           TEXT_FIELDS.some((k) => x[k] !== undefined && typeof x[k] !== 'string')) { invalid++; return; }
+      // a drawing that does not read as one keeps its row, by its label
+      if (x.region !== undefined && (checkRegion(x.region) || x.anchor !== 'q-' + x.region.id)) {
+        invalid++;
+        x = Object.assign({}, x);
+        delete x.region;
+      }
       (committed[x.anchor] = committed[x.anchor] || []).push(x);
     });
   }
@@ -172,6 +199,16 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
   let ds: Record<string, Mark> = Object.create(null);
   let placed: Placed[] = []; // what the document painted, in reading order
   let unplaced: string[] = []; // anchors with a comment but nothing on the page
+  // Draw around, offered only with the revision every drawing is stamped with
+  const revision = opts.revision && REVISION.test(opts.revision) ? opts.revision : '';
+  let tool = false; // the Draw tool is selected
+  let pending: Region | null = null; // a capture whose note is open, kept only on Save
+  // a drawing's record: the capture being noted, else your draft's, else the Ledger's
+  function regionOf(a: string): Region | undefined {
+    if (pending && 'q-' + pending.id === a) return pending;
+    if (ds[a] && ds[a].region) return ds[a].region;
+    return (committed[a] || []).map((x) => x.region).filter((r) => r)[0];
+  }
 
   function committedState(a: string) { const arr = committed[a] || []; return arr.length ? repOf(arr).state : ''; }
 
@@ -193,7 +230,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
         it = {
           anchor: a, kind: 'committed', status: c.status, state: c.state,
           glyph: (c.state === 'addressed' || c.state === 'verified') ? '✓' : (c.state === 'wontfix' ? '—' : glyphFor(c.status)),
-          tint: (c.state === 'addressed' || c.state === 'verified') ? 'sage' : c.state === 'wontfix' ? 'faint' : 'amber',
+          tint: stateTint(c.state),
         };
       } else return;
       // a highlight is found by its words: your mark's, else the first committed one's
@@ -206,6 +243,29 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
     return out;
   }
 
+  // paintDrawings is every drawing to place: per anchor, your unsent mark's,
+  // else the representative committed one's, and the capture being noted.
+  // Its geometry and targets only: who drew it, and their note, stay here.
+  function paintDrawings(): DrawingPaint[] {
+    const out: DrawingPaint[] = [];
+    Object.keys(committed).concat(Object.keys(ds), pending ? ['q-' + pending.id] : []).forEach((a, i, all) => {
+      const r = all.indexOf(a) === i && DRAWING.test(a) ? regionOf(a) : undefined;
+      if (!r) return;
+      const m = ds[a], carr = committed[a] || [];
+      const d = drawingPaint({
+        anchor: a,
+        kind: m || !carr.length ? 'unsent' : 'committed',
+        tint: m ? HL_TINT[m.status] || 'gold' : carr.length ? stateTint(repOf(carr).state) : 'gold',
+        ellipse: r.ellipse,
+        targets: r.targets.map((t) => ({ anchor: t.anchor, box: t.box, nth: t.nth, of: t.of })),
+        open: r.layout.open,
+        checked: r.layout.checked,
+      });
+      if (d) out.push(d);
+    });
+    return out;
+  }
+
   function paint() {
     if (destroyed) return;
     place();
@@ -213,15 +273,19 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
     store.drafts().forEach((m) => { ds[m.anchor] = m; });
     const n = Object.keys(ds).length;
     countEl.textContent = n ? (n + ' unsent') : '';
-    port.send({ type: 'paint', items: paintItems() }); // answered by 'placed'
+    port.send({ type: 'paint', items: paintItems(), drawings: paintDrawings() }); // answered by 'placed'
   }
+  let outcome: Record<string, string> = Object.create(null); // drawing anchor -> where it landed
   function onPlaced(items: Placed[]) {
+    outcome = Object.create(null);
+    items.forEach((p) => { if (p.outcome) outcome[p.anchor] = p.outcome; });
     // the whole plan names nothing on the page, so it is never unplaced
     const seen: Record<string, boolean> = Object.create(null);
     seen[WHOLE.a] = true;
     // one row per comment, however often the page repeats its anchor: the
-    // plan's own scripts can send this answer with 10,000 copies of one
-    placed = items.filter((p) => !seen[p.anchor] && (seen[p.anchor] = true));
+    // plan's own scripts can send this answer with 10,000 copies of one. A
+    // drawing that is missing or ambiguous is not on the page.
+    placed = items.filter((p) => p.outcome !== 'missing' && p.outcome !== 'ambiguous' && !seen[p.anchor] && (seen[p.anchor] = true));
     // comments whose text is gone from the page — rewritten by the agent, or
     // edited while this tab was away — keep a rail row, so an addressed one can
     // still be accepted or reopened
@@ -278,6 +342,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
           section: c.section || section, label: c.label || label,
           state: c.state, reviewer: c.reviewer || '', tag: '',
           answer: c.state !== 'open' && c.resolutionNote ? c.resolutionNote : '',
+          region: c.region,
         });
       });
       const m = ds[a];
@@ -288,6 +353,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
           state: '', reviewer: who() || '(you)',
           tag: store.unsaved(a) ? 'unsaved' : queued(waiting, m) ? 'queued' : 'unsent',
           answer: '',
+          region: m.region,
         });
       }
     }
@@ -325,7 +391,8 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
     const hide = '<button class="rev-rail-hide" title="Hide comments">Hide</button>';
     const plan = on ? '<button class="rev-rail-plan">+ Comment on the whole plan</button>' : '';
     if (!rows.length) {
-      r.innerHTML = '<div class="rev-rail-h">Comments' + hide + '</div>' + plan + '<div class="rev-rail-empty">Click any section, risk, or row — or highlight text — to leave a comment.</div>';
+      r.innerHTML = '<div class="rev-rail-h">Comments' + hide + '</div>' + plan + '<div class="rev-rail-empty">Click any section, risk, or row — or highlight text' +
+        (revision ? ', or Draw around part of the plan' : '') + ' — to leave a comment.</div>';
       return;
     }
     let html = '<div class="rev-rail-h">Comments <span class="rev-rail-n">' + rows.length + '</span>' + hide + '</div>' + plan + '<ul class="rev-rail-list">';
@@ -334,13 +401,17 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
       let tag = '';
       if (row.tag) tag = '<span class="rev-rail-tag ' + row.tag + '">' + row.tag + '</span>';
       else if (STATE_TAG[row.state]) tag = '<span class="rev-rail-tag ' + STATE_TAG[row.state] + '">' + STATE_TAG[row.state] + '</span>';
-      if (!row.at && !whole) tag += '<span class="rev-rail-tag">text changed</span>';
+      if (!row.at && !whole) tag += outcome[row.a] === 'ambiguous'
+        ? '<span class="rev-rail-tag" title="What it was drawn around now appears a different number of times">repeated</span>'
+        : '<span class="rev-rail-tag">text changed</span>';
+      else if (outcome[row.a] === 'hidden') tag += '<span class="rev-rail-tag" title="Collapsed or on another tab: click to show it">hidden</span>';
       // a highlight's row leads with its words; its label is those words, so a
       // note-less highlight shows nothing more
       const content = (row.quote ? '<div class="rev-rail-quote">' + esc(row.label) + '</div>' : '') +
         (row.note ? '<div class="rev-rail-note">' + esc(row.note) + '</div>'
           : row.quote || whole ? '' : '<div class="rev-rail-note muted">' + esc(row.label) + '</div>') +
-        (row.answer ? '<div class="rev-rail-answer">↳ ' + esc(row.answer) + '</div>' : '');
+        (row.answer ? '<div class="rev-rail-answer">↳ ' + esc(row.answer) + '</div>' : '') +
+        (row.region ? '<button class="rev-rail-orig" title="What lay under this drawing when it was drawn">View original</button>' : '');
       const whoTag = row.reviewer ? '<span class="rev-rail-who">' + esc(row.reviewer) + '</span>' : '';
       html += '<li class="rev-rail-item" data-i="' + i + '" data-status="' + esc(row.status) + '">' +
         '<span class="rev-rail-glyph">' + glyphFor(row.status) + '</span>' +
@@ -352,9 +423,11 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
       (li as HTMLElement).onclick = (ev) => {
         const row = rows[+(li.getAttribute('data-i') as string)];
         if (!row) return;
-        // nothing on the page to scroll to: open the comment from its row
-        if (!row.at) { openPop({ a: row.a, section: row.section, label: row.label, quote: row.quote }, { left: ev.clientX, bottom: ev.clientY }); popByHost = true; ev.stopPropagation(); return; }
-        port.send({ type: 'reveal', anchor: row.at.anchor, nth: row.at.nth });
+        if (row.region && (ev.target as Element).closest('.rev-rail-orig')) { showOriginal(row.region); ev.stopPropagation(); return; }
+        // A drawing takes no click on the page, so its row shows it and opens
+        // its note; anything with nothing on the page opens from its row too
+        if (row.at) port.send({ type: 'reveal', anchor: row.at.anchor, nth: row.at.nth });
+        if (!row.at || DRAWING.test(row.a)) { openPop({ a: row.a, section: row.section, label: row.label, quote: row.quote }, { left: ev.clientX, bottom: ev.clientY }); popByHost = true; ev.stopPropagation(); }
       };
     });
   }
@@ -362,7 +435,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
   let pop: HTMLElement | null = null;
   let popNote = ''; // the open note's text when it opened
   let popByHost = false; // opened from the rail, not by a pick in the plan's frame
-  function sendMode() { port.send({ type: 'mode', on, open: !!pop }); }
+  function sendMode() { port.send({ type: 'mode', on, open: !!pop, draw: tool }); }
   // The open note is held when the reviewer opened it from the rail or typed
   // in it: only their own Esc, Save or Delete ends it, never the plan's frame.
   // A plan that closed every note it could would leave no way to object, and
@@ -374,7 +447,11 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
   // replacing: another note opens in its place, so a waiting reload keeps waiting
   function closePop(replacing?: boolean) {
     popByHost = false;
-    if (pop) { pop.remove(); pop = null; sendMode(); }
+    if (pop) {
+      pop.remove(); pop = null; sendMode();
+      // a capture is kept only by Save
+      if (pending) { pending = null; paint(); }
+    }
     port.send({ type: 'focus', anchor: null });
     if (!replacing) idle();
   }
@@ -417,15 +494,52 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
     (p.querySelector('.rev-save') as HTMLElement).onclick = () => {
       const m: Omit<Mark, 'at'> = { anchor: a, section: t.section, label: t.label, status, note: (p.querySelector('.rev-note') as HTMLTextAreaElement).value.trim() };
       if (t.quote) m.quote = t.quote;
+      // a drawing's mark carries what was drawn, whoever marks it
+      const r = regionOf(a);
+      if (r) m.region = r;
       const kept = store.save(m);
+      pending = null;
       paint(); closePop();
       if (!kept) showSync('err', 'This browser could not save your note: it lives in this tab only and is lost when the tab closes. Free up browser storage, then save it again.');
     };
-    (p.querySelector('.rev-del') as HTMLElement).onclick = () => { store.remove(a); paint(); closePop(); };
+    (p.querySelector('.rev-del') as HTMLElement).onclick = () => { store.remove(a); pending = null; paint(); closePop(); };
+  }
+  // View original: a drawing redrawn from its record, in this window, never the plan's
+  let original: HTMLElement | null = null;
+  function closeOriginal() { if (original) { original.remove(); original = null; } }
+  function showOriginal(r: Region) {
+    closeOriginal();
+    const el = original = document.createElement('div');
+    el.className = 'rev-original';
+    el.setAttribute('role', 'dialog');
+    el.setAttribute('aria-label', 'The original drawing');
+    const head = document.createElement('div');
+    head.className = 'rev-original-h';
+    const l = r.layout;
+    head.textContent = 'Drawn on revision ' + r.plan_revision.slice(7, 19) + ' at ' + l.viewport.join(' × ') + ', ' + l.theme +
+      (revision ? (r.plan_revision === revision ? ' · the revision shown' : ' · not the revision shown') : '');
+    const x = document.createElement('button');
+    x.className = 'rev-original-x';
+    x.textContent = 'Close';
+    x.onclick = closeOriginal;
+    head.appendChild(x);
+    el.appendChild(head);
+    el.appendChild(originalView(r, document));
+    body.appendChild(el);
   }
   // The box the controls sit over: the plan's frame, else the window.
   function box() {
     return opts.frame ? opts.frame.getBoundingClientRect() : { left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight };
+  }
+  // toHost moves a point in a framed document's viewport into this one, so
+  // that the whole note (about 300 x 200) stays over the frame wherever the
+  // plan says.
+  function toHost(r: { left: number; bottom: number }) {
+    const b = box();
+    return {
+      left: Math.min(Math.max(r.left + b.left, b.left), Math.max(b.left, b.right - 300)),
+      bottom: Math.min(Math.max(r.bottom + b.top, b.top), Math.max(b.top, b.bottom - 200)),
+    };
   }
   // A framed plan is the reader's page: the controls sit over the frame's box,
   // as they sit over the window on ox's own page, so the host's chrome around
@@ -498,7 +612,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
   // alone, and a highlight's anchor cannot be turned back into its words.
   function reopen(a: string, note: string) {
     const c = (committed[a] || []).filter((x) => x.label || x.quote)[0];
-    const item = c ? { anchor: a, section: c.section, label: c.label, quote: c.quote } : { anchor: a };
+    const item = c ? { anchor: a, section: c.section, label: c.label, quote: c.quote, region: regionOf(a) } : { anchor: a, region: regionOf(a) };
     queue('reopen', (id, r) => reopenBody(id, r, item, note), {}, () => reopen(a, note));
   }
   // flush tries even while the host looks offline: a host it reaches is back.
@@ -555,7 +669,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
     if (!who()) { askName('Your name, so teammates know whose feedback this is:', exportJSON); return; }
     // a re-export of unchanged marks keeps its id, so `ox plan feedback apply`
     // run twice on the same feedback lands one round
-    const json = JSON.stringify({ id: store.exportId(items), slug, reviewer: who(), items }, null, 2);
+    const json = JSON.stringify(Object.assign({ id: store.exportId(items), slug, reviewer: who() }, roundItems(items)), null, 2);
     const blob = new Blob([json], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a'); a.href = url; a.download = slug + '-feedback.json'; a.click();
@@ -685,7 +799,9 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
   const bar = document.createElement('div');
   bar.className = 'rev-bar';
   bar.innerHTML = (live ? '<span class="rev-conn"></span>' : '') +
-    '<button class="rev-toggle" title="Toggle review mode">Review</button><span class="rev-count"></span>' +
+    '<button class="rev-toggle" title="Toggle review mode">Review</button>' +
+    (revision ? '<button class="rev-draw" aria-pressed="false" title="Draw a loop around part of the plan to comment on it">Draw</button>' : '') +
+    '<span class="rev-count"></span>' +
     (live && !opts.reviewer ? '<button class="rev-who" title="Set the name teammates see on your comments"></button>' : '') +
     '<button class="rev-submit" title="Send feedback to the agent">' + (live ? 'Submit' : 'Export') + '</button>' +
     (opts.approve ? '<button class="rev-approve" title="Approve and close the loop">Approve</button>' : '');
@@ -707,10 +823,23 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
   // to announce itself on entry and keep its exit in view — otherwise the only
   // signal is a green button and nothing visibly changes until a hover.
   const toggleEl = bar.querySelector('.rev-toggle') as HTMLElement;
+  const drawEl = bar.querySelector('.rev-draw') as HTMLElement | null;
   let hintBubble: HTMLElement | null = null;
+  // The Draw tool: while selected, a stroke on the plan draws instead of
+  // picking. It is part of review mode, so selecting it enters review mode,
+  // and leaving review mode puts it down.
+  let drawTaught = false; // the tool's toast shows once a page
+  function setTool(next: boolean) {
+    if (next && !on) setReview(true, true);
+    tool = next;
+    if (drawEl) { drawEl.classList.toggle('on', tool); drawEl.setAttribute('aria-pressed', String(tool)); }
+    sendMode();
+    if (tool && !drawTaught) { drawTaught = true; toast('Draw a loop around what you mean: a paragraph, rows, part of a diagram. Esc puts the pen down.'); }
+  }
   function setReview(next: boolean, silent?: boolean) {
     on = next; toggleEl.classList.toggle('on', on);
     body.classList.toggle('rev-on', on); // the controls' own look; a framed document marks its own body
+    if (!on && tool) { tool = false; if (drawEl) { drawEl.classList.remove('on'); drawEl.setAttribute('aria-pressed', 'false'); } }
     sendMode();
     toggleEl.textContent = on ? 'Exit review' : 'Review';
     toggleEl.title = on ? 'Leave review mode (Esc)' : 'Enter review mode (r)';
@@ -722,12 +851,17 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
     renderRail();
   }
   toggleEl.onclick = () => { setReview(!on); };
+  if (drawEl) drawEl.onclick = () => { setTool(!tool); };
   submitEl.onclick = submit;
   if (opts.approve) (bar.querySelector('.rev-approve') as HTMLElement).onclick = approve;
-  // Esc peels one layer at a time — an open note first, then the mode — and
-  // fires while typing in the note too; that is the point of Esc.
+  // Esc peels one layer at a time — View original, then an open note, then
+  // the Draw tool, then the mode — and fires while typing in the note too;
+  // that is the point of Esc. A stroke in progress takes it first, in the
+  // document tools.
   function escape(): boolean {
+    if (original) { closeOriginal(); return true; }
     if (pop) { closePop(); return true; }
+    if (tool) { setTool(false); return true; }
     if (on) { setReview(false); return true; }
     return false;
   }
@@ -784,25 +918,33 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
       case 'placed':
         onPlaced(m.items);
         break;
-      case 'target': {
+      case 'target':
         // The document picks only in review mode, so any other target came
         // from the plan's own scripts, as does one replacing a note in progress.
         if (!on || held()) break;
-        // a framed document's rect is in the frame's viewport: move it into
-        // this one, and keep the whole note (about 300 x 200) over the frame
-        // wherever the plan says
-        const b = box();
-        openPop({ a: m.target.anchor, section: m.target.section, label: m.target.label, quote: m.target.quote }, {
-          left: Math.min(Math.max(m.target.rect.left + b.left, b.left), Math.max(b.left, b.right - 300)),
-          bottom: Math.min(Math.max(m.target.rect.bottom + b.top, b.top), Math.max(b.top, b.bottom - 200)),
-        });
+        openPop({ a: m.target.anchor, section: m.target.section, label: m.target.label, quote: m.target.quote }, toHost(m.target.rect));
+        break;
+      case 'capture': {
+        // Only the reviewer's stroke in the Draw tool makes a capture; any
+        // other came from the plan's own scripts.
+        if (!on || !tool) break;
+        if (held()) { toast('Save or delete the open note, then draw again.'); break; }
+        // what the document proposed, with the identity, revision and time
+        // only this host can give it
+        const r: Region = { ...m.capture, id: newId(), plan_revision: revision, created_at: new Date().toISOString() };
+        const why = checkRegion(r);
+        if (why) { toast('That drawing cannot be kept: its ' + why + ' is out of bounds.'); break; }
+        closePop(true);
+        pending = r;
+        paint();
+        openPop({ a: 'q-' + r.id, section: r.targets[0].section, label: drawingLabel(r) }, toHost(m.rect), true);
         break;
       }
       case 'refused':
+        if (m.reason === 'cancelled') break;
         if (!held()) closePop();
-        toast(m.reason === 'repeated'
-          ? '“' + clip(m.quote, 40) + '” appears ' + m.count + ' times in this section — highlight a longer phrase so the comment points at one place.'
-          : 'Highlight text within one section to comment on it.');
+        if (m.reason === 'repeated') toast('“' + clip(m.quote, 40) + '” appears ' + m.count + ' times in this section — highlight a longer phrase so the comment points at one place.');
+        else toast(DRAW_REFUSED[m.reason] || 'Highlight text within one section to comment on it.');
         break;
       case 'dismiss':
         if ((on || pop) && !held()) closePop();
@@ -847,10 +989,10 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
       off.abort();
       clearTimeout(repaint);
       port.listen(() => {});
-      port.send({ type: 'mode', on: false, open: false });
-      port.send({ type: 'paint', items: [] });
+      port.send({ type: 'mode', on: false, open: false, draw: false });
+      port.send({ type: 'paint', items: [], drawings: [] });
       if (resized) resized.disconnect();
-      [bar, rail, orphanBar, syncEl, toastEl, offlineBar, hintBubble].forEach((el) => { if (el) el.remove(); });
+      [bar, rail, orphanBar, syncEl, toastEl, offlineBar, hintBubble, original].forEach((el) => { if (el) el.remove(); });
       body.classList.remove('rev-on', 'rev-offline', 'rev-framed');
       ['top', 'left', 'right', 'bottom', 'width', 'height'].forEach((k) => body.style.removeProperty('--rev-' + k));
     },

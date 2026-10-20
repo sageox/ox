@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -141,6 +143,49 @@ func TestRenderSavedReviewPage_PreservesLegacyAuthoredHTML(t *testing.T) {
 	}
 	if bytes.Contains(out, []byte(`<div class="brand">OX · PLAN</div>`)) {
 		t.Fatal("review regenerated the markdown template instead of preserving authored HTML")
+	}
+}
+
+// TestRenderSavedReviewPage_NamesTheRevisionItWasRenderedFrom: a review page
+// carries the revision of the stored bytes it was rendered from, which every
+// drawing made on it is stamped with and which turns on its Draw tool. An
+// authored page names its plan.html; a markdown plan its plan.md, the bytes
+// the generated page is rendered from. Failure prevented: a drawing names a
+// revision the reviewer never saw, so View original calls the revision on
+// screen another one, or the reverse.
+func TestRenderSavedReviewPage_NamesTheRevisionItWasRenderedFrom(t *testing.T) {
+	sha := func(s string) string {
+		sum := sha256.Sum256([]byte(s))
+		return "sha256:" + hex.EncodeToString(sum[:])
+	}
+	md := "# Quick plan\n\n## Current\nFresh markdown projection."
+	authored := `<!doctype html><html><head><title>Attest map</title></head><body><div class="hero-map">visual flow</div></body></html>`
+	for _, tc := range []struct {
+		name, md, html, want, island string
+	}{
+		{"markdown", md, "", sha(md), `data-review-revision="` + sha(md) + `"`},
+		{"authored", md, authored, sha(authored), `"revision":"` + sha(authored) + `"`},
+		// a Windows checkout with core.autocrlf: the same commit, the same revision
+		{"markdown with CRLF", strings.ReplaceAll(md, "\n", "\r\n"), "", sha(md), `data-review-revision="` + sha(md) + `"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "meta.json"), []byte(`{"topic":"Quick plan","slug":"quick-plan"}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if tc.html != "" {
+				if err := os.WriteFile(filepath.Join(dir, "plan.html"), []byte(tc.html), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			out, err := renderSavedReviewPage("", "quick-plan", dir, plan.Parse(tc.md), plan.Result{}, plan.Review{}, plan.RenderOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Contains(out, []byte(tc.island)) {
+				t.Errorf("the page does not name revision %s as %s", tc.want, tc.island)
+			}
+		})
 	}
 }
 

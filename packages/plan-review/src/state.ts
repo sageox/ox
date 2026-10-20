@@ -12,6 +12,7 @@
 //   ox-review:<account>:<plan>:export           the last export's id and items
 
 import { STATUSES, type Status } from './protocol.js';
+import { checkRegion, type Region } from './region.js';
 
 /** A reviewer's unsent mark. Each save of an anchor stamps a later `at` than any copy of it saved or frozen before. */
 export interface Mark {
@@ -21,6 +22,8 @@ export interface Mark {
   status: Status;
   note?: string;
   quote?: string;
+  /** A drawing's record, on a mark anchored "q-<its id>". */
+  region?: Region;
   at: number;
 }
 
@@ -147,8 +150,11 @@ function keysUnder(storage: Storage, prefix: string): string[] {
 }
 function asMark(v: unknown): Mark | null {
   if (!obj(v) || typeof v.anchor !== 'string' || STATUSES.indexOf(v.status as Status) < 0 || typeof v.at !== 'number') return null;
+  // a drawing that no longer reads as one could never be sent as one
+  if (v.region !== undefined && (checkRegion(v.region) || v.anchor !== 'q-' + (v.region as Region).id)) return null;
   const m: Mark = { anchor: v.anchor, status: v.status as Status, at: v.at };
   (['section', 'label', 'note', 'quote'] as const).forEach((k) => { if (typeof v[k] === 'string') m[k] = v[k] as string; });
+  if (v.region !== undefined) m.region = v.region as Region;
   return m;
 }
 function asEntry(v: unknown): Entry | null {
@@ -208,6 +214,7 @@ export function openStore(storage: Storage, account: string, plan: string): Stor
       last = at;
       const mark: Mark = { anchor: m.anchor, status: m.status, at };
       (['section', 'label', 'note', 'quote'] as const).forEach((k) => { if (m[k] !== undefined) mark[k] = m[k]; });
+      if (m.region) mark.region = m.region;
       if (write(storage, prefix + DRAFT + enc(m.anchor), mark)) {
         delete memory[m.anchor];
         return true;
@@ -257,12 +264,22 @@ export function queued(entries: Entry[], m: Mark): boolean {
 }
 
 /** The item a round carries for a mark, without its stamp. */
-export function wireItem(m: Pick<Mark, 'anchor' | 'section' | 'label' | 'status' | 'note' | 'quote'>): Record<string, string> {
-  const o: Record<string, string> = { anchor: m.anchor, section: m.section || '', label: m.label || '' };
+export function wireItem(m: Pick<Mark, 'anchor' | 'section' | 'label' | 'status' | 'note' | 'quote' | 'region'>): Record<string, unknown> {
+  const o: Record<string, unknown> = { anchor: m.anchor, section: m.section || '', label: m.label || '' };
   if (m.quote) o.quote = m.quote;
   o.status = m.status;
   o.note = m.note || '';
+  if (m.region) o.region = m.region;
   return o;
+}
+
+/**
+ * roundItems is where a round's items travel. With a drawing among them they
+ * go under marks, and items is empty: a release that predates drawings
+ * refuses that round instead of storing it without its drawings.
+ */
+export function roundItems(items: Array<Record<string, unknown>>): { items: unknown[]; marks?: unknown[] } {
+  return items.some((it) => it.region) ? { items: [], marks: items } : { items };
 }
 
 // A request names its reviewer only for a host that has no sign-in (ox's
@@ -275,12 +292,12 @@ function request(id: string, reviewer: string, rest: Record<string, unknown>): s
 
 /** submitBody freezes a round of marks. */
 export function submitBody(id: string, reviewer: string, marks: Mark[]): string {
-  return request(id, reviewer, { items: marks.map(wireItem) });
+  return request(id, reviewer, roundItems(marks.map(wireItem)));
 }
 
-/** reopenBody freezes a reopen: a round raising one item again as a requested change. */
-export function reopenBody(id: string, reviewer: string, item: { anchor: string; section?: string; label?: string; quote?: string }, note: string): string {
-  return request(id, reviewer, { items: [wireItem({ ...item, status: 'request-change', note: note || 'reopened by reviewer' })] });
+/** reopenBody freezes a reopen: a round raising one item again as a requested change, a drawing with what was drawn. */
+export function reopenBody(id: string, reviewer: string, item: { anchor: string; section?: string; label?: string; quote?: string; region?: Region }, note: string): string {
+  return request(id, reviewer, roundItems([wireItem({ ...item, status: 'request-change', note: note || 'reopened by reviewer' })]));
 }
 
 /** acceptBody freezes a reviewer's accept: a verified resolution. */

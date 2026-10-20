@@ -59,7 +59,7 @@ test('review mode announces itself, keeps its exit in view, and survives a reloa
     'if (toastEl === el) toastEl = null;', // a toast timer removes only its own toast
   ]);
   pins('document-tools.ts', [
-    "if (el0.closest && el0.closest(CHROME + ', .rev-pop')) return;", // the controls are never a target
+    "if (el0.closest && el0.closest(CHROME + ', .rev-pop, .rev-ink')) return;", // the controls, and the ink a stroke ends on, are never a target
     "if (!el) { port.send({ type: 'dismiss' }); return; }", // click-away
   ]);
 });
@@ -100,7 +100,7 @@ test('a highlight comments on exactly its words', () => {
   ]);
   pins('host-controls.ts', [
     'if (t.quote) m.quote = t.quote;', // the words travel with the mark
-    'if (!row.at) { openPop({ a: row.a, section: row.section, label: row.label, quote: row.quote }', // a comment whose text is gone opens from its row
+    'if (!row.at || DRAWING.test(row.a)) { openPop({ a: row.a, section: row.section, label: row.label, quote: row.quote }', // a comment whose text is gone, or a drawing, opens from its row
   ]);
   pins('document.css', ['sage', 'amber', 'red', 'gold', 'faint', 'focus'].map((t) => '::highlight(rev-q-' + t + '){'));
   pins('host.css', ['.rev-pop .rev-quote{', '.rev-rail-quote{']);

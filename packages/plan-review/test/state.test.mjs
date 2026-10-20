@@ -1,10 +1,11 @@
 // The host controls' drafts and outbox, over a fake Storage. The real-Chrome
 // tests (cmd/ox, build tag `browser`) cover the same paths end to end.
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { load } from './load.mjs';
 
-const { openStore, forgetAccount, deliver, queued, submitBody, acceptBody, migrateLegacy, syncMessage, newId } = await load('state.ts');
+const { openStore, forgetAccount, deliver, queued, submitBody, reopenBody, acceptBody, migrateLegacy, syncMessage, newId } = await load('state.ts');
 
 // fakeStorage is localStorage over a Map, recording the keys each write
 // touches; full(true) makes every write throw, as a full or denied storage does.
@@ -153,6 +154,37 @@ test('requests name the reviewer only for a host without sign-in', () => {
   assert.deepEqual(JSON.parse(submitBody('op-00000001', 'Devon', ds)), { id: 'op-00000001', reviewer: 'Devon', items: [{ anchor: 'q00ff00ff', section: 'Risks', label: 'q00ff00ff', quote: 'retry path', status: 'request-change', note: 'n' }] });
   assert.ok(!('reviewer' in JSON.parse(submitBody('op-00000001', '', ds))));
   assert.deepEqual(JSON.parse(acceptBody('op-00000002', 'Devon', 'h00000001')), { id: 'op-00000002', reviewer: 'Devon', anchor: 'h00000001', state: 'verified', note: 'accepted by reviewer' });
+});
+
+// A round's drawings travel under marks with items empty, which releases that
+// predate drawings refuse (the module's TestRoundRequest_DrawingsTravelUnderMarks
+// pins the server side). Failure prevented: a submission, a reopen or an
+// export carrying a drawing reaches an importer that stores it without it.
+test('a round with a drawing sends its items under marks, and one without under items', () => {
+  const region = JSON.parse(readFileSync(new URL('../../../pkg/planreview/testdata/drawn-context/captures.json', import.meta.url), 'utf8')).records[0];
+  const drawing = { anchor: 'q-' + region.id, section: 'Risks', label: 'Drawing: …', status: 'flag', note: 'here', region, at: 2 };
+  const element = { ...mark('h00000001', 'n'), at: 1 };
+  const both = JSON.parse(submitBody('op-00000001', '', [element, drawing]));
+  assert.deepEqual(both.items, []);
+  assert.deepEqual(both.marks.map((m) => [m.anchor, m.region && m.region.id]), [['h00000001', undefined], ['q-r1-double-fire', 'r1-double-fire']]);
+  assert.deepEqual(JSON.parse(submitBody('op-00000002', '', [element])).items.map((m) => m.anchor), ['h00000001']);
+  const reopened = JSON.parse(reopenBody('op-00000003', '', { anchor: drawing.anchor, label: drawing.label, region }, ''));
+  assert.deepEqual([reopened.items, reopened.marks[0].region.id, reopened.marks[0].status], [[], 'r1-double-fire', 'request-change']);
+});
+
+// Failure prevented: a draft whose drawing was damaged in storage is frozen
+// into a round the server refuses on every attempt.
+test('a stored draft whose drawing no longer reads as one is left out', () => {
+  const region = JSON.parse(readFileSync(new URL('../../../pkg/planreview/testdata/drawn-context/captures.json', import.meta.url), 'utf8')).records[0];
+  const s = fakeStorage(), st = openStore(s, 'acct', 'pln_1');
+  assert.ok(st.save({ anchor: 'q-' + region.id, status: 'flag', region }));
+  const key = 'ox-review:acct:pln_1:draft:q-' + region.id;
+  const kept = JSON.parse(s.getItem(key));
+  assert.equal(st.drafts()[0].region.id, region.id);
+  s.setItem(key, JSON.stringify({ ...kept, region: { ...region, ellipse: null } }));
+  assert.deepEqual(st.drafts(), [], 'a damaged region');
+  s.setItem(key, JSON.stringify({ ...kept, anchor: 'q-r2-double-fire-again' }));
+  assert.deepEqual(st.drafts(), [], 'a region filed under another drawing');
 });
 
 test('operation ids fit the hosts\' pattern and never repeat', () => {

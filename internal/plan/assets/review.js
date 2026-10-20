@@ -56,13 +56,557 @@
     return labelOf(anchorText(el));
   }
 
+  // src/region.ts
+  var LIMITS = {
+    regionBytes: 65536,
+    contextBytes: 16384,
+    pathPoints: 512,
+    targets: 16,
+    contextItems: 48,
+    itemLabels: 32,
+    targetText: 2e3,
+    neighborText: 600,
+    labelText: 80,
+    layoutKeys: 128
+  };
+  var DRAWING = /^q-[A-Za-z0-9_-]{8,64}$/;
+  var ID = /^[A-Za-z0-9_-]{8,64}$/;
+  var ELEMENT = /^h[0-9a-f]{8}$/;
+  var REVISION = /^sha256:[0-9a-f]{64}$/;
+  var TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?Z$/;
+  var obj = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
+  var str = (v) => typeof v === "string";
+  var num = (v) => typeof v === "number" && isFinite(v);
+  var all = (a, ok) => {
+    for (let i = 0; i < a.length; i++) if (!ok(a[i])) return false;
+    return true;
+  };
+  var nums = (v, n) => Array.isArray(v) && v.length === n && all(v, num);
+  var box = (v) => nums(v, 4) && v[2] >= 0 && v[3] >= 0;
+  var strs = (v, n) => Array.isArray(v) && v.length <= n && all(v, str);
+  var count = (v) => num(v) && v >= 0 && Math.floor(v) === v;
+  var bytes = (v) => new TextEncoder().encode(JSON.stringify(v)).length;
+  var utf8Bytes = bytes;
+  function problem(v, stamped) {
+    if (!obj(v)) return "not an object";
+    if (stamped) {
+      if (!str(v.id) || !ID.test(v.id)) return "id";
+      if (!str(v.plan_revision) || !REVISION.test(v.plan_revision)) return "plan_revision";
+      if (!str(v.created_at) || !TIME.test(v.created_at)) return "created_at";
+    }
+    if (v.v !== 1 || v.kind !== "region" || v.frame !== "document") return "v, kind or frame";
+    const p = v.path;
+    if (!Array.isArray(p) || p.length < 3 || p.length > LIMITS.pathPoints || !all(p, (x) => nums(x, 2))) return "path";
+    const e = v.ellipse;
+    if (!obj(e) || !nums(e.center, 2) || !nums(e.radii, 2) || !(e.radii[0] > 0 && e.radii[1] > 0) || !num(e.rotation) || !num(e.start) || e.dir !== 1 && e.dir !== -1) return "ellipse";
+    if (!box(v.bbox)) return "bbox";
+    const l = v.layout;
+    if (!obj(l) || !nums(l.viewport, 2) || !nums(l.document, 2) || !nums(l.scroll, 2) || !num(l.dpr) || !num(l.scale) || !str(l.theme) || !str(l.fonts) || !strs(l.open, LIMITS.layoutKeys) || !strs(l.checked, LIMITS.layoutKeys)) return "layout";
+    const ts = v.targets;
+    if (!Array.isArray(ts) || !ts.length || ts.length > LIMITS.targets) return "targets";
+    for (const t of ts) {
+      if (!obj(t) || !str(t.anchor) || !ELEMENT.test(t.anchor) || !str(t.tag) || !str(t.section) || !box(t.box)) return "targets";
+      if (!num(t.cover) || t.cover < 0 || t.cover > 1) return "targets";
+      if ("nth" in t !== "of" in t || "nth" in t && !(count(t.nth) && count(t.of) && t.of >= 2 && t.nth < t.of)) return "targets";
+    }
+    const c = v.context;
+    if (!obj(c) || !Array.isArray(c.items) || c.items.length > LIMITS.contextItems || typeof c.truncated !== "boolean") return "context";
+    const enclosed = ts.map((t) => t.anchor);
+    for (const it of c.items) {
+      if (!obj(it) || !str(it.anchor) || !ELEMENT.test(it.anchor) || !str(it.tag) || !box(it.box) || !str(it.text)) return "context";
+      if (it.text.length > (enclosed.indexOf(it.anchor) >= 0 ? LIMITS.targetText : LIMITS.neighborText)) return "context";
+      if (!("labels" in it)) continue;
+      const ls = it.labels;
+      if (!Array.isArray(ls) || !ls.length || ls.length > LIMITS.itemLabels) return "context";
+      if (!all(ls, (x) => obj(x) && box(x.box) && str(x.text) && x.text.length <= LIMITS.labelText)) return "context";
+    }
+    if (bytes(c) > LIMITS.contextBytes) return "context size";
+    if (bytes(v) > LIMITS.regionBytes) return "size";
+    return "";
+  }
+  function checkRegion(v) {
+    return problem(v, true);
+  }
+  function drawingLabel(r) {
+    const first = r.targets[0];
+    const item = r.context.items.filter((it) => it.anchor === first.anchor)[0];
+    const text2 = (item && item.text || first.section).replace(/\s+/g, " ").trim();
+    const label = "Drawing: " + text2;
+    return label.length > 70 ? label.slice(0, 69) + "…" : label;
+  }
+  var r1 = (n) => Math.round(n * 10) / 10;
+  function bboxOf(pts) {
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    pts.forEach((p) => {
+      x0 = Math.min(x0, p[0]);
+      y0 = Math.min(y0, p[1]);
+      x1 = Math.max(x1, p[0]);
+      y1 = Math.max(y1, p[1]);
+    });
+    return [r1(x0), r1(y0), r1(x1 - x0), r1(y1 - y0)];
+  }
+  function fitEllipse(pts) {
+    let A = 0, sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0;
+    for (let i = 0; i < pts.length; i++) {
+      const p = pts[i], q = pts[(i + 1) % pts.length], c = p[0] * q[1] - q[0] * p[1];
+      A += c / 2;
+      sx += (p[0] + q[0]) * c;
+      sy += (p[1] + q[1]) * c;
+      sxx += (p[0] * p[0] + p[0] * q[0] + q[0] * q[0]) * c;
+      syy += (p[1] * p[1] + p[1] * q[1] + q[1] * q[1]) * c;
+      sxy += (p[0] * q[1] + 2 * p[0] * p[1] + 2 * q[0] * q[1] + q[0] * p[1]) * c;
+    }
+    const bb = bboxOf(pts);
+    let cx, cy, rx, ry, rot = 0;
+    if (Math.abs(A) < 0.05 * bb[2] * bb[3]) {
+      cx = bb[0] + bb[2] / 2;
+      cy = bb[1] + bb[3] / 2;
+      rx = bb[2] / 2;
+      ry = bb[3] / 2;
+    } else {
+      cx = sx / (6 * A);
+      cy = sy / (6 * A);
+      const vxx = sxx / (12 * A) - cx * cx, vyy = syy / (12 * A) - cy * cy, vxy = sxy / (24 * A) - cx * cy;
+      const mid = (vxx + vyy) / 2, d = Math.sqrt((vxx - vyy) * (vxx - vyy) / 4 + vxy * vxy);
+      rot = 0.5 * Math.atan2(2 * vxy, vxx - vyy);
+      rx = 2 * Math.sqrt(Math.max(mid + d, 0));
+      ry = 2 * Math.sqrt(Math.max(mid - d, 0));
+      const snap = 10 * Math.PI / 180;
+      if (Math.abs(rot) < snap) rot = 0;
+      else if (Math.PI / 2 - Math.abs(rot) < snap) {
+        rot = 0;
+        const t = rx;
+        rx = ry;
+        ry = t;
+      }
+    }
+    const dx = pts[0][0] - cx, dy = pts[0][1] - cy, cos = Math.cos(rot), sin = Math.sin(rot);
+    const start = Math.atan2((-dx * sin + dy * cos) / (ry || 1), (dx * cos + dy * sin) / (rx || 1));
+    return { center: [r1(cx), r1(cy)], radii: [r1(rx), r1(ry)], rotation: r1(rot * 180 / Math.PI), start: r1(start * 180 / Math.PI), dir: A < 0 ? -1 : 1 };
+  }
+  function thin(pts) {
+    const out = [];
+    pts.forEach((p) => {
+      const q = out[out.length - 1];
+      if (!q || Math.abs(p[0] - q[0]) + Math.abs(p[1] - q[1]) >= 2) out.push(p);
+    });
+    if (out.length <= LIMITS.pathPoints) return out;
+    const step = out.length / LIMITS.pathPoints, s = [];
+    for (let i = 0; i < LIMITS.pathPoints; i++) s.push(out[Math.floor(i * step)]);
+    return s;
+  }
+  var NIB = { width: 12, angle: -12 * Math.PI / 180 };
+  function ellipsePoints(e, extra) {
+    const rx = e.radii[0], ry = e.radii[1], rot = e.rotation * Math.PI / 180, t0 = e.start * Math.PI / 180;
+    const around = Math.PI * (3 * (rx + ry) - Math.sqrt((3 * rx + ry) * (rx + 3 * ry)));
+    const sweep = 2 * Math.PI + extra;
+    const n = Math.max(48, Math.min(512, Math.ceil(around * sweep / (2 * Math.PI) / 3)));
+    const cos = Math.cos(rot), sin = Math.sin(rot), out = [];
+    for (let i = 0; i <= n; i++) {
+      const t = t0 + e.dir * sweep * i / n, x = rx * Math.cos(t), y = ry * Math.sin(t);
+      out.push([e.center[0] + x * cos - y * sin, e.center[1] + x * sin + y * cos]);
+    }
+    return out;
+  }
+  function smooth(pts) {
+    for (let k = 0; k < 2 && pts.length > 2; k++) {
+      const out = [pts[0]];
+      for (let i = 0; i < pts.length - 1; i++) {
+        const a = pts[i], b = pts[i + 1];
+        out.push([0.75 * a[0] + 0.25 * b[0], 0.75 * a[1] + 0.25 * b[1]], [0.25 * a[0] + 0.75 * b[0], 0.25 * a[1] + 0.75 * b[1]]);
+      }
+      out.push(pts[pts.length - 1]);
+      pts = out;
+    }
+    return pts;
+  }
+  function inkPaths(pts, off) {
+    pts = smooth(pts.map((p) => [p[0] + off[0], p[1] + off[1]]));
+    if (pts.length < 2) return { sweep: "", hair: "" };
+    const at = [0];
+    for (let i = 1; i < pts.length; i++) at.push(at[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]));
+    const total = at[at.length - 1];
+    const width = (d) => Math.max(0.1, Math.min(1, d / 24, (total - d) / 56));
+    const nx = Math.cos(NIB.angle) * NIB.width / 2, ny = Math.sin(NIB.angle) * NIB.width / 2;
+    const xy = (p, s) => r1(p[0] + nx * s) + " " + r1(p[1] + ny * s);
+    let sweep = "", hair = "M" + xy(pts[0], 0);
+    for (let j = 0; j < pts.length - 1; j++) {
+      const a = pts[j], b = pts[j + 1], wa = width(at[j]), wb = width(at[j + 1]);
+      sweep += "M" + xy(a, wa) + "L" + xy(b, wb) + "L" + xy(b, -wb) + "L" + xy(a, -wa) + "Z";
+      hair += "L" + xy(b, 0);
+    }
+    return { sweep, hair };
+  }
+  function inkLine(e) {
+    return ellipsePoints(e, 0.3);
+  }
+
+  // src/draw.ts
+  var SVGNS = "http://www.w3.org/2000/svg";
+  var TOL = 1;
+  var collapse = (s) => (s || "").replace(/\s+/g, " ").trim();
+  function markables(selector, exclude) {
+    const out = [];
+    document.querySelectorAll(selector).forEach((el) => {
+      if (!el.closest(exclude)) out.push({ el, anchor: anchorFor(el) });
+    });
+    return out;
+  }
+  function drawLayer(selector, exclude, capture, refuse, changed) {
+    const layer = svg("svg", { class: "rev-ink", "aria-hidden": "true" });
+    const ink = svg("g", {});
+    layer.appendChild(ink);
+    document.documentElement.appendChild(layer);
+    let tool = false;
+    let stroke = null;
+    let lastClient = null;
+    function svg(tag, attrs) {
+      const n = document.createElementNS(SVGNS, tag);
+      for (const k in attrs) n.setAttribute(k, String(attrs[k]));
+      return n;
+    }
+    function inkInto(pts, off, tint, cls) {
+      const p = inkPaths(pts, off);
+      const g = svg("g", { class: "rev-ink-" + tint + " " + cls });
+      g.appendChild(svg("path", { d: p.sweep, fill: "currentColor", stroke: "none" }));
+      g.appendChild(svg("path", { d: p.hair, fill: "none", stroke: "currentColor", "stroke-width": 1, "stroke-linecap": "round", "stroke-linejoin": "round" }));
+      ink.appendChild(g);
+      return g;
+    }
+    function fitLayer() {
+      const root = document.documentElement;
+      layer.setAttribute("width", "0");
+      layer.setAttribute("height", "0");
+      const o = layer.getBoundingClientRect();
+      layer.setAttribute("width", String(root.scrollWidth));
+      layer.setAttribute("height", String(root.scrollHeight));
+      ink.setAttribute("transform", "translate(" + r1(-(o.left + scrollX)) + " " + r1(-(o.top + scrollY)) + ")");
+    }
+    function byAnchor(all2) {
+      const m = /* @__PURE__ */ Object.create(null);
+      all2.forEach((c) => {
+        (m[c.anchor] = m[c.anchor] || []).push(c);
+      });
+      return m;
+    }
+    const rectOf = (r) => [r1(r.left + scrollX), r1(r.top + scrollY), r1(r.width), r1(r.height)];
+    function shownBox(el) {
+      const e = el;
+      if (e.checkVisibility ? !e.checkVisibility({ visibilityProperty: true }) : !el.getClientRects().length || getComputedStyle(el).visibility === "hidden" || inClosedDetails(el)) return null;
+      const r = el.getBoundingClientRect();
+      if (r.width < 1 || r.height < 1) return null;
+      for (let a = el.parentElement; a && a !== document.body && a !== document.documentElement; a = a.parentElement) {
+        const cs = getComputedStyle(a);
+        if (cs.overflowX === "visible" && cs.overflowY === "visible") continue;
+        const ar = a.getBoundingClientRect();
+        if (r.right <= ar.left || r.left >= ar.right || r.bottom <= ar.top || r.top >= ar.bottom) return null;
+      }
+      return rectOf(r);
+    }
+    function inClosedDetails(el) {
+      for (let d = el.parentElement && el.parentElement.closest("details:not([open])"); d; d = d.parentElement && d.parentElement.closest("details:not([open])")) {
+        const sum = d.querySelector(":scope > summary");
+        if (!sum || !sum.contains(el)) return true;
+      }
+      return false;
+    }
+    const overlaps = (a, b) => a[0] < b[0] + b[2] && b[0] < a[0] + a[2] && a[1] < b[1] + b[3] && b[1] < a[1] + a[3];
+    function inside(pt, poly) {
+      let w = 0;
+      for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+        const a = poly[j], b = poly[i], cross = (b[0] - a[0]) * (pt[1] - a[1]) - (pt[0] - a[0]) * (b[1] - a[1]);
+        if (a[1] <= pt[1]) {
+          if (b[1] > pt[1] && cross > 0) w++;
+        } else if (b[1] <= pt[1] && cross < 0) w--;
+      }
+      return w !== 0;
+    }
+    function coverage(b, poly, bb) {
+      if (!overlaps(b, bb)) return 0;
+      let n = 0;
+      for (let i = 0; i < 5; i++) for (let j = 0; j < 5; j++) if (inside([b[0] + b[2] * (i + 0.5) / 5, b[1] + b[3] * (j + 0.5) / 5], poly)) n++;
+      return n / 25;
+    }
+    const leafMost = (l) => l.filter((c) => !l.some((d) => d !== c && c.el.contains(d.el)));
+    const outerMost = (l) => l.filter((c) => !l.some((d) => d !== c && d.el.contains(c.el)));
+    function capturePath(pts) {
+      const ellipse = fitEllipse(pts), poly = ellipsePoints(ellipse, 0), bb = bboxOf(poly);
+      const all2 = markables(selector, exclude), index2 = byAnchor(all2);
+      const shown = [];
+      all2.forEach((c) => {
+        const b = shownBox(c.el);
+        if (b) shown.push({ ...c, box: b, cover: coverage(b, poly, bb) });
+      });
+      const covered = shown.filter((c) => c.cover >= 0.5);
+      let targets = leafMost(covered);
+      if (targets.length > LIMITS.targets) targets = outerMost(covered);
+      if (!targets.length) {
+        const cx = bb[0] + bb[2] / 2, cy = bb[1] + bb[3] / 2;
+        let best = null;
+        shown.forEach((c) => {
+          const b = c.box;
+          if (cx >= b[0] && cx <= b[0] + b[2] && cy >= b[1] && cy <= b[1] + b[3] && (!best || b[2] * b[3] < best.box[2] * best.box[3])) best = c;
+        });
+        if (best) targets = [best];
+      }
+      if (!targets.length) return "no-target";
+      if (targets.length > LIMITS.targets) return "too-large";
+      const cap = {
+        v: 1,
+        kind: "region",
+        frame: "document",
+        path: pts,
+        ellipse,
+        bbox: bb,
+        layout: layoutContext(),
+        targets: targets.map((c) => {
+          const same = index2[c.anchor];
+          const t = { anchor: c.anchor, tag: c.el.tagName.toLowerCase(), section: collapse(headingOf(c.el)), box: c.box, cover: c.cover };
+          if (same.length > 1) {
+            t.nth = same.findIndex((s) => s.el === c.el);
+            t.of = same.length;
+          }
+          return t;
+        }),
+        context: contextOf(shown, bb, targets)
+      };
+      return utf8Bytes(cap) > LIMITS.regionBytes - 256 ? "too-large" : cap;
+    }
+    function contextOf(shown, bb, targets) {
+      const m = 16, zone = [bb[0] - m, bb[1] - m, bb[2] + 2 * m, bb[3] + 2 * m];
+      const cx = bb[0] + bb[2] / 2, cy = bb[1] + bb[3] / 2;
+      const dist = (b) => Math.abs(b[0] + b[2] / 2 - cx) + Math.abs(b[1] + b[3] / 2 - cy);
+      const near = leafMost(shown.filter((c) => overlaps(c.box, zone))).sort((a, b) => dist(a.box) - dist(b.box));
+      const ctx = { items: [], truncated: near.length > LIMITS.contextItems };
+      const cut = (s, n) => {
+        if (s.length <= n) return s;
+        ctx.truncated = true;
+        return s.slice(0, n - 1) + "…";
+      };
+      const root = document.documentElement;
+      root.classList.add("rev-reading");
+      try {
+        near.slice(0, LIMITS.contextItems).forEach((c) => {
+          const h = c.el;
+          let text2 = collapse(h.innerText === void 0 ? h.textContent : h.innerText);
+          if (!text2) {
+            const img = c.el.querySelector("img[alt]");
+            if (img) text2 = "[image: " + collapse(img.getAttribute("alt")) + "]";
+          }
+          const it = { anchor: c.anchor, tag: c.el.tagName.toLowerCase(), box: c.box, text: cut(text2, targets.indexOf(c) >= 0 ? LIMITS.targetText : LIMITS.neighborText) };
+          let labels = labelsIn(c.el, zone);
+          if (labels.length > LIMITS.itemLabels) {
+            ctx.truncated = true;
+            labels = labels.slice(0, LIMITS.itemLabels);
+          }
+          labels.forEach((l) => {
+            l.text = cut(l.text, LIMITS.labelText);
+          });
+          if (labels.length) it.labels = labels;
+          ctx.items.push(it);
+        });
+      } finally {
+        root.classList.remove("rev-reading");
+      }
+      while (utf8Bytes(ctx) > LIMITS.contextBytes && ctx.items.length > 1) {
+        ctx.items.pop();
+        ctx.truncated = true;
+      }
+      return ctx;
+    }
+    function labelsIn(el, zone) {
+      const out = [];
+      el.querySelectorAll("svg g.node, svg g.edgeLabel, svg g.cluster, svg text").forEach((n) => {
+        if (n.tagName.toLowerCase() === "text" && n.closest("g.node, g.edgeLabel, g.cluster")) return;
+        const t = collapse(n.textContent), b = t ? shownBox(n) : null;
+        if (b && overlaps(b, zone)) out.push({ text: t, box: b });
+      });
+      return out;
+    }
+    const detailsKey = (d) => {
+      const s = d.querySelector("summary");
+      return "d" + fnv1a(norm(s ? s.textContent : ""));
+    };
+    const inputKey = (i) => i.id ? "#" + i.id : i.name + "=" + i.value;
+    function layoutContext() {
+      fitLayer();
+      const open = [], checked = [];
+      document.querySelectorAll("details[open]").forEach((d) => open.push(detailsKey(d)));
+      document.querySelectorAll("input[type=radio]:checked, input[type=checkbox]:checked").forEach((i) => checked.push(inputKey(i)));
+      const root = document.documentElement, vv = window.visualViewport;
+      return {
+        viewport: [innerWidth, innerHeight],
+        document: [root.scrollWidth, root.scrollHeight],
+        dpr: devicePixelRatio,
+        scale: vv ? r1(vv.scale) : 1,
+        scroll: [r1(scrollX), r1(scrollY)],
+        theme: root.getAttribute("data-theme") || (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark"),
+        fonts: document.fonts ? document.fonts.status : "",
+        open: open.slice(0, LIMITS.layoutKeys),
+        checked: checked.slice(0, LIMITS.layoutKeys)
+      };
+    }
+    function place(d, index2) {
+      const found = [];
+      let hidden = null, first;
+      for (const t of d.targets) {
+        const same = index2[t.anchor] || [];
+        if (!same.length) return { outcome: "missing" };
+        if (same.length !== (t.of || 1)) return { outcome: "ambiguous" };
+        const el = same[t.nth || 0].el, b = shownBox(el);
+        first = first || el;
+        if (!b) {
+          hidden = hidden || { outcome: "hidden" };
+          continue;
+        }
+        found.push({ box: b, was: t.box });
+      }
+      if (hidden) return { ...hidden, el: first };
+      const dx = r1(found[0].box[0] - found[0].was[0]), dy = r1(found[0].box[1] - found[0].was[1]);
+      const rigid = found.every((f) => Math.abs(f.box[2] - f.was[2]) <= TOL && Math.abs(f.box[3] - f.was[3]) <= TOL && Math.abs(f.box[0] - f.was[0] - dx) <= TOL && Math.abs(f.box[1] - f.was[1] - dy) <= TOL);
+      if (!rigid) return { outcome: "reflowed", boxes: found.map((f) => f.box), el: first };
+      return { outcome: Math.abs(dx) <= TOL && Math.abs(dy) <= TOL ? "exact" : "moved", offset: [dx, dy], el: first };
+    }
+    let drawings = [];
+    let index = /* @__PURE__ */ Object.create(null);
+    let last = "";
+    function placeAll() {
+      fitLayer();
+      while (ink.firstChild) ink.removeChild(ink.firstChild);
+      const out = drawings.map((d) => {
+        const o = place(d, index);
+        const cls = d.kind === "unsent" ? "rev-ink-unsent" : "";
+        if (o.offset) inkInto(inkLine(d.ellipse), o.offset, d.tint, cls).setAttribute("data-anchor", d.anchor);
+        else if (o.boxes) {
+          const u = o.boxes.reduce((m, b) => [Math.min(m[0], b[0]), Math.min(m[1], b[1]), Math.max(m[2], b[0] + b[2]), Math.max(m[3], b[1] + b[3])], [Infinity, Infinity, -Infinity, -Infinity]);
+          ink.appendChild(svg("ellipse", {
+            class: "rev-ink-" + d.tint + " rev-ink-reflowed",
+            "data-anchor": d.anchor,
+            cx: (u[0] + u[2]) / 2,
+            cy: (u[1] + u[3]) / 2,
+            rx: (u[2] - u[0]) / Math.SQRT2 + 6,
+            ry: (u[3] - u[1]) / Math.SQRT2 + 6
+          }));
+        }
+        return { anchor: d.anchor, outcome: o.outcome, el: o.el || null };
+      });
+      if (stroke) ink.appendChild(stroke.line);
+      last = out.map((p) => p.outcome).join();
+      return out;
+    }
+    let timer;
+    function relayout() {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        const was = last;
+        placeAll();
+        if (last !== was) changed();
+      }, 100);
+    }
+    function addPoint(cx, cy) {
+      if (!stroke) return;
+      lastClient = [cx, cy];
+      const p = [r1(cx + scrollX), r1(cy + scrollY)], q = stroke.pts[stroke.pts.length - 1];
+      if (q && Math.abs(p[0] - q[0]) + Math.abs(p[1] - q[1]) < 2) return;
+      stroke.pts.push(p);
+      const sp = layer.createSVGPoint();
+      sp.x = p[0];
+      sp.y = p[1];
+      stroke.line.points.appendItem(sp);
+    }
+    function abort(reason) {
+      if (!stroke) return;
+      stroke.line.remove();
+      stroke = null;
+      refuse(reason);
+    }
+    layer.addEventListener("pointerdown", (e) => {
+      if (!tool || e.button !== 0 || stroke) return;
+      e.preventDefault();
+      fitLayer();
+      stroke = { pointer: e.pointerId, pts: [], line: svg("polyline", { class: "rev-ink-live" }) };
+      ink.appendChild(stroke.line);
+      layer.setPointerCapture(e.pointerId);
+      addPoint(e.clientX, e.clientY);
+    });
+    layer.addEventListener("pointermove", (e) => {
+      if (stroke && e.pointerId === stroke.pointer) addPoint(e.clientX, e.clientY);
+    });
+    layer.addEventListener("pointerup", (e) => {
+      if (!stroke || e.pointerId !== stroke.pointer) return;
+      stroke.line.remove();
+      const pts = thin(stroke.pts), bb = bboxOf(pts);
+      stroke = null;
+      if (pts.length < 3 || bb[2] < 8 || bb[3] < 8) {
+        refuse("too-small");
+        return;
+      }
+      const c = capturePath(pts);
+      if (typeof c === "string") {
+        refuse(c);
+        return;
+      }
+      capture(c, { left: c.bbox[0] - scrollX, bottom: c.bbox[1] + c.bbox[3] - scrollY });
+    });
+    layer.addEventListener("pointercancel", (e) => {
+      if (stroke && e.pointerId === stroke.pointer) abort("cancelled");
+    });
+    window.addEventListener("scroll", () => {
+      if (stroke && lastClient) addPoint(lastClient[0], lastClient[1]);
+    });
+    document.addEventListener("scroll", (e) => {
+      if (e.target !== document) relayout();
+    }, true);
+    window.addEventListener("resize", () => {
+      abort("layout-changed");
+      relayout();
+    });
+    document.addEventListener("toggle", relayout, true);
+    document.addEventListener("change", relayout, true);
+    if (window.ResizeObserver) new ResizeObserver(relayout).observe(document.documentElement);
+    window.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape" || !stroke || e.defaultPrevented) return;
+      e.preventDefault();
+      abort("cancelled");
+    }, true);
+    return {
+      setTool(on) {
+        tool = on;
+        layer.classList.toggle("rev-drawing", on);
+        if (!on) abort("cancelled");
+      },
+      paint(next, all2) {
+        drawings = next;
+        index = byAnchor(all2);
+        return placeAll();
+      },
+      show(d) {
+        document.querySelectorAll("details").forEach((x) => {
+          const el = x;
+          if (!el.open && d.open.indexOf(detailsKey(el)) >= 0) el.open = true;
+        });
+        document.querySelectorAll("input[type=radio], input[type=checkbox]").forEach((x) => {
+          const i = x;
+          if (!i.checked && d.checked.indexOf(inputKey(i)) >= 0) {
+            i.checked = true;
+            i.dispatchEvent(new Event("change", { bubbles: true }));
+          }
+        });
+        d.targets.forEach((t) => {
+          const c = (index[t.anchor] || [])[t.nth || 0];
+          for (let a = c && c.el.parentElement; a; a = a.parentElement) if (a.tagName === "DETAILS") a.open = true;
+        });
+      }
+    };
+  }
+
   // src/protocol.ts
   var MAX_TEXT = 65536;
   var ANCHOR = /^[hq][0-9a-f]{8}$/;
   var STATUSES = ["approve", "request-change", "flag", "comment"];
   var STATES = ["open", "addressed", "verified", "wontfix"];
   var TINTS = ["sage", "amber", "red", "gold", "faint"];
-  function obj(v) {
+  function obj2(v) {
     return typeof v === "object" && v !== null && !Array.isArray(v);
   }
   function text(v) {
@@ -71,11 +615,17 @@
   function optText(v) {
     return v === void 0 || text(v);
   }
+  function num2(v) {
+    return typeof v === "number" && isFinite(v);
+  }
+  function nums2(v, n) {
+    return Array.isArray(v) && v.length === n && all(v, num2);
+  }
   function oneOf(v, list) {
     return typeof v === "string" && list.indexOf(v) >= 0;
   }
   function paintItem(it) {
-    if (!obj(it) || typeof it.anchor !== "string" || !ANCHOR.test(it.anchor)) return null;
+    if (!obj2(it) || typeof it.anchor !== "string" || !ANCHOR.test(it.anchor)) return null;
     if (it.kind !== "unsent" && it.kind !== "committed" || !oneOf(it.status, STATUSES) || !oneOf(it.tint, TINTS)) return null;
     if (it.state !== void 0 && !oneOf(it.state, STATES) || !text(it.glyph)) return null;
     if (!optText(it.quote) || !optText(it.section) || !optText(it.label)) return null;
@@ -85,6 +635,34 @@
     if (it.section !== void 0) p.section = it.section;
     if (it.label !== void 0) p.label = it.label;
     return p;
+  }
+  function drawingPaint(it) {
+    if (!obj2(it) || typeof it.anchor !== "string" || !DRAWING.test(it.anchor)) return null;
+    if (it.kind !== "unsent" && it.kind !== "committed" || !oneOf(it.tint, TINTS)) return null;
+    const e = it.ellipse;
+    if (!obj2(e) || !nums2(e.center, 2) || !nums2(e.radii, 2) || !num2(e.rotation) || !num2(e.start) || e.dir !== 1 && e.dir !== -1) return null;
+    const strs2 = (v) => Array.isArray(v) && v.length <= LIMITS.layoutKeys && all(v, text);
+    if (!Array.isArray(it.targets) || !it.targets.length || it.targets.length > LIMITS.targets || !strs2(it.open) || !strs2(it.checked)) return null;
+    const targets = [];
+    for (const t of it.targets) {
+      if (!obj2(t) || typeof t.anchor !== "string" || !ANCHOR.test(t.anchor) || t.anchor.charAt(0) !== "h" || !nums2(t.box, 4)) return null;
+      const o = { anchor: t.anchor, box: [t.box[0], t.box[1], t.box[2], t.box[3]] };
+      if (t.nth !== void 0 || t.of !== void 0) {
+        if (!num2(t.nth) || !num2(t.of)) return null;
+        o.nth = t.nth;
+        o.of = t.of;
+      }
+      targets.push(o);
+    }
+    return {
+      anchor: it.anchor,
+      kind: it.kind,
+      tint: it.tint,
+      ellipse: { center: [e.center[0], e.center[1]], radii: [e.radii[0], e.radii[1]], rotation: e.rotation, start: e.start, dir: e.dir },
+      targets,
+      open: it.open.slice(),
+      checked: it.checked.slice()
+    };
   }
 
   // src/ports.ts
@@ -102,7 +680,7 @@
   }
 
   // src/document-tools.ts
-  var CHROME = ".rev-bar, .rev-rail, .rev-orphans, .rev-toast, .rev-sync, .rev-offline-bar";
+  var CHROME = ".rev-bar, .rev-rail, .rev-orphans, .rev-toast, .rev-sync, .rev-offline-bar, .rev-original";
   function typing(e) {
     const t = e.target;
     return !!t && (t.tagName === "TEXTAREA" || t.tagName === "INPUT" || t.isContentEditable);
@@ -118,16 +696,27 @@
     let on = false;
     let open = false;
     let items = [];
+    let drawings = [];
     let qRanges = /* @__PURE__ */ Object.create(null);
     let spots = [];
     let picked = null;
     let focused = null;
     let started = false;
+    let tool = false;
     function isRange(at) {
       return "startContainer" in at;
     }
-    function paint(next) {
+    const NOT_PLAN = CHROME + ", .rev-pop";
+    const draw = drawLayer(
+      SELECTOR,
+      NOT_PLAN,
+      (capture, rect) => port.send({ type: "capture", capture, rect }),
+      (reason) => port.send({ type: "refused", reason }),
+      () => paint(items, drawings)
+    );
+    function paint(next, nextDrawings) {
       items = next;
+      drawings = nextDrawings;
       document.querySelectorAll(".rev-marked,.rev-committed").forEach((el) => {
         el.classList.remove("rev-marked", "rev-committed");
         el.removeAttribute("data-rev");
@@ -140,8 +729,8 @@
         byAnchor[it.anchor] = it;
       });
       const marked = [];
-      document.querySelectorAll(SELECTOR).forEach((el) => {
-        const a = anchorFor(el);
+      const all2 = markables(SELECTOR, NOT_PLAN);
+      all2.forEach(({ el, anchor: a }) => {
         const it = byAnchor[a];
         if (!it) return;
         const glyph = document.createElement("span");
@@ -159,6 +748,12 @@
       });
       const found = marked.map((m) => ({ p: { anchor: m.a, section: headingOf(m.el), label: labelFor(m.el) }, at: m.el }));
       paintQuotes(found);
+      const lost = [];
+      draw.paint(drawings, all2).forEach((d) => {
+        const p = { anchor: d.anchor, section: "", label: "", outcome: d.outcome };
+        if (d.el && d.outcome !== "missing" && d.outcome !== "ambiguous") found.push({ p, at: d.el });
+        else lost.push(p);
+      });
       const pos = found.map((s) => {
         if (isRange(s.at)) return s.at;
         const r = document.createRange();
@@ -167,7 +762,7 @@
       });
       const order = found.map((_, i) => i).sort((x, y) => pos[x].compareBoundaryPoints(Range.START_TO_START, pos[y]));
       spots = order.map((i) => found[i]);
-      port.send({ type: "placed", items: spots.map((s) => s.p) });
+      port.send({ type: "placed", items: spots.map((s) => s.p).concat(lost) });
     }
     function paintQuotes(found) {
       qRanges = /* @__PURE__ */ Object.create(null);
@@ -216,6 +811,11 @@
       setTimeout(() => el.classList.remove("rev-flash"), 1200);
     }
     function reveal(anchor, nth) {
+      const d = DRAWING.test(anchor) ? drawings.filter((x) => x.anchor === anchor)[0] : null;
+      if (d && spots.some((x) => x.p.anchor === anchor && x.p.outcome === "hidden")) {
+        draw.show(d);
+        paint(items, drawings);
+      }
       const s = spots.filter((x) => x.p.anchor === anchor)[nth];
       if (!s) return;
       const range = isRange(s.at) ? s.at : null;
@@ -309,8 +909,8 @@
       const section = headingOf(first);
       const n = quoteHits(idx, section, quote).length;
       if (n > 1) return { refuse: "repeated", quote, count: n };
-      const box = range.getBoundingClientRect();
-      return { anchor: quoteAnchor(section, quote), section, label: clip(quote, 70), quote, range: rangeAt(idx, s, e), rect: { left: box.left, bottom: box.bottom } };
+      const box2 = range.getBoundingClientRect();
+      return { anchor: quoteAnchor(section, quote), section, label: clip(quote, 70), quote, range: rangeAt(idx, s, e), rect: { left: box2.left, bottom: box2.bottom } };
     }
     function highlightAt(ev) {
       for (const a in qRanges) {
@@ -336,7 +936,7 @@
     function onClick(ev) {
       if (!started) return;
       const el0 = ev.target;
-      if (el0.closest && el0.closest(CHROME + ", .rev-pop")) return;
+      if (el0.closest && el0.closest(CHROME + ", .rev-pop, .rev-ink")) return;
       if (!on) {
         port.send({ type: "dismiss" });
         return;
@@ -385,9 +985,11 @@
           on = m.on;
           open = m.open;
           body.classList.toggle("rev-on", on);
+          tool = on && m.draw;
+          draw.setTool(tool && started);
           break;
         case "paint":
-          paint(m.items);
+          paint(m.items, m.drawings);
           break;
         case "focus": {
           const h = m.anchor === null ? null : picked && picked.a === m.anchor ? picked.range : qRanges[m.anchor] ? qRanges[m.anchor].range : null;
@@ -401,6 +1003,7 @@
     });
     whenDiagramsDrawn(() => {
       started = true;
+      draw.setTool(tool);
       port.send({ type: "ready" });
     });
   }
@@ -414,6 +1017,53 @@
     check();
   }
 
+  // src/original.ts
+  var SVGNS2 = "http://www.w3.org/2000/svg";
+  function originalView(r, doc) {
+    const mk = (tag, attrs, text2) => {
+      const n = doc.createElementNS(SVGNS2, tag);
+      for (const k in attrs) n.setAttribute(k, String(attrs[k]));
+      if (text2) n.textContent = text2;
+      return n;
+    };
+    const b = r.bbox, pad = 24, vb = [b[0] - pad, b[1] - pad, b[2] + 2 * pad, b[3] + 2 * pad];
+    const out = mk("svg", { viewBox: vb.join(" "), width: vb[2], height: vb[3], class: "rev-original-svg", role: "img" });
+    out.appendChild(mk("title", {}, "What lay under this drawing on revision " + r.plan_revision));
+    r.context.items.forEach((it) => {
+      const [x, y, w, h] = it.box;
+      out.appendChild(mk("rect", { x, y, width: w, height: h, class: "rev-orig-box" }));
+      if (it.labels) {
+        it.labels.forEach((l) => {
+          out.appendChild(mk("rect", { x: l.box[0], y: l.box[1], width: l.box[2], height: l.box[3], class: "rev-orig-label-box" }));
+          out.appendChild(mk("text", { x: l.box[0] + 2, y: l.box[1] + Math.min(l.box[3], 14) - 3, class: "rev-orig-label" }, l.text));
+        });
+        const rest = it.labels.reduce((t, l) => t.replace(l.text, " "), it.text).replace(/\s+/g, " ").trim();
+        if (rest) out.appendChild(mk("text", { x: x + 2, y: y + h - 4, class: "rev-orig-text" }, rest));
+        return;
+      }
+      const per = Math.max(8, Math.floor(w / 7)), rows = Math.max(1, Math.floor(h / 15)), text2 = mk("text", { class: "rev-orig-text" });
+      let line = "", n = 0;
+      const flush = () => {
+        if (n < rows && line) text2.appendChild(mk("tspan", { x: x + 2, y: y + 13 + n * 15 }, line));
+        n++;
+        line = "";
+      };
+      it.text.split(" ").forEach((wd) => {
+        if (line && (line + " " + wd).length > per) flush();
+        line = line ? line + " " + wd : wd;
+      });
+      flush();
+      out.appendChild(text2);
+    });
+    const p = inkPaths(inkLine(r.ellipse), [0, 0]);
+    const g = mk("g", { class: "rev-orig-ink" });
+    g.appendChild(mk("path", { d: p.sweep, fill: "currentColor", stroke: "none" }));
+    g.appendChild(mk("path", { d: p.hair, fill: "none", stroke: "currentColor", "stroke-width": 1, "stroke-linecap": "round", "stroke-linejoin": "round" }));
+    out.appendChild(g);
+    if (r.context.truncated) out.appendChild(mk("text", { x: vb[0] + 4, y: vb[1] + vb[3] - 6, class: "rev-orig-cut" }, "Context truncated: some of what lay here was not kept."));
+    return out;
+  }
+
   // src/state.ts
   var ACTS = ["submit", "reopen", "accept"];
   var DRAFT = "draft:";
@@ -422,7 +1072,7 @@
   var enc = encodeURIComponent;
   var accountPrefix = (account) => "ox-review:" + enc(account) + ":";
   var has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
-  function obj2(v) {
+  function obj3(v) {
     return typeof v === "object" && v !== null && !Array.isArray(v);
   }
   function read(storage, key) {
@@ -460,15 +1110,17 @@
     return out;
   }
   function asMark(v) {
-    if (!obj2(v) || typeof v.anchor !== "string" || STATUSES.indexOf(v.status) < 0 || typeof v.at !== "number") return null;
+    if (!obj3(v) || typeof v.anchor !== "string" || STATUSES.indexOf(v.status) < 0 || typeof v.at !== "number") return null;
+    if (v.region !== void 0 && (checkRegion(v.region) || v.anchor !== "q-" + v.region.id)) return null;
     const m = { anchor: v.anchor, status: v.status, at: v.at };
     ["section", "label", "note", "quote"].forEach((k) => {
       if (typeof v[k] === "string") m[k] = v[k];
     });
+    if (v.region !== void 0) m.region = v.region;
     return m;
   }
   function asEntry(v) {
-    if (!obj2(v) || typeof v.id !== "string" || ACTS.indexOf(v.act) < 0 || typeof v.body !== "string" || typeof v.at !== "number" || !obj2(v.stamps)) return null;
+    if (!obj3(v) || typeof v.id !== "string" || ACTS.indexOf(v.act) < 0 || typeof v.body !== "string" || typeof v.at !== "number" || !obj3(v.stamps)) return null;
     const stamps = /* @__PURE__ */ Object.create(null);
     Object.keys(v.stamps).forEach((a) => {
       const s = v.stamps[a];
@@ -523,6 +1175,7 @@
         ["section", "label", "note", "quote"].forEach((k) => {
           if (m[k] !== void 0) mark[k] = m[k];
         });
+        if (m.region) mark.region = m.region;
         if (write(storage, prefix + DRAFT + enc(m.anchor), mark)) {
           delete memory[m.anchor];
           return true;
@@ -557,7 +1210,7 @@
       },
       exportId(items) {
         const prev = read(storage, prefix + EXPORT);
-        const id = obj2(prev) && typeof prev.id === "string" && JSON.stringify(prev.items) === JSON.stringify(items) ? prev.id : newId();
+        const id = obj3(prev) && typeof prev.id === "string" && JSON.stringify(prev.items) === JSON.stringify(items) ? prev.id : newId();
         write(storage, prefix + EXPORT, { id, items });
         return id;
       }
@@ -571,7 +1224,11 @@
     if (m.quote) o.quote = m.quote;
     o.status = m.status;
     o.note = m.note || "";
+    if (m.region) o.region = m.region;
     return o;
+  }
+  function roundItems(items) {
+    return items.some((it) => it.region) ? { items: [], marks: items } : { items };
   }
   function request(id, reviewer, rest) {
     const o = { id };
@@ -579,10 +1236,10 @@
     return JSON.stringify(Object.assign(o, rest));
   }
   function submitBody(id, reviewer, marks) {
-    return request(id, reviewer, { items: marks.map(wireItem) });
+    return request(id, reviewer, roundItems(marks.map(wireItem)));
   }
   function reopenBody(id, reviewer, item, note) {
-    return request(id, reviewer, { items: [wireItem({ ...item, status: "request-change", note: note || "reopened by reviewer" })] });
+    return request(id, reviewer, roundItems([wireItem({ ...item, status: "request-change", note: note || "reopened by reviewer" })]));
   }
   function acceptBody(id, reviewer, anchor) {
     return request(id, reviewer, { anchor, state: "verified", note: "accepted by reviewer" });
@@ -623,29 +1280,29 @@
   }
   function migrateLegacy(storage, slug, store) {
     const KEY = "ox-plan-fb:" + slug;
-    const marks = read(storage, KEY), box = read(storage, KEY + ":outbox"), exp = read(storage, KEY + ":export");
-    if (marks === null && box === null && exp === null) return;
+    const marks = read(storage, KEY), box2 = read(storage, KEY + ":outbox"), exp = read(storage, KEY + ":export");
+    if (marks === null && box2 === null && exp === null) return;
     let ok = true;
     const current = store.drafts();
-    if (obj2(marks)) {
+    if (obj3(marks)) {
       Object.keys(marks).forEach((a) => {
         const v = marks[a];
-        const m = asMark(obj2(v) ? { ...v, anchor: a, at: Math.max(+v.updated_at || 0, 1) } : null);
+        const m = asMark(obj3(v) ? { ...v, anchor: a, at: Math.max(+v.updated_at || 0, 1) } : null);
         if (!m || current.some((d) => d.anchor === a && d.at >= m.at)) return;
         ok = write(storage, store.prefix + DRAFT + enc(a), m) && ok;
       });
     }
-    if (obj2(box) && typeof box.id === "string" && Array.isArray(box.items)) {
+    if (obj3(box2) && typeof box2.id === "string" && Array.isArray(box2.items)) {
       const stamps = /* @__PURE__ */ Object.create(null);
-      const s = obj2(box.stamps) ? box.stamps : {};
-      box.items.forEach((it) => {
-        if (obj2(it) && typeof it.anchor === "string") stamps[it.anchor] = Math.max(+s[it.anchor] || 0, 1);
+      const s = obj3(box2.stamps) ? box2.stamps : {};
+      box2.items.forEach((it) => {
+        if (obj3(it) && typeof it.anchor === "string") stamps[it.anchor] = Math.max(+s[it.anchor] || 0, 1);
       });
-      const body = JSON.stringify({ id: box.id, slug, reviewer: box.reviewer, items: box.items });
-      const e = { id: box.id, act: "submit", body, at: Date.parse(box.created_at) || Date.now(), stamps };
+      const body = JSON.stringify({ id: box2.id, slug, reviewer: box2.reviewer, items: box2.items });
+      const e = { id: box2.id, act: "submit", body, at: Date.parse(box2.created_at) || Date.now(), stamps };
       ok = write(storage, store.prefix + OP + enc(e.id), e) && ok;
     }
-    if (obj2(exp)) ok = write(storage, store.prefix + EXPORT, exp) && ok;
+    if (obj3(exp)) ok = write(storage, store.prefix + EXPORT, exp) && ok;
     if (ok) ["", ":tombs", ":outbox", ":export"].forEach((k) => unset(storage, KEY + k));
   }
 
@@ -657,6 +1314,14 @@
     { id: "comment", glyph: "◌" }
   ];
   var HL_TINT = { "approve": "sage", "request-change": "amber", "flag": "red", "comment": "gold" };
+  var stateTint = (state) => state === "addressed" || state === "verified" ? "sage" : state === "wontfix" ? "faint" : "amber";
+  var DRAW_REFUSED = {
+    "no-target": "Nothing in that loop can take a comment. Draw around a paragraph, an item, a row or part of a diagram.",
+    "too-large": "That loop holds too much of the plan to keep. Draw around less of it.",
+    "too-small": "Draw a loop around what you mean.",
+    "layout-changed": "The page changed while you drew. Draw the loop again."
+  };
+  var REVISION2 = /^sha256:[0-9a-f]{64}$/;
   var WHOLE = { a: "plan", section: "", label: "Whole plan" };
   var BUBBLE = '<svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 2.5h10A1.5 1.5 0 0 1 14.5 4v6a1.5 1.5 0 0 1-1.5 1.5H7.5L4 14.5v-3H3A1.5 1.5 0 0 1 1.5 10V4A1.5 1.5 0 0 1 3 2.5z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>';
   function esc(s) {
@@ -703,6 +1368,11 @@
           invalid++;
           return;
         }
+        if (x.region !== void 0 && (checkRegion(x.region) || x.anchor !== "q-" + x.region.id)) {
+          invalid++;
+          x = Object.assign({}, x);
+          delete x.region;
+        }
         (committed[x.anchor] = committed[x.anchor] || []).push(x);
       });
     }
@@ -724,14 +1394,22 @@
     let ds = /* @__PURE__ */ Object.create(null);
     let placed = [];
     let unplaced = [];
+    const revision = opts.revision && REVISION2.test(opts.revision) ? opts.revision : "";
+    let tool = false;
+    let pending = null;
+    function regionOf(a) {
+      if (pending && "q-" + pending.id === a) return pending;
+      if (ds[a] && ds[a].region) return ds[a].region;
+      return (committed[a] || []).map((x) => x.region).filter((r) => r)[0];
+    }
     function committedState(a) {
       const arr = committed[a] || [];
       return arr.length ? repOf(arr).state : "";
     }
     function paintItems() {
       const out = [];
-      Object.keys(committed).concat(Object.keys(ds)).forEach((a, i, all) => {
-        if (all.indexOf(a) !== i || !/^[hq][0-9a-f]{8}$/.test(a)) return;
+      Object.keys(committed).concat(Object.keys(ds)).forEach((a, i, all2) => {
+        if (all2.indexOf(a) !== i || !/^[hq][0-9a-f]{8}$/.test(a)) return;
         const carr = committed[a] || [];
         const c = carr.length ? repOf(carr) : null, m = ds[a];
         let it;
@@ -744,7 +1422,7 @@
             status: c.status,
             state: c.state,
             glyph: c.state === "addressed" || c.state === "verified" ? "✓" : c.state === "wontfix" ? "—" : glyphFor(c.status),
-            tint: c.state === "addressed" || c.state === "verified" ? "sage" : c.state === "wontfix" ? "faint" : "amber"
+            tint: stateTint(c.state)
           };
         } else return;
         const q = m && m.quote ? m : carr.filter((x) => x.quote)[0];
@@ -758,6 +1436,25 @@
       });
       return out;
     }
+    function paintDrawings() {
+      const out = [];
+      Object.keys(committed).concat(Object.keys(ds), pending ? ["q-" + pending.id] : []).forEach((a, i, all2) => {
+        const r = all2.indexOf(a) === i && DRAWING.test(a) ? regionOf(a) : void 0;
+        if (!r) return;
+        const m = ds[a], carr = committed[a] || [];
+        const d = drawingPaint({
+          anchor: a,
+          kind: m || !carr.length ? "unsent" : "committed",
+          tint: m ? HL_TINT[m.status] || "gold" : carr.length ? stateTint(repOf(carr).state) : "gold",
+          ellipse: r.ellipse,
+          targets: r.targets.map((t) => ({ anchor: t.anchor, box: t.box, nth: t.nth, of: t.of })),
+          open: r.layout.open,
+          checked: r.layout.checked
+        });
+        if (d) out.push(d);
+      });
+      return out;
+    }
     function paint() {
       if (destroyed) return;
       place();
@@ -767,13 +1464,18 @@
       });
       const n = Object.keys(ds).length;
       countEl.textContent = n ? n + " unsent" : "";
-      port.send({ type: "paint", items: paintItems() });
+      port.send({ type: "paint", items: paintItems(), drawings: paintDrawings() });
     }
+    let outcome = /* @__PURE__ */ Object.create(null);
     function onPlaced(items) {
+      outcome = /* @__PURE__ */ Object.create(null);
+      items.forEach((p) => {
+        if (p.outcome) outcome[p.anchor] = p.outcome;
+      });
       const seen = /* @__PURE__ */ Object.create(null);
       seen[WHOLE.a] = true;
-      placed = items.filter((p) => !seen[p.anchor] && (seen[p.anchor] = true));
-      unplaced = Object.keys(committed).concat(Object.keys(ds)).filter((a, i, all) => !seen[a] && all.indexOf(a) === i);
+      placed = items.filter((p) => p.outcome !== "missing" && p.outcome !== "ambiguous" && !seen[p.anchor] && (seen[p.anchor] = true));
+      unplaced = Object.keys(committed).concat(Object.keys(ds)).filter((a, i, all2) => !seen[a] && all2.indexOf(a) === i);
       const orphans = [];
       Object.keys(committed).forEach((a) => {
         if (!seen[a]) committed[a].forEach((x) => orphans.push(x));
@@ -836,7 +1538,8 @@
             state: c.state,
             reviewer: c.reviewer || "",
             tag: "",
-            answer: c.state !== "open" && c.resolutionNote ? c.resolutionNote : ""
+            answer: c.state !== "open" && c.resolutionNote ? c.resolutionNote : "",
+            region: c.region
           });
         });
         const m = ds[a];
@@ -852,7 +1555,8 @@
             state: "",
             reviewer: who() || "(you)",
             tag: store.unsaved(a) ? "unsaved" : queued(waiting, m) ? "queued" : "unsent",
-            answer: ""
+            answer: "",
+            region: m.region
           });
         }
       }
@@ -899,7 +1603,7 @@
       const hide = '<button class="rev-rail-hide" title="Hide comments">Hide</button>';
       const plan = on ? '<button class="rev-rail-plan">+ Comment on the whole plan</button>' : "";
       if (!rows.length) {
-        r.innerHTML = '<div class="rev-rail-h">Comments' + hide + "</div>" + plan + '<div class="rev-rail-empty">Click any section, risk, or row — or highlight text — to leave a comment.</div>';
+        r.innerHTML = '<div class="rev-rail-h">Comments' + hide + "</div>" + plan + '<div class="rev-rail-empty">Click any section, risk, or row — or highlight text' + (revision ? ", or Draw around part of the plan" : "") + " — to leave a comment.</div>";
         return;
       }
       let html = '<div class="rev-rail-h">Comments <span class="rev-rail-n">' + rows.length + "</span>" + hide + "</div>" + plan + '<ul class="rev-rail-list">';
@@ -908,8 +1612,9 @@
         let tag = "";
         if (row.tag) tag = '<span class="rev-rail-tag ' + row.tag + '">' + row.tag + "</span>";
         else if (STATE_TAG[row.state]) tag = '<span class="rev-rail-tag ' + STATE_TAG[row.state] + '">' + STATE_TAG[row.state] + "</span>";
-        if (!row.at && !whole) tag += '<span class="rev-rail-tag">text changed</span>';
-        const content = (row.quote ? '<div class="rev-rail-quote">' + esc(row.label) + "</div>" : "") + (row.note ? '<div class="rev-rail-note">' + esc(row.note) + "</div>" : row.quote || whole ? "" : '<div class="rev-rail-note muted">' + esc(row.label) + "</div>") + (row.answer ? '<div class="rev-rail-answer">↳ ' + esc(row.answer) + "</div>" : "");
+        if (!row.at && !whole) tag += outcome[row.a] === "ambiguous" ? '<span class="rev-rail-tag" title="What it was drawn around now appears a different number of times">repeated</span>' : '<span class="rev-rail-tag">text changed</span>';
+        else if (outcome[row.a] === "hidden") tag += '<span class="rev-rail-tag" title="Collapsed or on another tab: click to show it">hidden</span>';
+        const content = (row.quote ? '<div class="rev-rail-quote">' + esc(row.label) + "</div>" : "") + (row.note ? '<div class="rev-rail-note">' + esc(row.note) + "</div>" : row.quote || whole ? "" : '<div class="rev-rail-note muted">' + esc(row.label) + "</div>") + (row.answer ? '<div class="rev-rail-answer">↳ ' + esc(row.answer) + "</div>" : "") + (row.region ? '<button class="rev-rail-orig" title="What lay under this drawing when it was drawn">View original</button>' : "");
         const whoTag = row.reviewer ? '<span class="rev-rail-who">' + esc(row.reviewer) + "</span>" : "";
         html += '<li class="rev-rail-item" data-i="' + i + '" data-status="' + esc(row.status) + '"><span class="rev-rail-glyph">' + glyphFor(row.status) + '</span><div class="rev-rail-body"><div class="rev-rail-sec"><span class="rev-rail-sec-t">' + esc(whole ? WHOLE.label : row.section || "(plan)") + "</span>" + whoTag + tag + "</div>" + content + "</div></li>";
       });
@@ -919,13 +1624,17 @@
         li.onclick = (ev) => {
           const row = rows[+li.getAttribute("data-i")];
           if (!row) return;
-          if (!row.at) {
-            openPop({ a: row.a, section: row.section, label: row.label, quote: row.quote }, { left: ev.clientX, bottom: ev.clientY });
-            popByHost = true;
+          if (row.region && ev.target.closest(".rev-rail-orig")) {
+            showOriginal(row.region);
             ev.stopPropagation();
             return;
           }
-          port.send({ type: "reveal", anchor: row.at.anchor, nth: row.at.nth });
+          if (row.at) port.send({ type: "reveal", anchor: row.at.anchor, nth: row.at.nth });
+          if (!row.at || DRAWING.test(row.a)) {
+            openPop({ a: row.a, section: row.section, label: row.label, quote: row.quote }, { left: ev.clientX, bottom: ev.clientY });
+            popByHost = true;
+            ev.stopPropagation();
+          }
         };
       });
     }
@@ -933,7 +1642,7 @@
     let popNote = "";
     let popByHost = false;
     function sendMode() {
-      port.send({ type: "mode", on, open: !!pop });
+      port.send({ type: "mode", on, open: !!pop, draw: tool });
     }
     function held() {
       const n = pop ? pop.querySelector(".rev-note") : null;
@@ -945,6 +1654,10 @@
         pop.remove();
         pop = null;
         sendMode();
+        if (pending) {
+          pending = null;
+          paint();
+        }
       }
       port.send({ type: "focus", anchor: null });
       if (!replacing) idle();
@@ -985,19 +1698,56 @@
       p.querySelector(".rev-save").onclick = () => {
         const m = { anchor: a, section: t.section, label: t.label, status, note: p.querySelector(".rev-note").value.trim() };
         if (t.quote) m.quote = t.quote;
+        const r = regionOf(a);
+        if (r) m.region = r;
         const kept = store.save(m);
+        pending = null;
         paint();
         closePop();
         if (!kept) showSync("err", "This browser could not save your note: it lives in this tab only and is lost when the tab closes. Free up browser storage, then save it again.");
       };
       p.querySelector(".rev-del").onclick = () => {
         store.remove(a);
+        pending = null;
         paint();
         closePop();
       };
     }
-    function box() {
+    let original = null;
+    function closeOriginal() {
+      if (original) {
+        original.remove();
+        original = null;
+      }
+    }
+    function showOriginal(r) {
+      closeOriginal();
+      const el = original = document.createElement("div");
+      el.className = "rev-original";
+      el.setAttribute("role", "dialog");
+      el.setAttribute("aria-label", "The original drawing");
+      const head = document.createElement("div");
+      head.className = "rev-original-h";
+      const l = r.layout;
+      head.textContent = "Drawn on revision " + r.plan_revision.slice(7, 19) + " at " + l.viewport.join(" × ") + ", " + l.theme + (revision ? r.plan_revision === revision ? " · the revision shown" : " · not the revision shown" : "");
+      const x = document.createElement("button");
+      x.className = "rev-original-x";
+      x.textContent = "Close";
+      x.onclick = closeOriginal;
+      head.appendChild(x);
+      el.appendChild(head);
+      el.appendChild(originalView(r, document));
+      body.appendChild(el);
+    }
+    function box2() {
       return opts.frame ? opts.frame.getBoundingClientRect() : { left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight };
+    }
+    function toHost(r) {
+      const b = box2();
+      return {
+        left: Math.min(Math.max(r.left + b.left, b.left), Math.max(b.left, b.right - 300)),
+        bottom: Math.min(Math.max(r.bottom + b.top, b.top), Math.max(b.top, b.bottom - 200))
+      };
     }
     function place() {
       if (!opts.frame || destroyed) return;
@@ -1061,7 +1811,7 @@
     }
     function reopen(a, note) {
       const c = (committed[a] || []).filter((x) => x.label || x.quote)[0];
-      const item = c ? { anchor: a, section: c.section, label: c.label, quote: c.quote } : { anchor: a };
+      const item = c ? { anchor: a, section: c.section, label: c.label, quote: c.quote, region: regionOf(a) } : { anchor: a, region: regionOf(a) };
       queue("reopen", (id, r) => reopenBody(id, r, item, note), {}, () => reopen(a, note));
     }
     function flush() {
@@ -1129,7 +1879,7 @@
         askName("Your name, so teammates know whose feedback this is:", exportJSON);
         return;
       }
-      const json = JSON.stringify({ id: store.exportId(items), slug, reviewer: who(), items }, null, 2);
+      const json = JSON.stringify(Object.assign({ id: store.exportId(items), slug, reviewer: who() }, roundItems(items)), null, 2);
       const blob = new Blob([json], { type: "application/json" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -1295,7 +2045,7 @@
     if (resized && opts.frame) resized.observe(opts.frame);
     const bar = document.createElement("div");
     bar.className = "rev-bar";
-    bar.innerHTML = (live ? '<span class="rev-conn"></span>' : "") + '<button class="rev-toggle" title="Toggle review mode">Review</button><span class="rev-count"></span>' + (live && !opts.reviewer ? '<button class="rev-who" title="Set the name teammates see on your comments"></button>' : "") + '<button class="rev-submit" title="Send feedback to the agent">' + (live ? "Submit" : "Export") + "</button>" + (opts.approve ? '<button class="rev-approve" title="Approve and close the loop">Approve</button>' : "");
+    bar.innerHTML = (live ? '<span class="rev-conn"></span>' : "") + '<button class="rev-toggle" title="Toggle review mode">Review</button>' + (revision ? '<button class="rev-draw" aria-pressed="false" title="Draw a loop around part of the plan to comment on it">Draw</button>' : "") + '<span class="rev-count"></span>' + (live && !opts.reviewer ? '<button class="rev-who" title="Set the name teammates see on your comments"></button>' : "") + '<button class="rev-submit" title="Send feedback to the agent">' + (live ? "Submit" : "Export") + "</button>" + (opts.approve ? '<button class="rev-approve" title="Approve and close the loop">Approve</button>' : "");
     body.appendChild(bar);
     const countEl = bar.querySelector(".rev-count");
     connEl = bar.querySelector(".rev-conn");
@@ -1315,11 +2065,33 @@
       submitEl.textContent = flushing ? "Sending…" : "Submit";
     }
     const toggleEl = bar.querySelector(".rev-toggle");
+    const drawEl = bar.querySelector(".rev-draw");
     let hintBubble = null;
+    let drawTaught = false;
+    function setTool(next) {
+      if (next && !on) setReview(true, true);
+      tool = next;
+      if (drawEl) {
+        drawEl.classList.toggle("on", tool);
+        drawEl.setAttribute("aria-pressed", String(tool));
+      }
+      sendMode();
+      if (tool && !drawTaught) {
+        drawTaught = true;
+        toast("Draw a loop around what you mean: a paragraph, rows, part of a diagram. Esc puts the pen down.");
+      }
+    }
     function setReview(next, silent) {
       on = next;
       toggleEl.classList.toggle("on", on);
       body.classList.toggle("rev-on", on);
+      if (!on && tool) {
+        tool = false;
+        if (drawEl) {
+          drawEl.classList.remove("on");
+          drawEl.setAttribute("aria-pressed", "false");
+        }
+      }
       sendMode();
       toggleEl.textContent = on ? "Exit review" : "Review";
       toggleEl.title = on ? "Leave review mode (Esc)" : "Enter review mode (r)";
@@ -1349,11 +2121,22 @@
     toggleEl.onclick = () => {
       setReview(!on);
     };
+    if (drawEl) drawEl.onclick = () => {
+      setTool(!tool);
+    };
     submitEl.onclick = submit;
     if (opts.approve) bar.querySelector(".rev-approve").onclick = approve;
     function escape() {
+      if (original) {
+        closeOriginal();
+        return true;
+      }
       if (pop) {
         closePop();
+        return true;
+      }
+      if (tool) {
+        setTool(false);
         return true;
       }
       if (on) {
@@ -1413,18 +2196,33 @@
         case "placed":
           onPlaced(m.items);
           break;
-        case "target": {
+        case "target":
           if (!on || held()) break;
-          const b = box();
-          openPop({ a: m.target.anchor, section: m.target.section, label: m.target.label, quote: m.target.quote }, {
-            left: Math.min(Math.max(m.target.rect.left + b.left, b.left), Math.max(b.left, b.right - 300)),
-            bottom: Math.min(Math.max(m.target.rect.bottom + b.top, b.top), Math.max(b.top, b.bottom - 200))
-          });
+          openPop({ a: m.target.anchor, section: m.target.section, label: m.target.label, quote: m.target.quote }, toHost(m.target.rect));
+          break;
+        case "capture": {
+          if (!on || !tool) break;
+          if (held()) {
+            toast("Save or delete the open note, then draw again.");
+            break;
+          }
+          const r = { ...m.capture, id: newId(), plan_revision: revision, created_at: (/* @__PURE__ */ new Date()).toISOString() };
+          const why = checkRegion(r);
+          if (why) {
+            toast("That drawing cannot be kept: its " + why + " is out of bounds.");
+            break;
+          }
+          closePop(true);
+          pending = r;
+          paint();
+          openPop({ a: "q-" + r.id, section: r.targets[0].section, label: drawingLabel(r) }, toHost(m.rect), true);
           break;
         }
         case "refused":
+          if (m.reason === "cancelled") break;
           if (!held()) closePop();
-          toast(m.reason === "repeated" ? "“" + clip(m.quote, 40) + "” appears " + m.count + " times in this section — highlight a longer phrase so the comment points at one place." : "Highlight text within one section to comment on it.");
+          if (m.reason === "repeated") toast("“" + clip(m.quote, 40) + "” appears " + m.count + " times in this section — highlight a longer phrase so the comment points at one place.");
+          else toast(DRAW_REFUSED[m.reason] || "Highlight text within one section to comment on it.");
           break;
         case "dismiss":
           if ((on || pop) && !held()) closePop();
@@ -1469,10 +2267,10 @@
         clearTimeout(repaint);
         port.listen(() => {
         });
-        port.send({ type: "mode", on: false, open: false });
-        port.send({ type: "paint", items: [] });
+        port.send({ type: "mode", on: false, open: false, draw: false });
+        port.send({ type: "paint", items: [], drawings: [] });
         if (resized) resized.disconnect();
-        [bar, rail, orphanBar, syncEl, toastEl, offlineBar, hintBubble].forEach((el) => {
+        [bar, rail, orphanBar, syncEl, toastEl, offlineBar, hintBubble, original].forEach((el) => {
           if (el) el.remove();
         });
         body.classList.remove("rev-on", "rev-offline", "rev-framed");
@@ -1571,7 +2369,9 @@
       resolve: true,
       // any reviewer of a local review may Accept or Reopen
       approve: base ? approve : void 0,
-      restartCommand: "ox plan review " + slug
+      restartCommand: "ox plan review " + slug,
+      // the revision ox rendered this page from; a page without one offers no Draw
+      revision: body.getAttribute("data-review-revision") || void 0
     });
     startDocumentTools(ports.document);
     if (!base) return;

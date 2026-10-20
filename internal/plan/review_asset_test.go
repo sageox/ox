@@ -14,7 +14,7 @@ import (
 // (cmd/ox/plan_review.go) speaks with the review page: the bodies of POST
 // /feedback, /accept and /approve. Raise it with the server change that
 // serves a new one.
-const reviewServerProtocol = 2
+const reviewServerProtocol = 3
 
 // TestReviewAssets_MatchTheirManifest: review.js and review.css are built from
 // packages/plan-review, and review.manifest.json records that build. CI's

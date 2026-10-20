@@ -1,9 +1,11 @@
 # Plan review: original context for drawn annotations
 
-**Status:** candidate (#1292). Production regions (#1293) stay gated on this
-prototype *and* on consuming-host qualification (section 8). Builds on the
-Ledger contract (`plan-review-ledger-contract.md`, frozen in #1288), which
-`pkg/planreview` implements.
+**Status:** implemented (#1293). `@sageox/plan-review` 0.6.0 (protocol 3)
+draws, places and shows drawings, and `pkg/planreview` v0.4.0 checks and
+stores them (section 7). The format was proved by the #1292 prototype and
+qualified by a consuming host (section 8). Builds on the Ledger contract
+(`plan-review-ledger-contract.md`, frozen in #1288), which `pkg/planreview`
+implements.
 
 **Goal:** a reviewer circles part of a plan, the plan changes, and everyone can
 still see what was circled. Coordinates alone cannot do this: the page reflows
@@ -19,6 +21,7 @@ encloses, and a bounded copy of what lay under it.
 | `drawn-context/proto/serve.go` | Local-renderer prototype: `go run ./pkg/planreview/testdata/drawn-context/proto/serve.go` from the repository root serves a revision top-level and framed (section 6) |
 | `drawn-context/captures.json` | Ten hand-like strokes around parts of revision a, captured in Chrome |
 | `drawn-context/expect.json` | Where each capture lands on each revision and layout, and the environment that observed it |
+| `drawn-context/regions.json` | What every host accepts as a region (sections 5 and 6): cases each check refuses, and the limits. `pkg/planreview`'s `region_test.go` and the package's `test/region.test.mjs` both run it |
 | `review-contract/region-items/` | Two drawings stored as round items. The module's `TestContractFixtures` and the CLI's `TestReviewContractFixtures` both assemble them as its `expect.json` says |
 
 The evidence below was produced once with headless Chrome 155 on macOS 27,
@@ -66,9 +69,12 @@ and fonts as `expect.json`'s `environment`.
   `clientY + scrollY` at the moment of the pointer event. Boxes are
   `getBoundingClientRect()` shifted the same way.
 - **Revision:** the renderer that served the page stamps the digest of the
-  bytes it rendered from (`plan.html` for an authored plan). For a page over
-  1 MiB, that digest equals the `oid` of the plan's LFS pointer, so a host
-  holding only a stub still knows which revision a drawing names. A framed
+  bytes it rendered from (`plan.html` for an authored plan; `ox plan review`
+  renders a markdown plan's page from its `plan.md`), read with LF line
+  endings so that a Windows checkout of the same commit names the same
+  revision. For a page over 1 MiB with LF line endings, as ox writes it, that
+  digest equals the `oid` of the plan's LFS pointer, so a host holding only a
+  stub still knows which revision a drawing names. A framed
   document is untrusted, so the host stamps the revision of the instance it
   framed and ignores any claim from the document (section 6).
 - **Shape:** a reviewer draws freehand and sees a perfect ellipse: the one
@@ -135,7 +141,10 @@ is missing.
 ## 3. Placement on later renders
 
 Placement is derived on every render and never stored. Each target is looked
-up by its exact anchor. Text similarity is never used.
+up by its exact anchor. Text similarity is never used. The document tools
+report every drawing's outcome to the host in `placed`; a `missing` or
+`ambiguous` drawing comes after everything on the page, and the host's rail
+tags it "text changed" or "repeated".
 
 | Outcome | Rule | Painted |
 |---|---|---|
@@ -168,6 +177,13 @@ an orphaned mark on a list item, row or section by token similarity (Dice ≥
 0.72); this sentence and its rewording score 0.96. Placement reports `missing`
 and leaves the drawing off the page.
 
+Offsets depend on fonts; outcome classes do not, when a drawing is placed in
+the browser it was drawn in. `TestBrowser_DrawingsLandByTheirTargets`
+(`cmd/ox`, real Chrome) runs the shipped document tools that way on every run:
+it draws around nine parts of a and places each drawing on a, b and c, at 600
+and 1024 px, at 2× device pixels, hidden and then shown, and after a live
+resize.
+
 ## 4. View original
 
 The host redraws a drawing from the record alone, in the record's frame:
@@ -181,7 +197,8 @@ The host redraws a drawing from the record alone, in the record's frame:
 It names the revision and layout, says when that revision is not the one on
 screen, and inserts text as text nodes, never markup. It needs neither the
 framed document nor the revision's bytes. On revision c the harness shows the
-original sentence and the "Retry budget" node inside their ellipses.
+original sentence and the "Retry budget" node inside their ellipses, and so do
+the host controls (`TestBrowser_ViewOriginalAfterAnEdit`).
 
 ## 5. Inline context, not an attachment
 
@@ -238,10 +255,17 @@ Why inline:
 | whole record (host refuses larger) | 64 KiB of UTF-8; observed max 13,379 bytes |
 
 Every cut (an item, a label, a clipped text) sets `context.truncated`, and View
-original says so.
+original says so. Text lengths are UTF-16 code units, as the browser counts
+them. Sizes are UTF-8 bytes of the value as JavaScript's `JSON.stringify`
+writes it, whatever whitespace, escapes or number spellings a request uses:
+Go's encoder, for one, writes each `<` as six bytes. `regions.json` holds a
+case at and one past every limit.
 
-These sit inside the 1 MiB review request cap (`reviewBodyLimit`) and the
-Ledger contract's 8 MiB record limit (§3.6).
+Every host accepts a round request of up to 1 MiB, the CLI's
+`reviewBodyLimit`, so that a round one host accepts is not refused by another.
+A stored record outgrows its request: one 1 MiB request of 34 drawings at these
+limits, mostly numbers, was stored as 4.1 MB (4.0×), inside the Ledger
+contract's 8 MiB record limit (§3.6). That is an example, not a bound.
 
 The attachment criterion (durable publication before references, missing-byte
 diagnostics) does not arise.
@@ -283,13 +307,23 @@ style was needed.
 **Host rules:**
 
 - Accept a message only from the frame's window, with origin `"null"` and the
-  current instance id (passed in the frame URL's fragment).
+  current instance id (passed in the frame URL's fragment). `connectFrame`
+  does.
 - Accept a capture only if every field the host later reads is well-formed:
   path, ellipse, targets, layout, and each context item and label. It must
-  also be at most 64 KiB of UTF-8.
-- Mint `id`, stamp `plan_revision` and `created_at`.
+  also be at most 64 KiB of UTF-8. Keep only the fields section 1 names.
+  `parseDocumentMessage` (through `captureOf`) and `checkRegion` do; the
+  server's `ParseRoundRequest` applies the same rules (`regions.json`).
+- Mint `id` and stamp `created_at`. Stamp the `plan_revision` the frame was
+  served: a host never reads the bytes its frame loads, so it frames the plan
+  at a named revision and its server refuses any other bytes.
+  `mountHostControls` stamps the `revision` it is given and offers no Draw
+  tool without one.
 - The document accepts messages only from its parent.
-- A forged capture posted from another window was ignored.
+- A forged capture posted from another window was ignored. A capture the
+  plan's own scripts forge on the tools' channel opens nothing unless the
+  reviewer has the Draw tool up, and is kept only as its checked fields under
+  the host's stamps (`TestBrowser_ForgedCapturesAreCheckedAndRestamped`).
 
 **The CLI's review layer does not run here; the document tools do.** Before
 #1290, `review.js` read `localStorage` at load outside a `try`, so framed with
@@ -298,13 +332,14 @@ style was needed.
 `packages/plan-review` and returns before drawing anything when storage is
 denied. A host instead injects the package's document tools, which need no
 storage and talk to the host by `postMessage`
-(`TestBrowser_DocumentToolsInOpaqueFrame` in `cmd/ox`). Drafts and the outbox
-live in the host's review controls, `mountHostControls` (#1291).
+(`TestBrowser_DocumentToolsInOpaqueFrame` in `cmd/ox`). They capture and
+paint drawings in the frame too. Drafts and the outbox live in the host's
+review controls, `mountHostControls` (#1291), and so does View original.
 
-## 7. Released readers and writers
+## 7. Stored form, requests, and released readers
 
-**Candidate stored form:** a drawing is a round item. Its legacy fields project
-it for readers that predate regions, and the record rides in `region`:
+**Stored form:** a drawing is a round item. Its legacy fields project it for
+readers that predate regions, and the record rides in `region`:
 
 ```jsonc
 {"anchor": "q-<id>", "section": "Risks",
@@ -322,35 +357,61 @@ it for readers that predate regions, and the record rides in `region`:
   anchor per drawing also keeps released assembly — latest mark per anchor and
   reviewer — from merging two drawings, and lets
   `ox plan feedback resolve <slug> q-<id>` close exactly one.
-- **Label:** "Drawing: " plus the first target's text, within the 70-unit
-  label length.
+- **Section and label:** the first target's section, and "Drawing: " plus the
+  text the first target held at capture (its context item), within the
+  70-unit label length (`drawingLabel`).
+- **One drawing, one record:** a mark on a drawing carries its region, so a
+  second reviewer's mark, an edit of the note and a reopen all keep what was
+  drawn. Two drawings around one paragraph stay two items through edit,
+  resolve and reopen (`TestAssemble_DrawingsStayIndependent`,
+  `TestBrowser_DrawingsStayIndependentThroughEditAndReopen`).
+- **What an AI coworker gets:** a drawing's anchor, section, label, status
+  and note, like any comment. `ox plan feedback show --json` also carries the
+  record; `ox plan review await` leaves it out, since its stroke and boxes are
+  kilobytes a coworker cannot act on.
 
-**Measured** with the official `ox_0.20.0_darwin_arm64` asset (checksum
-verified) and a build of this branch, as in the Ledger contract's section 4:
+**Requests:** a round that carries a drawing lists all its items under
+`marks`, and `items` is empty:
 
-| | v0.20.0 | this branch (main) |
-|---|---|---|
-| `plan feedback show --json` on `region-items` | Three items, each drawing by its label and note; the resolved drawing shows open (per-entry resolutions unreadable, Ledger contract §4) | Three items as `expect.json`; the resolved drawing closed |
-| Rendered page | Drawings as rail rows tagged "text changed" and in the orphan bar; the element mark on its paragraph; no drawing painted on an element | Same |
-| Save of revision c | Saves a new dated plan rather than revising this one, so its remap never runs here; its `remap.go:162` has the same `q` exemption | A control mark with a dead `h` anchor, labeled like a list item, is rebound `label-exact`; a drawing with the identical label is not |
-| `feedback apply` of an item carrying `region` | Stored with `region` dropped, and the round id too, silently | Stored with `region` dropped, silently |
-| `feedback apply` with `items: []`, drawings under another key | Refused: `feedback has no items` | Refused, the same |
+```jsonc
+{"id": "…", "reviewer": "Devon", "items": [],
+ "marks": [{"anchor": "h59e210da", …}, {"anchor": "q-<id>", …, "region": { /* section 1 */ }}]}
+```
 
-The module keeps drawings intact. Its `Capture` and `Assemble` read
-`region-items` as `expect.json` says. Its writer, run on that round's items
-(`ParseRoundRequest`, then `Record`), keeps each drawing's `region`
-byte-identical in the immutable record it names
-`round-<time>-<id>.<digest>.json`. That was checked once with a throwaway test
-against the merged module, not kept.
+Every release, and main before #1293, refuses that shape (the table below),
+where each would otherwise store the round without its drawings or with its
+regions unchecked. The browser package freezes a submission, a reopen and an
+export this way whenever one of its items is a drawing; a round without a
+drawing keeps the old shape. `ParseRoundRequest` (`pkg/planreview` v0.4.0)
+accepts it, checks every region by the rules of sections 5 and 6, and refuses
+a drawing under `items`, a drawing whose anchor is not `q-<its id>`, and items
+under both keys. `Record` stores the items under `items`.
 
-What #1293 needs from this:
+A stored region is the same JSON value the request carried, not the same
+bytes: the record is indented, and `<`, `>` and `&` in strings are written as
+`<`, `>` and `&` (`TestRoundRequest_DrawingsTravelUnderMarks`).
+Once a record is written, its exact bytes and their digest are what a retry is
+matched on (Ledger contract §3.4).
 
-- **Readers before writers.** Ship readers that understand `region` first;
-  writers come from `pkg/planreview`, which already keeps it.
-- **Requests and exports that carry a drawing use a shape both releases
-  refuse:** an empty `items`, with the drawings under another key. Both
-  releases otherwise accept the item and lose the drawing silently.
-- **Stored rounds keep the legacy fields** for readers that predate regions.
+**Measured** 2026-10-19 with the official `ox_0.20.0_darwin_arm64` and
+`ox_0.23.0_darwin_arm64` assets (checksums verified), a build of main at
+`091cabaf`, and a build of #1293 against `pkg/planreview` v0.4.0, each on
+`region-items` installed as a plan in a scratch Ledger (scratch `HOME` and XDG
+dirs, `SAGEOX_DAEMON=false`, `DO_NOT_TRACK=1`). The exports carried one
+drawing, `r4-abort-item`, under each key:
+
+| | v0.20.0 | v0.23.0 (latest release) | main before #1293 | #1293 |
+|---|---|---|---|---|
+| `plan feedback show --json` | Three items, each drawing by its label and note, no region; the resolved drawing shows open (per-entry resolutions are unreadable, Ledger contract §4) | Three items, no region; the resolved drawing closed | Same as v0.23.0 | Three items, each drawing with its `region`; the resolved drawing closed |
+| `plan render` | Each drawing in the page's review state by its legacy fields, no region | Same | Same | With its region, so the page places and shows it |
+| `feedback apply`, drawing under `items` | Stored without `region` and without the round id, silently | Stored without `region`, silently | Stored with `region`, unchecked: `ParseRoundRequest` keeps unknown fields | Refused: `round request item 0 is a drawing under items: send the round's items under marks` |
+| `feedback apply`, items under `marks` | Refused: `feedback has no items` | Refused: `feedback has no items` | Refused: `round request has no items` | Stored with `region`, checked |
+
+Measured in #1292 on v0.20.0 and main, with remapping unchanged since: the
+rendered page lists drawings as rail rows tagged "text changed" and in the
+orphan bar, with no drawing painted; and a save of revision c rebinds a control
+mark with a dead `h` anchor, labeled like a list item, `label-exact`, but never
+a drawing with the identical label.
 
 ## 8. Consuming-host qualification
 
@@ -358,7 +419,10 @@ A host that displays plans in its own sandboxed viewer proves, in that viewer:
 
 1. **Environment:** `draw.js` injected into the framed document reports, in
    its `ready` message, origin `null`, storage, cookies, parent access and
-   network denied, and diagrams rendered — and capture still works.
+   network denied, and diagrams rendered — and capture still works. Its
+   network probe sends a `no-cors` request and listens for the enforced
+   `securitypolicyviolation` that request raises: from an opaque origin every
+   request fails CORS, so a failed fetch says nothing about `connect-src`.
 2. **Capture:** strokes around the same elements of revision a yield the same
    anchors as `captures.json`, pass the host rules of section 6, and stay
    within section 5's limits.
@@ -372,16 +436,31 @@ A host that displays plans in its own sandboxed viewer proves, in that viewer:
    yields its `expect.json` (the module's `Assemble` does), and its writer keeps
    `region`.
 
-Production regions (#1293) wait for these to pass. Qualification on hosts
-outside this repository is private-owner follow-up.
+A consuming host's sandboxed viewer passed all five before #1293 shipped
+(reported on #1293). Two findings from that run:
+
+- **Diagrams:** a viewer that leaves Mermaid's CDN tag blocked shows each
+  diagram's source, so a stroke around its nodes encloses the whole source,
+  and a drawing never places across a host that draws diagrams and one that
+  does not (`missing` both ways). Hosts inline ox's vendored build, as
+  `framePlan` does, to agree.
+- **Revision:** a host that frames the plan never sees the bytes its frame
+  loads, so it frames a named revision and stamps that one (section 6).
+
+Qualification on other hosts outside this repository is private-owner
+follow-up.
 
 ## 9. Not covered
 
-- **Writers:** #1293. `draw.js` is a prototype: it sits in the module's
-  testdata for hosts to qualify with, and no ox binary or module code runs it.
-- **Other engines and inputs:** only Chrome on macOS and mouse input were
-  exercised. `checkVisibility()` exists in current Firefox and Safari; Safari's
-  canvas rules for `foreignObject` were not tested.
-- **ADR-025:** its draft section 5 proposes a raster attachment for drawings.
-  Section 5 here argues for inline context instead; amending ADR-025 belongs
-  with #1293.
+- **`draw.js`** stays the prototype: it sits in the module's testdata for
+  hosts to qualify with, and no ox binary or module code runs it. The shipped
+  document tools are `packages/plan-review/src/draw.ts`.
+- **`ox plan render`** writes a page that names no revision, so it offers no
+  Draw; `ox plan review`, served or `--no-serve`, does.
+- **Other engines and inputs:** only Chrome was exercised: on macOS for the
+  evidence above, and on the CI runner's Linux for the shipped tests. A pen or
+  a finger draws (the ink layer sets `touch-action: none`), but only mouse
+  input was tested. `checkVisibility()` exists in current Firefox and Safari;
+  Safari's canvas rules for `foreignObject` were not tested.
+- **ADR-025** section 5 records this format (#1325); its delivery classes and
+  envelope generalization stay proposals.

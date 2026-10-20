@@ -121,6 +121,8 @@ const ACCOUNT = 'local';
     resolve: true, // any reviewer of a local review may Accept or Reopen
     approve: base ? approve : undefined,
     restartCommand: 'ox plan review ' + slug,
+    // the revision ox rendered this page from; a page without one offers no Draw
+    revision: body.getAttribute('data-review-revision') || undefined,
   });
   startDocumentTools(ports.document);
   if (!base) return;

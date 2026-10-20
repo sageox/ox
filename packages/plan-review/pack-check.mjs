@@ -67,11 +67,13 @@ import { framePlan, type FramePlanOptions } from '@sageox/plan-review/frame-plan
 const port = connectFrame(document.createElement('iframe'), 'instance-1');
 port.listen((m: DocumentMessage) => {
   if (m.type === 'target') console.log(m.target.anchor, m.target.rect.bottom);
+  if (m.type === 'capture') console.log(m.capture.ellipse.radii[0], m.capture.targets[0].anchor);
+  if (m.type === 'placed') console.log(m.items.map((p) => p.outcome));
 });
-const mode: HostMessage = { type: 'mode', on: true, open: false };
+const mode: HostMessage = { type: 'mode', on: true, open: false, draw: false };
 port.send(mode);
 const transport: Transport = { send: async (op): Promise<Receipt> => ({ state: 'owned', id: op.id, synced: true }) };
-const controls = mountHostControls(port, { account: 'acct', plan: 'pln_1', slug: 'plan', committed: [], transport, reviewer: 'Devon', frame: document.createElement('iframe') });
+const controls = mountHostControls(port, { account: 'acct', plan: 'pln_1', slug: 'plan', committed: [], transport, reviewer: 'Devon', frame: document.createElement('iframe'), revision: 'sha256:' + '0'.repeat(64) });
 controls.update([{ anchor: 'h1234abcd', status: 'flag', state: 'open' }], 0);
 controls.destroy();
 forgetAccount(localStorage, 'acct');

@@ -574,6 +574,16 @@
   whenSettled(function () {
     var p = probe();
     var net = function (result) { p.network = result; OxDraw.ready = p; if (embedded) send({ type: 'ready', probe: p }); paintAll(); };
-    try { fetch(location.href, { method: 'HEAD', cache: 'no-store' }).then(function () { net('allowed'); }, function () { net('denied'); }); } catch (e) { net('denied'); }
+    // network is whether the page's policy lets a request leave. A failed fetch
+    // cannot say: from an opaque origin every request is cross-origin and fails
+    // CORS whatever connect-src allows. A no-cors request the policy blocks
+    // raises securitypolicyviolation, enforced and naming the request; one it
+    // allows does not.
+    var target = 'https://network-probe.invalid/', blocked = false;
+    document.addEventListener('securitypolicyviolation', function (e) {
+      if (e.disposition === 'enforce' && e.blockedURI.indexOf('https://network-probe.invalid') === 0 && /^(connect|default)-src$/.test(e.effectiveDirective)) blocked = true;
+    });
+    var settled = function () { setTimeout(function () { net(blocked ? 'denied' : 'allowed'); }, 100); };
+    try { fetch(target, { mode: 'no-cors', cache: 'no-store' }).then(settled, settled); } catch (e) { settled(); }
   });
 })();

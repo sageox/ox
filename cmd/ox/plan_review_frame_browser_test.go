@@ -89,8 +89,8 @@ func serveFrameHost(t *testing.T, doc []byte, host string) string {
 	evil := `<!doctype html><html><body><script>var i=location.hash.slice(3),c=new MessageChannel();` +
 		`c.port1.onmessage=function(e){parent.postMessage({leak:e.data},'*')};` +
 		`window.addEventListener('message',function(e){parent.postMessage(e.data&&e.data.ping?{pong:true}:{leak:e.data},'*')});` +
-		`parent.postMessage({ox:'review',v:2,instance:i,type:'ready'},'*',[c.port2]);` +
-		`parent.postMessage({ox:'review',v:2,instance:i,type:'target',target:{anchor:'h00000000',section:'',label:'forged',rect:{left:1,bottom:1}}},'*');` +
+		`parent.postMessage({ox:'review',v:3,instance:i,type:'ready'},'*',[c.port2]);` +
+		`parent.postMessage({ox:'review',v:3,instance:i,type:'target',target:{anchor:'h00000000',section:'',label:'forged',rect:{left:1,bottom:1}}},'*');` +
 		`parent.postMessage({evil:true},'*')</script></body></html>`
 
 	mux := http.NewServeMux()
@@ -218,7 +218,7 @@ func TestBrowser_DocumentToolsInOpaqueFrame(t *testing.T) {
 	}
 	var none struct{}
 	n := frameMessage(t, ctx, 0, "ready", &none)
-	frameSend(t, ctx, `{type:'mode', on:true, open:false}`)
+	frameSend(t, ctx, `{type:'mode', on:true, open:false, draw:false}`)
 	// Chrome drops pointer input to a frame process that has only just
 	// loaded; move over the frame until the page hears it, then click.
 	var reached bool
@@ -245,7 +245,7 @@ func TestBrowser_DocumentToolsInOpaqueFrame(t *testing.T) {
 	}
 
 	// painting it: the document places the mark the host sent
-	frameSend(t, ctx, `{type:'paint', items:[{anchor:'`+want+`', kind:'unsent', status:'request-change', glyph:'✎', tint:'amber'}]}`)
+	frameSend(t, ctx, `{type:'paint', items:[{anchor:'`+want+`', kind:'unsent', status:'request-change', glyph:'✎', tint:'amber'}], drawings:[]}`)
 	var placed struct{ Items []struct{ Anchor string } }
 	n = frameMessage(t, ctx, n, "placed", &placed)
 	if len(placed.Items) != 1 || placed.Items[0].Anchor != want {
@@ -313,7 +313,7 @@ func TestBrowser_DocumentToolsMatchSharedPageVectors(t *testing.T) {
 			items = append(items, `{anchor:'`+v.Anchor+`', kind:'committed', status:'comment', state:'open', glyph:'◌', tint:'amber'}`)
 		}
 	}
-	frameSend(t, ctx, `{type:'paint', items:[`+strings.Join(items, ",")+`]}`)
+	frameSend(t, ctx, `{type:'paint', items:[`+strings.Join(items, ",")+`], drawings:[]}`)
 	var placed struct {
 		Items []struct{ Anchor, Section, Label string }
 	}
@@ -349,7 +349,7 @@ func TestBrowser_DocumentToolsAnchorADiagramOnceItDraws(t *testing.T) {
 	var none struct{}
 	n := frameMessage(t, ctx, 0, "ready", &none)
 	drawn := planreview.AnchorFor("Flow", "AB")
-	frameSend(t, ctx, `{type:'paint', items:[{anchor:'`+drawn+`', kind:'committed', status:'comment', state:'open', glyph:'◌', tint:'amber'}]}`)
+	frameSend(t, ctx, `{type:'paint', items:[{anchor:'`+drawn+`', kind:'committed', status:'comment', state:'open', glyph:'◌', tint:'amber'}], drawings:[]}`)
 	var placed struct{ Items []struct{ Anchor string } }
 	frameMessage(t, ctx, n, "placed", &placed)
 	if len(placed.Items) == 0 || placed.Items[0].Anchor != drawn {
@@ -377,7 +377,7 @@ func TestBrowser_NavigatedFrameIsNotHeard(t *testing.T) {
 	); err != nil {
 		t.Fatalf("the plan never navigated its frame: %v", err)
 	}
-	frameSend(t, ctx, `{type:'paint', items:[{anchor:'h1234abcd', kind:'committed', status:'flag', state:'open', glyph:'⚑', tint:'amber'}]}`)
+	frameSend(t, ctx, `{type:'paint', items:[{anchor:'h1234abcd', kind:'committed', status:'flag', state:'open', glyph:'⚑', tint:'amber'}], drawings:[]}`)
 	var got, leaks string
 	if err := chromedp.Run(ctx,
 		chromedp.Evaluate(`document.getElementById('doc').contentWindow.postMessage({ping:true},'*')`, nil),

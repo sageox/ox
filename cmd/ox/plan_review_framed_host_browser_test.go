@@ -43,7 +43,7 @@ func framedHost(opts string) string {
 const forgingDoc = `<!doctype html><html><head><script>var MC=MessageChannel;` +
 	`window.MessageChannel=function(){var c=new MC();window.toolsPort=c.port1;return c};` +
 	`window.addEventListener('message',function(e){if(e.data&&e.data.forge&&window.toolsPort)` +
-	`window.toolsPort.postMessage(Object.assign({ox:'review',v:2,instance:'` + frameInstance + `'},e.data.forge))})` +
+	`window.toolsPort.postMessage(Object.assign({ox:'review',v:3,instance:'` + frameInstance + `'},e.data.forge))})` +
 	`</script></head><body><p>Retry budget is three</p></body></html>`
 
 // insideFrame reports whether the element matching sel lies within the plan's
