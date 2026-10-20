@@ -471,8 +471,10 @@ func TestBrowser_DrawingsLandByTheirTargets(t *testing.T) {
 // forgingHead runs before the document tools in a plan whose own script
 // keeps their end of the channel, as any script in a plan can: whatever the
 // host page forges (window.ask({forge: message})) reaches the host as if the
-// tools had sent it.
-const forgingHead = `<script>var MC=MessageChannel;window.MessageChannel=function(){var c=new MC();window.toolsPort=c.port1;return c};` +
+// tools had sent it. It tells the host page {connected} when the host's first
+// message arrives on that channel.
+const forgingHead = `<script>var MC=MessageChannel;window.MessageChannel=function(){var c=new MC();window.toolsPort=c.port1;` +
+	`c.port1.addEventListener('message',function f(){c.port1.removeEventListener('message',f);parent.postMessage({connected:true},'*')});return c};` +
 	`window.addEventListener('message',function(e){if(e.data&&e.data.forge&&window.toolsPort)` +
 	`window.toolsPort.postMessage(Object.assign({ox:'review',v:3,instance:'draw-host-0001'},e.data.forge))})</script>`
 
@@ -487,7 +489,7 @@ func drawHost(doc, revision, committed, extra string) string {
 		`<iframe id="doc" sandbox="allow-scripts" style="position:absolute;left:0;top:0;width:1280px;height:800px;border:0"></iframe>` +
 		`<script type="module">import { connectFrame, mountHostControls } from '/index.js';` +
 		`const frame = document.getElementById('doc'); window.sent = [];` +
-		`window.addEventListener('message', (e) => { const d = e.data || {}; if (d.rect) window.rect = d.rect; if (d.input) window.input = true; });` +
+		`window.addEventListener('message', (e) => { const d = e.data || {}; if (d.rect) window.rect = d.rect; if (d.input) window.input = true; if (d.connected) window.connected = true; });` +
 		`window.ask = (m) => frame.contentWindow.postMessage(m, '*');` +
 		`mountHostControls(connectFrame(frame, 'draw-host-0001'), { account: 'acct-devon', plan: 'pln_draw', slug: 'retry-budget-rollout', reviewer: 'Devon',` +
 		` frame, reviewing: true, revision: '` + revision + `', committed: ` + committed + `,` + extra +
@@ -759,11 +761,12 @@ func TestBrowser_ForgedCapturesAreCheckedAndRestamped(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// the tools are listening: a dismiss is heard
-	if !waitJS(ctx, `document.querySelector('.rev-toggle').textContent==='Exit review'`, 10*time.Second) {
-		t.Fatal("the controls never opened in review mode")
+	// the host holds the channel's other end only once the tools say ready,
+	// after Mermaid draws: a forge sent before then would land late, after
+	// the Draw tool is up
+	if !waitJS(ctx, `window.connected&&document.querySelector('.rev-toggle').textContent==='Exit review'`, 10*time.Second) {
+		t.Fatal("the host never connected to the plan in review mode")
 	}
-	time.Sleep(time.Second) // the tools say ready after Mermaid draws
 	forge(capture(forged))
 	if waitJS(ctx, `document.querySelector('.rev-pop')`, time.Second) {
 		t.Fatal("a capture opened a note while the Draw tool was down")
