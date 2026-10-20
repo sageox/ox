@@ -133,3 +133,20 @@ func TestCommittedSessionScanChecksEveryFilenameForSharedBlob(t *testing.T) {
 	require.ErrorContains(t, PushWithRetry(context.Background(), ledger, PushOpts{}), "filename refused")
 	require.Equal(t, remoteBefore, gitInRepo(t, bare, "rev-parse", "HEAD"))
 }
+
+// A sensitive filename must be refused even when its blob is already reachable
+// from upstream: rev-list then reports no new blob, so a filename check gated on
+// "some blob was scanned" never runs.
+// Failure prevented: renaming or copying an already-published (for example
+// empty) file to a credential-bearing name publishes the name unchecked.
+func TestCommittedSessionScanChecksFilenamesWhenNoBlobIsNew(t *testing.T) {
+	useFreshFixtureRules(t)
+	ledger, _ := initBareRemoteRepo(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(ledger, "sessions", "synthetic"), 0700))
+	addCommit(t, ledger, "sessions/synthetic/notes.txt", "", "empty placeholder")
+	gitInRepo(t, ledger, "push", "--quiet")
+	require.NoError(t, ValidateSessionPublication(context.Background(), ledger), "control: nothing unpushed is sensitive")
+
+	addCommit(t, ledger, "sessions/synthetic/archive.p12", "", "same empty blob, sensitive name")
+	require.ErrorContains(t, ValidateSessionPublication(context.Background(), ledger), "session filename refused")
+}

@@ -38,11 +38,6 @@ type PrePushFinding struct {
 	Line     int    // 1-indexed line number
 }
 
-// prePushScannerSizeCap bounds scanner allocation. Larger session artifacts
-// require repair or a separately bounded upload path; a limit is never evidence
-// that uninspected bytes are safe to publish.
-const prePushScannerSizeCap = 8 * 1024 * 1024 // 8 MiB
-
 // prePushScannerScopePrefixes restricts the gate to ledger paths the
 // recovery tooling can actually fix. As of ox-cqdo:
 //
@@ -144,6 +139,8 @@ func scanAllTrackedFiles(ctx context.Context, ledgerPath string) (*PrePushScanRe
 // path in paths, recording detector matches as PrePushFindings. Only paths
 // outside sessions/ and legitimately deleted files are skipped. Extensions and
 // scan limits cannot authorize uninspected session content for publication.
+// File size is not a limit: long recordings are streamed line by line, and a
+// scan failure holds publication rather than skipping the file.
 func scanPaths(ledgerPath string, paths []string) (*PrePushScanResult, error) {
 	redactor := session.NewRedactor()
 	result := &PrePushScanResult{}
@@ -166,9 +163,6 @@ func scanPaths(ledgerPath string, paths []string) (*PrePushScanResult, error) {
 		}
 		if !info.Mode().IsRegular() {
 			return nil, fmt.Errorf("session path %s is not a regular file", rel)
-		}
-		if info.Size() > prePushScannerSizeCap {
-			return nil, fmt.Errorf("session path %s exceeds scan limit; publication pending", rel)
 		}
 		result.FilesScanned++
 
@@ -204,10 +198,9 @@ func scanFileForSecrets(r *session.Redactor, abs, rel string, result *PrePushSca
 	defer f.Close()
 
 	scanner := bufio.NewScanner(f)
-	// Any file under prePushScannerSizeCap fits in one rawJSONLMaxLineBytes
-	// line, so a scanned file can never fail on line length. That matters for
-	// prepareSessionUpload, which fails closed on scan errors and would otherwise
-	// strand a session that doctor re-scans identically on every pass.
+	// Memory is bounded by the longest line, not the file, so a recording of any
+	// length scans. A line past rawJSONLMaxLineBytes fails the scan closed
+	// (bufio.ErrTooLong) instead of being skipped.
 	scanner.Buffer(make([]byte, 64*1024), rawJSONLMaxLineBytes)
 
 	lineNo := 0

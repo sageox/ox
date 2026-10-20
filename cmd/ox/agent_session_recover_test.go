@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -240,7 +241,13 @@ func TestSessionRecoverFromCacheGuardsExistingLedgerSession(t *testing.T) {
 			assert.Equal(t, collisionSessionName, got.SessionName)
 			recovered, err := os.ReadFile(filepath.Join(f.ledgerSessionDir, ledgerFileRaw))
 			require.NoError(t, err)
-			assert.Equal(t, string(f.recoveredRaw), string(recovered), "an allowed recovery writes the recording under its original name")
+			// the guarded writer re-encodes each entry, so key order is not preserved
+			wantLines := strings.Split(strings.TrimSpace(string(f.recoveredRaw)), "\n")
+			gotLines := strings.Split(strings.TrimSpace(string(recovered)), "\n")
+			require.Len(t, gotLines, len(wantLines), "an allowed recovery writes the recording under its original name")
+			for i := range wantLines {
+				assert.JSONEq(t, wantLines[i], gotLines[i], "recovered entry %d keeps its content", i)
+			}
 			assert.NoFileExists(t, statePath, "a completed recovery retires the recording state")
 		})
 	}

@@ -423,7 +423,7 @@ func TestSessionUpload_ScansContentBeforeLFS(t *testing.T) {
 // The routine gate checks lines above bufio.Scanner's default 64 KiB limit.
 // The 4 MiB former-buffer regression is exercised in the slow tier because
 // race-instrumented secret regexes on multi-megabyte lines exceed the fast tier's budget.
-func TestSessionUpload_ScansLongLinesUnderSizeCap(t *testing.T) {
+func TestSessionUpload_ScansLongLines(t *testing.T) {
 	testSessionUploadScansLongLines(t, 128*1024)
 }
 
@@ -435,7 +435,7 @@ func testSessionUploadScansLongLines(t *testing.T, lineLength int) {
 			t.Setenv("OX_ALLOW_SECRETS", "")
 			const canary = "AKIAIOSFODNN7EXAMPLE"
 			longLine := strings.Repeat("x", lineLength) + " " + canary
-			require.Less(t, len(longLine), prePushScannerSizeCap, "the line must stay under the file cap so the file is scanned")
+			require.Less(t, len(longLine), rawJSONLMaxLineBytes, "the line must fit the scanner line bound so the file is scanned")
 			oversized := []byte(strings.ReplaceAll(string(fixture.rawContent), "preserve me", longLine))
 			require.NoError(t, os.WriteFile(fixture.result.RawPath, oversized, 0o600))
 			var calls []string

@@ -1,77 +1,89 @@
-Feature: A coworker's detected credentials never reach the shared Ledger
-  A coworker can record or import a session without publishing credentials quoted
-  in the conversation, passed to a tool, or printed by a tool. ox applies the same
-  mandatory redaction boundary to every supported recording and import mechanism.
+Feature: Credentials in a session never reach the shared Ledger
+  Devon records or imports an AI coworker session without publishing credentials
+  quoted in the conversation, passed to a tool, or printed by a tool. ox applies
+  the same mandatory redaction to every supported recording and import path.
   Teammates receive useful session context and redaction markers instead of keys.
 
-  This feature states user intent. Executable native-adapter and persistence tests
-  must prove it; this prose alone is not a passing integration test.
+  This feature states user intent. Executable tests must prove it; this prose alone
+  is not a passing integration test.
 
-  Rule: Every recording adapter protects all of its supported content surfaces
+  See also: session-recording/auto-record.feature
+  See also: session-recording/import-past-sessions.feature
+  See also: session-recording/manual-publishing.feature
 
-    Scenario: A tool prints a credential during a recorded session
-      Given a supported adapter reads native user and assistant turns containing a synthetic credential
-      And its native tool arguments contain the credential inside a nested object
-      And its native tool output contains the credential
+  Rule: Every supported recording protects all of its content
+    A credential Devon's tool prints would otherwise be stored and shared with the
+    team. Observable difference: no stored or published artifact contains it, and
+    teammates see a redaction marker in its place.
+
+    Scenario: Devon's tool prints a credential during a recorded session
+      Given Devon's session contains a synthetic credential in a conversation turn
+      And a tool call carries the credential inside a nested argument
+      And the tool's output prints the credential
       When ox stores and publishes the session
-      Then no persisted or published session artifact contains that credential
+      Then no stored or published session artifact contains that credential
       And teammates see redaction markers where it appeared
-      And the benign conversation and supported tool context remain readable
+      And the benign conversation and tool context remain readable
 
-    Scenario: A new bundled adapter is registered without a secret regression
-      Given a new bundled session adapter appears in the adapter registry
-      And it has no executable native-format redaction fixture
-      When the adapter redaction contract tests run
-      Then the tests fail and name the missing adapter proof
-
-    Scenario: An unavailable external adapter is selected
-      Given the registry lists an external session adapter without an available implementation
-      When a coworker attempts to record or import its native session
-      Then ox reports that the adapter is unavailable
-      And ox produces no captured or published session artifact
+    Scenario: Avery selects a session adapter that is not available
+      Given the session adapter for Avery's tool is not installed
+      When Avery tries to record or import a session from that tool
+      Then ox tells Avery the adapter is unavailable
+      And ox produces no captured or published session
 
   Rule: Imports and reconstructed history have the same protection as live recording
+    An imported earlier session is the easiest place for a credential to slip past
+    redaction. Observable difference: the stored import and any reconstructed
+    recording are as clean as a live one.
 
-    Scenario: A coworker imports an earlier session containing a credential
-      Given a supported native session contains a synthetic credential in conversation and tool data
-      When the coworker imports that session
-      And ox reconstructs or merges its earlier history with a current recording
-      Then neither the stored import nor reconstructed recording contains the credential
+    Scenario: Sam imports an earlier session containing a credential
+      Given Sam has an earlier native session with a synthetic credential in conversation and tool data
+      When Sam imports that session
+      And ox reconstructs or merges the earlier history with a current recording
+      Then neither the stored import nor the reconstructed recording contains the credential
       And the benign turns and their order remain intact
-      And publishing the imported session applies the same mandatory checks
+      And publishing the imported session applies the same checks as a live one
 
   Rule: Capture continuity never resets the protection for command output
+    A tool that was running when recording restarted would otherwise return its
+    credential unredacted. Observable difference: the later result is redacted and
+    the next turn is still recorded.
 
-    Scenario: A credential-emitting tool returns after a capture restart
-      Given ox records a credential-emitting tool call in one capture batch
-      And recording resumes after a restart before that tool returns
-      When ox reads the correlated tool result in a later batch
-      Then the credential output is redacted before persistence
+    Scenario: Riley's credential-emitting tool returns after a recording restart
+      Given Riley's recording captured a credential-emitting tool call in one batch
+      And recording resumed after a restart before that tool returned
+      When ox reads the tool's result in a later batch
+      Then the credential output is redacted before it is stored
       And the following benign turn is still recorded
 
-  Rule: Failure holds publication without silently bypassing redaction
+  Rule: A failed check holds publication instead of bypassing redaction
+    A broken or bypassed check would otherwise publish unchecked bytes.
+    Observable difference: nothing reaches the shared Ledger, and Devon keeps the
+    local original and gets a way to recover.
 
-    Scenario: Required redaction rules cannot be loaded
-      Given a session is ready to publish
+    Scenario: Devon publishes when the redaction rules cannot be loaded
+      Given Devon's session is ready to publish
       And the mandatory redaction rules are missing or invalid
-      When the coworker publishes the session
-      Then ox refuses publication with a recovery explanation
+      When Devon publishes the session
+      Then ox refuses publication and explains how to recover
       And no unchecked session bytes reach the shared Ledger
-      And the original source remains available locally for recovery
+      And the original source remains available locally
 
-    Scenario: An explicit override attempts to publish a detected credential
-      Given a session artifact contains a synthetic credential
-      And the coworker requests an allow-secrets override
-      When the coworker publishes the session
+    Scenario: Quinn tries to override the check to publish a credential
+      Given Quinn's session artifact contains a synthetic credential
+      And Quinn asks ox to allow secrets
+      When Quinn publishes the session
       Then ox does not publish the credential
       And ox explains that session credential protection cannot be bypassed
 
-  Rule: Rule updates follow upstream detection improvements
+  Rule: Redaction follows upstream detection improvements
+    A credential format added upstream after Devon installed ox would otherwise go
+    unrecognized until the next ox release. Observable difference: a new or
+    imported session is checked against the current upstream rules, and ox holds
+    publication if it cannot confirm they are current.
 
-    Scenario: Upstream Gitleaks adds a detection rule after ox was released
-      Given the official upstream rule catalog contains a newer detector
-      When a coworker publishes a new or imported session
-      Then ox automatically obtains and validates the current complete catalog
-      And the published session is checked using that catalog
-      And inability to establish required freshness holds publication
-      And the offline fallback has a complete-catalog refresh tool with regression verification
+    Scenario: Devon publishes after upstream adds a detection rule
+      Given the upstream credential rule catalog has a detector added since Devon installed ox
+      When Devon publishes a new or imported session
+      Then the published session is checked against the current complete catalog
+      And ox holds publication if it cannot confirm the catalog is current

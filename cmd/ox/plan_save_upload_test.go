@@ -287,7 +287,10 @@ func TestSavePlanArtifacts_UploadsOutsideTheLedgerLock(t *testing.T) {
 	}()
 	select {
 	case <-store.putting:
-	case <-time.After(30 * time.Second):
+	// The save scans the page against both secret catalogs before its first byte
+	// is uploaded; under -race on a loaded runner that alone takes ~30s. This is
+	// a hang detector, not a performance bound.
+	case <-time.After(3 * time.Minute):
 		t.Fatal("the save never started its upload")
 	}
 

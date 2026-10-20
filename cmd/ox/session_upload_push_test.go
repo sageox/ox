@@ -421,8 +421,8 @@ func TestCommitAndPushLedgerWithExtras_IncludesPointerFiles(t *testing.T) {
 	sessionName := "2026-01-01T00-00-testuser-OxPtr2"
 	sessionDir := writeSessionFiles(t, clonePath, sessionName)
 
-	// write summary.json
-	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "summary.json"), []byte(`{"key":"value"}`), 0644))
+	// write summary.json (not a field named "key": the secret guard treats that as a credential name)
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "summary.json"), []byte(`{"topic":"value"}`), 0644))
 
 	err := commitAndPushLedgerWithExtras(clonePath, sessionName, true)
 	require.NoError(t, err)

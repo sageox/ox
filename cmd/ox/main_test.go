@@ -87,9 +87,12 @@ func TestMain(m *testing.M) {
 	packageDir = wd
 	// Publication tests use the real checked-in catalog, never a public network
 	// dependency. Production keeps its unconditional current-rules refresh.
+	// runtime.Caller, not packageDir: re-exec'd child test processes inherit the
+	// sandbox working directory, where a cwd-relative path does not resolve.
+	_, thisFile, _, _ := runtime.Caller(0)
 	http.DefaultTransport = publicationCatalogTransport{
 		base:        http.DefaultTransport,
-		catalogPath: repoPath("..", "..", "internal", "secretguard", "gitleaks.toml"),
+		catalogPath: filepath.Join(filepath.Dir(thisFile), "..", "..", "internal", "secretguard", "gitleaks.toml"),
 	}
 
 	sandbox, err := os.MkdirTemp("", "ox-cmd-tests-")

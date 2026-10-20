@@ -96,10 +96,11 @@ func ValidateSessionPublication(ctx context.Context, ledgerPath string) error {
 	if err := cmd.Wait(); err != nil {
 		return errors.New("committed session scan failed; publication pending")
 	}
-	if rules != nil {
-		// rev-list deduplicates identical blob OIDs and reports only one path.
-		// Inspect every added/changed filename too: a rename to a sensitive
-		// file extension must not bypass path-only upstream rules.
+	{
+		// rev-list deduplicates identical blob OIDs and reports only one path, and
+		// it omits blobs upstream already has. Inspect every added/changed filename
+		// whether or not a new blob was scanned: a rename to a sensitive file
+		// extension must not bypass path-only rules.
 		pathArgs := []string{"-C", ledgerPath, "log", "--full-history", "--format=", "--name-only", "-z", "--no-renames", "--diff-filter=ACMT", "HEAD"}
 		if exec.CommandContext(ctx, "git", "-C", ledgerPath, "rev-parse", "--verify", "@{upstream}").Run() == nil {
 			pathArgs = append(pathArgs, "^@{upstream}")
@@ -115,6 +116,11 @@ func ValidateSessionPublication(ctx context.Context, ledgerPath string) error {
 			}
 			if err := secretguard.ValidateContent(path, nil); err != nil {
 				return fmt.Errorf("session filename refused: %w", err)
+			}
+			if rules == nil {
+				if rules, err = freshSessionPublicationRules(ctx); err != nil {
+					return fmt.Errorf("current session rules required before push: %w", err)
+				}
 			}
 			if err := rules.ValidateContent(path, nil); err != nil {
 				return fmt.Errorf("session filename refused by current rules: %w", err)

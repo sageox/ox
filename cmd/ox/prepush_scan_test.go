@@ -50,19 +50,6 @@ func TestSessionSecretGateRequiresVerifiedCleanAfterQuarantine(t *testing.T) {
 }
 
 func TestScanPathsRefusesUninspectableSessionContent(t *testing.T) {
-	t.Run("over size cap", func(t *testing.T) {
-		ledger := t.TempDir()
-		path := filepath.Join(ledger, "sessions", "oversize.jsonl")
-		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0700))
-		file, err := os.Create(path)
-		require.NoError(t, err)
-		require.NoError(t, file.Truncate(prePushScannerSizeCap+1))
-		require.NoError(t, file.Close())
-		_, err = scanPaths(ledger, []string{"sessions/oversize.jsonl"})
-		if err == nil {
-			t.Fatal("oversize session content was silently accepted")
-		}
-	})
 	t.Run("stat failure", func(t *testing.T) {
 		ledger := t.TempDir()
 		path := filepath.Join(ledger, "sessions", "unreadable.jsonl")
@@ -387,23 +374,4 @@ func TestFormatPrePushFindings_RecoveryMatchesScannerScope(t *testing.T) {
 	// Today only "sessions/" is in scope.
 	assert.Equal(t, []string{"sessions/"}, prePushScannerScopePrefixes,
 		"scope widened without updating recovery message; see ox-cqdo")
-}
-
-// TestPrePushScanner_LargeFileExceedsCap verifies that files over the size
-// cap block publication rather than being treated as verified clean.
-func TestPrePushScanner_LargeFileExceedsCap(t *testing.T) {
-	// Build a file just past the cap, with the canary at the end so a naive
-	// scanner would catch it.
-	const sz = prePushScannerSizeCap + 1024
-	buf := make([]byte, sz)
-	for i := range buf {
-		buf[i] = 'A'
-	}
-	copy(buf[sz-len("AKIAIOSFODNN7EXAMPLE"):], []byte("AKIAIOSFODNN7EXAMPLE"))
-	work := makeLedgerWithCommit(t, map[string]string{
-		"sessions/huge.txt": string(buf),
-	})
-
-	_, err := scanPrePushForSecrets(context.Background(), work)
-	require.Error(t, err, "uninspected oversized session content cannot authorize publication")
 }
