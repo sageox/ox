@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -179,17 +180,19 @@ func TestClaudeWatcherPreservesCursorAcrossOwnershipChanges(t *testing.T) {
 	}
 }
 
-// catchUpHookAdapter runs beforeCatchUp ahead of the watcher's first
-// incremental read, its catch-up, and closes caughtUp once that read returns,
-// so a test decides which read sees a turn.
-type catchUpHookAdapter struct {
+// readHookAdapter lets a test order its writes against the watcher's reads.
+// beforeCatchUp runs ahead of the first incremental read, the catch-up, and
+// caughtUp closes once that read returns. turnReads counts the reads that
+// returned entries.
+type readHookAdapter struct {
 	testAdapter
 	beforeCatchUp func()
 	caughtUp      chan struct{}
+	turnReads     atomic.Int32
 	once          sync.Once
 }
 
-func (a *catchUpHookAdapter) ReadFromOffset(path string, offset int64) ([]adapters.RawEntry, int64, error) {
+func (a *readHookAdapter) ReadFromOffset(path string, offset int64) ([]adapters.RawEntry, int64, error) {
 	first := false
 	a.once.Do(func() {
 		first = true
@@ -198,6 +201,9 @@ func (a *catchUpHookAdapter) ReadFromOffset(path string, offset int64) ([]adapte
 		}
 	})
 	entries, next, err := a.testAdapter.ReadFromOffset(path, offset)
+	if len(entries) > 0 {
+		a.turnReads.Add(1)
+	}
 	if first {
 		close(a.caughtUp)
 	}
@@ -257,7 +263,7 @@ func TestClaudeWatcherKeepsPollingAfterRetryableValidationError(t *testing.T) {
 				return errors.Join(err, f.Close())
 			}
 			var appendErr error
-			adapter := &catchUpHookAdapter{testAdapter: testAdapter{name: "claude-code"}, caughtUp: make(chan struct{})}
+			adapter := &readHookAdapter{testAdapter: testAdapter{name: "claude-code"}, caughtUp: make(chan struct{})}
 			if tc.duringCatchUp {
 				adapter.beforeCatchUp = func() { appendErr = appendSecond() }
 			}
@@ -277,7 +283,10 @@ func TestClaudeWatcherKeepsPollingAfterRetryableValidationError(t *testing.T) {
 			if !tc.duringCatchUp {
 				require.NoError(t, appendSecond())
 			}
-			time.Sleep(pollInterval + 500*time.Millisecond) // at least one poll sees the uncheckable turn
+			// A second read of the turn proves the first was checked and deferred,
+			// and that the watcher kept polling with its cursor in place.
+			require.Eventually(t, func() bool { return adapter.turnReads.Load() >= 2 },
+				10*pollInterval, 10*time.Millisecond, "the watcher must read the uncheckable turn again")
 			deferred, err := session.LoadRecordingStateForAgent(repo, state.AgentID)
 			require.NoError(t, err)
 			require.NotNil(t, deferred)
