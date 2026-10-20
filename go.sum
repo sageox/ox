@@ -382,8 +382,8 @@ github.com/rogpeppe/go-internal v1.14.1 h1:UQB4HGPB6osV0SQTLymcB4TgvyWu6ZyliaW0t
 github.com/rogpeppe/go-internal v1.14.1/go.mod h1:MaRKkUm5W0goXpeCfT7UZI6fk/L7L7so1lCWt35ZSgc=
 github.com/russross/blackfriday/v2 v2.1.0 h1:JIOH55/0cWyOuilr9/qlrm0BSXldqnqwMsf35Ld67mk=
 github.com/russross/blackfriday/v2 v2.1.0/go.mod h1:+Rmxgy9KzJVeS9/2gXHxylqXiyQDYRxCVz55jmeOWTM=
-github.com/sageox/agentx v0.1.15-0.20261020190526-0285e37f6f4b h1:vi2n5jd77geAwf68L42N22+eOe5extaMjk+hMEFrZlY=
-github.com/sageox/agentx v0.1.15-0.20261020190526-0285e37f6f4b/go.mod h1:b0TvBm6nL113HGs12vfb2WK62L7C0WZmZEQRInmEqlM=
+github.com/sageox/agentx v0.1.15 h1:dqy5mdE85+MDs2ehNsvbO2Cn9D9zKt6H04UkdRjNUbA=
+github.com/sageox/agentx v0.1.15/go.mod h1:b0TvBm6nL113HGs12vfb2WK62L7C0WZmZEQRInmEqlM=
 github.com/sageox/frictionax v0.1.3 h1:HITFxqloanvS1dH+gS7JBIhpGlLZXchZtl+Yyk32s+A=
 github.com/sageox/frictionax v0.1.3/go.mod h1:Mnlre6UE4F95yX2xAhx4fJ5AKJiNThBDZIyav04O6lo=
 github.com/sageox/ox/pkg/planreview v0.3.0 h1:aWkpF6NYuINrwsxk/mUz92sbGki5zxyq3g13/dVsCdQ=
