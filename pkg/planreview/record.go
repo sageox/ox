@@ -53,8 +53,13 @@ type RoundRequest struct {
 // ParseRoundRequest decodes and validates the exact bytes a client froze for a
 // round: at least one item, each with an anchor and a known status, and a
 // well-formed id and slug when present. Unknown fields are kept for the record.
+//
+// A round that carries a drawing lists its items under "marks", with "items"
+// empty: releases that predate drawings refuse it as a round without items,
+// where they would store its items without their regions. Each drawing must
+// be a well-formed region on an item anchored "q-<region id>".
 func ParseRoundRequest(frozen []byte) (*RoundRequest, error) {
-	top, _, err := roundObjects(frozen)
+	top, items, err := roundObjects(frozen)
 	if err != nil {
 		return nil, err
 	}
@@ -70,9 +75,6 @@ func ParseRoundRequest(frozen []byte) (*RoundRequest, error) {
 	if r.ID != "" && !idPattern.MatchString(r.ID) {
 		return nil, fmt.Errorf("invalid round id %q: want 8-64 chars of [A-Za-z0-9_-]", r.ID)
 	}
-	if len(r.Items) == 0 {
-		return nil, errors.New("round request has no items")
-	}
 	for i := range r.Items {
 		if strings.TrimSpace(r.Items[i].Anchor) == "" {
 			return nil, fmt.Errorf("item %d has no anchor", i)
@@ -86,6 +88,19 @@ func ParseRoundRequest(frozen []byte) (*RoundRequest, error) {
 			return nil, fmt.Errorf("item %d: unknown status %q (want approve|request-change|flag|comment)", i, r.Items[i].Status)
 		}
 		r.Items[i].Status = s
+		// checked as the request carries it: r.Items was decoded from a
+		// re-encoding, which escapes <, > and &
+		raw, ok := items[i]["region"]
+		if !ok {
+			continue
+		}
+		id, err := checkRegion(raw)
+		if err != nil {
+			return nil, fmt.Errorf("item %d: %w", i, err)
+		}
+		if r.Items[i].Anchor != "q-"+id {
+			return nil, fmt.Errorf("item %d: a drawing's anchor must be %q", i, "q-"+id)
+		}
 	}
 	return &RoundRequest{Round: r, frozen: frozen}, nil
 }
@@ -245,8 +260,8 @@ func Prior(inv Inventory, rec File) (r Receipt, ok bool) {
 // matches a field name case-insensitively, so object refuses a key that
 // differs from a known field only in case.
 var (
-	roundFields      = []string{"id", "slug", "reviewer", "created_at", "items", "request_sha256"}
-	itemFields       = []string{"anchor", "section", "label", "quote", "status", "note", "reviewer"}
+	roundFields      = []string{"id", "slug", "reviewer", "created_at", "items", "marks", "request_sha256"}
+	itemFields       = []string{"anchor", "section", "label", "quote", "status", "note", "reviewer", "region"}
 	resolutionFields = []string{"id", "anchor", "state", "commit", "note", "at", "reviewer", "request_sha256"}
 )
 
@@ -270,25 +285,50 @@ func object(raw []byte, known []string) (map[string]json.RawMessage, error) {
 }
 
 // roundObjects decodes a frozen round request and each of its items as raw
-// objects.
+// objects. The items are its marks when it has any, and top holds them under
+// "items", where a record stores them.
 func roundObjects(frozen []byte) (map[string]json.RawMessage, []map[string]json.RawMessage, error) {
 	top, err := object(frozen, roundFields)
 	if err != nil {
 		return nil, nil, fmt.Errorf("parse round request: %w", err)
 	}
-	var raws []json.RawMessage
-	if raw, ok := top["items"]; !ok {
+	list := func(key string) ([]json.RawMessage, error) {
+		var raws []json.RawMessage
+		if raw, ok := top[key]; ok {
+			if err := json.Unmarshal(raw, &raws); err != nil {
+				return nil, fmt.Errorf("parse round request %s: %w", key, err)
+			}
+		}
+		return raws, nil
+	}
+	raws, err := list("items")
+	if err != nil {
+		return nil, nil, err
+	}
+	marks, err := list("marks")
+	if err != nil {
+		return nil, nil, err
+	}
+	drawn := len(marks) > 0
+	switch {
+	case drawn && len(raws) > 0:
+		return nil, nil, errors.New("round request lists items under both items and marks")
+	case drawn:
+		raws = marks
+	case len(raws) == 0:
 		return nil, nil, errors.New("round request has no items")
-	} else if err := json.Unmarshal(raw, &raws); err != nil {
-		return nil, nil, fmt.Errorf("parse round request items: %w", err)
 	}
 	items := make([]map[string]json.RawMessage, len(raws))
 	for i, raw := range raws {
 		if items[i], err = object(raw, itemFields); err != nil {
 			return nil, nil, fmt.Errorf("parse round request item %d: %w", i, err)
 		}
+		if _, ok := items[i]["region"]; ok && !drawn {
+			return nil, nil, fmt.Errorf("round request item %d is a drawing under items: send the round's items under marks", i)
+		}
 	}
 	top["items"] = rawJSON(items)
+	delete(top, "marks")
 	return top, items, nil
 }
 

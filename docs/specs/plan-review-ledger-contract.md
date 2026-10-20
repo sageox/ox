@@ -512,6 +512,24 @@ anchor `plan` (`WholePlanAnchor`), an empty section and the label
   them. Its review page lists both in the rail as notes whose text changed,
   and the open one in the banner of notes no longer anchored.
 
+### 3.11 Drawn regions (#1293)
+
+A drawing is a round item anchored `q-<region id>` that carries its record
+under `region` (`plan-review-drawn-context.md`, section 7; fixture
+`region-items`).
+
+- **Requests:** a round with a drawing lists its items under `marks`, with
+  `items` empty, a shape every earlier release refuses. `ParseRoundRequest`
+  checks each region (`testdata/drawn-context/regions.json`) and refuses a
+  drawing under `items`, a drawing whose anchor is not `q-<its id>`, and items
+  under both keys. A request without a drawing is unchanged.
+- **Records:** the items are stored under `items`, and `marks` is not kept.
+  A region is stored as the same JSON value the request carried (3.3), and it
+  is part of what two copies of a round must agree on (3.2).
+- **Assembly:** unchanged. Each drawing has its own anchor, so assembly never
+  merges two, a resolution closes only the one it names, and `Rebind` never
+  moves a `q` anchor. `Item.Region` carries the record to the reader.
+
 ---
 
 ## 4. Compatibility
