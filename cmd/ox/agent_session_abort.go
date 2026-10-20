@@ -83,6 +83,11 @@ func runAgentSessionAbortActive(inst *agentinstance.Instance, cmd *cobra.Command
 
 	sessionName := session.GetSessionName(state.SessionPath)
 
+	// Remember the recording and the native sessions it covered while the
+	// state that names them still exists, so `ox session import` never
+	// offers them.
+	importWarning := rememberAbort(sessionName, state.SessionID, nativeSessionsOfRecording(state.SessionPath, state))
+
 	// Remove any published draft placeholder from the ledger FIRST, while the
 	// local state that identifies it still exists. Doing this after
 	// os.RemoveAll would mean a failure here leaves the user's data already
@@ -108,7 +113,7 @@ func runAgentSessionAbortActive(inst *agentinstance.Instance, cmd *cobra.Command
 	// repair tasks server-side (fire-and-forget)
 	notifySessionAbortedAsync(projectRoot, state.SessionID, state.LifecycleRegistrationState != "deferred")
 
-	return emitAbortOutput(cmd.OutOrStdout(), inst.AgentID, sessionName, draftDeleted, draftWarning)
+	return emitAbortOutput(cmd.OutOrStdout(), inst.AgentID, sessionName, draftDeleted, joinWarnings(draftWarning, importWarning))
 }
 
 // runAgentSessionAbortByName aborts a session by name. Only allows discarding
@@ -223,6 +228,7 @@ func runAgentSessionAbortByName(inst *agentinstance.Instance, cmd *cobra.Command
 	if abortedSessionID == "" {
 		abortedSessionID = session.ReadHeaderSessionID(filepath.Join(sessionPath, "raw.jsonl"))
 	}
+	importWarning := rememberAbort(sessionName, abortedSessionID, nativeSessionsOfRecording(sessionPath, nil))
 
 	// Remove any published draft placeholder from the ledger before touching
 	// local data, so a git failure cannot leave the session deleted locally
@@ -241,7 +247,7 @@ func runAgentSessionAbortByName(inst *agentinstance.Instance, cmd *cobra.Command
 
 	notifySessionAbortedAsync(projectRoot, abortedSessionID, abortedEverRegistered)
 
-	return emitAbortOutput(cmd.OutOrStdout(), inst.AgentID, sessionName, draftDeleted, draftWarning)
+	return emitAbortOutput(cmd.OutOrStdout(), inst.AgentID, sessionName, draftDeleted, joinWarnings(draftWarning, importWarning))
 }
 
 // buildSessionInfo constructs a SessionInfo from a session folder on disk.
@@ -428,9 +434,12 @@ func abortDraftOnlySession(inst *agentinstance.Instance, cmd *cobra.Command, pro
 		}
 	}
 
+	// A draft names no native session (ADR-029), but its ses_ id is the link
+	// prime wrote into the native transcript, which is enough for import.
+	importWarning := rememberAbort(sessionName, abortedSessionID, nil)
 	deleted, warning := removeLedgerDraftForAbort(sessionName)
 	notifySessionAbortedAsync(projectRoot, abortedSessionID, true)
-	return emitAbortOutput(cmd.OutOrStdout(), inst.AgentID, sessionName, deleted, warning)
+	return emitAbortOutput(cmd.OutOrStdout(), inst.AgentID, sessionName, deleted, joinWarnings(warning, importWarning))
 }
 
 // removeLedgerDraftForAbort git-removes a session's draft placeholder from the
@@ -477,11 +486,14 @@ func killFinalizedSession(inst *agentinstance.Instance, cmd *cobra.Command, proj
 	}
 	ledgerSessionDir := filepath.Join(ledgerPath, "sessions", sessionName)
 
-	// Read the ses_ id before removal so the server /c/ page can flip to
-	// discarded — the meta.json that carries it is about to be git-rm'd.
+	// Read the ses_ id and native sessions before removal so the server /c/
+	// page can flip to discarded and `ox session import` never offers the
+	// session again — the meta.json that carries them is about to be git-rm'd.
 	abortedSessionID := ""
+	importWarning := ""
 	if meta, metaErr := lfs.ReadSessionMeta(ledgerSessionDir); metaErr == nil {
 		abortedSessionID = meta.EffectiveSessionID()
+		importWarning = rememberAbort(sessionName, abortedSessionID, nativeSessionsOfMeta(meta))
 	}
 
 	// Remove the git-tracked ledger directory: git rm -r + commit + push.
@@ -510,7 +522,7 @@ func killFinalizedSession(inst *agentinstance.Instance, cmd *cobra.Command, proj
 
 	notifySessionAbortedAsync(projectRoot, abortedSessionID, true)
 
-	return emitAbortOutput(cmd.OutOrStdout(), inst.AgentID, sessionName, false, "")
+	return emitAbortOutput(cmd.OutOrStdout(), inst.AgentID, sessionName, false, importWarning)
 }
 
 // confirmAbort checks --force flag or prompts for interactive confirmation.

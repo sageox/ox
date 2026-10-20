@@ -55,7 +55,8 @@ mode with no tools, and then uploaded once. A session the summarizer judges
 not worth sharing stays on this computer, as it would had ox recorded it.
 Up to 3 sessions are summarized at once; --parallel 1 runs one at a time.
 Running the import again uploads nothing twice: sessions already imported,
-and sessions ox recorded live, are recognized and skipped.
+and sessions ox recorded live, are recognized and skipped. A session whose
+ox recording you aborted is never uploaded.
 
 This is not 'ox agent <id> session import', which adds a planning
 conversation to the current recording.`,
@@ -779,6 +780,10 @@ func planImport(ctx context.Context, opts importOptions, env *importEnv) ([]*imp
 	if err != nil {
 		return nil, ignored, &importFailure{Code: importErrLedgerUnreadable, Message: err.Error(), Guidance: "Run ox doctor, then retry."}
 	}
+	if idx.aborted, err = loadAbortedSessions(env.ledgerPath); err != nil {
+		return nil, ignored, &importFailure{Code: importErrLedgerUnreadable, Message: err.Error(),
+			Guidance: "It lists the sessions the coworker aborted; ask them to repair it. Never delete it to proceed: that offers those sessions for upload again."}
+	}
 	sessions, err := discoverImportSessions(opts, scope, &ignored)
 	if err != nil {
 		return nil, ignored, &importFailure{Code: importErrNativeUnreadable, Message: err.Error()}
@@ -804,7 +809,7 @@ func planImport(ctx context.Context, opts importOptions, env *importEnv) ([]*imp
 		default:
 			c.State, c.Covered = idx.classify(s, now)
 			switch c.State {
-			case stateInProgress:
+			case stateInProgress, stateAborted:
 				c.Reason, c.Covered = c.Covered, ""
 			case stateAlreadyImported, stateRecordedLive:
 				c.Reason = idx.coverageNote(s, c.State)

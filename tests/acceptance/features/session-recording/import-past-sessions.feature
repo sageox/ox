@@ -61,6 +61,30 @@ Feature: Importing Past Sessions into the Ledger
       Then the preview lists that session as recorded live by ox, not from its start
       And it says the part before the resume is not in the Ledger
 
+  Rule: A session whose recording the coworker aborted is never imported
+
+    Scenario: Devon aborts a recording, then runs the import
+      Given ox was recording one of Devon's sessions
+      And Devon aborted that recording to discard it
+      When Devon runs the import after the session has gone quiet
+      Then the preview lists that session as aborted by Devon, with the date
+      And it is not selected
+      And it is not uploaded, even when Devon confirms or names it on the command line
+
+    Scenario: Devon kills a session already in the Ledger, then runs the import
+      Given one of Devon's recorded sessions is in the Ledger
+      And Devon aborted it by its exact name
+      When Devon runs the import
+      Then the preview lists that session as aborted by Devon
+      And it is not uploaded again
+
+    Scenario: Devon keeps working after aborting
+      Given Devon aborted a recording
+      And Devon later recorded and stopped other sessions, and aborted another one
+      When Devon runs the import
+      Then both aborted sessions are listed as aborted
+      And neither is uploaded
+
   Rule: The preview comes first and nothing moves without confirmation
 
     Scenario: Quinn looks before importing

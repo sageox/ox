@@ -119,7 +119,7 @@ func renderImportPreview(w io.Writer, opts importOptions, dest importDestination
 		}
 		label := skipLabel(c)
 		skipped[label]++
-		if (c.State == stateAlreadyImported || c.State == stateRecordedLive) && c.Reason != "" {
+		if (c.State == stateAlreadyImported || c.State == stateRecordedLive || c.State == stateAborted) && c.Reason != "" {
 			notes[label] = append(notes[label], nativeShortID(c.Session.NativeID)+": "+c.Reason)
 		}
 		if c.State == stateInProgress && !importHasString(hints, "in progress → finish it, then rerun") {
@@ -177,6 +177,8 @@ func skipLabel(c *importCandidate) string {
 		return "recorded live by ox"
 	case stateInProgress:
 		return "in progress"
+	case stateAborted:
+		return "aborted by you"
 	case stateNeedsSummarizer:
 		return "needs summarizer"
 	case stateIneligible:
