@@ -35,6 +35,14 @@ mkdirSync(DIR, { recursive: true });
 const ORB_AGENT_IDLE_MS = 5 * 60_000;
 const ORB_INTERACTION_IDLE_MS = 20 * 60_000;
 const UPLOAD_MARGIN_MS = 3 * 60_000;
+// Amp starts the 20-minute interaction clock when the coworker sends the
+// message, but the plugin first sees the turn at agent.start, once the orb is
+// up. A project orb that built its setup snapshot started its turn about
+// 1m40s after the message, and the upload landed only 70 s before the pause
+// (sageox/ox#1425). Assume this much of the window is gone by agent.start.
+// The agent-idle clock needs no allowance: it starts at agent.end, which the
+// plugin sees as it happens.
+const ORB_START_ALLOWANCE_MS = 3 * 60_000;
 // ox waits up to 3 min for the upload (sessionEndStopWait in
 // cmd/ox/session_end_sync.go); wait a minute longer so ox returns first.
 const STOP_TIMEOUT_MS = 4 * 60_000;
@@ -67,7 +75,9 @@ const assistantText = (m: unknown): string => {
 export function sessionEndDelay(turnEndedAt: number, lastPromptAt?: number): number {
   const byAgentIdle = turnEndedAt + ORB_AGENT_IDLE_MS;
   const byInteraction =
-    lastPromptAt === undefined ? byAgentIdle : lastPromptAt + ORB_INTERACTION_IDLE_MS;
+    lastPromptAt === undefined
+      ? byAgentIdle
+      : lastPromptAt + ORB_INTERACTION_IDLE_MS - ORB_START_ALLOWANCE_MS;
   return Math.max(byAgentIdle, byInteraction) - UPLOAD_MARGIN_MS - turnEndedAt;
 }
 

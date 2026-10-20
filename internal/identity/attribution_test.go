@@ -4,10 +4,14 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/sageox/ox/internal/runtime"
 )
 
 // --- A. osUsername fallback ---
@@ -139,4 +143,47 @@ func TestResolveAttribution_TeamCoworker(t *testing.T) {
 		DisplayName: "Rip Van Winkle",
 		AI:          true,
 	}, ResolveAttribution(srv.URL, "port8080"))
+}
+
+// --- G. Personal token in an Amp project orb ---
+
+// Failure prevented (sageox/ox#1425): an Amp project orb commits as its
+// project's commit author, "Amp", so git's identity named and credited every
+// session there "amp". The verified owner of SAGEOX_TOKEN must name the work
+// in an orb; on a laptop the slug stays git's so existing session names hold.
+func TestResolveAttribution_PersonalTokenInAnOrb(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"user":{"id":"usr_avery","email":"avery@test.sageox.ai","name":"Avery Quinn"}}`)
+	}))
+	t.Cleanup(srv.Close)
+	gitConfig := t.TempDir() + "/gitconfig"
+	require.NoError(t, os.WriteFile(gitConfig, []byte("[user]\n\tname = Amp\n\temail = amp@test.sageox.ai\n"), 0o600))
+
+	for _, tc := range []struct {
+		name         string
+		ampOrb       string
+		wantUsername string
+	}{
+		{"Amp orb: the token's owner names the session", "1", "avery"},
+		{"laptop: the slug stays git's", "", "amp"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_CACHE_HOME", t.TempDir())
+			t.Setenv("SAGEOX_ENDPOINT", srv.URL)
+			t.Setenv("SAGEOX_TOKEN", "oxp_test_4bDZfN")
+			t.Setenv("GIT_CONFIG_GLOBAL", gitConfig)
+			t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+			t.Chdir(t.TempDir())
+			t.Setenv("AMP_ORB", tc.ampOrb)
+			runtime.Reset()
+			t.Cleanup(runtime.Reset)
+
+			attr := ResolveAttribution(srv.URL, "")
+
+			assert.Equal(t, tc.wantUsername, attr.Username)
+			assert.Equal(t, "avery@test.sageox.ai", attr.Email, "the verified owner beats git")
+			assert.Equal(t, "Avery Quinn", attr.Name)
+			assert.Equal(t, "Avery Q.", attr.DisplayName)
+		})
+	}
 }

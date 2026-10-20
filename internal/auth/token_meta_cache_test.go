@@ -325,3 +325,24 @@ func TestFetchTokenMetaCached_DoesNotRetryAFailedFetchAtOnce(t *testing.T) {
 	}
 	assert.Equal(t, int32(1), calls.Load())
 }
+
+// TestFetchTokenMetaCached_KeepsTheTokenOwner — Failure prevented: /auth/me
+// names the person behind a personal token, the CLI drops it, and an Amp
+// project orb (git identity "Amp") credits that person's sessions to "Amp".
+func TestFetchTokenMetaCached_KeepsTheTokenOwner(t *testing.T) {
+	withTempCacheDir(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"user":{"id":"usr_avery","email":"avery@test.sageox.ai","name":"Avery Quinn"},"token_prefix":"oxp_AAAA","name":"orb"}`)
+	}))
+	defer srv.Close()
+
+	meta, err := FetchTokenMetaCached(context.Background(), srv.URL, "oxp_test_token")
+	require.NoError(t, err)
+	require.NotNil(t, meta.User)
+	assert.Equal(t, TokenUser{ID: "usr_avery", Email: "avery@test.sageox.ai", Name: "Avery Quinn"}, *meta.User)
+
+	cached, err := FetchTokenMetaCached(context.Background(), srv.URL, "oxp_test_token")
+	require.NoError(t, err)
+	require.NotNil(t, cached.User, "the owner must survive the on-disk cache")
+	assert.Equal(t, "avery@test.sageox.ai", cached.User.Email)
+}

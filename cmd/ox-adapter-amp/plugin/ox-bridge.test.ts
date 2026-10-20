@@ -115,8 +115,16 @@ describe('sessionEndDelay', () => {
   test('a long turn ends 2 minutes after it finishes (orb pauses at agent idle + 5 min)', () => {
     expect(sessionEndDelay(30 * MIN, 0)).toBe(2 * MIN);
   });
-  test('a quick turn waits for the 20-minute interaction window, less the upload margin', () => {
-    expect(sessionEndDelay(1 * MIN, 0)).toBe(16 * MIN);
+  test('a quick turn ends inside the 20-minute interaction window, less the orb start allowance and the upload margin', () => {
+    expect(sessionEndDelay(1 * MIN, 0)).toBe(13 * MIN);
+  });
+  test('a turn that starts 1m40s after its message (a snapshot build) still ends 3+ minutes before the pause', () => {
+    const sentAt = 0; // Amp's interaction clock; the plugin never sees it
+    const startedAt = 100_000; // agent.start once the orb is up
+    const endedAt = 130_000;
+    const sessionEndAt = endedAt + sessionEndDelay(endedAt, startedAt);
+    const pauseAt = Math.max(endedAt + 5 * MIN, sentAt + 20 * MIN);
+    expect(pauseAt - sessionEndAt).toBeGreaterThanOrEqual(3 * MIN);
   });
   test('with no prompt seen, only agent idle counts', () => {
     expect(sessionEndDelay(10 * MIN)).toBe(2 * MIN);
@@ -131,14 +139,14 @@ describe('createSessionEnder', () => {
 
     ender.promptStarted('T-1');
     advanceTo(1 * MIN);
-    ender.turnEnded('T-1'); // ends at 17 min unless Devon replies
+    ender.turnEnded('T-1'); // ends at 14 min unless Devon replies
     advanceTo(10 * MIN);
     ender.promptStarted('T-1'); // Devon replies: cancelled
     advanceTo(11 * MIN);
-    ender.turnEnded('T-1'); // now ends at max(13, 27) = 27 min
-    advanceTo(26 * MIN);
+    ender.turnEnded('T-1'); // now ends at max(13, 24) = 24 min
+    advanceTo(23 * MIN);
     expect(ended).toEqual([]);
-    advanceTo(27 * MIN);
+    advanceTo(24 * MIN);
     expect(ended).toEqual(['T-1']);
   });
 
