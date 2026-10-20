@@ -20,21 +20,24 @@ running `Assemble` over them.
 `ParseRoundRequest`/`ParseResolutionRequest` take the exact bytes the client
 froze; `Record` adds what the host materializes (slug, acceptance time, the
 caller's identity) and names the record by time, operation id and a digest of
-its bytes. Before writing, `Prior` looks the operation up: the same payload from
-the same reviewer is `already_published`, anything else `conflict`. `Publish`
-writes a record to a local worktree create-only, without following a symlink at
-any component. Authentication, authorization and lifecycle (approval, plan
-status) stay with the host. A submission never writes remaps; the plan's author
-computes them with `Rebind` and records each with `RemapRecord`.
+its bytes. A round that carries a drawing sends its items under `marks`, and
+`ParseRoundRequest` checks each drawn region (`region.go`). Before writing,
+`Prior` looks the operation up: the same payload from the same reviewer is
+`already_published`, anything else `conflict`. `Publish` writes a record to a
+local worktree create-only, without following a symlink at any component.
+Authentication, authorization and lifecycle (approval, plan status) stay with
+the host. A submission never writes remaps; the plan's author computes them
+with `Rebind` and records each with `RemapRecord`.
 
 **Fixtures.** `testdata/review-contract/<fixture>/` holds a plan directory and
 what assembling it yields (`expect.json`); `testdata/anchors.json` holds the
 review page's anchor, label and markable-element vectors. Record files in the
 fixtures never change: hosts compare against them byte for byte.
 `testdata/drawn-context/` holds the drawn-region prototype a host qualifies
-its viewer with (a document tool, an opaque-origin harness and a local server)
-and its plan revisions, captures and expected placements; no module code reads
-it (`docs/specs/plan-review-drawn-context.md`).
+its viewer with (a document tool, an opaque-origin harness and a local server),
+its plan revisions, captures and expected placements, and `regions.json`, the
+region rules this module and the browser package both test against; only tests
+read it (`docs/specs/plan-review-drawn-context.md`).
 
 Run `go test -race ./...` in this directory or `make test-public-modules` at the
 repository root. Root `go test ./...` does not reach this nested module.

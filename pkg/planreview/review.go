@@ -45,10 +45,11 @@ const (
 
 // Item is one anchored review mark. Anchor is the content hash the review page
 // computes (see AnchorFor): "h…" for an element, "q…" for a highlight; or
-// WholePlanAnchor.
+// WholePlanAnchor; or "q-<id>" for a drawing, whose record is Region.
 //
 // The field order and tags are ContentRoundID's input; changing them changes
-// every content-derived round id.
+// every content-derived round id. Region is last and omitted when empty, so
+// an item without one hashes as it always has.
 type Item struct {
 	Anchor   string `json:"anchor"`
 	Section  string `json:"section,omitempty"`
@@ -57,6 +58,10 @@ type Item struct {
 	Status   Status `json:"status"`
 	Note     string `json:"note,omitempty"`
 	Reviewer string `json:"reviewer,omitempty"`
+	// Region is a drawing's record as stored: the same JSON value the request
+	// carried, not the same bytes (region.go). It must hold valid JSON, as
+	// every Item decoded from a request or a record does.
+	Region json.RawMessage `json:"region,omitempty"`
 }
 
 // WholePlanAnchor is the anchor of a mark on the plan as a whole, such as its
@@ -539,7 +544,7 @@ func contentDigest(reviewer string, items []Item) [32]byte {
 	canon, _ := json.Marshal(struct {
 		Reviewer string `json:"reviewer"`
 		Items    []Item `json:"items"`
-	}{reviewer, items}) // strings only: Marshal cannot fail
+	}{reviewer, items}) // strings and decoded JSON (Region): Marshal cannot fail
 	return sha256.Sum256(canon)
 }
 
