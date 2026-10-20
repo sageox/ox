@@ -136,6 +136,11 @@ type Config struct {
 	// LedgerPath is the path to the ledger repository.
 	LedgerPath string
 
+	// DisposableMachine is the user's disposable_machine setting, read when
+	// the daemon starts: this machine runs one job and goes away, keeping only
+	// the home directory.
+	DisposableMachine bool
+
 	// ProjectRoot is the path to the project root (for loading team contexts).
 	ProjectRoot string
 }

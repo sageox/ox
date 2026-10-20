@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/lfs"
+	"github.com/sageox/ox/internal/proc"
 )
 
 // SessionStatus represents the lifecycle state of a session.
@@ -181,7 +182,7 @@ func ClassifySession(info SessionInfo, isUploaded bool) SessionStatus {
 	}
 
 	// recording is active — check if the parent process is still alive
-	if isAbandoned(info.ParentPID, info.CreatedAt) {
+	if isAbandoned(info.ParentPID, info.ParentStartTime, info.CreatedAt) {
 		// A held folder can keep its recording marker: recovery writes the
 		// hold first, and a failed clear leaves both. Orphan and ghost are
 		// what prune deletes, and a hold is removed only by name.
@@ -205,11 +206,12 @@ func ClassifySession(info SessionInfo, isUploaded bool) SessionStatus {
 }
 
 // isAbandoned checks whether a recording session's parent process is dead.
-// If PID is known, uses kill(pid, 0) for instant liveness detection.
+// If PID is known, uses kill(pid, 0) for instant liveness detection, and
+// parentStart (RecordingState.ParentStartTime) to catch a reused PID.
 // If PID is unknown, falls back to age heuristic.
-func isAbandoned(parentPID int, createdAt time.Time) bool {
+func isAbandoned(parentPID int, parentStart int64, createdAt time.Time) bool {
 	if parentPID > 0 {
-		return !isPIDAlive(parentPID)
+		return !isPIDAlive(parentPID) || proc.IsReused(parentPID, parentStart)
 	}
 	// no PID recorded — fall back to heuristic: old enough to be suspicious
 	return time.Since(createdAt) > ghostHeuristicAge

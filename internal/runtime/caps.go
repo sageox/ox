@@ -103,8 +103,9 @@ type Capabilities struct {
 
 	// HostEndsWithAgent reports that the machine may pause or be torn
 	// down once the coding agent finishes: an Amp orb, Claude Code Cloud,
-	// Devin. Work handed to the daemon at session end may then never run,
-	// so session end must upload before it returns.
+	// Devin, or a machine the user set `disposable_machine` on (a pod
+	// with a persistent home). Work handed to the daemon at session end
+	// may then never run, so session end must upload before it returns.
 	//
 	// Independent of DaemonViable: an Amp orb runs the daemon (it clones
 	// the Ledger and serves the session) yet pauses minutes after its
@@ -317,10 +318,11 @@ func probeLifetime() Lifetime {
 }
 
 // probeHostEndsWithAgent reports the venues whose machine pauses or is torn
-// down once the coding agent is done. Venue markers only: an explicit
-// OX_EPHEMERAL says the disk is lost, not when the machine stops.
+// down once the coding agent is done, and a machine the user set
+// `disposable_machine` on. An explicit OX_EPHEMERAL does not count: it says
+// the disk is lost, not when the machine stops.
 func probeHostEndsWithAgent() bool {
-	return IsAmpOrb() || isClaudeCloud() || isDevin()
+	return IsAmpOrb() || isClaudeCloud() || isDevin() || userConfigSaysDisposable()
 }
 
 // probeDaemonViable composes the other capability fields plus the

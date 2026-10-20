@@ -347,6 +347,7 @@ type SessionInfo struct {
 	EntryCount      int                 `json:"entry_count,omitempty"`        // from .recording.json or meta.json
 	IsSubagent      bool                `json:"is_subagent,omitempty"`        // true if spawned by a parent session
 	ParentPID       int                 `json:"parent_pid,omitempty"`         // from .recording.json for liveness detection
+	ParentStartTime int64               `json:"parent_start_time,omitempty"`  // from .recording.json; see RecordingState.ParentStartTime
 	Origin          string              `json:"origin,omitempty"`             // session origin: "human", "subagent", "agent"
 	HasRawData      bool                `json:"has_raw_data,omitempty"`       // true if raw.jsonl exists with content on disk
 	StopReason      string              `json:"stop_reason,omitempty"`        // how session ended (StopReason* constants)
@@ -456,6 +457,7 @@ func (s *Store) listSessionSessions(since time.Time) ([]SessionInfo, error) {
 		var recordingEntryCount int
 		var isSubagent bool
 		var parentPID int
+		var parentStartTime int64
 		var origin string
 		var suspendedAt *time.Time
 		recPath := filepath.Join(sessionPath, recordingFile)
@@ -468,6 +470,7 @@ func (s *Store) listSessionSessions(since time.Time) ([]SessionInfo, error) {
 				recordingEntryCount = recState.EntryCount
 				isSubagent = recState.IsSubagent()
 				parentPID = recState.ParentPID
+				parentStartTime = recState.ParentStartTime
 				origin = recState.Origin
 				// ADR-020: ClassifySession branches on SessionInfo.SuspendedAt to
 				// return StatusSuspended; without this propagation, suspended
@@ -562,6 +565,7 @@ func (s *Store) listSessionSessions(since time.Time) ([]SessionInfo, error) {
 			EntryCount:      entryCount(isRecording, recordingEntryCount, meta),
 			IsSubagent:      isSubagent,
 			ParentPID:       parentPID,
+			ParentStartTime: parentStartTime,
 			Origin:          origin,
 			HasRawData:      hasRawData,
 			StopReason:      stopReason(meta),

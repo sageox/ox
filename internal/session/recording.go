@@ -22,6 +22,7 @@ import (
 	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/paths"
+	"github.com/sageox/ox/internal/proc"
 	"github.com/sageox/ox/internal/sessionid"
 	"github.com/sageox/ox/internal/trace/model"
 )
@@ -163,7 +164,12 @@ type RecordingState struct {
 	StopIncomplete bool   `json:"stop_incomplete,omitempty"` // set when stop returned retry guidance (empty file)
 	Model          string `json:"model,omitempty"`           // LLM model for generic adapters where ReadMetadata returns nil
 	ParentPID      int    `json:"parent_pid,omitempty"`      // parent agent process ID for liveness detection
-	SourceOffset   int64  `json:"source_offset,omitempty"`   // byte offset in source file for incremental reading
+	// ParentStartTime is proc.StartTime(ParentPID), stored only under the
+	// disposable_machine setting (see ParentStartTimeOf); 0 otherwise. This
+	// file outlives the machine, and on the next one ParentPID can name an
+	// unrelated process.
+	ParentStartTime int64 `json:"parent_start_time,omitempty"`
+	SourceOffset    int64 `json:"source_offset,omitempty"` // byte offset in source file for incremental reading
 	// Preserve a rejected native source and captured prefix for manual ownership
 	// review, but do not keep retrying or publish a mixed-repository session.
 	SourceRejected bool `json:"source_rejected,omitempty"`
@@ -309,7 +315,18 @@ func (r *RecordingState) IsAgentAlive() bool {
 	if r == nil || r.ParentPID <= 0 {
 		return true // no PID recorded — assume alive
 	}
-	return isPIDAlive(r.ParentPID)
+	return isPIDAlive(r.ParentPID) && !proc.IsReused(r.ParentPID, r.ParentStartTime)
+}
+
+// ParentStartTimeOf returns the value to store as ParentStartTime for pid: its
+// start time under the disposable_machine setting, otherwise 0, which leaves
+// liveness checks on the PID alone.
+func ParentStartTimeOf(pid int) int64 {
+	if !config.DisposableMachineEnabled() {
+		return 0
+	}
+	start, _ := proc.StartTime(pid)
+	return start
 }
 
 // AmpStartsAtPrompt reports whether an Amp recording starts at the sidecar
@@ -841,7 +858,7 @@ func IsRecording(projectRoot string) bool {
 func HasLiveRecording(projectRoot string) (bool, error) {
 	live := false
 	if err := walkRecordingStates(projectRoot, true, func(state *RecordingState) bool {
-		live = !isAbandoned(state.ParentPID, state.StartedAt)
+		live = !isAbandoned(state.ParentPID, state.ParentStartTime, state.StartedAt)
 		return !live // the first live owner answers the question
 	}); err != nil {
 		return false, err
@@ -1572,6 +1589,7 @@ func StartRecording(projectRoot string, opts StartRecordingOptions) (*RecordingS
 	if state.ParentPID <= 0 && state.AdapterName != "cursor" {
 		state.ParentPID = os.Getppid()
 	}
+	state.ParentStartTime = ParentStartTimeOf(state.ParentPID)
 	if opts.BeforePublish != nil {
 		if err := opts.BeforePublish(state); err != nil {
 			return nil, fmt.Errorf("initialize recording before publication: %w", err)

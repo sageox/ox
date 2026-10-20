@@ -344,12 +344,66 @@ func (d *Daemon) hasPendingWork() bool {
 	return false
 }
 
-// RestartRequested returns true if the daemon stopped due to a version mismatch
-// and should be re-executed with the updated binary.
+// RestartRequested returns true if the daemon stopped to be re-executed: after
+// a version mismatch, to run the updated binary, or under disposable_machine
+// once the Ledger's first clone lands.
 func (d *Daemon) RestartRequested() bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.restartRequested
+}
+
+// startAutofix starts the periodic auto-fix scheduler (ox-0xgx). It runs the
+// registered auto-fix-safe doctor checks on a slow cadence so silent drift
+// (init artifacts reverted from git, legacy hook formats in settings.json,
+// etc.) gets repaired without anyone typing `ox doctor`. The set of checks
+// lives in internal/doctor/autofix/default_checks.go and is intentionally
+// small at first — incremental migration of cmd/ox/doctor_*.go auto-safe
+// checks happens in follow-up beads.
+//
+// Off under disposable_machine: the machine runs one job, and the checks
+// rewrite files in every Ledger under the home, not only this job's.
+func (d *Daemon) startAutofix() {
+	if d.config.ProjectRoot == "" || d.config.DisposableMachine {
+		return
+	}
+	autofixReg := autofix.Default()
+	d.autofixSched = autofix.NewScheduler(autofixReg, d.logger,
+		func() []string { return []string{d.config.ProjectRoot} },
+		d.routeAutofixResult)
+	d.autofixSched.SetLedgerPaths(d.autofixLedgerPaths)
+	d.wg.Add(1)
+	go func() {
+		defer d.wg.Done()
+		d.autofixSched.Run(d.ctx)
+	}()
+}
+
+// restartAfterFirstLedgerClone has the daemon restart once a background clone
+// lands the Ledger it started without, under disposable_machine. A daemon
+// started before the Ledger's first clone leaves the parts that need a Ledger
+// unwired until it restarts, because LedgerPath is fixed at start, and a
+// disposable machine's daemon runs for the whole job. This machine made that
+// clone, so the restarted daemon finds no other machine's locks to clear.
+func (d *Daemon) restartAfterFirstLedgerClone() {
+	if !d.config.DisposableMachine || d.config.LedgerPath != "" {
+		return
+	}
+	d.scheduler.SetLedgerClonedCallback(func(ledgerPath string) {
+		markLedgerLocksCleared(ledgerPath, d.logger)
+		d.logger.Info("restarting to pick up the Ledger's first clone", "path", ledgerPath)
+		d.requestRestart()
+	})
+}
+
+// requestRestart stops the daemon so that runDaemonForeground re-executes it.
+func (d *Daemon) requestRestart() {
+	d.mu.Lock()
+	d.restartRequested = true
+	d.mu.Unlock()
+	go func() {
+		_ = d.Stop() // best-effort; caller checks RestartRequested() and re-execs regardless
+	}()
 }
 
 // Start starts the daemon in the foreground.
@@ -1120,6 +1174,21 @@ func (d *Daemon) ensureLedgerSparseCheckout(ctx context.Context) {
 	d.logger.Info("ledger sparse-checkout verified at startup")
 }
 
+// removeLedgerLocksAtStart cleans up git lock files that crashed processes left
+// in the Ledger, before sync starts.
+func (d *Daemon) removeLedgerLocksAtStart() {
+	if d.config.LedgerPath == "" {
+		return
+	}
+	if d.config.DisposableMachine {
+		clearLedgerLocksOnFirstStart(d.ctx, d.config.LedgerPath, d.logger)
+	}
+	gitDir := filepath.Join(d.config.LedgerPath, ".git")
+	if removed, _ := gitutil.RemoveStaleLockFiles(gitDir); len(removed) > 0 {
+		d.logger.Info("removed stale git lock files at startup", "path", d.config.LedgerPath, "locks", removed)
+	}
+}
+
 // initComponents creates and wires all daemon subsystems. Returns setup duration.
 func (d *Daemon) initComponents() time.Duration {
 	startSetup := time.Now()
@@ -1130,13 +1199,7 @@ func (d *Daemon) initComponents() time.Duration {
 		projectEndpoint = projectCfg.GetEndpoint()
 	}
 
-	// clean up stale git lock files left by crashed processes before starting sync
-	if d.config.LedgerPath != "" {
-		gitDir := filepath.Join(d.config.LedgerPath, ".git")
-		if removed, _ := gitutil.RemoveStaleLockFiles(gitDir); len(removed) > 0 {
-			d.logger.Info("removed stale git lock files at startup", "path", d.config.LedgerPath, "locks", removed)
-		}
-	}
+	d.removeLedgerLocksAtStart()
 
 	// ensure ledger sparse-checkout cone is correct before any sync or indexing.
 	// without this, a corrupt cone from a previous session causes every sync cycle
@@ -1220,12 +1283,7 @@ func (d *Daemon) initComponents() time.Duration {
 			"cli_version", cliVersion,
 			"daemon_version", daemonVersion,
 		)
-		d.mu.Lock()
-		d.restartRequested = true
-		d.mu.Unlock()
-		go func() {
-			_ = d.Stop() // best-effort; caller checks RestartRequested() and re-execs regardless
-		}()
+		d.requestRestart()
 	})
 	// pre-populate credentials from credential store (cold-start)
 	if creds, err := gitserver.LoadCredentialsForEndpoint(projectEndpoint); err == nil && creds != nil {
@@ -1255,6 +1313,7 @@ func (d *Daemon) initComponents() time.Duration {
 	d.scheduler = NewSyncScheduler(d.config, d.logger)
 	d.scheduler.SetTracer(d.tracer)
 	d.scheduler.SetEventBus(d.eventBus)
+	d.restartAfterFirstLedgerClone()
 
 	// Per-(user, endpoint) global-sync leader election (ox-6zme).
 	// Acquire the flock lease BEFORE the scheduler runs so the first
@@ -1315,8 +1374,14 @@ func (d *Daemon) initComponents() time.Duration {
 		}
 		awCfg := configLoader()
 		sfh.SetQualityThresholds(awCfg.GetQualityUploadThreshold(), awCfg.GetQualityDiscardThreshold())
-		d.sessionFinalizeHandler = sfh
-		d.agentWorker.RegisterHandler(sfh)
+		// Under disposable_machine the CLI uploads every session itself: at
+		// session end, and with `ox session wait` when the job ends. With no
+		// handler the daemon detects nothing to finalize, and a dead agent's
+		// sessions are left to the CLI too.
+		if !d.config.DisposableMachine {
+			d.sessionFinalizeHandler = sfh
+			d.agentWorker.RegisterHandler(sfh)
+		}
 		d.agentWorker.SetOnComplete(func(result agentwork.WorkResult) {
 			status := "success"
 			if !result.Success {
@@ -1486,26 +1551,7 @@ func (d *Daemon) startWorkers() {
 		d.scheduler.Start(d.ctx)
 	}()
 
-	// ox-0xgx: periodic auto-fix scheduler. Runs the registered
-	// auto-fix-safe doctor checks on a slow cadence so silent drift
-	// (init artifacts reverted from git, legacy hook formats in
-	// settings.json, etc.) gets repaired without anyone typing
-	// `ox doctor`. The set of checks lives in
-	// internal/doctor/autofix/default_checks.go and is intentionally
-	// small at first — incremental migration of cmd/ox/doctor_*.go
-	// auto-safe checks happens in follow-up beads.
-	if d.config.ProjectRoot != "" {
-		autofixReg := autofix.Default()
-		d.autofixSched = autofix.NewScheduler(autofixReg, d.logger,
-			func() []string { return []string{d.config.ProjectRoot} },
-			d.routeAutofixResult)
-		d.autofixSched.SetLedgerPaths(d.autofixLedgerPaths)
-		d.wg.Add(1)
-		go func() {
-			defer d.wg.Done()
-			d.autofixSched.Run(d.ctx)
-		}()
-	}
+	d.startAutofix()
 
 	// unified DB maintenance: prune, vacuum, integrity check for all SQLite databases
 	d.dbMaintenance = NewDBMaintenanceScheduler(d.logger)
@@ -1923,6 +1969,11 @@ func finalizeSessionDir(ledgerPath, sessionName, cachePath string) (string, bool
 func (s *daemonServiceImpl) SessionFinalize(payload SessionFinalizeIPCPayload) {
 	if s.d.agentWorker == nil {
 		s.d.logger.Warn("session_finalize received but agent worker not initialized")
+		return
+	}
+	// The session waits in the cache for `ox session wait`; see initComponents.
+	if s.d.config.DisposableMachine {
+		s.d.logger.Info("session_finalize not taken on a disposable machine", "session", payload.SessionName)
 		return
 	}
 	// Trust boundary: SessionName flows into filepath.Join under sessions/ —

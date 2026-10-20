@@ -191,6 +191,36 @@ DO_NOT_TRACK=1 turns all of it off, the same as setting this to off.`,
 		Levels:      []ConfigLevel{ConfigLevelUser},
 	},
 	{
+		Key:         "disposable_machine",
+		Label:       "Disposable machine",
+		Description: "This machine runs one job and goes away; only its home directory persists.",
+		LongDescription: `Turn on for a machine that runs ox for one job and then goes away,
+keeping only its home directory, such as a pod with a persistent home
+volume. Leave it off on a laptop or a long-lived server.
+
+When on:
+  - Session end uploads the session before it returns, as on an Amp orb,
+    and the daemon finalizes no sessions.
+  - The daemon's first start on a machine removes the Ledger's git lock
+    files, which a machine that went away mid-command leaves behind.
+  - The daemon runs no periodic auto-fix and no clone garbage collection.
+  - The daemon restarts once the Ledger's first clone lands, so the work
+    that needs a Ledger starts.
+  - A recording stores when its AI coworker's process started, so a
+    process on a later machine that reuses the same PID is not taken
+    for it.
+  - Git commands that ox runs in its own clones (the Ledger, team
+    contexts, Knowledge Bubbles) run no hooks and get credentials only
+    from ox.
+
+The daemon reads this setting when it starts: run 'ox daemon restart'
+after changing it.`,
+		Category:    "Machine",
+		ValidValues: []string{"on", "off"},
+		Default:     "off",
+		Levels:      []ConfigLevel{ConfigLevelUser},
+	},
+	{
 		Key:         "tips",
 		Label:       "Tips",
 		Description: "Show contextual tips after command output.",
@@ -736,6 +766,11 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 			}
 		}
 
+	case "disposable_machine":
+		if userCfg != nil && userCfg.DisposableMachine != nil {
+			cv.UserVal = boolToOnOff(*userCfg.DisposableMachine)
+		}
+
 	case "view_format":
 		if userCfg != nil && userCfg.ViewFormat != "" {
 			cv.UserVal = userCfg.ViewFormat
@@ -1018,6 +1053,10 @@ func setUserConfig(key, value string) error {
 	case "tips":
 		enabled := value == "on"
 		cfg.TipsEnabled = &enabled
+
+	case "disposable_machine":
+		enabled := value == "on"
+		cfg.DisposableMachine = &enabled
 
 	case "view_format":
 		cfg.ViewFormat = value
@@ -1331,6 +1370,9 @@ func unsetUserConfig(key string) error {
 
 	case "tips":
 		cfg.TipsEnabled = nil
+
+	case "disposable_machine":
+		cfg.DisposableMachine = nil
 
 	case "view_format":
 		cfg.ViewFormat = ""

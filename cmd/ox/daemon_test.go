@@ -1,9 +1,17 @@
 package main
 
 import (
+	"fmt"
+	"io"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/sageox/ox/internal/cli"
+	"github.com/sageox/ox/internal/daemon"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -106,4 +114,100 @@ func resetDaemonStartFlags(t *testing.T) {
 	require.NotNil(t, fg, "daemon start must declare --foreground")
 	require.NoError(t, fg.Value.Set(fg.DefValue))
 	fg.Changed = false
+}
+
+// Failure prevented: on a disposable machine, the daemon that restarts after
+// the Ledger's first clone starts in $HOME, where StabilizeCWD moved it, finds
+// no project there, and comes up without its Ledger or workspace. Other
+// machines keep today's behavior.
+func TestReexecDaemon_DisposableMachineReturnsToTheProject(t *testing.T) {
+	for _, disposable := range []bool{false, true} {
+		t.Run(fmt.Sprintf("disposable_machine=%v", disposable), func(t *testing.T) {
+			project, elsewhere := t.TempDir(), t.TempDir()
+			t.Chdir(elsewhere)
+			var dir string
+			execProcess = func(string, []string, []string) error {
+				dir, _ = os.Getwd()
+				return nil
+			}
+			t.Cleanup(func() { execProcess = syscall.Exec })
+
+			cfg := &daemon.Config{ProjectRoot: project, DisposableMachine: disposable}
+			require.NoError(t, reexecDaemon(cfg, slog.New(slog.DiscardHandler)))
+
+			want := elsewhere
+			if disposable {
+				want = project
+			}
+			want, err := filepath.EvalSymlinks(want)
+			require.NoError(t, err)
+			got, err := filepath.EvalSymlinks(dir)
+			require.NoError(t, err)
+			assert.Equal(t, want, got)
+		})
+	}
+}
+
+// Failure prevented: disposable_machine is on, but `ox daemon start` never
+// hands it to the daemon, so none of the daemon's disposable-machine
+// behaviors happen.
+func TestDaemonConfig_CarriesDisposableMachine(t *testing.T) {
+	for _, on := range []bool{false, true} {
+		t.Run(fmt.Sprintf("disposable_machine=%v", on), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			require.NoError(t, os.WriteFile(path, fmt.Appendf(nil, "disposable_machine: %v\n", on), 0o600))
+			t.Setenv("OX_USER_CONFIG", path)
+
+			cfg := daemonConfig("/ledger")
+
+			assert.Equal(t, on, cfg.DisposableMachine)
+			assert.Equal(t, "/ledger", cfg.LedgerPath)
+		})
+	}
+}
+
+// Failure prevented: the project directory is gone when the daemon
+// re-executes, and it re-executes anyway, in a directory with no project.
+func TestReexecDaemon_ProjectGoneIsAnError(t *testing.T) {
+	called := false
+	execProcess = func(string, []string, []string) error {
+		called = true
+		return nil
+	}
+	t.Cleanup(func() { execProcess = syscall.Exec })
+
+	cfg := &daemon.Config{ProjectRoot: filepath.Join(t.TempDir(), "gone"), DisposableMachine: true}
+	err := reexecDaemon(cfg, slog.New(slog.DiscardHandler))
+
+	require.ErrorContains(t, err, "return to the project")
+	assert.False(t, called)
+}
+
+// Failure prevented: with disposable_machine on, git that ox starts in its
+// own clones still runs their hooks and credential helpers, because the root
+// command never applies the isolation.
+func TestRootCommand_DisposableMachineIsolatesManagedClones(t *testing.T) {
+	home := t.TempDir()
+	cfgPath := filepath.Join(home, "config.yaml")
+	require.NoError(t, os.WriteFile(cfgPath, []byte("disposable_machine: true\n"), 0o600))
+	t.Setenv("OX_USER_CONFIG", cfgPath)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, "cache"))
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("DO_NOT_TRACK", "1")
+	for _, name := range []string{"GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"} {
+		t.Setenv(name, "") // restores what the command sets
+	}
+	oldOut := rootCmd.OutOrStdout()
+	rootCmd.SetOut(io.Discard)
+	rootCmd.SetArgs([]string{"config", "get", "disposable_machine"})
+	t.Cleanup(func() {
+		rootCmd.SetArgs(nil)
+		rootCmd.SetOut(oldOut)
+	})
+
+	require.NoError(t, rootCmd.Execute())
+
+	require.Equal(t, "1", os.Getenv("GIT_CONFIG_COUNT"))
+	require.True(t, strings.HasPrefix(os.Getenv("GIT_CONFIG_KEY_0"), "includeIf.gitdir:"), os.Getenv("GIT_CONFIG_KEY_0"))
 }

@@ -273,6 +273,7 @@ func buildSessionInfo(sessionName, sessionPath string) session.SessionInfo {
 			info.AgentID = state.AgentID
 			info.EntryCount = state.EntryCount
 			info.ParentPID = state.ParentPID
+			info.ParentStartTime = state.ParentStartTime
 			info.CreatedAt = state.StartedAt
 		}
 	}

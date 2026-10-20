@@ -210,6 +210,9 @@ type SyncScheduler struct {
 	onTelemetry  func(syncType, operation, status string, duration time.Duration) // called on sync complete for telemetry
 	getAuthToken func() string                                                    // returns cached auth token from heartbeat
 
+	// onLedgerCloned is set by SetLedgerClonedCallback.
+	onLedgerCloned func(ledgerPath string)
+
 	// issues tracker for health check system
 	issues *IssueTracker
 
@@ -456,6 +459,24 @@ func (s *SyncScheduler) SetTracer(t *observability.DaemonTracer) {
 // SetEventBus sets the event bus for emitting sync events.
 func (s *SyncScheduler) SetEventBus(bus *hooks.EventBus) {
 	s.eventBus = bus
+}
+
+// gcCheckInterval is how often Start checks for workspaces due a GC reclone,
+// or 0 for never. Never under disposable_machine: an hour into a job, the
+// first check would reclone the Ledger, because the daemon's first clone is a
+// full clone and GC upgrades every full clone to a partial one.
+func (s *SyncScheduler) gcCheckInterval() time.Duration {
+	if s.config.ProjectRoot == "" || s.config.DisposableMachine {
+		return 0
+	}
+	return s.config.GCCheckInterval
+}
+
+// SetLedgerClonedCallback registers fn to run when a background clone lands
+// the Ledger this scheduler started without (config.LedgerPath empty). Call it
+// before Start.
+func (s *SyncScheduler) SetLedgerClonedCallback(fn func(ledgerPath string)) {
+	s.onLedgerCloned = fn
 }
 
 // SetGlobalSyncLease wires the per-endpoint global-sync leader-election
@@ -895,8 +916,8 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 	// GC reclone ticker — checks hourly if any workspace needs a fresh reclone
 	var gcTicker *time.Ticker
 	var gcChan <-chan time.Time
-	if s.config.GCCheckInterval > 0 && s.config.ProjectRoot != "" {
-		gcTicker = time.NewTicker(s.config.GCCheckInterval)
+	if every := s.gcCheckInterval(); every > 0 {
+		gcTicker = time.NewTicker(every)
 		gcChan = gcTicker.C
 		defer gcTicker.Stop()
 	}

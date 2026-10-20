@@ -711,3 +711,25 @@ func TestUserConfig_TelemetryNoticeShownSurvivesSaveAndLoad(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, reloaded.HasSeenTelemetryNotice())
 }
+
+// Failure prevented: a machine without the disposable_machine setting, or with
+// a config ox cannot read, takes the disposable-machine behaviors.
+func TestDisposableMachineEnabled(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{"unset", "tips_enabled: true\n", false},
+		{"on", "disposable_machine: true\n", true},
+		{"off", "disposable_machine: false\n", false},
+		{"unreadable", "disposable_machine: [true\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			require.NoError(t, os.WriteFile(path, []byte(tc.content), 0o600))
+			t.Setenv(EnvUserConfig, path)
+			assert.Equal(t, tc.want, DisposableMachineEnabled())
+		})
+	}
+}

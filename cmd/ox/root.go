@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -18,6 +19,7 @@ import (
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/flags"
+	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/version"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -60,6 +62,11 @@ var rootCmd = &cobra.Command{
 		}
 		if err := applyConfigFlag(cmd, args); err != nil {
 			return err
+		}
+		if config.DisposableMachineEnabled() {
+			if err := gitserver.IsolateManagedClones(); err != nil {
+				slog.Warn("disposable_machine: git in ox's clones still runs their hooks and credential helpers", "error", err)
+			}
 		}
 
 		// initialize CLI context (centralizes config, logger, telemetry)

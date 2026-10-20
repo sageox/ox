@@ -200,6 +200,26 @@ func TestProbe_AmpOrbKeepsDaemonButEndsWithAgent(t *testing.T) {
 	}
 }
 
+// TestProbe_DisposableMachineEndsWithAgent: the user's disposable_machine
+// setting, as the config layer publishes it, marks the host as ending with its
+// agent and leaves the daemon viable. Failure prevented (sageox/ox#1132): a
+// pod's session end hands the upload to a daemon that dies with the pod — or
+// the setting turns the daemon off, and the Ledger is never cloned.
+func TestProbe_DisposableMachineEndsWithAgent(t *testing.T) {
+	clearEnv(t)
+	t.Cleanup(func() { SetUserConfigDisposableMachine(nil) })
+	for _, on := range []bool{true, false} {
+		SetUserConfigDisposableMachine(&on)
+		c := Probe()
+		if c.HostEndsWithAgent != on {
+			t.Errorf("disposable_machine=%v: HostEndsWithAgent = %v", on, c.HostEndsWithAgent)
+		}
+		if !c.DaemonViable || Reason() != "" {
+			t.Errorf("disposable_machine=%v: the daemon must stay viable (DaemonViable=%v, Reason()=%q)", on, c.DaemonViable, Reason())
+		}
+	}
+}
+
 // TestProbe_HostEndsWithAgent covers every venue the flag reads, plus the
 // overrides that must not set it.
 func TestProbe_HostEndsWithAgent(t *testing.T) {

@@ -921,9 +921,10 @@ func captureHookEntries(ctx *HookContext, agentID, expectedSessionPath, expected
 		// Refresh parent_pid only if the stored PID is dead — each hook call runs in a
 		// new transient shell, so blindly overwriting with os.Getppid() would store a dead
 		// PID. FindAgentAncestorPID walks the tree to find the long-lived agent process.
-		if !proc.IsAlive(s.ParentPID) {
+		if !proc.IsAlive(s.ParentPID) || proc.IsReused(s.ParentPID, s.ParentStartTime) {
 			if agentPID := proc.FindAgentAncestorPID(); agentPID > 0 {
 				s.ParentPID = agentPID
+				s.ParentStartTime = session.ParentStartTimeOf(agentPID)
 			}
 		}
 	})

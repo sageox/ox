@@ -13,6 +13,7 @@ import (
 	"github.com/sageox/ox/internal/ephemeral"
 	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/paths"
+	"github.com/sageox/ox/internal/runtime"
 	"gopkg.in/yaml.v3"
 )
 
@@ -365,6 +366,13 @@ type UserConfig struct {
 	// signal still overrides it. See docs/adr/adr-ephemeral-mode.md.
 	Ephemeral *bool `yaml:"ephemeral,omitempty"`
 
+	// DisposableMachine marks a machine that runs ox for one job and then
+	// goes away, keeping only the home directory, such as a pod with a
+	// persistent home volume. Unlike Ephemeral, the daemon runs and the Ledger
+	// is cloned. Read through DisposableMachineEnabled. Pointer so unset stays
+	// distinct from an explicit false.
+	DisposableMachine *bool `yaml:"disposable_machine,omitempty"`
+
 	// PATExpiryWarningThresholdPct is the fraction of token lifetime remaining
 	// at which to emit a single-line stderr warning during interactive
 	// commands. Default 0.05 (warn at 5% remaining). The effective threshold
@@ -472,6 +480,13 @@ func (c *UserConfig) SetTelemetryEnabled(enabled bool) {
 	c.TelemetryEnabled = &enabled
 }
 
+// DisposableMachineEnabled reports the user's disposable_machine setting. It
+// is off unless set, and an unreadable user config reads as off.
+func DisposableMachineEnabled() bool {
+	cfg, err := LoadUserConfig()
+	return err == nil && cfg != nil && cfg.DisposableMachine != nil && *cfg.DisposableMachine
+}
+
 // AreSessionsEnabled returns whether session recording is enabled.
 // Default: false
 func (c *UserConfig) AreSessionsEnabled() bool {
@@ -568,8 +583,8 @@ func (c *UserConfig) SetMurmurReceive(mode string) {
 // LoadUserConfig loads user configuration using standard path discovery.
 // Checks OX_USER_CONFIG env var first, then XDG/default paths.
 //
-// Also publishes the user's ephemeral-mode preference into
-// internal/ephemeral so subsystem checks pick it up without forming a
+// Also publishes the user's ephemeral and disposable_machine settings into
+// internal/runtime so subsystem checks pick them up without forming a
 // reverse import edge.
 //
 // For tests that need to load from an explicit directory, use LoadUserConfigFrom.
@@ -580,24 +595,26 @@ func LoadUserConfig() (*UserConfig, error) {
 		if errors.Is(err, os.ErrNotExist) {
 			err = nil // an absent environment-selected file still means defaults
 		}
-		publishEphemeralPreference(cfg)
+		publishRuntimePreferences(cfg)
 		return cfg, err
 	}
 
 	cfg, err := LoadUserConfigFrom("")
-	publishEphemeralPreference(cfg)
+	publishRuntimePreferences(cfg)
 	return cfg, err
 }
 
-// publishEphemeralPreference forwards the user-config Ephemeral pointer to
-// the ephemeral package so its lowest-precedence signal stays in sync with
-// disk. Tolerates nil cfg.
-func publishEphemeralPreference(cfg *UserConfig) {
+// publishRuntimePreferences forwards the user-config Ephemeral and
+// DisposableMachine pointers to internal/runtime, so the capability probe
+// stays in sync with disk. Tolerates nil cfg.
+func publishRuntimePreferences(cfg *UserConfig) {
 	if cfg == nil {
 		ephemeral.SetUserConfigPreference(nil)
+		runtime.SetUserConfigDisposableMachine(nil)
 		return
 	}
 	ephemeral.SetUserConfigPreference(cfg.Ephemeral)
+	runtime.SetUserConfigDisposableMachine(cfg.DisposableMachine)
 }
 
 // LoadUserConfigFrom loads user configuration from the specified config directory.

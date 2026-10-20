@@ -224,6 +224,9 @@ func (s *SyncScheduler) cloneInBackground(ctx context.Context, cloneURL, repoPat
 			s.logger.Warn("failed to update config last sync after clone", "type", repoType, "path", repoPath, "error", err)
 		}
 		s.recordSyncState(ctx, repoPath)
+		if repoType == "ledger" && s.config.LedgerPath == "" && s.onLedgerCloned != nil {
+			s.onLedgerCloned(repoPath)
+		}
 	}
 
 	// update exists flags so status renders correctly before next Reload()
