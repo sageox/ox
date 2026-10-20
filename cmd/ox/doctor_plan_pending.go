@@ -200,20 +200,23 @@ func unownedPlanDirs(ctx context.Context, ledgerPath string) ([]string, error) {
 }
 
 // hasUncommittedSave reports whether the plan dir's events.jsonl holds more
-// created or revised events than HEAD's: each `ox plan save` appends one.
+// created or revised events than HEAD's: each `ox plan save` appends one. A
+// HEAD it cannot read reports false: a stranded save is queued for publishing
+// without asking, unsaved edits and all.
 func hasUncommittedSave(ctx context.Context, ledgerPath, dir string) bool {
 	worktree, err := os.ReadFile(filepath.Join(ledgerPath, filepath.FromSlash(dir), "events.jsonl"))
 	if err != nil {
 		return false
 	}
-	// HEAD without the file is a first save that never committed. A read the
-	// timeout cut off looks the same, and would queue the dir, unsaved edits
-	// and all, for publishing without asking.
-	head, err := gitStdout(ctx, ledgerPath, nil, "cat-file", "blob", "HEAD:"+dir+"/events.jsonl")
-	if err != nil && ctx.Err() != nil {
-		return false
+	rel := dir + "/events.jsonl"
+	// ls-tree succeeds with no output when HEAD lacks the file: a first save
+	// that never committed
+	entry, err := gitStdout(ctx, ledgerPath, nil, "ls-tree", "HEAD", "--", rel)
+	var head []byte
+	if err == nil && len(entry) > 0 {
+		head, err = gitStdout(ctx, ledgerPath, nil, "cat-file", "blob", "HEAD:"+rel)
 	}
-	return countSaves(worktree) > countSaves(head)
+	return err == nil && countSaves(worktree) > countSaves(head)
 }
 
 // countSaves counts the created and revised events in an events.jsonl. A CRLF

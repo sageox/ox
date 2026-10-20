@@ -400,25 +400,29 @@ func TestDoctorFix_PublishesUnsavedPlanEditsOnlyWithConsent(t *testing.T) {
 
 // TestHasUncommittedSave_CommittedSaveIsNotStranded: a committed save must not
 // read as one that never committed when a clone with core.autocrlf checks
-// events.jsonl out with CRLF endings, or when the timeout cuts off the read of
-// HEAD's copy; either way ox doctor would publish the edits beside it unasked.
+// events.jsonl out with CRLF endings, or when HEAD cannot be read; either way
+// ox doctor would publish the edits beside it unasked.
 func TestHasUncommittedSave_CommittedSaveIsNotStranded(t *testing.T) {
 	ledger, _ := plansLedger(t)
 	const dir = "data/plans/2026-10-03-crlf"
 	created := `{"ts":"2026-10-03T00:00:00Z","plan_id":"pln_crlf","event":"created"}`
 	commitLedgerFiles(t, ledger, map[string]string{dir + "/events.jsonl": created + "\n"})
 
+	writeLedgerFile(t, ledger, dir+"/events.jsonl", created+"\r\n"+`{"ts":"2026-10-04T00:00:00Z","plan_id":"pln_crlf","event":"revised"}`+"\r\n")
+	if !hasUncommittedSave(context.Background(), ledger, dir) {
+		t.Error("a revised event HEAD does not hold must read as a save that never committed")
+	}
 	writeLedgerFile(t, ledger, dir+"/events.jsonl", created+"\r\n")
 	if hasUncommittedSave(context.Background(), ledger, dir) {
 		t.Error("the committed save, checked out with CRLF, read as one that never committed")
 	}
-	timedOut, cancel := context.WithCancel(context.Background())
-	cancel()
-	if hasUncommittedSave(timedOut, ledger, dir) {
-		t.Error("a HEAD read the timeout cut off read as a save that never committed")
+	// the plan dir's tree object, corrupt, leaves HEAD's events.jsonl unreadable
+	tree := runGitInDir(t, ledger, "rev-parse", "HEAD:"+dir)
+	obj := filepath.Join(ledger, ".git", "objects", tree[:2], tree[2:])
+	if err := errors.Join(os.Chmod(obj, 0o644), os.WriteFile(obj, []byte("corrupt"), 0o644)); err != nil {
+		t.Fatal(err)
 	}
-	writeLedgerFile(t, ledger, dir+"/events.jsonl", created+"\r\n"+`{"ts":"2026-10-04T00:00:00Z","plan_id":"pln_crlf","event":"revised"}`+"\r\n")
-	if !hasUncommittedSave(context.Background(), ledger, dir) {
-		t.Error("a revised event HEAD does not hold must read as a save that never committed")
+	if hasUncommittedSave(context.Background(), ledger, dir) {
+		t.Error("a HEAD that could not be read read as a save that never committed")
 	}
 }
