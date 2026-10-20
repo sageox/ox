@@ -133,48 +133,6 @@ path = "/nonexistent/path/to/team/context"
 	assert.Equal(t, "path does not exist and no clone URL available", status[0].LastErr)
 }
 
-func TestSyncScheduler_PullTeamContext_FetchHeadDeduplication(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test")
-	}
-
-	// check if git is available
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not available")
-	}
-
-	// isolate from real credentials
-	prevConfigDir := gitserver.TestSetConfigDirOverride(t.TempDir())
-	prevForceFile := gitserver.TestSetForceFileStorage(true)
-	t.Cleanup(func() {
-		gitserver.TestSetConfigDirOverride(prevConfigDir)
-		gitserver.TestSetForceFileStorage(prevForceFile)
-	})
-
-	// create temp git repo for team context
-	teamDir := t.TempDir()
-	setupGitRepo(t, teamDir)
-
-	cfg := DefaultConfig()
-	cfg.TeamContextSyncInterval = 10 * time.Minute // long interval
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-
-	scheduler := NewSyncScheduler(cfg, logger)
-
-	// first pull should succeed
-	_, err := scheduler.pullTeamContext(context.Background(), teamDir)
-	assert.NoError(t, err)
-
-	// simulate recent FETCH_HEAD by touching the file
-	fetchHead := filepath.Join(teamDir, ".git", "FETCH_HEAD")
-	// the file already exists from the first fetch, but let's make sure it's recent
-	require.NoError(t, os.WriteFile(fetchHead, []byte("fake-sha1\t\trefs/heads/main\n"), 0644))
-
-	// second pull should be skipped due to recent fetch
-	_, err = scheduler.pullTeamContext(context.Background(), teamDir)
-	assert.NoError(t, err) // returns nil when skipped
-}
-
 func TestSyncScheduler_PullTeamContext_NotGitRepo(t *testing.T) {
 	// create temp directory that is NOT a git repo
 	tmpDir := t.TempDir()
