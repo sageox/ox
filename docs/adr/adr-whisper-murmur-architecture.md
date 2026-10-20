@@ -456,7 +456,7 @@ SageOx writes a murmur into a repo's Ledger when a pull request is opened on Git
 - **Classification.** A murmur is *outside news* when `principal_type` is `"external"` or `metadata.source` is `"github"` (`ledger.IsOutsideNews`). Either marker is enough.
 - **Delivery.** The writer marks outside news `ambient`, so ox releases without this frame never deliver it as a whisper. The relay changes three things:
   - It delivers outside news at `normal`, never `critical`.
-  - It keeps only `source`, `number`, `url`, `author_login` and `files`.
+  - It keeps only `source`, `number`, `url`, `author_login`, `title` and `files`.
   - It pins `principal_type` to `external`, so dropping metadata to fit the budget cannot re-file the entry as a teammate's.
 
   All outside news shares one cap slot per delivery, inside the existing 1024-token budget.
