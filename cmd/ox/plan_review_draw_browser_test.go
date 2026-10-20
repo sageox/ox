@@ -3,9 +3,9 @@
 // plan_review_draw_browser_test.go drives Draw around in real Chrome on the
 // drawn-context fixture revisions (pkg/planreview/testdata/drawn-context),
 // framed in an opaque origin under frameCSP. Each capture is made in the
-// browser that places it, so a machine's fonts change offsets, never
-// outcomes. It reads the npm build: run `make plan-review` first; it skips
-// without one.
+// browser that places it, so a machine's fonts change offsets, not outcomes,
+// as long as each stroke encloses the same elements on every machine. It
+// reads the npm build: run `make plan-review` first; it skips without one.
 package main
 
 import (
@@ -33,7 +33,9 @@ import (
 // drawProbe is the fixture page's own script, the test's and not the
 // package's. It reports when pointer input first reaches the frame, scrolls a
 // named part of the plan into view and reports its box in the frame's
-// viewport, and opens the notes or checks a tab when told to.
+// viewport, and opens the notes or checks a tab when told to. "table" is the
+// rows under its header: a loop around the whole table bulges far enough
+// above it to enclose the sentence there, which revision c rewords.
 const drawProbe = `<script>
 document.addEventListener('mousemove',function m(){document.removeEventListener('mousemove',m,true);parent.postMessage({input:true},'*')},true);
 function node(t){return [].filter.call(document.querySelectorAll('svg g.node'),function(g){return g.textContent.trim()===t})}
@@ -46,7 +48,7 @@ var named={
  notes:function(){return li('Add the budget counter beside the queue depth gauge.')},
  'full-tab':function(){return [document.querySelector('#panel-full p')]},
  figure:function(){return [document.querySelector('figure')]},
- table:function(){return [document.querySelector('table')]}
+ table:function(){return [].slice.call(document.querySelectorAll('table tr'),1)}
 };
 window.addEventListener('message',function(e){
  var d=e.data||{};if(e.source!==parent)return;
