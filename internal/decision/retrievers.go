@@ -105,6 +105,9 @@ func (murmursRetriever) Retrieve(_ context.Context, env *Env, in Input) ([]Conte
 
 	var out []ContextItem
 	for _, m := range murmurs {
+		if m.IsOutsideNews() {
+			continue // written outside the team: not active work to cite
+		}
 		content := strings.ToLower(m.Content)
 		matched := 0
 		for _, t := range terms {

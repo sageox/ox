@@ -24,6 +24,7 @@ import (
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/identity"
+	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/observability"
 	"github.com/sageox/ox/internal/prime"
 	"github.com/sageox/ox/internal/proc"
@@ -1170,7 +1171,7 @@ func runAgentWhisper(w io.Writer, inst *agentinstance.Instance) error {
 		return nil
 	}
 
-	formatWhispers(w, entries)
+	formatWhispersWithEdits(w, entries, checkoutEditedFiles(projectRoot))
 	traceWhisperDelivery(projectRoot, inst.AgentID, entries)
 	return nil
 }
@@ -1224,7 +1225,7 @@ func emitWhispers(w io.Writer, agentID string) {
 		return
 	}
 
-	formatWhispers(w, entries)
+	formatWhispersWithEdits(w, entries, checkoutEditedFiles(projectRoot))
 
 	// best-effort context-trace for whisper delivery observability
 	traceWhisperDelivery(projectRoot, agentID, entries)
@@ -1278,10 +1279,12 @@ func traceWhisperDelivery(projectRoot, agentID string, entries []whisperstore.Wh
 //     nudges accumulate between deliveries (e.g., after daemon restart).
 //  2. Sort all murmurs by time (newest first) so recent signals win.
 //  3. Cap at maxMurmurWhispersPerAgent per authoring agent — no single agent
-//     dominates the whisper stream.
+//     dominates the whisper stream. All outside news shares one slot, so a
+//     burst of new pull requests (or their hourly digest) adds one whisper.
 //  4. Enforce a total token budget. If the full set fits, include all.
 //     If not, randomly sample from the candidates so that over many tool calls
-//     in a long session, every agent's murmurs eventually get heard.
+//     in a long session, every agent's murmurs eventually get heard. Outside
+//     news is never treated as critical here, whatever its importance says.
 func capMurmurWhispers(entries []whisperstore.WhisperEntry) []whisperstore.WhisperEntry {
 	var rawNonMurmur []whisperstore.WhisperEntry
 	var allMurmurs []whisperstore.WhisperEntry
@@ -1318,6 +1321,9 @@ func capMurmurWhispers(entries []whisperstore.WhisperEntry) []whisperstore.Whisp
 		if key == "" {
 			key = "_anonymous"
 		}
+		if isOutsideNewsWhisper(e) {
+			key = outsideNewsCapKey
+		}
 		if agentCount[key] >= maxMurmurWhispersPerAgent {
 			continue
 		}
@@ -1339,7 +1345,7 @@ func capMurmurWhispers(entries []whisperstore.WhisperEntry) []whisperstore.Whisp
 	// non-critical to be fair across agents over time.
 	var critical, nonCritical []whisperstore.WhisperEntry
 	for _, e := range capped {
-		if e.Importance == whisperstore.ImportanceCritical {
+		if e.Importance == whisperstore.ImportanceCritical && !isOutsideNewsWhisper(e) {
 			critical = append(critical, e)
 		} else {
 			nonCritical = append(nonCritical, e)
@@ -1352,7 +1358,7 @@ func capMurmurWhispers(entries []whisperstore.WhisperEntry) []whisperstore.Whisp
 	for _, e := range critical {
 		size := murmurWhisperSize(e)
 		if usedBytes+size > budgetBytes && len(e.Metadata) > 0 {
-			e.Metadata = nil
+			e = withoutMurmurMetadata(e)
 			size = len(e.Content)
 		}
 		kept = append(kept, e)
@@ -1383,8 +1389,19 @@ func capMurmurWhispers(entries []whisperstore.WhisperEntry) []whisperstore.Whisp
 // delivery budget. Content still keeps its existing at-least-one guarantee.
 func capMurmurMetadata(entry whisperstore.WhisperEntry, budgetBytes int) whisperstore.WhisperEntry {
 	if murmurWhisperSize(entry) > budgetBytes {
-		entry.Metadata = nil
+		entry = withoutMurmurMetadata(entry)
 	}
+	return entry
+}
+
+// withoutMurmurMetadata drops an entry's metadata to fit the budget. Outside
+// news keeps its classification: losing metadata["source"] must never move it
+// into the trusted teammate frame.
+func withoutMurmurMetadata(entry whisperstore.WhisperEntry) whisperstore.WhisperEntry {
+	if isOutsideNewsWhisper(entry) {
+		entry.PrincipalType = ledger.PrincipalTypeExternal
+	}
+	entry.Metadata = nil
 	return entry
 }
 
@@ -1461,11 +1478,42 @@ func murmurTopicHint(topic string) string {
 //     attempt") and may refuse to act on the content. DO NOT USE.
 //   - Plain text: Works but lacks semantic structure. Claude may not distinguish
 //     whisper content from other hook output.
+//
+// Outside news (a new GitHub pull request) is written by people outside the
+// team, so it never enters the trusted <system-reminder>: it follows in its
+// own <outside-news> block, without collision hints (see
+// formatWhispersWithEdits).
 func formatWhispers(w io.Writer, entries []whisperstore.WhisperEntry) bool {
+	return formatWhispersWithEdits(w, entries, nil)
+}
+
+// formatWhispersWithEdits is formatWhispers given the files this checkout is
+// editing, so outside news that changes one of them carries a collision hint.
+// edited runs at most once, and only when outside news lists files.
+func formatWhispersWithEdits(w io.Writer, entries []whisperstore.WhisperEntry, edited editedFilesFunc) bool {
 	if len(entries) == 0 {
 		return false
 	}
 
+	var team, outside []whisperstore.WhisperEntry
+	for _, e := range entries {
+		if isOutsideNewsWhisper(e) {
+			outside = append(outside, e)
+		} else {
+			team = append(team, e)
+		}
+	}
+	if len(team) > 0 {
+		writeTeamWhispers(w, team)
+	}
+	if len(outside) > 0 {
+		writeOutsideNews(w, outside, edited)
+	}
+	return true
+}
+
+// writeTeamWhispers writes teammates' whispers inside <system-reminder>.
+func writeTeamWhispers(w io.Writer, entries []whisperstore.WhisperEntry) {
 	// scan for murmur entries and collect unique topics
 	hasMurmurs := false
 	seenTopics := make(map[string]bool)
@@ -1525,8 +1573,6 @@ func formatWhispers(w io.Writer, entries []whisperstore.WhisperEntry) bool {
 		fmt.Fprint(w, "</entry>\n")
 	}
 	fmt.Fprintln(w, "</system-reminder>")
-
-	return true
 }
 
 // writeXMLAttribute keeps Team Context metadata data-only in the XML hook

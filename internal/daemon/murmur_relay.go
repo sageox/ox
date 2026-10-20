@@ -109,6 +109,9 @@ func (r *MurmurRelay) RelayFromPath(baseDir, scope string) int {
 			PrincipalType: m.PrincipalType,
 			Metadata:      m.Metadata,
 		}
+		if m.IsOutsideNews() {
+			entry = outsideNewsWhisper(entry)
+		}
 
 		if err := r.registry.Add(scope, entry); err != nil {
 			r.logger.Warn("failed to add murmur as whisper", "murmur_id", m.ID, "err", err)
@@ -121,14 +124,14 @@ func (r *MurmurRelay) RelayFromPath(baseDir, scope string) int {
 
 		if r.eventBus != nil {
 			eventName := hooks.EventMurmurReceived
-			if m.Importance == "critical" {
+			if entry.Importance == whisperstore.ImportanceCritical {
 				eventName = hooks.EventMurmurCritical
 			}
 			r.eventBus.Emit(context.Background(), hooks.Event{
 				Name:    eventName,
 				Project: r.projectRoot,
 				RepoID:  config.GetRepoID(r.projectRoot),
-				Payload: hooks.MurmurPayload(m.ID, m.AgentID, m.PrincipalID, m.Topic, m.Importance, m.Content),
+				Payload: hooks.MurmurPayload(m.ID, m.AgentID, m.PrincipalID, m.Topic, string(entry.Importance), m.Content),
 			})
 		}
 
@@ -142,4 +145,19 @@ func (r *MurmurRelay) RelayFromPath(baseDir, scope string) int {
 		r.logger.Debug("murmurs relayed", "scope", scope, "count", relayed, "dir", baseDir)
 	}
 	return relayed
+}
+
+// outsideNewsWhisper prepares outside news (a murmur about a new GitHub pull
+// request) for delivery. SageOx writes it as ambient so that ox releases
+// without the outside news frame never deliver it; this release frames it as
+// untrusted, so it is delivered at normal importance. It is never critical,
+// whatever the file says, because its text was written outside the team. The
+// principal type is pinned to external so the entry stays outside news even if
+// its metadata is later dropped to fit the whisper budget, and only the
+// metadata keys outside news may carry are kept.
+func outsideNewsWhisper(entry whisperstore.WhisperEntry) whisperstore.WhisperEntry {
+	entry.Importance = whisperstore.ImportanceNormal
+	entry.PrincipalType = ledger.PrincipalTypeExternal
+	entry.Metadata = ledger.OutsideNewsMetadata(entry.Metadata)
+	return entry
 }
