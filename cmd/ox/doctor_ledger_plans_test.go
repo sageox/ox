@@ -8,13 +8,12 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
@@ -134,10 +133,18 @@ var plainDoctor = doctorOptions{forceYes: true}
 func runDoctor(t *testing.T, ledger string, opts doctorOptions) []checkCategory {
 	t.Helper()
 	sandboxDoctorEnv(t)
-	t.Setenv(config.EnvProjectRoot, "")
 	project := testGitRepo(t)
-	t.Chdir(project)
 	createFreshSageoxStructure(t, project)
+	return runDoctorIn(t, project, ledger, opts)
+}
+
+// runDoctorIn runs `ox doctor` with opts in project, its Ledger set to
+// ledger, away from any running daemon's socket.
+func runDoctorIn(t *testing.T, project, ledger string, opts doctorOptions) []checkCategory {
+	t.Helper()
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv(config.EnvProjectRoot, "")
+	t.Chdir(project)
 	if err := config.SaveLocalConfig(project, &config.LocalConfig{Ledger: &config.LedgerConfig{Path: ledger}}); err != nil {
 		t.Fatal(err)
 	}
@@ -146,6 +153,37 @@ func runDoctor(t *testing.T, ledger string, opts doctorOptions) []checkCategory 
 		t.Fatal(err)
 	}
 	return categories
+}
+
+// savePlanPage authors a page titled title in project and saves it with the
+// real `ox plan save`, returning its plan dir relative to ledger. large pads
+// the page past the LFS threshold, so the save uploads it.
+func savePlanPage(t *testing.T, project, ledger, title string, large bool) string {
+	t.Helper()
+	page := filepath.Join(project, ".context", strings.ReplaceAll(strings.ToLower(title), " ", "-")+".html")
+	if large {
+		writeLargeAuthoredPage(t, page, title)
+	} else {
+		writeAuthoredPage(t, page, title)
+	}
+	if _, err := runPlanSaveCLI(t, "--file", page); err != nil {
+		t.Fatalf("ox plan save: %v", err)
+	}
+	plans, err := plan.List(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range plans {
+		if p.Topic == title {
+			rel, err := ledgerRelPath(ledger, p.Dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return rel
+		}
+	}
+	t.Fatalf("no saved plan titled %q among %+v", title, plans)
+	return ""
 }
 
 // doctorLine is the result `ox doctor` reported under name.
@@ -238,84 +276,107 @@ func TestPlainDoctor_CleanupCommitsLeavePlanFilesAlone(t *testing.T) {
 	}
 }
 
-// TestPlainDoctor_LeavesAFailedSaveToItsRetry: doctor's sweep runs before its
-// plan retry, and the retry still publishes what the save owes, from its own
-// commit, without the page no store took, and keeps the save's retry marker.
-// Failure prevented: refusing the sweep costs a saved plan its recovery.
-func TestPlainDoctor_LeavesAFailedSaveToItsRetry(t *testing.T) {
-	ledger, origin := plansLedger(t)
+// TestPlainDoctor_LeavesARealFailedSaveToItsRetry runs real `ox plan save`s,
+// then a plain `ox doctor`: a shared plan someone edited by hand and never
+// saved, a save whose large page no store took (its retry owed), and an
+// unrelated dirty file. The sweep commits only the unrelated file, only the
+// hand edit is listed as unsaved, and the failed save is left to its retry,
+// which never commits the raw page and lands it as an LFS pointer once a store
+// takes it. Failure prevented: refusing the sweep costs a saved plan its
+// recovery, or a raw page goes out.
+func TestPlainDoctor_LeavesARealFailedSaveToItsRetry(t *testing.T) {
+	root := newPlanCaptureTestRepo(t)
+	ledger, remote := newSharedLedger(t, root, true)
+	t.Setenv("SAGEOX_AGENT_ID", "")
+	store := newPlanLFSStore(t, false)
+	useLFSStore(t, store.client)
+	edited := savePlanPage(t, root, ledger, "Edited By Hand", false)
+	const handEdit = "# Edited By Hand\n\nan edit nobody saved\n"
+	writeLedgerFile(t, ledger, edited+"/plan.md", handEdit)
+	store.fail.Store(true)
+	failed := savePlanPage(t, root, ledger, "Upload Failed", true)
 	writeLedgerFile(t, ledger, "audit/unrelated.md", "unrelated\n")
 	base := runGitInDir(t, ledger, "rev-parse", "HEAD")
-	files := leavePlanEdits(t, ledger)
-	recordPlanPushOutcome(context.Background(), ledger, filepath.Join(ledger, filepath.FromSlash(pendingPlanDir)),
-		time.Now(), errors.New("plan.html upload failed"))
-	useLFSStore(t, nil) // still no store, so the retry cannot store the page either
 
-	categories := runDoctor(t, ledger, plainDoctor)
+	categories := runDoctorIn(t, root, ledger, plainDoctor)
 
-	if got := doctorLine(t, categories, "Ledger plan edits").message; got != "1 plan(s) have unsaved edits: 2026-10-01-edited" {
-		t.Errorf("a save its retry owns is not an unsaved edit, got %q", got)
-	}
-	swept, retried := false, false
+	swept := false
 	for _, c := range commitsSince(t, ledger, base) {
 		for _, p := range c.paths {
-			mine := c.subject == "plan: 2026-10-02-pending" && p == pendingPlanDir+"/meta.json"
-			if strings.HasPrefix(p, "data/plans/") && !mine {
+			if strings.HasPrefix(p, edited+"/") || p == failed+"/plan.html" ||
+				strings.HasPrefix(p, "data/plans/") && c.subject != "plan: "+path.Base(failed) {
 				t.Errorf("commit %q carries %s", c.subject, p)
 			}
 			swept = swept || c.subject == "ox doctor: auto-commit ledger changes" && p == "audit/unrelated.md"
-			retried = retried || mine
 		}
 	}
 	if !swept {
 		t.Error("doctor's sweep made no commit of the unrelated file, so this test checks nothing about it")
 	}
-	if !retried || !strings.Contains(remoteFiles(t, origin), pendingPlanDir+"/meta.json") {
-		t.Error("the plan's retry must publish the save's meta.json from its own commit")
+	if got := doctorLine(t, categories, "Ledger plan edits").message; got != "1 plan(s) have unsaved edits: "+path.Base(edited) {
+		t.Errorf("only the hand edit is unsaved; the failed save is its retry's, got %q", got)
 	}
-	if _, err := os.Stat(planPushMarkerPath(ledger, pendingPlanDir)); err != nil {
-		t.Errorf("the page is still not stored, so its retry marker must stay: %v", err)
+	if strings.Contains(remoteFiles(t, remote), failed+"/plan.html") || !planRetryPending(ledger, failed) {
+		t.Fatal("a page no store took must stay queued, never committed raw")
 	}
-	assertPlanEditsKept(t, ledger, origin, files)
+
+	store.fail.Store(false)
+	runDoctorIn(t, root, ledger, plainDoctor)
+	if _, _, err := lfs.ParsePointer(runGitInDir(t, remote, "show", "main:"+failed+"/plan.html") + "\n"); err != nil || planRetryPending(ledger, failed) {
+		t.Errorf("once a store takes the page, the retry must land it as an LFS pointer and clear its marker: %v", err)
+	}
+	if got := runGitInDir(t, remote, "show", "main:"+edited+"/plan.md"); got == strings.TrimSpace(handEdit) {
+		t.Error("the hand edit nobody saved reached the remote")
+	}
 }
 
-// TestPlainDoctor_QueuesAStrandedSave: a plan whose `ox plan save` ran but
-// never committed, with no retry marker (a crash, an older ox), is queued and
-// published by the same plain `ox doctor`. Failure prevented: saved work that
-// nothing retries waits for a re-save that may never come.
-func TestPlainDoctor_QueuesAStrandedSave(t *testing.T) {
-	event := func(kind plan.EventKind) string {
-		b, err := json.Marshal(plan.Event{Timestamp: time.Now().UTC(), PlanID: "pln_stranded", Kind: kind})
-		if err != nil {
-			t.Fatal(err)
-		}
-		return string(b) + "\n"
-	}
-	created, revised := event(plan.EventCreated), event(plan.EventRevised)
-	const dir = "data/plans/2026-10-03-stranded"
-	for _, tc := range []struct {
-		name             string
-		committed, saved string // plan.md and events.jsonl as HEAD has them, and as the save wrote them
-		committedEvents  string
-		savedEvents      string
-	}{
-		{name: "first save", saved: "# Stranded\n", savedEvents: created},
-		{name: "revision", committed: "# Stranded\n", committedEvents: created, saved: "# Stranded\n\nrevised\n", savedEvents: created + revised},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			ledger, origin := plansLedger(t)
-			if tc.committed != "" {
-				commitLedgerFiles(t, ledger, map[string]string{dir + "/plan.md": tc.committed, dir + "/events.jsonl": tc.committedEvents})
+// TestPlainDoctor_RecoversARealSaveThatNeverCommitted: a real `ox plan save`
+// (a first save, and a revision of a shared plan) whose commit never happened
+// and whose retry marker is gone, as a crash, an older ox or a re-clone
+// leaves it, is queued and published by one plain `ox doctor`, from what the
+// save wrote. Failure prevented: saved work that nothing retries waits for a
+// re-save that may never come.
+func TestPlainDoctor_RecoversARealSaveThatNeverCommitted(t *testing.T) {
+	for _, revision := range []bool{false, true} {
+		t.Run(map[bool]string{false: "first save", true: "revision"}[revision], func(t *testing.T) {
+			root := newPlanCaptureTestRepo(t)
+			ledger, remote := newSharedLedger(t, root, true)
+			t.Setenv("SAGEOX_AGENT_ID", "")
+			useLFSStore(t, nil)
+			const title = "Never Committed"
+			if revision {
+				savePlanPage(t, root, ledger, title, false)
+				page := filepath.Join(root, ".context", "never-committed.html")
+				f, err := os.OpenFile(page, os.O_APPEND|os.O_WRONLY, 0o644)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, werr := f.WriteString("<p>revised</p>\n")
+				if err := errors.Join(werr, f.Close()); err != nil {
+					t.Fatal(err)
+				}
 			}
-			writeLedgerFile(t, ledger, dir+"/plan.md", tc.saved)
-			writeLedgerFile(t, ledger, dir+"/events.jsonl", tc.savedEvents)
+			prev := commitPlanSnapshot
+			commitPlanSnapshot = func(context.Context, string, string, ...string) (bool, error) {
+				return false, errors.New("ox was interrupted")
+			}
+			t.Cleanup(func() { commitPlanSnapshot = prev })
+			dir := savePlanPage(t, root, ledger, title, false)
+			commitPlanSnapshot = prev
+			if err := os.RemoveAll(filepath.Join(ledger, filepath.FromSlash(planPushPendingDir))); err != nil {
+				t.Fatal(err)
+			}
 
-			categories := runDoctor(t, ledger, plainDoctor)
+			categories := runDoctorIn(t, root, ledger, plainDoctor)
 
-			if got := doctorLine(t, categories, "Ledger plan saves").message; got != "queued 1 saved plan(s) for the plan retry: 2026-10-03-stranded" {
+			if got := doctorLine(t, categories, "Ledger plan saves").message; got != "queued 1 saved plan(s) for the plan retry: "+path.Base(dir) {
 				t.Errorf("Ledger plan saves says %q", got)
 			}
-			if got := runGitInDir(t, origin, "show", "main:"+dir+"/plan.md"); got != strings.TrimSpace(tc.saved) {
+			saved, err := os.ReadFile(filepath.Join(ledger, filepath.FromSlash(dir), "plan.md"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := runGitInDir(t, remote, "show", "main:"+dir+"/plan.md"); got != strings.TrimSpace(string(saved)) {
 				t.Errorf("the remote's plan.md is %q, want what the save wrote", got)
 			}
 			if planRetryPending(ledger, dir) || planDirDirty(ledger, dir) {
