@@ -144,12 +144,13 @@ func ResolveAttribution(ep, configDisplayName string) Attribution {
 		}
 	}
 
-	// On a host that ends with the agent (an Amp orb), git's identity is the
-	// host's, not the person's: an Amp project orb commits as its project's
-	// commit author, "Amp", which named and credited every session "amp"
-	// (sageox/ox#1425). There the verified SageOx identity names the work. On
-	// a laptop the slug stays git's, so existing session names don't move.
-	if (verified.Email != "" || verified.Name != "") && runtime.Caps().HostEndsWithAgent {
+	// In an Amp orb, git's identity is the orb's, not the person's: an Amp
+	// project orb commits as its project's commit author, "Amp", which named
+	// and credited every session "amp" (sageox/ox#1425). There the verified
+	// SageOx identity names the work. Only Amp orbs: the other hosts that end
+	// with the agent (Claude Code cloud, Devin) were not seen to have this
+	// problem, and elsewhere the slug stays git's so session names don't move.
+	if (verified.Email != "" || verified.Name != "") && runtime.IsAmpOrb() {
 		username = verified.Slug()
 	}
 

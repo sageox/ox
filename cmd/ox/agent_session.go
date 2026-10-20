@@ -1279,7 +1279,7 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 		Summary: localSummary,
 	}
 
-	result.Summary = localSummary
+	result.Summary = publishableSummary(localSummary)
 
 	// use the session name from recording state (generated at start time)
 	// to ensure cache and ledger directories always match
@@ -1521,14 +1521,15 @@ func daemonOutlivesSession() bool {
 	return !daemon.IsDaemonDisabled() && !runtime.Caps().HostEndsWithAgent
 }
 
-// summaryForMeta drops a local summary that meta.json's writer would refuse.
-// With no user message to name a topic, session.LocalSummary returns only its
-// stats line ("0 user messages, 1 assistant responses. ..."), which is the
-// exact shape the writer rejects as a leaked failure stub (ox-qqka). That
-// failed every upload of an Amp orb session, whose recording starts after the
-// thread's first prompt (sageox/ox#1318, #1425). An empty summary is legal,
-// and the summarizer fills it later.
-func summaryForMeta(summary string) string {
+// publishableSummary drops a local summary that is only a stats line. With no
+// user message to name a topic, session.LocalSummary returns just "0 user
+// messages, 1 assistant responses. ...", which meta.json's writer rejects as
+// a leaked failure stub (ox-qqka). That failed every upload of an Amp orb
+// session, whose recording starts after the thread's first prompt
+// (sageox/ox#1318, #1425). The stop result carries the normalized value, so
+// the stop's JSON and the team-memory observation don't repeat the stub
+// either. An empty summary is legal, and the summarizer fills it later.
+func publishableSummary(summary string) string {
 	if lfs.IsLeakySummaryString(summary) {
 		return ""
 	}
@@ -1601,7 +1602,7 @@ func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionRe
 		Model(result.Model).
 		Title(state.Title).
 		EntryCount(result.EntryCount).
-		Summary(summaryForMeta(result.Summary)).
+		Summary(result.Summary).
 		StopReason(session.StopReasonStopped).
 		ContinuedFromSessionID(state.ContinuedFromSessionID).
 		ProducedCommits(state.ProducedCommits).

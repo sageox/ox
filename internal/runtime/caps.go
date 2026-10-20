@@ -295,7 +295,7 @@ func probeLifetime() Lifetime {
 	if os.Getenv("CLAUDE_CODE_REMOTE") != "" {
 		return LifetimeHours
 	}
-	if isAmpOrb() {
+	if IsAmpOrb() {
 		return LifetimeHours
 	}
 	if isCodespaces() {
@@ -320,7 +320,7 @@ func probeLifetime() Lifetime {
 // down once the coding agent is done. Venue markers only: an explicit
 // OX_EPHEMERAL says the disk is lost, not when the machine stops.
 func probeHostEndsWithAgent() bool {
-	return isAmpOrb() || isClaudeCloud() || isDevin()
+	return IsAmpOrb() || isClaudeCloud() || isDevin()
 }
 
 // probeDaemonViable composes the other capability fields plus the

@@ -330,7 +330,7 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 	summaryResp := &session.SummarizeResponse{
 		Summary: localSummary,
 	}
-	result.Summary = localSummary
+	result.Summary = publishableSummary(localSummary)
 
 	ledgerPath, ledgerErr := resolveLedgerPath()
 	if ledgerErr == nil {

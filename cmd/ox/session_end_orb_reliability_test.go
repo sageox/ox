@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sageox/ox/internal/api"
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/lfs"
 	oxruntime "github.com/sageox/ox/internal/runtime"
@@ -113,6 +114,9 @@ func TestStartSessionRecording_OrbRecordsBeforeTheLedgerIsCloned(t *testing.T) {
 			projectRoot, _ := setupTestProject(t)
 			t.Chdir(projectRoot)
 			clearFinalizeEnv(t)
+			// the env layer outranks every config file, so neither a developer's
+			// user config nor an inherited value can turn recording off here
+			t.Setenv(config.EnvSessionRecording, config.SessionRecordingAuto)
 			for k, v := range tc.env {
 				t.Setenv(k, v)
 			}
@@ -160,9 +164,9 @@ func TestSessionEnd_AmpOrbUploadsATurnWithoutItsPrompt(t *testing.T) {
 	assert.Empty(t, meta.Summary, "a stats-only summary must not be published as the session's summary")
 }
 
-func TestSummaryForMeta(t *testing.T) {
-	assert.Equal(t, "", summaryForMeta("0 user messages, 1 assistant responses. 3 tool calls. Tools: Bash"))
-	assert.Equal(t, "", summaryForMeta(""))
+func TestPublishableSummary(t *testing.T) {
+	assert.Equal(t, "", publishableSummary("0 user messages, 1 assistant responses. 3 tool calls. Tools: Bash"))
+	assert.Equal(t, "", publishableSummary(""))
 	withTopic := "Rename the retry helper\n\n1 user messages, 1 assistant responses"
-	assert.Equal(t, withTopic, summaryForMeta(withTopic), "a summary that names its topic is kept")
+	assert.Equal(t, withTopic, publishableSummary(withTopic), "a summary that names its topic is kept")
 }

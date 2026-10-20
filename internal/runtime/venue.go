@@ -113,13 +113,13 @@ func isDevin() bool {
 	return os.Getenv("DEVIN_TASK_ID") != ""
 }
 
-// isAmpOrb detects an Amp orb (Amp's cloud sandbox, one per thread) by the
+// IsAmpOrb detects an Amp orb (Amp's cloud sandbox, one per thread) by the
 // AMP_ORB signal Amp sets inside every orb; Amp's own docs test it for
 // truthiness, so any non-empty value counts. An orb keeps its disk and runs
 // the daemon that clones the Ledger, so it does NOT contribute to Reason().
 // It does pause a few minutes after its agent goes idle, which is what
 // probeHostEndsWithAgent records (sageox/ox#1314).
-func isAmpOrb() bool {
+func IsAmpOrb() bool {
 	return os.Getenv("AMP_ORB") != ""
 }
 
