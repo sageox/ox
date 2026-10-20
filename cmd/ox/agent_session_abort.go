@@ -199,7 +199,7 @@ func runAgentSessionAbortByName(inst *agentinstance.Instance, cmd *cobra.Command
 		if err := confirmAbort(inst, cmd); err != nil {
 			return err
 		}
-		return killFinalizedSession(inst, cmd, projectRoot, sessionName)
+		return killFinalizedSession(inst, cmd, projectRoot, sessionName, sessionPath)
 	case session.StatusPaused, session.StatusHeld:
 		// stopped but not uploaded (held: kept on this machine by choice);
 		// discarding by name is the coworker's explicit call
@@ -478,13 +478,15 @@ func removeLedgerDraftForAbort(sessionName string) (bool, string) {
 // (deleteSessionFromLedger + store.DeleteSession) rather than reimplementing
 // it, and add the abort-only steps delete omits: the hydration-cache purge and
 // the server notification. The caller has already confirmed and verified the
-// name is exact.
-func killFinalizedSession(inst *agentinstance.Instance, cmd *cobra.Command, projectRoot, sessionName string) error {
+// name is exact; sessionPath is where it resolved the session.
+func killFinalizedSession(inst *agentinstance.Instance, cmd *cobra.Command, projectRoot, sessionName, sessionPath string) error {
 	ledgerPath, err := resolveLedgerPath()
 	if err != nil {
 		return fmt.Errorf("could not resolve ledger to delete finalized session %q: %w", sessionName, err)
 	}
 	ledgerSessionDir := filepath.Join(ledgerPath, "sessions", sessionName)
+	repoID := getRepoIDOrDefault(projectRoot)
+	hydrationCache := filepath.Join(ledgerPath, ".sageox", "cache", "sessions", sessionName)
 
 	// Read the ses_ id and native sessions before removal so the server /c/
 	// page can flip to discarded and `ox session import` never offers the
@@ -494,6 +496,15 @@ func killFinalizedSession(inst *agentinstance.Instance, cmd *cobra.Command, proj
 	if meta, metaErr := lfs.ReadSessionMeta(ledgerSessionDir); metaErr == nil {
 		abortedSessionID = meta.EffectiveSessionID()
 		importWarning = rememberAbort(sessionName, abortedSessionID, nativeSessionsOfMeta(meta))
+	} else {
+		// isSessionInLedger reads an unreadable meta.json as finalized, so only
+		// a local copy of the recording can still say what it covered.
+		sessionID, natives := localIdentityOfSession(sessionPath,
+			filepath.Join(session.GetContextPath(repoID), "sessions", sessionName), hydrationCache)
+		importWarning = rememberAbort(sessionName, sessionID, natives)
+		if sessionID == "" && len(natives) == 0 {
+			importWarning = "could not read the session's meta.json, so the abort was not recorded for 'ox session import', which may offer this session again"
+		}
 	}
 
 	// Remove the git-tracked ledger directory: git rm -r + commit + push.
@@ -503,7 +514,6 @@ func killFinalizedSession(inst *agentinstance.Instance, cmd *cobra.Command, proj
 
 	// Remove the local recording cache copy, if one exists. ErrSessionNotFound
 	// is expected and fine — a finalized session may have no local copy left.
-	repoID := getRepoIDOrDefault(projectRoot)
 	if contextPath := session.GetContextPath(repoID); contextPath != "" {
 		if store, storeErr := session.NewStore(contextPath); storeErr == nil {
 			if delErr := store.DeleteSession(sessionName); delErr != nil && !errors.Is(delErr, session.ErrSessionNotFound) {
@@ -515,7 +525,6 @@ func killFinalizedSession(inst *agentinstance.Instance, cmd *cobra.Command, proj
 	// Remove the ledger hydration cache. git rm never touches it — it is
 	// gitignored and lives outside the tracked sessions/ tree — so without this
 	// the hydrated summary/transcript bytes would survive the kill.
-	hydrationCache := filepath.Join(ledgerPath, ".sageox", "cache", "sessions", sessionName)
 	if err := os.RemoveAll(hydrationCache); err != nil {
 		slog.Warn("failed to remove ledger hydration cache during finalized abort", "session", sessionName, "error", err)
 	}

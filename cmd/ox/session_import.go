@@ -782,7 +782,8 @@ func planImport(ctx context.Context, opts importOptions, env *importEnv) ([]*imp
 	}
 	if idx.aborted, err = loadAbortedSessions(env.ledgerPath); err != nil {
 		return nil, ignored, &importFailure{Code: importErrLedgerUnreadable, Message: err.Error(),
-			Guidance: "It lists the sessions the coworker aborted; ask them to repair it. Never delete it to proceed: that offers those sessions for upload again."}
+			Guidance: "The abort record at " + abortedSessionsPath(env.ledgerPath) + " lists sessions a coworker aborted on this machine; " +
+				"ask that coworker to repair it. Never delete the file to proceed: that offers those sessions for upload again."}
 	}
 	sessions, err := discoverImportSessions(opts, scope, &ignored)
 	if err != nil {

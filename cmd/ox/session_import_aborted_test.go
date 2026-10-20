@@ -46,6 +46,13 @@ func newAbortFixture(t *testing.T) (*importFixture, string) {
 // would mean the abort was not recorded for the import.
 func abortAs(t *testing.T, agentID string, args ...string) {
 	t.Helper()
+	require.Empty(t, abortWithWarning(t, agentID, args...).Warning)
+}
+
+// abortWithWarning runs the real abort command, which must succeed, and
+// returns what it reported.
+func abortWithWarning(t *testing.T, agentID string, args ...string) sessionAbortOutput {
+	t.Helper()
 	setForceFlag(t, true)
 	var out bytes.Buffer
 	agentCmd.SetOut(&out)
@@ -54,7 +61,26 @@ func abortAs(t *testing.T, agentID string, args ...string) {
 	var result sessionAbortOutput
 	require.NoError(t, json.Unmarshal(out.Bytes(), &result), out.String())
 	require.True(t, result.Success)
-	require.Empty(t, result.Warning)
+	return result
+}
+
+// captureHeader is a stopped capture's raw.jsonl naming one native session.
+func captureHeader(nativeID string) string {
+	return `{"type":"header","metadata":{"version":"1","agent_type":"claude-code","created_at":"2026-10-19T09:00:00Z",` +
+		`"native_sessions":[{"id":"` + nativeID + `","source":"startup","first_seen":"2026-10-19T09:00:00Z","last_seen":"2026-10-19T09:01:00Z"}]}}` +
+		"\n" + `{"type":"user","content":"` + abortedPrompt + `","seq":1}` + "\n"
+}
+
+func writeDamage(content string) func(t *testing.T, path string) {
+	return func(t *testing.T, path string) { require.NoError(t, os.WriteFile(path, []byte(content), 0o600)) }
+}
+
+func unchangedDamage(content string) func(t *testing.T, path string) {
+	return func(t *testing.T, path string) {
+		got, err := os.ReadFile(path)
+		require.NoError(t, err)
+		assert.Equal(t, content, string(got), "the damaged record must not be replaced")
+	}
 }
 
 // Devon aborts an ox recording of a session, in each state abort reaches, and
@@ -122,10 +148,7 @@ func TestImportE2E_AbortedRecordingIsNeverImported(t *testing.T) {
 				name := "2026-10-19T09-00-devon-OxCapt"
 				dir := filepath.Join(session.GetContextPath(e2eRepoID), "sessions", name)
 				require.NoError(t, os.MkdirAll(dir, 0o755))
-				header := `{"type":"header","metadata":{"version":"1","agent_type":"claude-code","created_at":"2026-10-19T09:00:00Z",` +
-					`"native_sessions":[{"id":"` + e2eClaudeA + `","source":"startup","first_seen":"2026-10-19T09:00:00Z","last_seen":"2026-10-19T09:01:00Z"}]}}`
-				require.NoError(t, os.WriteFile(filepath.Join(dir, ledgerFileRaw),
-					[]byte(header+"\n"+`{"type":"user","content":"`+abortedPrompt+`","seq":1}`+"\n"), 0o600))
+				require.NoError(t, os.WriteFile(filepath.Join(dir, ledgerFileRaw), []byte(captureHeader(e2eClaudeA)), 0o600))
 				return string(stateRecordedLive), name
 			},
 			abort: func(t *testing.T, recording string) { abortAs(t, "OxOthr", recording) },
@@ -252,35 +275,87 @@ func TestImportE2E_AbortSurvivesLaterRecordings(t *testing.T) {
 // Failure prevented: a damaged file silently reopens every session the
 // coworker discarded.
 func TestImportE2E_UnreadableAbortRecordFailsClosed(t *testing.T) {
-	f, nativePath := newAbortFixture(t)
-	cfg = &config.Config{}
-	path := abortedSessionsPath(f.ledgerPath)
-	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
-	damaged := []byte(`{"sessions": {"` + e2eClaudeB + `": `)
-	require.NoError(t, os.WriteFile(path, damaged, 0o600))
+	cases := []struct {
+		name   string
+		damage func(t *testing.T, path string)
+		intact func(t *testing.T, path string)
+	}{
+		{name: "truncated JSON", damage: writeDamage(`{"sessions": {"` + e2eClaudeB + `": `), intact: unchangedDamage(`{"sessions": {"` + e2eClaudeB + `": `)},
+		{name: "null record", damage: writeDamage("null"), intact: unchangedDamage("null")},
+		{
+			name:   "directory where the file belongs",
+			damage: func(t *testing.T, path string) { require.NoError(t, os.MkdirAll(path, 0o700)) },
+			intact: func(t *testing.T, path string) { assert.DirExists(t, path) },
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f, nativePath := newAbortFixture(t)
+			cfg = &config.Config{}
+			path := abortedSessionsPath(f.ledgerPath)
+			require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
+			tc.damage(t, path)
 
-	r := f.run(t, importOptions{dryRun: true, jsonOut: true})
-	require.ErrorIs(t, r.err, cli.ErrSilent)
-	refusal := map[string]any{}
-	require.NoError(t, json.Unmarshal([]byte(r.out), &refusal), r.out)
-	assert.Equal(t, importErrLedgerUnreadable, refusal["error"])
-	assert.Contains(t, refusal["guidance"], "Never delete it")
+			r := f.run(t, importOptions{dryRun: true, jsonOut: true})
+			require.ErrorIs(t, r.err, cli.ErrSilent)
+			refusal := map[string]any{}
+			require.NoError(t, json.Unmarshal([]byte(r.out), &refusal), r.out)
+			assert.Equal(t, importErrLedgerUnreadable, refusal["error"])
+			assert.Contains(t, refusal["guidance"], path, "the guidance must name the record")
+			assert.Contains(t, refusal["guidance"], "Never delete the file")
 
-	_, err := session.StartRecording(f.projectRoot, session.StartRecordingOptions{
-		AgentID: "OxAbrt", AdapterName: "claude-code", AgentSessionID: e2eClaudeA, SessionFile: nativePath,
-	})
-	require.NoError(t, err)
-	setForceFlag(t, true)
-	var out bytes.Buffer
-	agentCmd.SetOut(&out)
-	t.Cleanup(func() { agentCmd.SetOut(nil) })
-	require.NoError(t, runAgentSessionAbort(&agentinstance.Instance{AgentID: "OxAbrt"}, agentCmd, nil), "abort must still discard the recording")
-	var abortOut sessionAbortOutput
-	require.NoError(t, json.Unmarshal(out.Bytes(), &abortOut))
-	assert.Contains(t, abortOut.Warning, "'ox session import', which may offer this session again")
-	got, err := os.ReadFile(path)
-	require.NoError(t, err)
-	assert.Equal(t, damaged, got, "the damaged record must not be replaced")
+			_, err := session.StartRecording(f.projectRoot, session.StartRecordingOptions{
+				AgentID: "OxAbrt", AdapterName: "claude-code", AgentSessionID: e2eClaudeA, SessionFile: nativePath,
+			})
+			require.NoError(t, err)
+			abortOut := abortWithWarning(t, "OxAbrt")
+			assert.Contains(t, abortOut.Warning, "'ox session import', which may offer this session again")
+			tc.intact(t, path)
+		})
+	}
+}
+
+// A finalized session whose meta.json cannot be read is killed by name only
+// through a local copy (abort refuses a Ledger directory it cannot classify).
+// The abort is recorded from that copy, and when the copy names nothing the
+// coworker is warned.
+//
+// Failure prevented: the kill deletes the only readable identity and the
+// native transcript is offered again with no warning.
+func TestImportE2E_FinalizedKillWithUnreadableMeta(t *testing.T) {
+	for _, namesIt := range []bool{true, false} {
+		t.Run(fmt.Sprintf("local copy names the session %t", namesIt), func(t *testing.T) {
+			f, _ := newAbortFixture(t)
+			cfg = &config.Config{}
+			name := "2026-10-19T09-00-devon-OxBadM"
+			dir := filepath.Join(f.ledgerPath, "sessions", name)
+			require.NoError(t, os.MkdirAll(dir, 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "meta.json"), []byte(`{"session_name": "`), 0o644))
+			require.NoError(t, os.WriteFile(filepath.Join(dir, ledgerFileRaw),
+				[]byte("version https://git-lfs.github.com/spec/v1\noid sha256:abc\nsize 10\n"), 0o644))
+			require.NoError(t, ensureSessionsGitignore(filepath.Join(f.ledgerPath, "sessions")))
+			commitAndPushFinalized(t, f.draftLedgerFixture, name)
+			hydrated := filepath.Join(f.ledgerPath, ".sageox", "cache", "sessions", name)
+			require.NoError(t, os.MkdirAll(hydrated, 0o755))
+			raw := captureHeader(e2eClaudeA)
+			if !namesIt {
+				raw = `{"type":"header","metadata":{"version":"1","created_at":"2026-10-19T09:00:00Z"}}` + "\n" +
+					`{"type":"user","content":"` + abortedPrompt + `","seq":1}` + "\n"
+			}
+			require.NoError(t, os.WriteFile(filepath.Join(hydrated, ledgerFileRaw), []byte(raw), 0o600))
+
+			abortOut := abortWithWarning(t, "OxOthr", name)
+			assert.Empty(t, remotePathsUnder(t, f.barePath, name), "the kill must still remove the session")
+			r := f.run(t, importOptions{dryRun: true, jsonOut: true})
+			require.NoError(t, r.err, r.out)
+			if namesIt {
+				assert.Empty(t, abortOut.Warning)
+				assert.Equal(t, "aborted", r.session(t, e2eClaudeA).State)
+			} else {
+				assert.Contains(t, abortOut.Warning, "which may offer this session again")
+			}
+		})
+	}
 }
 
 // Concurrent aborts each keep their entry.

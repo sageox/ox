@@ -62,9 +62,16 @@ func loadAbortedSessions(ledgerPath string) (*abortedSessions, error) {
 		return nil, fmt.Errorf("read the sessions you aborted: %w", err)
 	}
 	if err == nil {
-		if err := json.Unmarshal(data, record); err != nil {
+		// Decode through a pointer: a record of `null` would otherwise leave
+		// the empty record in place and read as "nothing aborted".
+		var decoded *abortedSessions
+		if err := json.Unmarshal(data, &decoded); err != nil {
 			return nil, fmt.Errorf("read the sessions you aborted at %s: %w", path, err)
 		}
+		if decoded == nil {
+			return nil, fmt.Errorf("read the sessions you aborted at %s: the record is null", path)
+		}
+		record = decoded
 	}
 	if record.Sessions == nil {
 		record.Sessions = map[string]abortedSession{}
@@ -150,6 +157,24 @@ func nativeSessionsOfRecording(sessionPath string, state *session.RecordingState
 		}
 	}
 	return out
+}
+
+// localIdentityOfSession reads what local copies of a session say about it,
+// for when its Ledger meta.json cannot be read: the ses_ ID from a capture
+// header and the native sessions each copy names. Empty dirs are skipped.
+func localIdentityOfSession(dirs ...string) (string, []abortedNative) {
+	sessionID := ""
+	var natives []abortedNative
+	for _, dir := range dirs {
+		if dir == "" {
+			continue
+		}
+		natives = append(natives, nativeSessionsOfRecording(dir, nil)...)
+		if capture, ok := readCaptureIdentity(filepath.Join(dir, ledgerFileRaw)); ok && sessionID == "" {
+			sessionID = capture.sessionID
+		}
+	}
+	return sessionID, natives
 }
 
 // nativeSessionsOfMeta lists the native sessions a Ledger session covered.
