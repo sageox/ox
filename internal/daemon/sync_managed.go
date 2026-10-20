@@ -55,6 +55,11 @@ type ManagedRepoPullOpts struct {
 	// Zero means use gitutil.MinFetchHeadAge.
 	MinFetchAge time.Duration
 
+	// SkipFetchAgeCheck lets Team Context pull a changed remote immediately.
+	// The endpoint ownership lease and per-repo lock already serialize writers;
+	// FETCH_HEAD freshness must not delay newly published discussions.
+	SkipFetchAgeCheck bool
+
 	// ValidateIntegrity runs isValidGitRepo before pulling. If false (or repo
 	// is corrupt), returns a CorruptRepo result so the caller can handle reclone.
 	ValidateIntegrity bool
@@ -215,7 +220,7 @@ type ManagedRepoPullResult struct {
 //  1. Rebase-in-progress check
 //  2. Lock file check
 //  3. ls-remote dedup (skip if HEAD unchanged)
-//  4. FETCH_HEAD mtime dedup (secondary)
+//  4. FETCH_HEAD mtime dedup (secondary, unless disabled)
 //  5. Credential refresh
 //  6. git fetch
 //  7. Divergence detection (optional)
@@ -296,7 +301,7 @@ func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPul
 				result = ManagedRepoPullResult{Skipped: true, SkipReason: skipReasonRemoteUnchanged}
 				return nil
 			}
-			if age, ok := gitutil.FetchHeadAge(path); ok {
+			if age, ok := gitutil.FetchHeadAge(path); ok && !opts.SkipFetchAgeCheck {
 				minAge := opts.MinFetchAge
 				if minAge == 0 {
 					minAge = gitutil.MinFetchHeadAge

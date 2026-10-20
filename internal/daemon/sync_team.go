@@ -638,17 +638,16 @@ type teamPullOutcome struct {
 }
 
 // pullTeamContext performs a git pull on a single team context repo.
-// Returns a nil error if skipped due to recent fetch (by another daemon).
+// Returns a nil error if the remote is unchanged.
 //
 // Multi-daemon deduplication: Users often work on multiple repos that share
 // the same team context (e.g., 5-6 project repos all pointing to one team
 // context directory). Each repo has its own daemon, so without coordination,
 // they'd all try to git pull the same team context simultaneously.
 //
-// We solve this by checking .git/FETCH_HEAD mtime before fetching. Git updates
-// this file on every fetch, so if it was recently modified (by any process),
-// we skip the pull. This naturally deduplicates without locks - whichever
-// daemon fetches first "wins" and others skip for that interval.
+// The endpoint ownership lease selects one background sync daemon, and the
+// per-repository lock serializes it with on-demand syncs. Under that lock,
+// ls-remote skips unchanged repos. A recent fetch must not delay a new commit.
 //
 // Change Detection: After a successful pull, this function compares file states
 // before and after to detect changes in key team context files (distilled discussions,
@@ -656,12 +655,6 @@ type teamPullOutcome struct {
 // so that CLI commands can "whisper" updates to agents.
 func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) (teamPullOutcome, error) {
 	repoName := filepath.Base(path)
-
-	// compute FETCH_HEAD min age from manifest if available
-	minFetchAge := minTeamContextFetchAge
-	if intervalMin := s.workspaceRegistry.GetSyncIntervalMin(path); intervalMin > 0 {
-		minFetchAge = time.Duration(intervalMin) * time.Minute
-	}
 
 	// read manifest before pull to get auto-resolve prefixes. The manifest
 	// is already on disk from the previous clone/pull. If missing, ParseFile
@@ -684,7 +677,7 @@ func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) (teamP
 		RepoName:           repoName,
 		ProjectRoot:        s.config.ProjectRoot,
 		SyncInterval:       s.config.TeamContextSyncInterval,
-		MinFetchAge:        minFetchAge,
+		SkipFetchAgeCheck:  true,
 		ValidateIntegrity:  true,
 		DetectDivergence:   true,
 		ResolveRules:       mCfg.ResolveRules,
