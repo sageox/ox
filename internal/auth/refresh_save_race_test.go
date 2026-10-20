@@ -247,3 +247,34 @@ func TestRefresh_SavesOnlyOverTheLoginItRefreshed(t *testing.T) {
 		})
 	}
 }
+
+// TestRevokeDiscardedRefresh_OutlivesTheCallersContext revokes a discarded
+// rotated token after the caller's context is already canceled.
+// Failure prevented: a daemon refresh whose context was canceled after the
+// server answered skipped the revoke, leaving the rotated refresh token live
+// on the server with no local copy left to revoke.
+func TestRevokeDiscardedRefresh_OutlivesTheCallersContext(t *testing.T) {
+	t.Parallel()
+	var mu sync.Mutex
+	var revoked []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != RevokeEndpoint {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		mu.Lock()
+		revoked = append(revoked, r.FormValue("token"))
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	revokeDiscardedRefresh(ctx, srv.URL, "sent-rt", &StoredToken{AccessToken: "discarded-jwt", RefreshToken: "rotated-rt"})
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, []string{"rotated-rt"}, revoked, "a canceled caller must not leave the rotated token live")
+}

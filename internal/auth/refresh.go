@@ -115,11 +115,13 @@ func refreshResult(ep string, stored, refreshed *StoredToken) (*StoredToken, err
 // token, is the one the logout revoked: revoking it again adds nothing, and
 // could sign out that session if a login this refresh did not find on disk
 // still uses it. Best effort: the refresh fails as logged out either way.
+// The caller's cancellation does not stop the revoke, since nothing else can
+// revoke that token later; the revoke's own 10s timeout bounds it.
 func revokeDiscardedRefresh(ctx context.Context, baseURL, sent string, discarded *StoredToken) {
 	if discarded.RefreshToken == "" || discarded.RefreshToken == sent {
 		return
 	}
-	status := revokeOnServerAt(ctx, baseURL, discarded)
+	status := revokeOnServerAt(context.WithoutCancel(ctx), baseURL, discarded)
 	slog.Info("auth: asked the server to revoke the token refreshed during logout",
 		"endpoint", endpoint.NormalizeEndpoint(baseURL), "confirmed", status == RevocationSuccess)
 }
