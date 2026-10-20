@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
-	"strconv"
+	"slices"
 	"strings"
 	"time"
 
@@ -30,8 +30,8 @@ Where the ox daemon will not outlive the session (the daemon is off, or the
 machine goes away with its AI coworker), it finishes every recording whose AI
 coworker is gone, as session end would have, publishes every session still
 waiting on this machine, as 'ox session upload' does, and pushes Ledger
-commits an earlier push left behind. Where the daemon uploads sessions, it
-leaves them to the daemon and only reports.
+commits an earlier push left behind. Where the daemon uploads sessions, such
+as a laptop, it finishes, publishes and pushes nothing, and only reports.
 
 It reports how many sessions finished since --since and how many of those are
 in the Ledger, the older pending sessions it found, and every session that is
@@ -174,13 +174,21 @@ func waitForSessions(ctx context.Context, projectRoot, ledgerPath string, since 
 
 	// An upload whose push failed is committed here and reads as in the Ledger,
 	// so nothing above retries it.
-	ahead, err := gitutil.RunGit(ctx, ledgerPath, "rev-list", "--count", "@{upstream}..HEAD")
+	unpushed, err := gitutil.RunGit(ctx, ledgerPath, "log", "@{upstream}..HEAD", "--format=", "--name-only", "--", "sessions/")
 	if err != nil {
 		return out, fmt.Errorf("check the Ledger for unpushed commits: %w", err)
 	}
-	if n, _ := strconv.Atoi(ahead); n > 0 {
+	stranded := sessionNamesIn(unpushed)
+	notPushed := "committed on this machine but not pushed"
+	if len(stranded) > 0 && cliUploads {
+		notPushed = ""
 		if err := pushLedger(ctx, ledgerPath); err != nil {
-			return out, fmt.Errorf("push %d Ledger commits: %w", n, err)
+			notPushed = "push the Ledger: " + err.Error()
+		}
+	}
+	for _, name := range stranded {
+		if notPushed != "" && !reported[name] {
+			fail(name, notPushed, time.Time{})
 		}
 	}
 
@@ -213,14 +221,8 @@ func publishedSince(ctx context.Context, ledgerPath string, since time.Time) (in
 	if err != nil {
 		return 0, err
 	}
-	names := make(map[string]bool)
-	for _, line := range strings.Split(log, "\n") {
-		if parts := strings.Split(line, "/"); len(parts) >= 3 && parts[0] == "sessions" {
-			names[parts[1]] = true
-		}
-	}
 	count := 0
-	for name := range names {
+	for _, name := range sessionNamesIn(log) {
 		// read from the remote-tracking branch, which a push updates
 		data, err := gitutil.RunGit(ctx, ledgerPath, "show", "@{upstream}:sessions/"+name+"/meta.json")
 		var meta lfs.SessionMeta
@@ -236,6 +238,19 @@ func publishedSince(ctx context.Context, ledgerPath string, since time.Time) (in
 		}
 	}
 	return count, nil
+}
+
+// sessionNamesIn returns the sorted session names in `git log --name-only`
+// output. RunGit mixes stderr into it; a warning line names no session.
+func sessionNamesIn(log string) []string {
+	var names []string
+	for _, line := range strings.Split(log, "\n") {
+		if parts := strings.Split(line, "/"); len(parts) >= 3 && parts[0] == "sessions" && !slices.Contains(names, parts[1]) {
+			names = append(names, parts[1])
+		}
+	}
+	slices.Sort(names)
+	return names
 }
 
 func printSessionWait(w io.Writer, out sessionWaitOutput, since time.Time) {

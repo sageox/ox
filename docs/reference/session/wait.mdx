@@ -18,8 +18,8 @@ Where the ox daemon will not outlive the session (the daemon is off, or the
 machine goes away with its AI coworker), it finishes every recording whose AI
 coworker is gone, as session end would have, publishes every session still
 waiting on this machine, as 'ox session upload' does, and pushes Ledger
-commits an earlier push left behind. Where the daemon uploads sessions, it
-leaves them to the daemon and only reports.
+commits an earlier push left behind. Where the daemon uploads sessions, such
+as a laptop, it finishes, publishes and pushes nothing, and only reports.
 
 It reports how many sessions finished since --since and how many of those are
 in the Ledger, the older pending sessions it found, and every session that is

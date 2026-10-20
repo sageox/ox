@@ -109,6 +109,17 @@ func (f *waitFixture) leftover(t *testing.T, name, agentID string, at time.Time)
 	return dir
 }
 
+// stranded publishes a leftover whose push fails, so its commit is only in the
+// Ledger clone.
+func (f *waitFixture) stranded(t *testing.T, name, agentID string) {
+	t.Helper()
+	dir := f.leftover(t, name, agentID, time.Now())
+	runGit(t, f.ledgerPath, "remote", "set-url", "--push", "origin", filepath.Join(t.TempDir(), "missing.git"))
+	require.Error(t, publishCachedSession(f.projectRoot, f.ledgerPath, name, dir))
+	runGit(t, f.ledgerPath, "remote", "set-url", "--push", "origin", f.barePath)
+	require.NotContains(t, remoteTree(t, f.barePath), "sessions/"+name+"/meta.json", "precondition")
+}
+
 // writeWaitTranscript writes a recorded session's raw.jsonl: a header and two
 // turns at the given time.
 func writeWaitTranscript(t *testing.T, dir, agentID string, at time.Time) {
@@ -208,17 +219,24 @@ func TestSessionWait_PublishesWhatIsLeftAndCountsIt(t *testing.T) {
 }
 
 // An upload whose push failed is committed in the Ledger clone and reads as
-// published there, so nothing else retries it; wait pushes it.
+// published there, so nothing else retries it; wait pushes it. While that push
+// fails too, the report still comes out and names the session.
 func TestSessionWait_PushesAnUploadWhosePushFailed(t *testing.T) {
 	f := newWaitFixture(t)
 	const name = "2026-10-20T09-30-coworker-OxPsh1"
-	dir := f.leftover(t, name, "OxPsh1", time.Now())
+	f.stranded(t, name, "OxPsh1")
 	runGit(t, f.ledgerPath, "remote", "set-url", "--push", "origin", filepath.Join(t.TempDir(), "missing.git"))
-	require.Error(t, publishCachedSession(f.projectRoot, f.ledgerPath, name, dir))
-	runGit(t, f.ledgerPath, "remote", "set-url", "--push", "origin", f.barePath)
-	require.NotContains(t, remoteTree(t, f.barePath), "sessions/"+name+"/meta.json", "precondition")
 
 	out, err := runWait(t, time.Now().Add(-time.Hour))
+
+	require.Len(t, out.Failed, 1, "the report is printed when the push fails")
+	assert.Equal(t, name, out.Failed[0].Session)
+	assert.Contains(t, out.Failed[0].Error, "push the Ledger: ")
+	assert.Error(t, err)
+
+	runGit(t, f.ledgerPath, "remote", "set-url", "--push", "origin", f.barePath)
+
+	out, err = runWait(t, time.Now().Add(-time.Hour))
 
 	assert.Contains(t, remoteTree(t, f.barePath), "sessions/"+name+"/meta.json", "the stranded commit reaches the Ledger")
 	assert.Equal(t, sessionWaitOutput{Since: 1, InLedger: 1, OlderPending: []string{}, Failed: []sessionWaitFailure{}}, out)
@@ -263,9 +281,11 @@ func TestSessionWait_UnreadableLedgerRemoteFailsTheRun(t *testing.T) {
 }
 
 // Where the daemon outlives the session it owns uploads, so wait only reports:
-// two uploaders on one session is how a Ledger wedges.
+// two uploaders on one session is how a Ledger wedges. It pushes nothing either.
 func TestSessionWait_LeavesUploadsToADaemonThatOutlivesTheSession(t *testing.T) {
 	f := newWaitFixture(t)
+	const stranded = "2026-10-20T09-30-coworker-OxPsh3"
+	f.stranded(t, stranded, "OxPsh3") // while the CLI owns uploads, so no daemon is reached
 	t.Setenv("SAGEOX_DAEMON", "")
 	runtime.Reset()
 	require.True(t, daemonOutlivesSession(), "precondition: a laptop with a working daemon")
@@ -278,9 +298,11 @@ func TestSessionWait_LeavesUploadsToADaemonThatOutlivesTheSession(t *testing.T) 
 
 	assert.Empty(t, *ran, "wait never runs session end where the daemon owns it")
 	assert.NotContains(t, remoteTree(t, f.barePath), "sessions/"+waiting+"/meta.json", "wait never publishes where the daemon owns uploads")
+	assert.NotContains(t, remoteTree(t, f.barePath), "sessions/"+stranded+"/meta.json", "wait never pushes where the daemon owns uploads")
 	assert.ElementsMatch(t, []sessionWaitFailure{
 		{Session: crashed, Error: "its AI coworker is gone; the daemon finishes it"},
 		{Session: waiting, Error: "waiting for the daemon to upload it"},
+		{Session: stranded, Error: "committed on this machine but not pushed"},
 	}, out.Failed)
 	assert.Error(t, err)
 }
