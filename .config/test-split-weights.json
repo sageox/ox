@@ -7,7 +7,7 @@
       "tests": {
         "TestFixLedgerBranchBehind_LockBusy_FailsFastInsteadOfRacing": 30.1,
         "TestFixLedgerUnmergedPaths_RepairsAgreeingAutostash": 30.1,
-        "TestSessionUpload_ScansLongLinesUnderSizeCap": 20.5,
+        "TestSessionUpload_ScansLongLines": 20.5,
         "TestSpinnerCLIInterrupt": 16.9,
         "TestPostHog_ReleaseBuildReportsCommandsUnderOneInstallID": 11.7,
         "TestDoctorExitCLI": 10.1,
