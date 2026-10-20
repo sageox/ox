@@ -103,7 +103,7 @@ func init() {
 		Name:        "Ledger clean workdir",
 		Category:    "Ledger Git Health",
 		FixLevel:    FixLevelAuto,
-		Description: "Checks for uncommitted changes in ledger repository",
+		Description: "Checks for uncommitted changes in ledger repository outside data/plans/",
 		Run:         func(fix bool) checkResult { return checkLedgerCleanWorkdir(fix) },
 	})
 
@@ -1011,9 +1011,10 @@ func fixLedgerStuckOperation(ledgerPath, _, _ string) checkResult {
 	return result
 }
 
-// checkLedgerCleanWorkdir checks for uncommitted changes in the ledger repository.
+// checkLedgerCleanWorkdir checks for uncommitted changes in the ledger repository
+// outside data/plans/ (allButPlansPathspec).
 // Reports if there are staged, unstaged, or untracked files.
-// With fix=true, auto-commits all changes. The ledger is fully ox-managed.
+// With fix=true, auto-commits them. The ledger is fully ox-managed.
 //
 // Unmerged paths (U-state from a stuck merge/rebase/cherry-pick) are
 // intentionally skipped here — they're surfaced separately by
@@ -1038,14 +1039,10 @@ func checkLedgerCleanWorkdir(fix bool) checkResult {
 	}
 
 	// check for any uncommitted changes
-	statusCmd := exec.Command("git", "-C", ledgerPath, "status", "--porcelain")
+	statusCmd := exec.Command("git", append([]string{"-C", ledgerPath, "status", "--porcelain", "--"}, allButPlansPathspec...)...)
 	output, err := statusCmd.Output()
 	if err != nil {
 		return SkippedCheck("Ledger clean workdir", "status check failed", "")
-	}
-
-	if len(output) == 0 {
-		return PassedCheck("Ledger clean workdir", "clean")
 	}
 
 	// count different types of changes
@@ -1106,10 +1103,12 @@ func checkLedgerCleanWorkdir(fix bool) checkResult {
 			"Run `ox doctor --fix` to commit and sync ledger changes")
 	}
 
+	// plan changes are reported by Ledger plan saves and Ledger plan edits
 	return PassedCheck("Ledger clean workdir", "clean")
 }
 
-// fixLedgerDirtyWorkdir stages and commits all changes in the ledger.
+// fixLedgerDirtyWorkdir stages and commits all changes in the ledger outside
+// data/plans/ (allButPlansPathspec).
 func fixLedgerDirtyWorkdir(ledgerPath string, fileCount int) checkResult {
 	// Re-check for unmerged (U-state) paths immediately before staging.
 	// checkLedgerCleanWorkdir deliberately excludes U-state entries from the
@@ -1165,9 +1164,9 @@ func fixLedgerDirtyWorkdir(ledgerPath string, fileCount int) checkResult {
 	// repair while the durable fix silently didn't land.
 	_, signErr := gitserver.DisableCommitSigning(ledgerPath)
 
-	// stage all changes
+	// stage all changes but plans
 	// --sparse: ledger repos use sparse-checkout
-	addCmd := exec.Command("git", "-C", ledgerPath, "add", "--sparse", "-A")
+	addCmd := exec.Command("git", append([]string{"-C", ledgerPath, "add", "--sparse", "-A", "--"}, allButPlansPathspec...)...)
 	if output, err := addCmd.CombinedOutput(); err != nil {
 		return FailedCheck("Ledger clean workdir",
 			"staging failed",
@@ -1214,7 +1213,8 @@ func fixLedgerDirtyWorkdir(ledgerPath string, fileCount int) checkResult {
 	// daemon autostash-pop can't stage an unchecked blob between the pre-check
 	// above and the commit (PR #811 validation↔commit TOCTOU). It carries the same
 	// managed-git hardening (gpgsign off, non-interactive, cmd.Dir), runs its own
-	// snapshot scan, and refuses mid-rebase.
+	// snapshot scan, and refuses mid-rebase. It leaves data/plans/ out, so a plan
+	// file that was already staged stays staged.
 	committed, err := commitLedgerSnapshot(context.Background(), ledgerPath, "ox doctor: auto-commit ledger changes")
 	if err != nil {
 		return FailedCheck("Ledger clean workdir",
@@ -1268,17 +1268,10 @@ func checkLedgerCacheTracked(fix bool) checkResult {
 	// untrack cache files and ensure gitignore is in place
 	gitserver.EnsureGitignoreBeforeCommit(ledgerPath)
 
-	// check if untracking created staged changes that need committing
-	statusCmd := exec.Command("git", "-C", ledgerPath, "diff", "--cached", "--name-only")
-	if out, err := statusCmd.Output(); err == nil && len(strings.TrimSpace(string(out))) > 0 {
-		commitCmd := exec.Command("git", "-C", ledgerPath, "commit", "-m", "chore: untrack local-only cache files")
-		if commitOut, err := commitCmd.CombinedOutput(); err != nil {
-			errStr := strings.TrimSpace(string(commitOut))
-			if !strings.Contains(errStr, "nothing to commit") {
-				return FailedCheck(name, "commit failed after untracking",
-					fmt.Sprintf("git commit error: %s", errStr))
-			}
-		}
+	// commit the untracking, and never a plan file someone already staged
+	if _, err := commitLedgerSnapshot(context.Background(), ledgerPath, "chore: untrack local-only cache files"); err != nil {
+		return FailedCheck(name, "commit failed after untracking",
+			fmt.Sprintf("git commit error: %s", strings.TrimSpace(err.Error())))
 	}
 
 	return PassedCheck(name, "untracked cache files from ledger")
@@ -1339,16 +1332,14 @@ func checkLedgerRejTracked(fix bool) checkResult {
 		return nil
 	})
 
-	// stage the untrack + the updated .gitignore
-	addCmd := exec.Command("git", "-C", ledgerPath, "add", "--sparse", "-A")
+	// stage the untrack + the updated .gitignore, and never a plan file
+	addCmd := exec.Command("git", append([]string{"-C", ledgerPath, "add", "--sparse", "-A", "--"}, allButPlansPathspec...)...)
 	if out, err := addCmd.CombinedOutput(); err != nil {
 		return FailedCheck(name, "staging failed",
 			fmt.Sprintf("git add error: %s", strings.TrimSpace(string(out))))
 	}
 
-	out, err := gitutil.RunGit(context.Background(), ledgerPath,
-		"commit", "-m", "chore: untrack and ignore .rej patch-reject artifacts")
-	if err != nil && !strings.Contains(out, "nothing to commit") && !strings.Contains(err.Error(), "nothing to commit") {
+	if _, err := commitLedgerSnapshot(context.Background(), ledgerPath, "chore: untrack and ignore .rej patch-reject artifacts"); err != nil {
 		return FailedCheck(name, "commit failed after untracking",
 			fmt.Sprintf("git commit error: %s", strings.TrimSpace(err.Error())))
 	}

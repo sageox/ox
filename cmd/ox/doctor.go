@@ -1377,6 +1377,10 @@ var ledgerGitHealthOrder = []string{
 	CheckSlugLedgerStuckOperation,
 	CheckSlugLedgerCleanWorkdir,
 	CheckSlugLedgerBranchStatus,
+	// before plan-pending-writes: a save queued here lands in this run's retry,
+	// and edits are listed only once that queue is settled.
+	CheckSlugPlanStrandedSaves,
+	CheckSlugPlanUnsavedEdits,
 	// after branch-status, whose push can land review records still waiting
 	// in the retry queue, so their entries are cleared instead of reported.
 	CheckSlugPlanPendingWrites,
