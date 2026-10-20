@@ -511,6 +511,37 @@ func (c *AuthClient) RemoveTokenForEndpoint(ep string) error {
 	}, legacyOpt, trackerOpt)
 }
 
+// removeTokenIfUnchanged deletes ep's stored login only if it is still want,
+// the login the caller revoked (nil if none was stored). Checking and deleting
+// under one write lock keeps a login saved meanwhile, by a concurrent `ox login`
+// or a daemon token refresh, from being deleted without ever being revoked: it
+// is kept and ErrLoginChanged is returned. A login already removed is not a
+// change. ep must already be normalized.
+func (c *AuthClient) removeTokenIfUnchanged(ep string, want *StoredToken) error {
+	authPath, err := c.GetAuthFilePath()
+	if err != nil {
+		return err
+	}
+
+	legacyOpt := withLegacyMigrationEndpoint(c.endpoint)
+	trackerOpt := withEndpointTracker(c)
+	return withAuthFileLocked(authPath, func(h *authFileHandle) error {
+		store, loadErr := h.load()
+		if loadErr != nil {
+			return loadErr
+		}
+		cur, exists := store.Tokens[ep]
+		if !exists {
+			return nil // nothing to remove
+		}
+		if cur != nil && (want == nil || !sameCredential(cur, want)) {
+			return ErrLoginChanged
+		}
+		delete(store.Tokens, ep)
+		return h.save(store)
+	}, legacyOpt, trackerOpt)
+}
+
 // IsAuthenticated checks if a locally valid token exists for this client's endpoint.
 // AuthClient is used for test isolation — uses local-only check (no server call).
 func (c *AuthClient) IsAuthenticated() (bool, error) {

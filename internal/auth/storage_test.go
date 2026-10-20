@@ -186,6 +186,85 @@ func TestRemoveToken_NoFile(t *testing.T) {
 	assert.NoError(t, err, "want nil when file doesn't exist")
 }
 
+// TestRemoveTokenIfUnchanged_DeletesOnlyTheRevokedLogin covers every pairing of
+// the login on disk with the login the caller revoked.
+// Failure prevented: logout deleted whatever auth.json held at removal time,
+// including a login saved after the revocation that was never revoked.
+func TestRemoveTokenIfUnchanged_DeletesOnlyTheRevokedLogin(t *testing.T) {
+	t.Parallel()
+	const ep = "https://sageox.ai"
+	login := func(name string) *StoredToken {
+		return &StoredToken{AccessToken: name + "-access", RefreshToken: name + "-refresh", ExpiresAt: time.Now().Add(time.Hour)}
+	}
+	// A refresh can keep the access and refresh tokens and still return a new
+	// session token, which EffectiveRefreshToken falls back to.
+	withSession := func(tok *StoredToken, session string) *StoredToken {
+		tok.SessionToken = session
+		return tok
+	}
+
+	for _, tt := range []struct {
+		name        string
+		onDisk      *StoredToken
+		revoked     *StoredToken
+		wantChanged bool
+		wantKept    string // refresh token left on disk; "" for none
+	}{
+		{name: "the revoked login is deleted", onDisk: login("s1"), revoked: login("s1")},
+		{name: "a login that replaced the revoked one is kept", onDisk: login("s2"), revoked: login("s1"), wantChanged: true, wantKept: "s2-refresh"},
+		{name: "a login saved when none was revoked is kept", onDisk: login("s2"), wantChanged: true, wantKept: "s2-refresh"},
+		{name: "a login refreshed to a new session token is kept", onDisk: withSession(login("s1"), "s1-session-2"), revoked: withSession(login("s1"), "s1-session-1"), wantChanged: true, wantKept: "s1-refresh"},
+		{name: "a login already removed is not a change", revoked: login("s1")},
+		{name: "nothing stored and nothing revoked", revoked: nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			client := NewTestClient(t).WithEndpoint(ep)
+			if tt.onDisk != nil {
+				require.NoError(t, client.SaveToken(tt.onDisk))
+			}
+
+			err := client.removeTokenIfUnchanged(ep, tt.revoked)
+			if tt.wantChanged {
+				require.ErrorIs(t, err, ErrLoginChanged)
+			} else {
+				require.NoError(t, err)
+			}
+
+			stored, err := client.GetToken()
+			require.NoError(t, err)
+			if tt.wantKept == "" {
+				assert.Nil(t, stored)
+			} else if assert.NotNil(t, stored, "a login that was never revoked must not be deleted") {
+				assert.Equal(t, tt.wantKept, stored.RefreshToken)
+			}
+		})
+	}
+}
+
+// TestRemoveTokenIfUnchanged_UnreadableStoreIsAnError verifies an auth.json that
+// cannot be parsed at removal time is reported as a failure, not as a change.
+// Failure prevented: logout told the user the login "changed during logout" (or
+// that it logged out) when it could not read the store at all, and the bytes on
+// disk were overwritten instead of left for the next attempt.
+func TestRemoveTokenIfUnchanged_UnreadableStoreIsAnError(t *testing.T) {
+	t.Parallel()
+	const ep = "https://sageox.ai"
+	client := NewTestClient(t).WithEndpoint(ep)
+	authPath, err := client.GetAuthFilePath()
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Dir(authPath), 0o700))
+	require.NoError(t, os.WriteFile(authPath, []byte("not-json"), 0o600))
+
+	err = client.removeTokenIfUnchanged(ep, &StoredToken{AccessToken: "s1-access", RefreshToken: "s1-refresh"})
+	require.Error(t, err, "an unreadable store must not read as removed")
+	assert.NotErrorIs(t, err, ErrLoginChanged, "nothing was compared, so nothing changed")
+
+	data, err := os.ReadFile(authPath)
+	require.NoError(t, err)
+	assert.Equal(t, "not-json", string(data), "an unreadable store must be left as it was")
+}
+
 func TestIsExpired(t *testing.T) {
 	t.Parallel()
 
