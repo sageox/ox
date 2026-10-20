@@ -296,7 +296,7 @@ func executeWithFrictionRecovery(ctx context.Context, args []string, attempt int
 		return 1
 	}
 
-	result := frictionEngine.Handle(args, err)
+	result := handleFriction(frictionEngine, args, err)
 	if result == nil {
 		printError(err)
 		return 1
