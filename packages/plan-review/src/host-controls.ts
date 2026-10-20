@@ -855,9 +855,8 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
   submitEl.onclick = submit;
   if (opts.approve) (bar.querySelector('.rev-approve') as HTMLElement).onclick = approve;
   // Esc peels one layer at a time — View original, then an open note, then
-  // the Draw tool, then the mode — and fires while typing in the note too;
-  // that is the point of Esc. A stroke in progress takes it first, in the
-  // document tools.
+  // the Draw tool, then the mode — and fires while typing in the note too. A
+  // stroke in progress takes it first, in the document tools.
   function escape(): boolean {
     if (original) { closeOriginal(); return true; }
     if (pop) { closePop(); return true; }

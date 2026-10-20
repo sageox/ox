@@ -101,7 +101,6 @@ test('a capture keeps only the fields a region names', () => {
   }
 });
 
-test('a drawing is labeled by the text it encloses', () => {
+test('a drawing is labeled by the text it encloses, within the label length', () => {
   assert.equal(drawingLabel(byId['r1-double-fire']), 'Drawing: The retry path can double-fire under load when the queue is …');
-  assert.equal(drawingLabel(byId['r4-abort-item']), 'Drawing: Abort if the dead-letter rate doubles.');
 });

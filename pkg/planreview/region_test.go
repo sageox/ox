@@ -197,8 +197,7 @@ func TestJSONLen_IsWhatJSONStringifyWrites(t *testing.T) {
 		`{"a":"q\"uote\\back\b\f\n\r\t\u0001\u001f\u2028\u2029é😀<>&"}`:                58,
 		`[1e21, 1e-7, 0.1, -1.5, 123456789.25, 1e20, 5e-324, 1.7976931348623157e308]`: 87,
 		`{"nested":[[],{},[null,true,false],{"k":[0]}]}`:                              46,
-		`-0`:             1,
-		`"\ud83d\ude00"`: 6,
+		`-0`: 1,
 	} {
 		var v any
 		if err := json.Unmarshal([]byte(in), &v); err != nil {

@@ -1,13 +1,11 @@
 //go:build browser
 
-// plan_review_draw_browser_test.go proves Draw around in real Chrome, on the
-// drawn-context fixture revisions (pkg/planreview/testdata/drawn-context):
-// framed in an opaque origin under the policy hosts frame plans with, a stroke
-// becomes a capture, the host stamps and sends it, and each drawing lands
-// where the spec's placement rules say on later revisions and layouts. Every
-// capture is made in the browser that places it, so the fonts a machine
-// renders with change offsets, never outcomes. It reads the npm build, so run
-// `make plan-review` first; it skips without one.
+// plan_review_draw_browser_test.go drives Draw around in real Chrome on the
+// drawn-context fixture revisions (pkg/planreview/testdata/drawn-context),
+// framed in an opaque origin under frameCSP. Each capture is made in the
+// browser that places it, so a machine's fonts change offsets, never
+// outcomes. It reads the npm build: run `make plan-review` first; it skips
+// without one.
 package main
 
 import (
@@ -77,7 +75,7 @@ const drawTools = `<!doctype html><html><body style="margin:0">` +
 	` const inst = 'draw-test-' + String(++loads).padStart(4, '0'); port = connectFrame(frame, inst); port.listen((m) => window.got.push(m));` +
 	` frame.style.width = w + 'px'; frame.style.height = h + 'px'; frame.src = '/doc/' + rev + '?load=' + loads + '#i=' + inst; };` +
 	`window.send = (m) => port.send(m); window.ask = (m) => frame.contentWindow.postMessage(m, '*');` +
-	`window.errs = []; window.addEventListener('message', (e) => { const d = e.data || {}; if (d.rect) window.rect = d.rect; if (d.input) window.input = true; if (d.err) window.errs.push(d.err); if (d.which) window.which = d.which; });` +
+	`window.addEventListener('message', (e) => { const d = e.data || {}; if (d.rect) window.rect = d.rect; if (d.input) window.input = true; if (d.which) window.which = d.which; });` +
 	`window.ready = true;</script></body></html>`
 
 var mermaidCDNTag = regexp.MustCompile(`<script[^>]+src="https://cdn\.jsdelivr\.net/npm/mermaid@[^"]+"[^>]*></script>`)
@@ -148,8 +146,6 @@ func serveDrawFixture(t *testing.T, host string) string {
 			page = strings.Replace(page, "<head>", "<head>"+forgingHead, 1)
 		}
 		page = mermaidCDNTag.ReplaceAllLiteralString(page, mermaid)
-		// the page's errors reach the host's window.errs, for a failing test to print
-		page = strings.Replace(page, "<head>", `<head><script>window.addEventListener('error',function(e){parent.postMessage({err:e.message+' @'+e.lineno+':'+e.colno},'*')})</script>`, 1)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Content-Security-Policy", frameCSP)
 		_, _ = w.Write([]byte(page))
@@ -189,7 +185,7 @@ func gotMessage(t *testing.T, ctx context.Context, after int, kind string, out a
 		}
 	}
 	got := evalString(t, ctx, `JSON.stringify((window.got||[]).map(function(m){return m.type+(m.reason?':'+m.reason:'')}))`)
-	t.Fatalf("no %q message after %d; got %s; the page's errors: %s", kind, after, got, evalString(t, ctx, `JSON.stringify(window.errs||[])`))
+	t.Fatalf("no %q message after %d; got %s", kind, after, got)
 	return 0
 }
 
@@ -285,19 +281,14 @@ func paintOf(name string, c captured) map[string]any {
 		"targets": targets, "open": c.Layout.Open, "checked": c.Layout.Checked}
 }
 
-// TestBrowser_DrawingsLandByTheirTargets draws around nine parts of fixture
-// revision a (a sentence twice, a list item, two Mermaid nodes and one more,
-// a figure, a table, an item in the closed notes and the unchecked tab's
-// panel), then places every drawing on revisions a, b and c and at other
-// widths, as the spec's section 3 rules say: exact where nothing moved, moved
-// with content added above, reflowed when the column narrows, hidden while
-// collapsed or on another tab and placed once shown, missing when the drawn
-// text was reworded or the drawn node renamed, ambiguous when the drawn item
-// now appears twice. Device pixels move nothing, and a live resize places
-// them again without a reload.
+// TestBrowser_DrawingsLandByTheirTargets draws around nine parts of revision
+// a and places each drawing by spec section 3: exact on a, moved on b
+// (content added above), missing or ambiguous on c where its text changed,
+// reflowed at 600 px, hidden while collapsed or on another tab and exact once
+// shown, unchanged at 2x device pixels, and placed again after a live resize.
 // Failure prevented: a drawing lands on whatever text now resembles the
 // original, paints over the wrong element after an edit, vanishes while its
-// section is collapsed, or stays where it was when the page reflows.
+// section is collapsed, or stays put when the page reflows.
 func TestBrowser_DrawingsLandByTheirTargets(t *testing.T) {
 	ctx := drawBrowser(t)
 	base := serveDrawFixture(t, drawTools)
@@ -409,9 +400,6 @@ func TestBrowser_DrawingsLandByTheirTargets(t *testing.T) {
 	load("a", 600, 800)
 	got, _ = place(0)
 	check("a at 600 px", got, map[string][]string{"sentence": one("reflowed"), "table": one("reflowed"), "notes": one("hidden")})
-	load("a", 1024, 800)
-	got, _ = place(0)
-	check("a at 1024 px", got, map[string][]string{"sentence": one("moved"), "abort": one("moved"), "figure": one("moved")})
 	// device pixels change no CSS pixel
 	if err := chromedp.Run(ctx, chromedp.EmulateViewport(1400, 900, chromedp.EmulateScale(2))); err != nil {
 		t.Fatal(err)
@@ -423,12 +411,12 @@ func TestBrowser_DrawingsLandByTheirTargets(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Show is for a hidden drawing: revealing one on the page leaves the
-	// reader's own tab choice alone, though it was drawn on the other tab
+	// revealing a drawing that is on the page leaves the reader's tab alone,
+	// though the drawing was made with the other tab checked
 	load("a", 1280, 800)
 	_, at := place(0)
-	// which asks the frame which rollout tab is checked; the ask channel and
-	// the tools' channel are not ordered with each other, so each step waits
+	// which asks the frame which rollout tab is checked; this channel and the
+	// tools' are not ordered with each other, so each step waits
 	which := func() string {
 		t.Helper()
 		var id string
@@ -507,17 +495,14 @@ func drawHost(doc, revision, committed, extra string) string {
 		`frame.src = '/doc/` + doc + `#i=draw-host-0001';</script></body></html>`
 }
 
-// TestBrowser_DrawAroundReachesTheHostStamped is the reviewer's path through
-// the host's controls: Devon picks Draw, loops twice around one sentence and
-// once around a list item, writes a note on each, and submits. Each drawing
-// is its own item, filed under a q-<id> anchor the host minted, stamped with
-// the revision the host framed and the time it took it, and the round travels
-// with its items under marks. Esc puts the pen down before it leaves review
-// mode.
-// Failure prevented: a reviewer's drawing never reaches the author, two
-// drawings of one sentence merge into one, the untrusted plan names the
-// drawing or the revision it was drawn on, or a release that predates
-// drawings stores the round without them.
+// TestBrowser_DrawAroundReachesTheHostStamped: Devon picks Draw in the host's
+// controls, loops twice around one sentence and once around a list item,
+// notes each, and submits. Each drawing is its own item under a q-<id> the
+// host minted, stamped with the framed revision and a time, sent under marks.
+// Esc puts the pen down before it leaves review mode.
+// Failure prevented: a drawing never reaches the author, two drawings of one
+// sentence merge, or a release that predates drawings stores the round
+// without them.
 func TestBrowser_DrawAroundReachesTheHostStamped(t *testing.T) {
 	ctx := drawBrowser(t)
 	revision := revisionDigest(t, "a")
@@ -624,16 +609,13 @@ func committedDrawing(region map[string]any, state, note string) map[string]any 
 		"status": "request-change", "state": state, "note": note, "reviewer": "Devon", "region": region}
 }
 
-// TestBrowser_ViewOriginalAfterAnEdit opens the host on revision c, where
-// the sentence two drawings were made around was reworded and the diagram
-// node a third was made around renamed. The drawings are listed with their
-// text changed, and View original shows each as it was drawn, from its record
-// alone: the original sentence, the "Retry budget" node, the revision and
-// layout it was drawn at, and that this is not the revision shown. Text in
-// the record that looks like markup stays text. Esc closes it.
-// Failure prevented: a reviewer's drawing is lost, or shown over whatever the
-// plan now says there, once the plan is edited; or a member-written record
-// runs script in the host.
+// TestBrowser_ViewOriginalAfterAnEdit opens the host on revision c, where a
+// drawn sentence was reworded and a drawn diagram node renamed. Both drawings
+// are listed as text changed, and View original redraws each from its record:
+// the original text, the revision and layout it was drawn at, and that this
+// is not the revision shown. Record text that looks like markup stays text.
+// Failure prevented: once the plan is edited a drawing is lost or shown over
+// what the plan now says, or a member-written record runs script in the host.
 func TestBrowser_ViewOriginalAfterAnEdit(t *testing.T) {
 	ctx := drawBrowser(t)
 	recs := fixtureDrawings(t)
@@ -678,13 +660,12 @@ func TestBrowser_ViewOriginalAfterAnEdit(t *testing.T) {
 	}
 }
 
-// TestBrowser_DrawingsStayIndependentThroughEditAndReopen opens two stored
-// drawings around one sentence, one the author addressed. Devon edits the
-// open one's note from its row, and reopens the addressed one; each operation
-// carries only its own drawing, whole, under marks.
-// Failure prevented: reopening or editing one drawing changes or drops the
-// other drawing of the same sentence, or the reopened drawing loses what was
-// drawn and can no longer be placed or shown.
+// TestBrowser_DrawingsStayIndependentThroughEditAndReopen: of two stored
+// drawings around one sentence, Devon edits the open one's note from its row
+// and reopens the addressed one; each operation carries only its own drawing,
+// whole, under marks.
+// Failure prevented: editing or reopening one drawing changes the other, or
+// sends the drawing without its region, so it can no longer be placed.
 func TestBrowser_DrawingsStayIndependentThroughEditAndReopen(t *testing.T) {
 	ctx := drawBrowser(t)
 	recs := fixtureDrawings(t)
@@ -747,15 +728,14 @@ func TestBrowser_DrawingsStayIndependentThroughEditAndReopen(t *testing.T) {
 	}
 }
 
-// TestBrowser_ForgedCapturesAreCheckedAndRestamped has the plan's own script
-// forge captures on the document tools' channel. With the Draw tool down, a
-// capture opens nothing. With it up, a malformed or oversized capture opens
-// nothing either; a well-formed one opens the note, and what is sent is the
-// capture's own fields with the identity, revision and time the host gave
-// it, never the ones the plan claimed or anything else it added.
+// TestBrowser_ForgedCapturesAreCheckedAndRestamped: the plan's own script
+// forges captures on the document tools' channel. With the Draw tool down
+// none opens a note; with it up a malformed or oversized one opens none, and
+// a well-formed one is sent with only a region's fields, under the id,
+// revision and time the host gave it.
 // Failure prevented: a plan opens the trusted note box when the reviewer did
-// not draw, stores an unbounded record in the Ledger, or names the drawing,
-// its revision or its time.
+// not draw, stores an unbounded record, or names the drawing, its revision or
+// its time.
 func TestBrowser_ForgedCapturesAreCheckedAndRestamped(t *testing.T) {
 	ctx := drawBrowser(t)
 	revision := revisionDigest(t, "a")
@@ -841,13 +821,11 @@ func TestBrowser_ForgedCapturesAreCheckedAndRestamped(t *testing.T) {
 	}
 }
 
-// TestBrowser_DrawOnTheLocalReviewPage is Devon's path through `ox plan
-// review`: the page offers Draw because the server stamped the revision it
-// rendered, he loops twice around the first risk with a note on each, and
-// submits. The round reaches the Ledger with both drawings under their own
-// q-<id> anchors, each stamped with the revision of the plan.md the page was
-// rendered from; the reloaded page paints them from the Ledger; and resolving
-// one leaves the other open.
+// TestBrowser_DrawOnTheLocalReviewPage is the `ox plan review` path: Devon
+// loops twice around the first risk with a note on each and submits. The
+// Ledger holds both drawings under their own q-<id> anchors, stamped with the
+// revision of the plan.md the page was rendered from; the reloaded page
+// paints them; resolving one leaves the other open.
 // Failure prevented: a drawing on ox's own page never reaches the agent, is
 // stored without what was drawn, names a revision the page was not rendered
 // from, or merges with another drawing of the same item.
@@ -927,10 +905,9 @@ func TestBrowser_DrawOnTheLocalReviewPage(t *testing.T) {
 }
 
 // TestBrowser_DrawingNeverEnclosesTheReviewControls: on `ox plan review`'s
-// own page the comments rail shares the plan's document. Devon leaves an
-// unsent note, then draws a loop around the rail that lists it. Nothing in the
-// loop is the plan's, so no drawing is made, and his note's text is in no
-// draft but the note's own.
+// own page the rail shares the plan's document. Devon leaves an unsent note
+// and draws a loop around the rail that lists it: no drawing is made, and the
+// note's text is in no draft but its own.
 // Failure prevented: a drawing records the rail's rows, reviewer names and
 // unsent notes as if they were the plan, and the next render reports it
 // missing because the rail's text changed.

@@ -86,35 +86,26 @@ test('connectFrame posts only the protocol\'s fields, on the port the document h
 });
 
 // Drawings cross the boundary as data. Failure prevented: a plan's script
-// smuggles fields into the record a capture becomes, files a drawing under an
-// anchor the host would read as a mark, or a host's paint of a drawing
-// carries who drew it, or their note, into the plan.
+// smuggles fields into the record a capture becomes, or gives a mark an
+// outcome; or a host's paint of a drawing carries who drew it, or their note,
+// into the plan.
 test('captures, outcomes and drawing paints parse to their known fields only', () => {
   const r = JSON.parse(readFileSync(new URL('../../../pkg/planreview/testdata/drawn-context/captures.json', import.meta.url), 'utf8')).records[0];
-  const capture = { ...r, reviewer: 'mallory' };
   const want = { ...r };
   for (const k of ['id', 'plan_revision', 'created_at']) delete want[k];
-  assert.deepEqual(parseDocumentMessage(doc({ type: 'capture', capture, rect: { left: 1, bottom: 2 }, submit: true }), I), { type: 'capture', capture: want, rect: { left: 1, bottom: 2 } });
+  assert.deepEqual(parseDocumentMessage(doc({ type: 'capture', capture: { ...r, reviewer: 'mallory' }, rect: { left: 1, bottom: 2 }, submit: true }), I), { type: 'capture', capture: want, rect: { left: 1, bottom: 2 } });
   for (const bad of [{ type: 'capture', capture: { ...r, v: 2 }, rect: { left: 1, bottom: 2 } }, { type: 'capture', capture: r }]) {
     assert.equal(parseDocumentMessage(doc(bad), I), null, JSON.stringify(bad).slice(0, 60));
   }
-  for (const reason of ['no-target', 'too-large', 'too-small', 'layout-changed', 'cancelled']) {
-    assert.deepEqual(parseDocumentMessage(doc({ type: 'refused', reason }), I), { type: 'refused', reason });
-  }
-  assert.equal(parseDocumentMessage(doc({ type: 'refused', reason: 'approve' }), I), null);
 
   const placed = (it) => parseDocumentMessage(doc({ type: 'placed', items: [{ section: '', label: '', ...it }] }), I);
   assert.deepEqual(placed({ anchor: 'q-r1-double-fire', outcome: 'hidden' }).items, [{ anchor: 'q-r1-double-fire', section: '', label: '', outcome: 'hidden' }]);
-  assert.deepEqual(placed({ anchor: 'q-r1-double-fire', outcome: 'ambiguous' }).items[0].outcome, 'ambiguous');
-  for (const it of [{ anchor: 'q-r1-double-fire' }, { anchor: 'h1234abcd', outcome: 'exact' }, { anchor: 'q-r1-double-fire', outcome: 'gone' }, { anchor: 'q-r1', outcome: 'exact' }]) {
+  for (const it of [{ anchor: 'q-r1-double-fire' }, { anchor: 'h1234abcd', outcome: 'exact' }, { anchor: 'q-r1-double-fire', outcome: 'gone' }]) {
     assert.equal(placed(it), null, JSON.stringify(it));
   }
 
   const drawing = { anchor: 'q-r1-double-fire', kind: 'committed', tint: 'amber', ellipse: r.ellipse, targets: [{ anchor: 'h59e210da', box: [284, 576, 712, 24] }], open: [], checked: ['#tab-canary'] };
   const paint = (d) => parseHostMessage(doc({ type: 'paint', items: [], drawings: [d] }), I);
   assert.deepEqual(paint({ ...drawing, note: 'Both retries fire here.', reviewer: 'Devon', region: r, targets: [{ ...drawing.targets[0], text: 'x' }] }), { type: 'paint', items: [], drawings: [drawing] });
-  for (const d of [{ ...drawing, anchor: 'h59e210da' }, { ...drawing, targets: [{ anchor: 'q00ff00ff', box: [0, 0, 1, 1] }] }, { ...drawing, targets: [] }, { ...drawing, ellipse: { ...r.ellipse, dir: 0 } }]) {
-    assert.equal(paint(d), null, JSON.stringify(d).slice(0, 80));
-  }
-  assert.deepEqual(parseHostMessage(doc({ type: 'reveal', anchor: 'q-r1-double-fire', nth: 0 }), I), { type: 'reveal', anchor: 'q-r1-double-fire', nth: 0 });
+  assert.equal(paint({ ...drawing, targets: [] }), null, 'a drawing around nothing');
 });

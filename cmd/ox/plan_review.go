@@ -577,11 +577,9 @@ func renderSavedReviewPage(gitRoot, slug, planDir string, in plan.Input, res pla
 	return plan.RenderHTMLOpts(in, res, opts)
 }
 
-// planRevision is a plan's revision as a drawing names it: "sha256:" and the
-// hex SHA-256 of the stored bytes a page was rendered from, read with LF line
-// endings. Git for Windows' core.autocrlf checks ox's LF files out with CRLF,
-// which would give one commit two revisions. For a plan.html over the LFS
-// threshold with LF line endings, as ox writes it, it is the pointer's oid.
+// planRevision is the revision a drawing names: "sha256:" and the hex SHA-256
+// of the stored bytes a page was rendered from, with CRLF read as LF so that a
+// Windows checkout (core.autocrlf) of the same commit names the same revision.
 func planRevision(stored []byte) string {
 	sum := sha256.Sum256(bytes.ReplaceAll(stored, []byte("\r\n"), []byte("\n")))
 	return "sha256:" + hex.EncodeToString(sum[:])

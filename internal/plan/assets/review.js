@@ -85,8 +85,7 @@
   var box = (v) => nums(v, 4) && v[2] >= 0 && v[3] >= 0;
   var strs = (v, n) => Array.isArray(v) && v.length <= n && all(v, str);
   var count = (v) => num(v) && v >= 0 && Math.floor(v) === v;
-  var bytes = (v) => new TextEncoder().encode(JSON.stringify(v)).length;
-  var utf8Bytes = bytes;
+  var utf8Bytes = (v) => new TextEncoder().encode(JSON.stringify(v)).length;
   function problem(v, stamped) {
     if (!obj(v)) return "not an object";
     if (stamped) {
@@ -120,8 +119,8 @@
       if (!Array.isArray(ls) || !ls.length || ls.length > LIMITS.itemLabels) return "context";
       if (!all(ls, (x) => obj(x) && box(x.box) && str(x.text) && x.text.length <= LIMITS.labelText)) return "context";
     }
-    if (bytes(c) > LIMITS.contextBytes) return "context size";
-    if (bytes(v) > LIMITS.regionBytes) return "size";
+    if (utf8Bytes(c) > LIMITS.contextBytes) return "context size";
+    if (utf8Bytes(v) > LIMITS.regionBytes) return "size";
     return "";
   }
   function checkRegion(v) {
@@ -1111,12 +1110,11 @@
   }
   function asMark(v) {
     if (!obj3(v) || typeof v.anchor !== "string" || STATUSES.indexOf(v.status) < 0 || typeof v.at !== "number") return null;
-    if (v.region !== void 0 && (checkRegion(v.region) || v.anchor !== "q-" + v.region.id)) return null;
     const m = { anchor: v.anchor, status: v.status, at: v.at };
     ["section", "label", "note", "quote"].forEach((k) => {
       if (typeof v[k] === "string") m[k] = v[k];
     });
-    if (v.region !== void 0) m.region = v.region;
+    if (v.region !== void 0 && !checkRegion(v.region) && v.anchor === "q-" + v.region.id) m.region = v.region;
     return m;
   }
   function asEntry(v) {

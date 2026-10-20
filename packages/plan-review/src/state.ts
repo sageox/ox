@@ -150,11 +150,11 @@ function keysUnder(storage: Storage, prefix: string): string[] {
 }
 function asMark(v: unknown): Mark | null {
   if (!obj(v) || typeof v.anchor !== 'string' || STATUSES.indexOf(v.status as Status) < 0 || typeof v.at !== 'number') return null;
-  // a drawing that no longer reads as one could never be sent as one
-  if (v.region !== undefined && (checkRegion(v.region) || v.anchor !== 'q-' + (v.region as Region).id)) return null;
   const m: Mark = { anchor: v.anchor, status: v.status as Status, at: v.at };
   (['section', 'label', 'note', 'quote'] as const).forEach((k) => { if (typeof v[k] === 'string') m[k] = v[k] as string; });
-  if (v.region !== undefined) m.region = v.region as Region;
+  // a drawing that no longer reads as one (another version wrote it, say)
+  // would be refused on every send: the note is kept, by its label
+  if (v.region !== undefined && !checkRegion(v.region) && v.anchor === 'q-' + (v.region as Region).id) m.region = v.region as Region;
   return m;
 }
 function asEntry(v: unknown): Entry | null {

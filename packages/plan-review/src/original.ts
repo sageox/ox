@@ -1,9 +1,7 @@
 // View original: a drawing redrawn in the host from its record alone (spec
-// section 4). Each context item is a box with its text, diagram labels sit
-// at their own boxes with any text they do not account for along the bottom,
-// then the inked ellipse, and a note when the context was cut. It needs
-// neither the plan's frame nor the revision's bytes, and puts every text in
-// as a text node, never markup.
+// section 4): each context item as a box with its text or diagram labels, the
+// inked ellipse, and a note when the context was cut. Text goes in as text
+// nodes, never markup.
 
 import { inkLine, inkPaths, type Region } from './region.js';
 

@@ -69,8 +69,8 @@ type RenderOptions struct {
 	// server's port. Empty: the page keys them by Slug.
 	ReviewPlan string
 	// ReviewRevision is "sha256:" and the hex SHA-256 of the plan bytes the
-	// page was rendered from, which every drawing made on it is stamped with
-	// (ReviewRevision). Empty: the page offers no Draw.
+	// page was rendered from; every drawing made on the page is stamped with
+	// it. Empty: the page offers no Draw.
 	ReviewRevision string
 	// PriorArtURL resolves a prior-art source (its kind + ref/slug) to a SageOx
 	// web URL, opened in a new tab from the enrichment panel. Nil-safe: when nil

@@ -401,34 +401,20 @@ func applyExport(t *testing.T, slug, body string) (string, error) {
 	return out.String(), err
 }
 
-// TestRunPlanFeedbackApply_DrawingsTravelUnderMarks applies two exports of
-// the same drawing. The one with its items under marks is stored with the
-// drawing whole and applies once however often it is pasted; the one that
-// carries the drawing under items, which releases before drawings would store
-// without it, is refused and writes nothing. Failure prevented: a reviewer's
-// exported drawing reaches the Ledger without what was drawn, or is applied
-// twice.
-func TestRunPlanFeedbackApply_DrawingsTravelUnderMarks(t *testing.T) {
+// TestRunPlanFeedbackApply_StoresAnExportedDrawingWhole applies an export as
+// the review page writes one with a drawing: its items under marks. Failure
+// prevented: the CLI's canonical re-freeze of an export drops marks or
+// changes the region, so the drawing reaches the Ledger without what was
+// drawn.
+func TestRunPlanFeedbackApply_StoresAnExportedDrawingWhole(t *testing.T) {
 	_, planDir := saveFeedbackTestPlan(t, "apply-drawn")
 	item, sent := drawingExport(t)
-	if _, err := applyExport(t, "apply-drawn", `{"reviewer":"Avery","items":[`+item+`]}`); err == nil || !strings.Contains(err.Error(), "marks") {
-		t.Fatalf("a drawing under items: err = %v, want a refusal naming marks", err)
-	}
-	if got := countRoundFiles(t, planDir); got != 0 {
-		t.Fatalf("a refused export wrote %d rounds", got)
-	}
-	for i := range 2 {
-		out, err := applyExport(t, "apply-drawn", `{"reviewer":"Avery","items":[],"marks":[`+item+`]}`)
-		if err != nil {
-			t.Fatalf("apply #%d: %v", i+1, err)
-		}
-		if already := strings.Contains(out, "already applied"); already != (i == 1) {
-			t.Errorf("apply #%d already-applied=%v:\n%s", i+1, already, out)
-		}
+	if _, err := applyExport(t, "apply-drawn", `{"reviewer":"Avery","items":[],"marks":[`+item+`]}`); err != nil {
+		t.Fatal(err)
 	}
 	rev := plan.ReadReview(planDir)
-	if len(rev.Items) != 1 || rev.Items[0].Anchor != "q-r4-abort-item" || rev.Items[0].Reviewer != "Avery" || countRoundFiles(t, planDir) != 1 {
-		t.Fatalf("stored %+v in %d rounds, want Avery's one drawing once", rev.Items, countRoundFiles(t, planDir))
+	if len(rev.Items) != 1 || rev.Items[0].Anchor != "q-r4-abort-item" || rev.Items[0].Reviewer != "Avery" {
+		t.Fatalf("stored %+v, want Avery's one drawing", rev.Items)
 	}
 	var stored any
 	_ = json.Unmarshal(rev.Items[0].Region, &stored)

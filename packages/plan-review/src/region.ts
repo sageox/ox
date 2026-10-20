@@ -120,10 +120,9 @@ const nums = (v: unknown, n: number): v is number[] => Array.isArray(v) && v.len
 const box = (v: unknown): v is Box => nums(v, 4) && v[2] >= 0 && v[3] >= 0;
 const strs = (v: unknown, n: number): v is string[] => Array.isArray(v) && v.length <= n && all(v, str);
 const count = (v: unknown): v is number => num(v) && v >= 0 && Math.floor(v) === v;
-const bytes = (v: unknown) => new TextEncoder().encode(JSON.stringify(v)).length;
 
 /** utf8Bytes is the size of v as stored: compact UTF-8 JSON. */
-export const utf8Bytes = bytes;
+export const utf8Bytes = (v: unknown) => new TextEncoder().encode(JSON.stringify(v)).length;
 
 // problem returns why v is not a capture (a region, when stamped), or ''.
 function problem(v: unknown, stamped: boolean): string {
@@ -160,8 +159,8 @@ function problem(v: unknown, stamped: boolean): string {
     if (!Array.isArray(ls) || !ls.length || ls.length > LIMITS.itemLabels) return 'context';
     if (!all(ls, (x) => obj(x) && box(x.box) && str(x.text) && x.text.length <= LIMITS.labelText)) return 'context';
   }
-  if (bytes(c) > LIMITS.contextBytes) return 'context size';
-  if (bytes(v) > LIMITS.regionBytes) return 'size';
+  if (utf8Bytes(c) > LIMITS.contextBytes) return 'context size';
+  if (utf8Bytes(v) > LIMITS.regionBytes) return 'size';
   return '';
 }
 
@@ -275,10 +274,9 @@ export function thin(pts: Point[]): Point[] {
 
 // --- ink: how a drawing is painted, from the record alone, so every host
 // paints it the same way (spec section 1). A broad nib held almost flat: the
-// line swells where it turns through the vertical and thins to a hairline
-// along the horizontal runs, so an ellipse around a line of text stays clear
-// of the words above and below it. It lands and lifts with tapered ends, and
-// runs past its start like a pen closing an O.
+// line is widest on the vertical turns and a hairline along the horizontal
+// runs, so an ellipse around a line of text stays clear of the lines above
+// and below it.
 
 const NIB = { width: 12, angle: (-12 * Math.PI) / 180 };
 

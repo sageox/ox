@@ -177,12 +177,9 @@ an orphaned mark on a list item, row or section by token similarity (Dice ≥
 0.72); this sentence and its rewording score 0.96. Placement reports `missing`
 and leaves the drawing off the page.
 
-Offsets depend on fonts; outcome classes do not, when a drawing is placed in
-the browser it was drawn in. `TestBrowser_DrawingsLandByTheirTargets`
-(`cmd/ox`, real Chrome) runs the shipped document tools that way on every run:
-it draws around nine parts of a and places each drawing on a, b and c, at 600
-and 1024 px, at 2× device pixels, hidden and then shown, and after a live
-resize.
+Offsets depend on fonts; outcomes do not, when a drawing is placed in the
+browser it was drawn in. `TestBrowser_DrawingsLandByTheirTargets` (`cmd/ox`,
+real Chrome) checks all six with the shipped document tools.
 
 ## 4. View original
 
@@ -362,8 +359,7 @@ readers that predate regions, and the record rides in `region`:
   70-unit label length (`drawingLabel`).
 - **One drawing, one record:** a mark on a drawing carries its region, so a
   second reviewer's mark, an edit of the note and a reopen all keep what was
-  drawn. Two drawings around one paragraph stay two items through edit,
-  resolve and reopen (`TestAssemble_DrawingsStayIndependent`,
+  drawn, and two drawings around one paragraph stay two items (`region-items`,
   `TestBrowser_DrawingsStayIndependentThroughEditAndReopen`).
 - **What an AI coworker gets:** a drawing's anchor, section, label, status
   and note, like any comment. `ox plan feedback show --json` also carries the
@@ -388,10 +384,9 @@ a drawing under `items`, a drawing whose anchor is not `q-<its id>`, and items
 under both keys. `Record` stores the items under `items`.
 
 A stored region is the same JSON value the request carried, not the same
-bytes: the record is indented, and `<`, `>` and `&` in strings are written as
-`<`, `>` and `&` (`TestRoundRequest_DrawingsTravelUnderMarks`).
-Once a record is written, its exact bytes and their digest are what a retry is
-matched on (Ledger contract §3.4).
+bytes: the record is indented, and Go's encoder escapes `<`, `>` and `&` in
+strings. Once a record is written, its exact bytes and their digest are what a
+retry is matched on (Ledger contract §3.4).
 
 **Measured** 2026-10-19 with the official `ox_0.20.0_darwin_arm64` and
 `ox_0.23.0_darwin_arm64` assets (checksums verified), a build of main at

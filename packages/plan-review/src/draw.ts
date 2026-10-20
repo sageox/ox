@@ -1,9 +1,8 @@
-// Draw around, in the plan document: the gesture, the capture a stroke makes,
-// and the placement and ink of the drawings the host paints. The capture is a
-// proposal: the host checks it, mints its id and stamps the revision, and
-// keeps it. docs/specs/plan-review-drawn-context.md is the format, and
-// pkg/planreview/testdata/drawn-context/proto/draw.js the prototype this
-// follows.
+// Draw around, in the plan document: a stroke becomes a capture, and the
+// drawings the host paints are placed and inked. A capture is a proposal: the
+// host checks it, mints its id and stamps its revision. The format is
+// docs/specs/plan-review-drawn-context.md; this follows the prototype in
+// pkg/planreview/testdata/drawn-context/proto/draw.js.
 
 import { anchorFor, fnv1a, headingOf, norm } from './anchor.js';
 import type { DrawRefusal, DrawingPaint, Outcome } from './protocol.js';
