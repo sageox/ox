@@ -70,13 +70,11 @@ func checkRegion(raw json.RawMessage) (string, error) {
 	case !matches(isoTime, r["created_at"]):
 		return "", errors.New("region: created_at must be a UTC time like 2026-10-10T20:00:00Z")
 	}
-	for _, check := range []func(map[string]any) error{checkStroke, checkLayout, checkTargets} {
+	// checkContext reads the targets checkTargets has checked
+	for _, check := range []func(map[string]any) error{checkStroke, checkLayout, checkTargets, checkContext} {
 		if err := check(r); err != nil {
 			return "", fmt.Errorf("region: %w", err)
 		}
-	}
-	if err := checkContext(r); err != nil {
-		return "", fmt.Errorf("region: %w", err)
 	}
 	if n := jsonLen(r["context"]); n > maxContextBytes {
 		return "", fmt.Errorf("region: context is %d bytes, over the %d-byte limit", n, maxContextBytes)
@@ -202,7 +200,7 @@ func checkContext(r map[string]any) error {
 		return fmt.Errorf("context must have at most %d items and truncated", maxContextItems)
 	}
 	var targets []any
-	for _, t := range r["targets"].([]any) { // checked: objects with anchors
+	for _, t := range r["targets"].([]any) {
 		targets = append(targets, t.(map[string]any)["anchor"])
 	}
 	for i, x := range items {

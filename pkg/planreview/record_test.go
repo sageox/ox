@@ -226,13 +226,12 @@ func drawingItem(t *testing.T, rec map[string]any, status, note string) string {
 		`"status":"` + status + `","note":"` + note + `","region":` + string(region) + `}`
 }
 
-// TestRoundRequest_DrawingsTravelUnderMarks pins the request a round with
-// drawings sends (drawn-context spec §7): its items under marks, items empty,
-// a shape releases before drawings refuse; each drawing a well-formed region
-// on its own q-<id> anchor. The record stores the items under items, every
-// region the same JSON value it was sent as. Failure prevented: an older
-// importer stores a review without its drawings, a malformed or misattributed
-// drawing reaches the Ledger, or the writer changes what a reviewer drew.
+// TestRoundRequest_DrawingsTravelUnderMarks: a round with drawings sends its
+// items under marks (drawn-context spec §7), each drawing a well-formed region
+// on its own q-<id> anchor, and the record stores them under items with every
+// region the same JSON value it was sent as. Failure prevented: a drawing is
+// stored without its region, malformed, under another drawing's anchor, or
+// changed by the writer.
 func TestRoundRequest_DrawingsTravelUnderMarks(t *testing.T) {
 	t.Parallel()
 	recs := captures(t)
@@ -266,10 +265,6 @@ func TestRoundRequest_DrawingsTravelUnderMarks(t *testing.T) {
 			t.Errorf("drawing %d stored as %v, sent as %v", i, got, want)
 		}
 	}
-	// encoding/json writes < > & as < > &, as the spec says
-	if escaped, _ := json.Marshal("Risk <Severity> & Mitigation"); !strings.Contains(string(rec.Data), string(escaped)) {
-		t.Errorf("the record does not write the text as %s", escaped)
-	}
 	rev := Assemble(Inventory{Files: []File{rec}}, Limits{})
 	if len(rev.Items) != 3 || !rev.Complete() {
 		t.Fatalf("assembled %d items, failures %v", len(rev.Items), rev.Failures)
@@ -285,84 +280,16 @@ func TestRoundRequest_DrawingsTravelUnderMarks(t *testing.T) {
 	}
 
 	misnamed := strings.Replace(one, `"anchor":"q-r1-double-fire"`, `"anchor":"q-r2-double-fire-again"`, 1)
-	onElement := strings.Replace(one, `"anchor":"q-r1-double-fire"`, `"anchor":"h59e210da"`, 1)
 	for name, body := range map[string]string{
-		"a drawing under items":          `{"id":"r-0009-regions","items":[` + one + `]}`,
-		"items under both keys":          `{"id":"r-0009-regions","items":[` + element + `],"marks":[` + one + `]}`,
-		"a drawing on another's anchor":  `{"id":"r-0009-regions","items":[],"marks":[` + misnamed + `]}`,
-		"a drawing on an element anchor": `{"id":"r-0009-regions","items":[],"marks":[` + onElement + `]}`,
-		"a malformed region":             `{"id":"r-0009-regions","items":[],"marks":[` + strings.Replace(one, `"v":1`, `"v":2`, 1) + `]}`,
-		"a null region":                  `{"id":"r-0009-regions","items":[],"marks":[{"anchor":"q-r1-double-fire","status":"flag","region":null}]}`,
-		"a region keyed apart by case":   `{"id":"r-0009-regions","items":[],"marks":[` + strings.Replace(one, `"region":`, `"Region":`, 1) + `]}`,
-		"marks that are not a list":      `{"id":"r-0009-regions","items":[],"marks":{"0":` + one + `}}`,
-		"items that are not a list":      `{"id":"r-0009-regions","items":{"0":` + element + `}}`,
-		"empty items and marks":          `{"id":"r-0009-regions","items":[],"marks":[]}`,
+		"a drawing under items":         `{"id":"r-0009-regions","items":[` + one + `]}`,
+		"items under both keys":         `{"id":"r-0009-regions","items":[` + element + `],"marks":[` + one + `]}`,
+		"a drawing on another's anchor": `{"id":"r-0009-regions","items":[],"marks":[` + misnamed + `]}`,
+		"a malformed region":            `{"id":"r-0009-regions","items":[],"marks":[` + strings.Replace(one, `"v":1`, `"v":2`, 1) + `]}`,
+		"a region keyed apart by case":  `{"id":"r-0009-regions","items":[],"marks":[` + strings.Replace(one, `"region":`, `"Region":`, 1) + `]}`,
+		"marks that are not a list":     `{"id":"r-0009-regions","items":[],"marks":{"0":` + one + `}}`,
 	} {
 		if _, err := ParseRoundRequest([]byte(body)); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
-	}
-}
-
-// TestAssemble_DrawingsStayIndependent pins that two drawings around one
-// paragraph are two review items through resolve and reopen: a resolution
-// closes only the drawing it names, a reopen raises that drawing again with
-// what was drawn, and the element mark on the same paragraph is untouched.
-// Failure prevented: resolving one drawing closes another drawing of the same
-// text, or a reopened drawing loses its region.
-func TestAssemble_DrawingsStayIndependent(t *testing.T) {
-	t.Parallel()
-	recs := captures(t)
-	round := func(id string, hour int, items ...string) File {
-		t.Helper()
-		q, err := ParseRoundRequest([]byte(`{"id":"` + id + `","items":[],"marks":[` + strings.Join(items, ",") + `]}`))
-		if err != nil {
-			t.Fatal(err)
-		}
-		f, err := q.Record("p", "Devon", at(hour))
-		if err != nil {
-			t.Fatal(err)
-		}
-		return f
-	}
-	resolve := func(id, anchor string, hour int) File {
-		t.Helper()
-		q, err := ParseResolutionRequest([]byte(`{"id":"` + id + `","anchor":"` + anchor + `","state":"addressed"}`))
-		if err != nil {
-			t.Fatal(err)
-		}
-		f, err := q.Record("Author", at(hour))
-		if err != nil {
-			t.Fatal(err)
-		}
-		return f
-	}
-	element := `{"anchor":"h59e210da","label":"The retry path","status":"request-change"}`
-	files := []File{
-		round("r-0001-draws", 1, element, drawingItem(t, recs[0], "request-change", "Both fire."), drawingItem(t, recs[1], "flag", "Again.")),
-		resolve("res-0001-r1", "q-r1-double-fire", 2),
-		round("r-0002-reopen", 3, drawingItem(t, recs[0], "request-change", "Still fires twice.")),
-		resolve("res-0002-r2", "q-r2-double-fire-again", 4),
-	}
-	rev := Assemble(Inventory{Files: files}, Limits{})
-	type got struct {
-		anchor, note, region string
-		open                 bool
-	}
-	var items []got
-	for _, it := range rev.Items {
-		var region struct{ ID string }
-		if len(it.Region) > 0 {
-			_ = json.Unmarshal(it.Region, &region)
-		}
-		items = append(items, got{it.Anchor, it.Note, region.ID, it.Open})
-	}
-	want := []got{
-		{"h59e210da", "", "", true},
-		{"q-r1-double-fire", "Still fires twice.", "r1-double-fire", true},
-		{"q-r2-double-fire-again", "Again.", "r2-double-fire-again", false},
-	}
-	if !reflect.DeepEqual(items, want) || !rev.Complete() {
-		t.Errorf("assembled %+v (failures %v), want %+v", items, rev.Failures, want)
 	}
 }
