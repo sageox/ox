@@ -346,3 +346,34 @@ func TestFetchTokenMetaCached_KeepsTheTokenOwner(t *testing.T) {
 	require.NotNil(t, cached.User, "the owner must survive the on-disk cache")
 	assert.Equal(t, "avery@test.sageox.ai", cached.User.Email)
 }
+
+// TestPersonalTokenUser — Failure prevented: an Amp project orb credits a
+// person's sessions to its git identity ("Amp") because the owner of their
+// SAGEOX_TOKEN is never looked up, or a team token's coworker is mistaken for
+// a person.
+func TestPersonalTokenUser(t *testing.T) {
+	withUser := `{"user":{"id":"usr_avery","email":"avery@test.sageox.ai","name":"Avery Quinn"}}`
+	for _, tc := range []struct {
+		name  string
+		token string
+		body  string
+		want  *TokenUser
+	}{
+		{"personal token names its owner", "oxp_test_4bDZfN", withUser, &TokenUser{ID: "usr_avery", Email: "avery@test.sageox.ai", Name: "Avery Quinn"}},
+		{"server without a user field", "oxp_test_4bDZfN", `{"token_prefix":"oxp_AAAA"}`, nil},
+		{"team token is not a person", "oxt_test_1ljPfr", withUser, nil},
+		{"no SAGEOX_TOKEN", "", withUser, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withTempCacheDir(t)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer srv.Close()
+			t.Setenv("SAGEOX_ENDPOINT", srv.URL)
+			t.Setenv("SAGEOX_TOKEN", tc.token)
+
+			assert.Equal(t, tc.want, PersonalTokenUser(srv.URL))
+		})
+	}
+}
