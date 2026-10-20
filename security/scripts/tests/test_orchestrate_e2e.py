@@ -218,6 +218,31 @@ class OrchestrateE2ETest(unittest.TestCase):
                 self.assertEqual(call["env"]["CLAUDE_CODE_DISABLE_CLAUDE_MDS"], "1",
                                  "CLAUDE.md and .claude/rules files come from the branch")
 
+    def test_reviewers_own_mcp_servers_never_reach_a_subagent(self):
+        """Riley's user config carries MCP servers (mail, chat). Loaded into a subagent they add tools
+        beyond Read/Grep/Glob, and their schemas fill the Haiku cartographer's window, so the map
+        fails "Prompt is too long" on every chunk and the run reports NO COVERAGE."""
+        (self.repo.home / ".claude.json").write_text(json.dumps({"mcpServers": {
+            "gmail": {"type": "http", "url": "https://mail.example.invalid/mcp"},
+            "slack": {"type": "stdio", "command": "slack-mcp"},
+        }}))
+        self.repo.plant_feature()
+        self.repo.install("claude", "golangci-lint")
+        result = self.repo.run("orchestrate.sh")
+
+        calls = self.repo.calls()
+        self.assertTrue(calls, self.explain(result))
+        for call in calls:
+            with self.subTest(role=call["role"]):
+                self.assertEqual(call["mcp_servers"], [], "a user MCP server reached the subagent")
+        surface = json.loads(self.repo.output("surface.json"))
+        self.assertEqual(surface["chunks"]["statuses"], {"1": "ok"}, self.explain(result))
+        report = self.repo.output("FINDINGS.md")
+        self.assertNotIn("NO COVERAGE", report, self.explain(result))
+        self.assertNotIn("cartographer did not map", report)
+        self.assertIn(FINDING_TITLE, report)
+        self.assertEqual(result.returncode, 0, self.explain(result))
+
     def test_sensitive_change_without_entry_points_reports_no_coverage(self):
         """Avery's run maps no entry points for a cmd/ox + daemon change."""
         self.repo.plant_feature()

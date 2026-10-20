@@ -102,7 +102,7 @@ class EnvelopeTest(unittest.TestCase):
             {"type": "result", "subtype": "success", "is_error": False, "total_cost_usd": 0.132036,
              "usage": {"input_tokens": 18}, "structured_output": {"findings": []}}
         )
-        self.assertEqual(fields, ["0.132036", "success", "false", "0", "false"])
+        self.assertEqual(fields, ["0.132036", "success", "false", "0", "false", "-"])
         self.assertEqual(json.loads(payload), {"findings": []})
 
     def test_budget_stop_reports_what_it_spent_and_writes_an_error_stub(self):
@@ -110,12 +110,12 @@ class EnvelopeTest(unittest.TestCase):
             {"type": "result", "subtype": "error_max_budget_usd", "is_error": True, "result": None,
              "total_cost_usd": 0.0191667}
         )
-        self.assertEqual(fields, ["0.019167", "error_max_budget_usd", "true", "0", "false"])
+        self.assertEqual(fields, ["0.019167", "error_max_budget_usd", "true", "0", "false", "-"])
         self.assertEqual(json.loads(payload)["verdict"], "error")
 
     def test_no_envelope_is_an_error_with_no_spend(self):
         fields, payload = self.run_envelope("claude: command crashed\n")
-        self.assertEqual(fields, ["0.000000", "no-envelope", "true", "0", "false"])
+        self.assertEqual(fields, ["0.000000", "no-envelope", "true", "0", "false", "-"])
         self.assertEqual(json.loads(payload)["verdict"], "error")
 
     def test_rate_or_usage_limit_is_reported_apart_from_other_errors(self):
@@ -142,7 +142,7 @@ class EnvelopeTest(unittest.TestCase):
         fields, _ = self.run_envelope(
             {"type": "result", "is_error": True, "result": "API Error: Request rejected (429)", "total_cost_usd": 0}
         )
-        self.assertEqual(fields, ["0.000000", "-", "true", "0", "true"])
+        self.assertEqual(fields, ["0.000000", "-", "true", "0", "true", "API Error: Request rejected (429)"])
 
     def test_text_that_only_resembles_a_limit_is_not_one(self):
         cases = [
@@ -164,6 +164,22 @@ class EnvelopeTest(unittest.TestCase):
         )
         self.assertEqual(fields[4], "false")
         self.assertEqual(json.loads(payload)["verdict"], "error")
+
+    def test_a_failed_call_says_why(self):
+        """The cartographer failed on every chunk while the run log said only "exit 1, success"."""
+        fields, payload = self.run_envelope(
+            {"type": "result", "subtype": "success", "is_error": True, "num_turns": 4,
+             "result": "Prompt is\ntoo\tlong", "total_cost_usd": 0, "permission_denials": [{"tool_name": "Read"}]}
+        )
+        self.assertEqual(fields, ["0.000000", "success", "true", "1", "false", "Prompt is too long"])
+        self.assertEqual(json.loads(payload), {"verdict": "error", "reason": "claude CLI success: Prompt is too long"})
+
+    def test_a_successful_result_is_no_failure_detail(self):
+        fields, _ = self.run_envelope(
+            {"type": "result", "subtype": "success", "is_error": False, "total_cost_usd": 0.01,
+             "result": "Prompt is too long", "structured_output": {"findings": []}}
+        )
+        self.assertEqual(fields[5], "-")
 
     def test_a_successful_result_mentioning_a_rate_limit_is_not_a_limit(self):
         fields, _ = self.run_envelope(
