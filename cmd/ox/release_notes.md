@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.24.0] - 2026-10-21
+## [0.24.1] - 2026-10-21
 
 Amp orb sessions now reach your team whole and on their own, Oxy can join you in Claude Code, and plan reviews, approvals and saves reliably reach your team.
 
