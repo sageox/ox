@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -607,6 +608,53 @@ func TestPrime_DoesNotAutoRecordAnAbortedConversation(t *testing.T) {
 	repaired := startSessionRecording(f.projectRoot, "OxPrm3", "claude-code", "", "", e2eClaudeC)
 	require.NotNil(t, repaired)
 	assert.True(t, repaired.Recording, "after the repair, an unrelated conversation records again")
+}
+
+// The doctor repair keeps every ID a damaged record holds verbatim, not only
+// UUID-shaped ones: keys of sessions and recordings up to where the JSON
+// breaks, and IDs past that point.
+//
+// Failure prevented: a repair that reports success while dropping an aborted
+// session whose ID is not a UUID, which import or prime then offers again.
+func TestSalvageAbortRecord_KeepsEveryIDVerbatim(t *testing.T) {
+	damaged := `{"sessions": {"opencode-native-01": {"agent": "opencode", "aborted_at": "2026-10-19T09:00:00Z"}, ` +
+		`"` + e2eClaudeA + `": {}}, "recordings": {"ses_legacy-recording": {"recording": "rec"}, "ses_` + e2eCodexA + `": ` +
+		"\x00\x00 garbage after the break " + e2eClaudeB
+	at := time.Date(2026, 10, 19, 9, 0, 0, 0, time.UTC)
+	record := salvageAbortRecord([]byte(damaged), at)
+	assert.ElementsMatch(t, []string{"opencode-native-01", e2eClaudeA, e2eClaudeB}, keysOf(record.Sessions))
+	assert.ElementsMatch(t, []string{"ses_legacy-recording", "ses_" + e2eCodexA}, keysOf(record.Recordings))
+	assert.Equal(t, at, record.Sessions["opencode-native-01"].AbortedAt)
+}
+
+// A repair whose new record cannot be written puts the damaged record back.
+//
+// Failure prevented: the damaged record is moved aside, nothing replaces it,
+// and a missing record reads as "nothing aborted" to import and prime.
+func TestRepairAbortRecord_PutsTheDamagedRecordBackWhenTheWriteFails(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "aborted.json")
+	damaged := []byte(`{"sessions": {"` + e2eClaudeA + `": `)
+	require.NoError(t, os.WriteFile(path, damaged, 0o600))
+	prior := writeRepairedAbortRecord
+	writeRepairedAbortRecord = func(string, *abortedSessions) error { return errors.New("disk full") }
+	t.Cleanup(func() { writeRepairedAbortRecord = prior })
+
+	_, aside, err := repairAbortRecord(path, time.Now())
+	require.ErrorContains(t, err, "disk full")
+	got, readErr := os.ReadFile(path)
+	require.NoError(t, readErr, "the damaged record must be back in place")
+	assert.Equal(t, damaged, got)
+	assert.NoFileExists(t, aside)
+	_, loadErr := loadAbortRecordFile(path)
+	assert.Error(t, loadErr, "the record still reads as damaged, so import and prime stay closed")
+}
+
+func keysOf(m map[string]abortedSession) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
 }
 
 // coveringRecording is the recording the preview says holds a session: named
