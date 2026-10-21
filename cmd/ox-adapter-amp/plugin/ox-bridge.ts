@@ -106,17 +106,26 @@ const realClock: Clock = {
 /**
  * Schedules one session end per thread: a turn ending (re)arms it, and the
  * thread's next prompt cancels it. The first prompt after an end resumes
- * recording, once that end has finished: a prime while the stop still owns
- * the recording would find it live and start nothing.
+ * recording. A thread's ends and resumes run one at a time, in order: a
+ * prime while the stop still owns the recording would find it live and start
+ * nothing, and an end before the resume it follows would end nothing. A
+ * resume that fails leaves the thread ended, so its next prompt tries again.
  */
 export function createSessionEnder(
   clock: Clock,
   end: (threadID: string) => Promise<void>,
-  resume: (threadID: string) => Promise<void>
+  resume: (threadID: string) => Promise<boolean>
 ) {
   const lastPrompt = new Map<string, number>();
   const pending = new Map<string, Timer>();
-  const ended = new Map<string, Promise<void>>();
+  // threads whose session ended and has not been resumed
+  const ended = new Set<string>();
+  const queue = new Map<string, Promise<void>>();
+  const settled = (): void => {};
+  const enqueue = (threadID: string, step: () => Promise<unknown>): void => {
+    const prior = queue.get(threadID) ?? Promise.resolve();
+    queue.set(threadID, prior.then(step).then(settled, settled));
+  };
   const cancel = (threadID: string): void => {
     const timer = pending.get(threadID);
     if (timer === undefined) return;
@@ -127,10 +136,15 @@ export function createSessionEnder(
     promptStarted(threadID: string): void {
       cancel(threadID);
       lastPrompt.set(threadID, clock.now());
-      const ending = ended.get(threadID);
-      if (ending === undefined) return;
-      ended.delete(threadID);
-      void ending.then(() => resume(threadID));
+      if (!ended.delete(threadID)) return;
+      enqueue(threadID, async () => {
+        let resumed = false;
+        try {
+          resumed = await resume(threadID);
+        } finally {
+          if (!resumed) ended.add(threadID);
+        }
+      });
     },
     turnEnded(threadID: string): void {
       cancel(threadID);
@@ -140,7 +154,8 @@ export function createSessionEnder(
         clock.setTimer(() => {
           pending.delete(threadID);
           lastPrompt.delete(threadID);
-          ended.set(threadID, end(threadID).catch(() => {}));
+          ended.add(threadID);
+          enqueue(threadID, () => end(threadID));
         }, delay)
       );
     },
@@ -177,22 +192,25 @@ export async function endSession(amp: PluginAPI, threadID: string): Promise<void
  * model's own prime does: `ox agent prime` with the thread's URL in
  * AMP_THREAD_URL, which keys the AI coworker and the session it continues.
  * The output is team context for the model, which already has it, so it is
- * discarded.
+ * discarded. Resolves false when the prime failed and is worth retrying.
  */
-export async function resumeSession(amp: PluginAPI, threadID: string): Promise<void> {
+export async function resumeSession(amp: PluginAPI, threadID: string): Promise<boolean> {
   try {
     const code = await runOx(['agent', 'prime'], {
       cwd: workspaceDir(amp),
       env: { AMP_THREAD_URL: threadURL(amp, threadID) },
     });
-    if (code !== 0)
-      amp.logger.log(
-        `ox-bridge event=session_resume_exit thread_id=${threadID} exit_code=${code ?? 'still_running'}`
-      );
+    if (code === 0) return true;
+    amp.logger.log(
+      `ox-bridge event=session_resume_exit thread_id=${threadID} exit_code=${code ?? 'still_running'}`
+    );
+    // a prime still running may yet start the recording; priming again would race it
+    return code === null;
   } catch (err) {
     amp.logger.log(
       `ox-bridge event=session_resume_error thread_id=${threadID} error=${JSON.stringify(String(err))}`
     );
+    return false;
   }
 }
 

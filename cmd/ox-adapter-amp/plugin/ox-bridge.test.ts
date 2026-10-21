@@ -21,7 +21,7 @@ const home = realpathSync(homedir());
 if (!home.startsWith(realpathSync(tmpdir()))) {
   throw new Error(`refusing to write Amp sidecars into ${home}: run with HOME=$(mktemp -d) bun test`);
 }
-const { bridge, createSessionEnder, endSession, sessionEndDelay } = await import('./ox-bridge.ts');
+const { bridge, createSessionEnder, endSession, resumeSession, sessionEndDelay } = await import('./ox-bridge.ts');
 type Clock = Parameters<typeof createSessionEnder>[0];
 
 const MIN = 60_000;
@@ -152,9 +152,9 @@ function deferred() {
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
 describe('createSessionEnder', () => {
-  const noResume = async () => {};
+  const noResume = async () => true;
 
-  test('a coworker who keeps prompting keeps one session; idle ends it once', () => {
+  test('a coworker who keeps prompting keeps one session; idle ends it once', async () => {
     const { clock, advanceTo } = fakeClock();
     const ended: string[] = [];
     const ender = createSessionEnder(clock, async (tid) => void ended.push(tid), noResume);
@@ -167,12 +167,14 @@ describe('createSessionEnder', () => {
     advanceTo(11 * MIN);
     ender.turnEnded('T-1'); // now ends at max(13, 24) = 24 min
     advanceTo(23 * MIN);
+    await flush();
     expect(ended).toEqual([]);
     advanceTo(24 * MIN);
+    await flush();
     expect(ended).toEqual(['T-1']);
   });
 
-  test('threads end independently', () => {
+  test('threads end independently', async () => {
     const { clock, advanceTo } = fakeClock();
     const ended: string[] = [];
     const ender = createSessionEnder(clock, async (tid) => void ended.push(tid), noResume);
@@ -181,8 +183,10 @@ describe('createSessionEnder', () => {
     advanceTo(1 * MIN);
     ender.turnEnded('T-b'); // 3 min
     advanceTo(2 * MIN);
+    await flush();
     expect(ended).toEqual(['T-a']);
     advanceTo(3 * MIN);
+    await flush();
     expect(ended).toEqual(['T-a', 'T-b']);
   });
 
@@ -190,7 +194,7 @@ describe('createSessionEnder', () => {
     const { clock, advanceTo } = fakeClock();
     const stop = deferred();
     const resumed: string[] = [];
-    const ender = createSessionEnder(clock, () => stop.promise, async (tid) => void resumed.push(tid));
+    const ender = createSessionEnder(clock, () => stop.promise, async (tid) => (resumed.push(tid), true));
 
     ender.turnEnded('T-1');
     advanceTo(2 * MIN); // idle: the session end starts uploading
@@ -211,7 +215,7 @@ describe('createSessionEnder', () => {
   test('a prompt before any idle end never resumes', async () => {
     const { clock, advanceTo } = fakeClock();
     const resumed: string[] = [];
-    const ender = createSessionEnder(clock, async () => {}, async (tid) => void resumed.push(tid));
+    const ender = createSessionEnder(clock, async () => {}, async (tid) => (resumed.push(tid), true));
 
     ender.promptStarted('T-1');
     advanceTo(1 * MIN);
@@ -228,7 +232,7 @@ describe('createSessionEnder', () => {
     const ender = createSessionEnder(
       clock,
       () => Promise.reject(new Error('ox crashed')),
-      async (tid) => void resumed.push(tid)
+      async (tid) => (resumed.push(tid), true)
     );
 
     ender.turnEnded('T-1');
@@ -236,6 +240,50 @@ describe('createSessionEnder', () => {
     ender.promptStarted('T-1');
     await flush();
     expect(resumed).toEqual(['T-1']);
+  });
+
+  test("an end that fires while the last end still uploads waits for the reply's resume", async () => {
+    const { clock, advanceTo } = fakeClock();
+    const firstStop = deferred();
+    const calls: string[] = [];
+    let ends = 0;
+    const ender = createSessionEnder(
+      clock,
+      (tid) => {
+        calls.push(`end ${tid}`);
+        return ends++ === 0 ? firstStop.promise : Promise.resolve();
+      },
+      async (tid) => (calls.push(`resume ${tid}`), true)
+    );
+
+    ender.turnEnded('T-1');
+    advanceTo(2 * MIN); // end #1 starts uploading
+    ender.promptStarted('T-1'); // Devon replies
+    ender.turnEnded('T-1');
+    advanceTo(16 * MIN); // end #2 is due before end #1 has returned
+    await flush();
+    expect(calls).toEqual(['end T-1']);
+
+    firstStop.resolve();
+    await flush();
+    expect(calls).toEqual(['end T-1', 'resume T-1', 'end T-1']);
+  });
+
+  test('a prime that fails is tried again on the next prompt, and only until it works', async () => {
+    const { clock, advanceTo } = fakeClock();
+    const results = [false, true];
+    const resumed: string[] = [];
+    const ender = createSessionEnder(clock, async () => {}, async (tid) => (resumed.push(tid), results.shift()!));
+
+    ender.turnEnded('T-1');
+    advanceTo(2 * MIN);
+    ender.promptStarted('T-1'); // the prime fails
+    await flush();
+    ender.promptStarted('T-1'); // tried again
+    await flush();
+    ender.promptStarted('T-1'); // recording: nothing to resume
+    await flush();
+    expect(resumed).toEqual(['T-1', 'T-1']);
   });
 });
 
@@ -340,6 +388,18 @@ describe('endSession', () => {
       expect(leases.taken).toBe(0);
     } finally {
       ox.restore();
+    }
+  });
+
+  test('a prime without ox on PATH logs and reports that it failed', async () => {
+    const priorPath = process.env.PATH;
+    process.env.PATH = mkdtempSync(join(tmpdir(), 'ox-bridge-empty-'));
+    try {
+      const { amp, logs } = fakeAmp(workspace);
+      expect(await resumeSession(amp, 'T-noox')).toBe(false);
+      expect(logs.join('\n')).toMatch(/^ox-bridge event=session_resume_error thread_id=T-noox error=".*"$/m);
+    } finally {
+      process.env.PATH = priorPath;
     }
   });
 
