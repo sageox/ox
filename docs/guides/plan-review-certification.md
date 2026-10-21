@@ -80,7 +80,7 @@ release or a consuming host.
 | npm and embedded assets | `make plan-review-check` passes: 37 Node tests, reproducible packing, offline install, file hashes, exports and consumer types. Local tarball SHA-256: `ea747cbb3959c38e16459027ff9e3f218e3d4d55606cc24bce5c848e961ba03a` |
 | Stale asset | Clean copied source passes; altering `review.js` makes `build.mjs --check` fail |
 | Chrome | 53 tests pass. Removing the truncation notice makes its regression fail |
-| CLI binary | Nine default-limit fixtures agree through `feedback show --json` and render successfully. The nested module tests `oversized` with its custom limits. Binary SHA-256: `c7d6ad081223cba5805f30f6c3883e046289ecec2126a58b8fa8c449e07e1cd9`; worktree build reporting 0.23.0, not the release asset |
+| CLI binary | Nine default-limit fixtures agree through `feedback show --json` and render successfully. The nested module tests `oversized` with its custom limits. Binary SHA-256: `479651ce761fffcbb266d15bab634d1511c62bfe061e1f38b8412c69048556d4`; worktree build reporting 0.23.0, not the release asset |
 | GC | Race tests pass; loss, refusal and interrupted-swap regressions first failed against the unsafe implementation |
 | CLI recovery | Review/concurrency race suite and lifecycle/save suite pass; staged/unstaged session-stop cases pass |
 | Lint | Passes with isolated golangci-lint 2.14.0 built with Go 1.27.0; installed 2.11.4 cannot read Go 1.27 export data |

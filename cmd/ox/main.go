@@ -179,13 +179,22 @@ func main() {
 // internal/gitutil), so a terminal Ctrl-C no longer reaches them directly;
 // they die only when this context is canceled.
 func executeWithSignalContext(args []string) int {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, cancel := context.WithCancel(context.Background())
+	interrupts := make(chan os.Signal, 1)
+	signal.Notify(interrupts, os.Interrupt, syscall.SIGTERM)
+	stop := func() {
+		signal.Stop(interrupts)
+		cancel()
+	}
 	defer stop()
 	go func() {
-		// restore default handling once canceled so a second Ctrl-C kills
-		// ox immediately if cleanup stalls
-		<-ctx.Done()
-		stop()
+		select {
+		case <-interrupts:
+			// Restore default handling before cleanup can start, so a second
+			// Ctrl-C terminates even when cleanup ignores cancellation.
+			stop()
+		case <-ctx.Done():
+		}
 	}()
 	return executeWithFrictionRecovery(ctx, args, 0)
 }
