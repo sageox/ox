@@ -160,7 +160,8 @@ func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
 				// A lock-busy result means no check actually ran — spending
 				// the cooldown on it would let frequent contention from the
 				// daemon's own sync cycle silently disable wedge detection.
-				if !lockBusy {
+				// A canceled probe must remain retryable too.
+				if !lockBusy && ctx.Err() == nil {
 					s.mu.Lock()
 					s.lastWedgeCheck = time.Now()
 					s.mu.Unlock()

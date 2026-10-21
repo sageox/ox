@@ -7,10 +7,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/ledger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -579,6 +581,100 @@ func TestGC_PlanRetriesRetainedWhenCarryIsRefused(t *testing.T) {
 	}
 }
 
+func TestGC_CarryPlanRetriesRejectsNonRegularEntries(t *testing.T) {
+	for _, tc := range []struct{ target, kind string }{
+		{"source", "directory"}, {"source", "symlink"},
+		{"destination", "directory"}, {"destination", "symlink"},
+	} {
+		t.Run(tc.target+" "+tc.kind, func(t *testing.T) {
+			if tc.kind == "symlink" && runtime.GOOS == "windows" {
+				t.Skip("creating symlinks requires elevated privileges on Windows")
+			}
+			oldPath, newPath := t.TempDir(), t.TempDir()
+			src := filepath.Join(oldPath, ledger.PlanPushPendingDir, "retry.json")
+			dst := filepath.Join(newPath, ledger.PlanPushPendingDir, "retry.json")
+			for _, path := range []string{src, dst} {
+				require.NoError(t, os.MkdirAll(filepath.Dir(path), 0755))
+				require.NoError(t, os.WriteFile(path, []byte("retry"), 0644))
+			}
+			bad, other := src, dst
+			if tc.target == "destination" {
+				bad, other = dst, src
+			}
+			require.NoError(t, os.Remove(bad))
+			if tc.kind == "directory" {
+				require.NoError(t, os.Mkdir(bad, 0755))
+			} else {
+				require.NoError(t, os.Symlink(other, bad))
+			}
+			before, err := os.Lstat(bad)
+			require.NoError(t, err)
+			require.ErrorContains(t, gcCarryPlanRetries(oldPath, newPath), "not a regular file")
+			after, err := os.Lstat(bad)
+			require.NoError(t, err)
+			require.True(t, os.SameFile(before, after), "refused entries must be retained")
+			data, err := os.ReadFile(other)
+			require.NoError(t, err)
+			require.Equal(t, "retry", string(data))
+		})
+	}
+}
+
+func TestGC_CarryPlanRetriesRecoversFromPermissionFailures(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("requires Unix file permissions without root privileges")
+	}
+	for _, tc := range []struct {
+		name, path   string
+		mode         os.FileMode
+		existingDest bool
+	}{
+		{"unreadable inventory", "source directory", 0111, false},
+		{"refused hard link", "destination directory", 0555, false},
+		{"unreadable source", "source", 0000, true},
+		{"unreadable destination", "destination", 0000, true},
+		{"unsyncable clone directory", "clone", 0300, false},
+		{"refused source retirement", "source directory", 0555, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			oldPath, newPath := t.TempDir(), t.TempDir()
+			src := filepath.Join(oldPath, ledger.PlanPushPendingDir, "retry.json")
+			dst := filepath.Join(newPath, ledger.PlanPushPendingDir, "retry.json")
+			require.NoError(t, os.MkdirAll(filepath.Dir(src), 0755))
+			require.NoError(t, os.MkdirAll(filepath.Dir(dst), 0755))
+			require.NoError(t, os.WriteFile(src, []byte("original retry"), 0644))
+			if tc.existingDest {
+				require.NoError(t, os.WriteFile(dst, []byte("existing retry"), 0644))
+			}
+			path := map[string]string{
+				"source": src, "destination": dst,
+				"source directory": filepath.Dir(src), "destination directory": filepath.Dir(dst),
+				"clone": newPath,
+			}[tc.path]
+			info, err := os.Stat(path)
+			require.NoError(t, err)
+			require.NoError(t, os.Chmod(path, tc.mode))
+			t.Cleanup(func() { _ = os.Chmod(path, info.Mode().Perm()) })
+			require.Error(t, gcCarryPlanRetries(oldPath, newPath))
+			require.NoError(t, os.Chmod(path, info.Mode().Perm()))
+			data, err := os.ReadFile(src)
+			require.NoError(t, err, "a failed carry must retain its source")
+			require.Equal(t, "original retry", string(data))
+			if tc.existingDest {
+				data, err = os.ReadFile(dst)
+				require.NoError(t, err)
+				require.Equal(t, "existing retry", string(data), "never replace destination bytes")
+				require.NoError(t, os.Remove(dst))
+			}
+			require.NoError(t, gcCarryPlanRetries(oldPath, newPath))
+			require.NoFileExists(t, src, "a successful retry retires its source")
+			data, err = os.ReadFile(dst)
+			require.NoError(t, err)
+			require.Equal(t, "original retry", string(data))
+		})
+	}
+}
+
 func TestGC_PlanRetriesSurviveInterruptedSwap(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: git clone operations")
@@ -677,6 +773,142 @@ func TestGC_SkipsWhenLocked(t *testing.T) {
 	_, err = acquireGCLock(lockPath)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "gc lock held")
+}
+
+func TestCheckAndRunGC_TeamInterruptedSwapOutranksRecentGC(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real team context clones")
+	}
+	for _, state := range []string{"healthy clone", "completed swap", "missing canonical clone"} {
+		t.Run(state, func(t *testing.T) {
+			bare, clone, scheduler := setupClonedTeamContext(t, "version 1\ninclude .sageox/\ninclude SOUL.md\n", nil)
+			cache := filepath.Join(clone, ".sageox", "cache", "sync-state.json")
+			require.NoError(t, os.MkdirAll(filepath.Dir(cache), 0755))
+			require.NoError(t, os.WriteFile(cache, []byte("local sync state"), 0644))
+			if state != "healthy clone" {
+				require.NoError(t, gcPreserveCache(clone, clone+".gc-cache"))
+				require.NoError(t, os.Rename(clone, clone+".old"))
+				if state == "completed swap" {
+					require.NoError(t, exec.Command("git", "clone", "file://"+bare, clone).Run())
+				}
+			}
+			if state != "missing canonical clone" {
+				require.NoError(t, exec.Command("git", "-C", clone, "config", "remote.origin.promisor", "true").Run())
+			}
+			lastGC := time.Now()
+			ws := WorkspaceState{ID: "team-recovery", Type: WorkspaceTypeTeamContext, Path: clone,
+				CloneURL: "file://" + bare, Exists: state != "missing canonical clone", LastGCTime: lastGC}
+			registry := scheduler.WorkspaceRegistry()
+			registry.mu.Lock()
+			primeConfigCacheLocked(registry)
+			registry.ledger = nil
+			registry.workspaces = map[string]*WorkspaceState{ws.ID: &ws}
+			registry.mu.Unlock()
+
+			scheduler.checkAndRunGC(context.Background())
+
+			data, err := os.ReadFile(cache)
+			require.NoError(t, err)
+			require.Equal(t, "local sync state", string(data))
+			require.NoDirExists(t, clone+".old")
+			require.NoDirExists(t, clone+".new")
+			if state == "healthy clone" {
+				require.Equal(t, lastGC, registry.GetLastGCTime(ws.ID), "a healthy recent partial clone does not need GC")
+			} else {
+				require.True(t, registry.GetLastGCTime(ws.ID).After(lastGC), "an interrupted swap must be recovered immediately")
+				require.True(t, registry.GetWorkspace(ws.ID).Exists)
+			}
+		})
+	}
+}
+
+func TestGC_InterruptedSwapRefusalPreservesBackups(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX symlink failure modes")
+	}
+	for _, obstruction := range []string{"swap lock directory", "dangling canonical symlink", "canonical symlink loop", "swap marker directory", "old clone symlink loop"} {
+		t.Run(obstruction, func(t *testing.T) {
+			clone := filepath.Join(t.TempDir(), "clone")
+			old := clone + ".old"
+			require.NoError(t, os.MkdirAll(clone, 0755))
+			retained := filepath.Join(old, ".git", "ox-plan-review-pending", "only.json")
+			if obstruction == "old clone symlink loop" {
+				retained = filepath.Join(clone, ".git", "ox-plan-review-pending", "only.json")
+			}
+			require.NoError(t, os.MkdirAll(filepath.Dir(retained), 0755))
+			require.NoError(t, os.WriteFile(retained, []byte("only retry copy"), 0644))
+			for _, suffix := range []string{".gc-cache", ".gc-untracked"} {
+				require.NoError(t, os.MkdirAll(clone+suffix, 0755))
+				require.NoError(t, os.WriteFile(filepath.Join(clone+suffix, "only.txt"), []byte("only backup"), 0644))
+			}
+			switch obstruction {
+			case "swap lock directory":
+				require.NoError(t, os.Mkdir(clone+".gc-swap-lock", 0755))
+			case "dangling canonical symlink", "canonical symlink loop":
+				require.NoError(t, os.Remove(clone))
+				target := filepath.Join(filepath.Dir(clone), "missing")
+				if obstruction == "canonical symlink loop" {
+					target = clone
+				}
+				require.NoError(t, os.Symlink(target, clone))
+			case "swap marker directory":
+				require.NoError(t, os.Mkdir(clone+".gc-swap-done", 0755))
+			case "old clone symlink loop":
+				require.NoError(t, os.Symlink(old, old))
+			}
+			scheduler := gcTestScheduler(t)
+			ws := WorkspaceState{ID: "blocked-recovery", Type: WorkspaceTypeLedger, Path: clone}
+			require.Equal(t, gcFailed, scheduler.runBlueGreenGC(context.Background(), ws))
+			data, err := os.ReadFile(retained)
+			require.NoError(t, err)
+			require.Equal(t, "only retry copy", string(data))
+			for _, suffix := range []string{".gc-cache", ".gc-untracked"} {
+				data, err := os.ReadFile(filepath.Join(clone+suffix, "only.txt"))
+				require.NoError(t, err)
+				require.Equal(t, "only backup", string(data), "fatal setup errors must not consume backups")
+			}
+			require.NoDirExists(t, clone+".new")
+			require.True(t, scheduler.ledgerMu.TryLock(), "failed recovery must release the ledger lock")
+			scheduler.ledgerMu.Unlock()
+		})
+	}
+}
+
+func TestGC_SwapMarkerWriteFailureRetainsRetriesAndRecovers(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real Ledger clones")
+	}
+	bare, clone, scheduler := setupClonedLedger(t)
+	entry := filepath.Join(".git", "ox-plan-review-pending", "only.json")
+	local := filepath.Join("sessions", "local.txt")
+	for path, contents := range map[string]string{entry: "only retry copy", local: "unpublished content"} {
+		full := filepath.Join(clone, path)
+		require.NoError(t, os.MkdirAll(filepath.Dir(full), 0755))
+		require.NoError(t, os.WriteFile(full, []byte(contents), 0644))
+	}
+	scheduler.gcSwapWindowTestHook = func() {
+		require.NoError(t, os.Mkdir(clone+".gc-swap-done", 0755))
+	}
+	ws := WorkspaceState{ID: "marker-refused", Type: WorkspaceTypeLedger, Path: clone, CloneURL: "file://" + bare, Exists: true}
+	require.Equal(t, gcFailed, scheduler.runBlueGreenGC(context.Background(), ws))
+	for path, contents := range map[string]string{entry: "only retry copy", local: "unpublished content"} {
+		data, err := os.ReadFile(filepath.Join(clone+".old", path))
+		require.NoError(t, err)
+		require.Equal(t, contents, string(data))
+	}
+	require.FileExists(t, filepath.Join(clone+".gc-untracked", local))
+	require.NoFileExists(t, filepath.Join(clone, local), "a fatal marker error leaves restore to the next recovery")
+	require.NoFileExists(t, clone+".gc-swap-lock")
+
+	scheduler.gcSwapWindowTestHook = nil
+	require.NoError(t, os.Remove(clone+".gc-swap-done"))
+	require.Equal(t, gcSuccess, scheduler.runBlueGreenGC(context.Background(), ws))
+	for path, contents := range map[string]string{entry: "only retry copy", local: "unpublished content"} {
+		data, err := os.ReadFile(filepath.Join(clone, path))
+		require.NoError(t, err)
+		require.Equal(t, contents, string(data))
+	}
+	require.NoDirExists(t, clone+".old")
 }
 
 // --- Failure tests ---
