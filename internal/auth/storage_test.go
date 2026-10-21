@@ -265,6 +265,81 @@ func TestRemoveTokenIfUnchanged_UnreadableStoreIsAnError(t *testing.T) {
 	assert.Equal(t, "not-json", string(data), "an unreadable store must be left as it was")
 }
 
+// TestSaveTokenIfUnchanged_SavesOnlyOverTheRefreshedLogin covers every pairing
+// of the login on disk with the login a refresh started from.
+// Failure prevented: a refresh saved over whatever auth.json held when the
+// server answered, bringing back a removed login or overwriting a newer one.
+func TestSaveTokenIfUnchanged_SavesOnlyOverTheRefreshedLogin(t *testing.T) {
+	t.Parallel()
+	const ep = "https://sageox.ai"
+	login := func(access, refresh string) *StoredToken {
+		return &StoredToken{AccessToken: access, RefreshToken: refresh, ExpiresAt: time.Now().Add(time.Hour)}
+	}
+	refreshed := login("t2-access", "t2-refresh")
+
+	for _, tt := range []struct {
+		name       string
+		onDisk     *StoredToken
+		from       *StoredToken
+		wantStored string // access token stored afterwards; "" for none
+	}{
+		{name: "the refreshed login is replaced", onDisk: login("t1-access", "t1-refresh"), from: login("t1-access", "t1-refresh"), wantStored: "t2-access"},
+		{name: "a Better Auth session login is replaced", onDisk: login("s1", "s1"), from: login("s1", "s1"), wantStored: "t2-access"},
+		{name: "a login that replaced it is kept", onDisk: login("other-access", "other-refresh"), from: login("t1-access", "t1-refresh"), wantStored: "other-access"},
+		{name: "a newer JWT on the same session is kept", onDisk: login("jwt-b", "s1"), from: login("jwt-a", "s1"), wantStored: "jwt-b"},
+		{name: "a removed login stays removed", from: login("t1-access", "t1-refresh")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			client := NewTestClient(t).WithEndpoint(ep)
+			if tt.onDisk != nil {
+				require.NoError(t, client.SaveToken(tt.onDisk))
+			}
+
+			got, err := client.saveTokenIfUnchanged(ep, tt.from, refreshed)
+			require.NoError(t, err)
+
+			stored, err := client.GetToken()
+			require.NoError(t, err)
+			if tt.wantStored == "" {
+				assert.Nil(t, stored, "a removed login came back")
+				assert.Nil(t, got)
+				return
+			}
+			if assert.NotNil(t, stored) {
+				assert.Equal(t, tt.wantStored, stored.AccessToken)
+			}
+			if assert.NotNil(t, got, "the stored login must be returned") {
+				assert.Equal(t, tt.wantStored, got.AccessToken)
+			}
+		})
+	}
+}
+
+// TestSaveTokenIfUnchanged_UnreadableAuthFileIsAnError proves an auth.json the
+// helper cannot parse fails the save and is left as it was.
+// Failure prevented: an unreadable store read as "login removed", which would
+// discard a refresh and report a logout that never happened.
+func TestSaveTokenIfUnchanged_UnreadableAuthFileIsAnError(t *testing.T) {
+	t.Parallel()
+	const ep = "https://sageox.ai"
+	client := NewTestClient(t).WithEndpoint(ep)
+	authPath, err := client.GetAuthFilePath()
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Dir(authPath), 0o700))
+	corrupt := []byte("{ invalid json }")
+	require.NoError(t, os.WriteFile(authPath, corrupt, 0o600))
+
+	from := createTestTokenForTest(-time.Hour)
+	got, err := client.saveTokenIfUnchanged(ep, from, createTestTokenForTest(time.Hour))
+	require.Error(t, err)
+	assert.Nil(t, got)
+
+	after, err := os.ReadFile(authPath)
+	require.NoError(t, err)
+	assert.Equal(t, corrupt, after, "a failed save must not rewrite auth.json")
+}
+
 func TestIsExpired(t *testing.T) {
 	t.Parallel()
 

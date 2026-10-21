@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -222,6 +223,12 @@ func (c *AuthClient) revokeOnServerStatus(token *StoredToken) RevocationStatus {
 	if baseURL == "" {
 		baseURL = endpoint.Get()
 	}
+	return revokeOnServerAt(context.Background(), baseURL, token)
+}
+
+// revokeOnServerAt is revokeOnServerStatus against baseURL, for callers with
+// no AuthClient such as the package-level token refresh.
+func revokeOnServerAt(ctx context.Context, baseURL string, token *StoredToken) RevocationStatus {
 	baseURL = strings.TrimSuffix(baseURL, "/")
 	revokeURL := baseURL + RevokeEndpoint
 
@@ -241,14 +248,16 @@ func (c *AuthClient) revokeOnServerStatus(token *StoredToken) RevocationStatus {
 		Timeout: 10 * time.Second,
 	}
 
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, revokeURL, strings.NewReader(data.Encode()))
+	if err != nil {
+		return RevocationNetworkError
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
 	logger.LogHTTPRequest("POST", revokeURL)
 	start := time.Now()
 
-	resp, err := client.Post(
-		revokeURL,
-		"application/x-www-form-urlencoded",
-		strings.NewReader(data.Encode()),
-	)
+	resp, err := client.Do(req)
 	duration := time.Since(start)
 	if err != nil {
 		logger.LogHTTPError("POST", revokeURL, err, duration)
