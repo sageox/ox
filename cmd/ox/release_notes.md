@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A plain `ox doctor` no longer publishes plans you have not saved** — the commits its automatic cleanup makes, and the commit that uploads a session, now leave plans out. A `plan.md` you are still editing, a plan change someone already staged, and a large `plan.html` whose upload failed stay on your machine until the plan's own save, or its retry, shares them. Before, a plain `ox doctor` could commit and push them, the multi-megabyte page included.
 - **`ox doctor` finishes plan saves that never committed, and names plan edits nobody saved** — a save that wrote the plan but never committed it (ox was interrupted, or an older version left it) is queued and shared by the same `ox doctor` run. Edits nobody saved are listed by plan; `ox doctor --fix-slug=plan-unsaved-edits` shares them as they are once you confirm.
 
-## [0.24.0] - 2026-10-21
+## [0.24.1] - 2026-10-21
 
 Amp orb sessions now reach your team whole and on their own, Oxy can join you in Claude Code, and plan reviews, approvals and saves reliably reach your team.
 

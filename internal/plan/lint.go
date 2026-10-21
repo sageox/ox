@@ -2,9 +2,12 @@ package plan
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
+
+	xhtml "golang.org/x/net/html"
 
 	"github.com/sageox/ox/internal/viz"
 )
@@ -154,7 +157,8 @@ var (
 	oxMarkerRe = regexp.MustCompile(`(?i)aria-label\s*=\s*["']SageOx insight["']`)
 
 	// footer credit, e.g. "Team context enriched by SageOx" — substring match,
-	// case-insensitive, wording-tolerant.
+	// case-insensitive, wording-tolerant. Matched against the page's VISIBLE
+	// text only (hasRenderedCredit), never its raw bytes.
 	footerCreditRe = regexp.MustCompile(`(?i)enriched by SageOx`)
 
 	// banned: a LIVE remote avatar image. The mark must be data:-inlined or
@@ -236,7 +240,7 @@ func LintBranding(html []byte, res Result) []BrandingFinding {
 	// context-bundle item present. Shared with lintWordmark via isEnriched so
 	// the credit and the mark can never disagree about what "enriched" means.
 	enriched := isEnriched(res)
-	hasCredit := footerCreditRe.Match(html)
+	hasCredit := hasRenderedCredit(html)
 
 	switch {
 	case enriched && !hasCredit:
@@ -271,6 +275,105 @@ func LintBranding(html []byte, res Result) []BrandingFinding {
 	}
 
 	return findings
+}
+
+// creditHiddenTags hold text a reader never sees as page content: executable or
+// styling source, the document/SVG title (a tab or tooltip), and inert templates.
+var creditHiddenTags = map[string]bool{
+	"script": true, "style": true, "template": true, "title": true, "desc": true,
+}
+
+// voidTags never get an end tag, so they must not open a scope that an end tag
+// is expected to close.
+var voidTags = map[string]bool{
+	"area": true, "base": true, "br": true, "col": true, "embed": true, "hr": true,
+	"img": true, "input": true, "link": true, "meta": true, "source": true,
+	"track": true, "wbr": true,
+}
+
+// hasRenderedCredit reports whether a reader of the page sees a SageOx
+// enrichment credit. Three things count, all of them rendered:
+//
+//   - visible text matching footerCreditRe (whitespace-collapsed, so a credit
+//     split across inline markup still counts);
+//   - the injected chrome's #ox-chrome-data island with footer_credit set —
+//     chrome.js renders "Team context enriched by SageOx" from it at view time;
+//   - a data-ox-wordmark lockup, which visibly reads "enriched by" + the mark.
+//
+// Script and style source, comments, and attribute values (an aria-label or a
+// title) do not count on their own: the inlined chrome.js carries the credit
+// string as source on every injected page, enriched or not (ox#1432). Neither
+// does text under an element with the `hidden` attribute.
+//
+// Open elements are tracked as a stack so an end tag closes its own element and
+// any it implicitly closes (an unclosed <p>), never an outer hidden scope.
+func hasRenderedCredit(page []byte) bool {
+	z := xhtml.NewTokenizer(bytes.NewReader(page))
+	var text strings.Builder
+	type openElem struct {
+		name  string
+		hides bool
+	}
+	var open []openElem
+	hidden := 0 // open elements that hide their text
+	chromeIsland := false
+	for {
+		tt := z.Next()
+		switch tt {
+		case xhtml.ErrorToken:
+			return footerCreditRe.MatchString(strings.Join(strings.Fields(text.String()), " "))
+		case xhtml.StartTagToken, xhtml.SelfClosingTagToken:
+			name, more := z.TagName()
+			tag := string(name)
+			chromeIsland = false
+			hides := creditHiddenTags[tag]
+			for more {
+				var key, val []byte
+				key, val, more = z.TagAttr()
+				switch string(key) {
+				case "data-ox-wordmark":
+					return true
+				case "id":
+					chromeIsland = string(val) == "ox-chrome-data"
+				case "hidden":
+					hides = true
+				}
+			}
+			if tt == xhtml.StartTagToken && !voidTags[tag] {
+				open = append(open, openElem{name: tag, hides: hides})
+				if hides {
+					hidden++
+				}
+			}
+		case xhtml.EndTagToken:
+			name, _ := z.TagName()
+			tag := string(name)
+			for i := len(open) - 1; i >= 0; i-- {
+				if open[i].name != tag {
+					continue
+				}
+				for _, e := range open[i:] {
+					if e.hides {
+						hidden--
+					}
+				}
+				open = open[:i]
+				break
+			}
+			chromeIsland = false
+		case xhtml.TextToken:
+			if chromeIsland {
+				var payload chromePayload
+				if json.Unmarshal(z.Text(), &payload) == nil && payload.FooterCredit {
+					return true
+				}
+				continue
+			}
+			if hidden == 0 {
+				text.Write(z.Text())
+			}
+		}
+	}
 }
 
 // LintSessionLink warns when a plan whose provenance carries a session
