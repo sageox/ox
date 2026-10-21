@@ -185,7 +185,9 @@ func TestPlanReviewDurability_MixedToolsRecoverAcrossClones(t *testing.T) {
 		require.True(t, it.Open, "%+v", it)
 	}
 	// Each review commit contains one record.
-	for _, sha := range strings.Fields(runGitInDir(t, f.origin, "log", "--format=%H", "--grep=plan review:", "main")) {
+	reviewCommits := strings.Fields(runGitInDir(t, f.origin, "log", "--format=%H", "--grep=plan review:", "main"))
+	require.NotEmpty(t, reviewCommits, "no review commits found")
+	for _, sha := range reviewCommits {
 		files := strings.Fields(runGitInDir(t, f.origin, "show", "--name-only", "--format=", sha))
 		require.Len(t, files, 1)
 		require.Contains(t, files[0], "/feedback/")

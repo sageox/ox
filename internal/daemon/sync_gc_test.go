@@ -486,11 +486,26 @@ func TestGC_PlanRetriesRetainedWhenCarryIsRefused(t *testing.T) {
 			require.NoError(t, exec.Command("git", "-C", cloneDir, "add", "sessions").Run())
 			require.NoError(t, exec.Command("git", "-C", cloneDir, "commit", "-m", "ledger structure").Run())
 			require.NoError(t, exec.Command("git", "-C", cloneDir, "push").Run())
+			localFiles := map[string]string{
+				"README.md":                  "unpublished edit",
+				"data/plans/unsaved.txt":     "untracked plan",
+				".sageox/cache/gc-state.txt": "local cache",
+			}
+			for path, contents := range localFiles {
+				fullPath := filepath.Join(cloneDir, path)
+				require.NoError(t, os.MkdirAll(filepath.Dir(fullPath), 0755))
+				require.NoError(t, os.WriteFile(fullPath, []byte(contents), 0644))
+			}
 			pushDir := filepath.Join(".git", "ox-plan-push-pending")
 			reviewDir := filepath.Join(".git", "ox-plan-review-pending")
 			for _, dir := range []string{pushDir, reviewDir} {
 				require.NoError(t, os.MkdirAll(filepath.Join(cloneDir, dir), 0755))
 				require.NoError(t, os.WriteFile(filepath.Join(cloneDir, dir, "old.json"), []byte("original retry"), 0644))
+			}
+			copied := []string{filepath.Join(pushDir, "old.json")}
+			if conflict {
+				copied = append(copied, filepath.Join(reviewDir, "a-copied.json"))
+				require.NoError(t, os.WriteFile(filepath.Join(cloneDir, reviewDir, "a-copied.json"), []byte("copied retry"), 0644))
 			}
 			s := gcTestScheduler(t)
 			s.gcSwapWindowTestHook = func() {
@@ -503,32 +518,61 @@ func TestGC_PlanRetriesRetainedWhenCarryIsRefused(t *testing.T) {
 			}
 			ws := WorkspaceState{ID: "carry-refused", Type: WorkspaceTypeLedger, Path: cloneDir, CloneURL: "file://" + bareDir, Exists: true}
 			require.Equal(t, gcFailed, s.runBlueGreenGC(context.Background(), ws), "a refused carry must retain the old clone")
-			for _, dir := range []string{pushDir, reviewDir} {
-				data, err := os.ReadFile(filepath.Join(cloneDir+".old", dir, "old.json"))
-				require.NoError(t, err)
-				require.Equal(t, "original retry", string(data))
+			for _, path := range copied {
+				assert.NoFileExists(t, filepath.Join(cloneDir+".old", path), "a durable copy must retire its source")
+			}
+			data, err := os.ReadFile(filepath.Join(cloneDir+".old", reviewDir, "old.json"))
+			require.NoError(t, err)
+			require.Equal(t, "original retry", string(data), "the failed carry must keep its source")
+			for path, contents := range localFiles {
+				data, err := os.ReadFile(filepath.Join(cloneDir, path))
+				assert.NoError(t, err, path)
+				assert.Equal(t, contents, string(data), "a retry conflict must not strand local state: %s", path)
 			}
 			blocked := filepath.Join(cloneDir, reviewDir)
 			if conflict {
 				blocked = filepath.Join(blocked, "old.json")
 			}
-			data, err := os.ReadFile(blocked)
+			data, err = os.ReadFile(blocked)
 			require.NoError(t, err)
 			require.Equal(t, "newer retry", string(data), "never replace destination bytes")
 			require.NoFileExists(t, cloneDir+".gc-swap-lock", "a failed carry must release the CLI swap signal")
 
-			// A restart must refuse the same conflict before another clone can
-			// remove .old. Once the obstruction clears, recovery is automatic.
+			// Simulate a crash before local-state restoration. A retry conflict
+			// must not block restoring those backups on the next invocation.
+			_, err = s.gcCaptureDiff(context.Background(), cloneDir+".old", cloneDir+".gc-diff", "HEAD")
+			require.NoError(t, err)
+			_, err = s.gcCaptureUntracked(context.Background(), cloneDir+".old", cloneDir+".gc-untracked")
+			require.NoError(t, err)
+			require.NoError(t, gcPreserveCache(cloneDir+".old", cloneDir+".gc-cache"))
+			require.NoError(t, exec.Command("git", "-C", cloneDir, "checkout", "--", "README.md").Run())
+			require.NoError(t, os.RemoveAll(filepath.Join(cloneDir, "data/plans/unsaved.txt")))
+			require.NoError(t, os.RemoveAll(filepath.Join(cloneDir, ".sageox/cache")))
+			require.NoError(t, os.WriteFile(cloneDir+".gc-swap-done", nil, 0600))
+
+			// The CLI acknowledged the copied push retry before the restart.
+			for _, path := range copied {
+				require.NoError(t, os.Remove(filepath.Join(cloneDir, path)))
+			}
 			s = gcTestScheduler(t)
 			require.Equal(t, gcFailed, s.runBlueGreenGC(context.Background(), ws))
 			require.NoDirExists(t, cloneDir+".new")
 			require.FileExists(t, filepath.Join(cloneDir+".old", reviewDir, "old.json"))
+			for _, path := range copied {
+				assert.NoFileExists(t, filepath.Join(cloneDir, path), "an acknowledged retry must not return")
+			}
+			for path, contents := range localFiles {
+				data, err := os.ReadFile(filepath.Join(cloneDir, path))
+				assert.NoError(t, err, path)
+				assert.Equal(t, contents, string(data), "startup must restore local state despite the retry conflict: %s", path)
+			}
 			require.NoError(t, os.Remove(blocked))
 			require.Equal(t, gcSuccess, s.runBlueGreenGC(context.Background(), ws))
-			for _, dir := range []string{pushDir, reviewDir} {
-				data, err := os.ReadFile(filepath.Join(cloneDir, dir, "old.json"))
-				require.NoError(t, err)
-				require.Equal(t, "original retry", string(data))
+			data, err = os.ReadFile(filepath.Join(cloneDir, reviewDir, "old.json"))
+			require.NoError(t, err)
+			require.Equal(t, "original retry", string(data))
+			for _, path := range copied {
+				require.NoFileExists(t, filepath.Join(cloneDir, path))
 			}
 			require.NoDirExists(t, cloneDir+".old")
 		})

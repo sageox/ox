@@ -644,6 +644,7 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 	defer close(stopLockHeartbeat)
 
 	swapMarker := ws.Path + ".gc-swap-done"
+	var carryErr error
 	if _, err := os.Stat(oldPath); err == nil {
 		// Recover .old before cleanup: it may hold the only copy of a retry.
 		if isLedger {
@@ -670,11 +671,15 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 			if err := os.WriteFile(swapMarker, nil, 0o600); err != nil {
 				return err
 			}
-			return gcCarryPlanRetries(oldPath, ws.Path)
+			carryErr = gcCarryPlanRetries(oldPath, ws.Path)
+			return nil
 		}()
 		if err != nil {
 			s.logger.Error("gc: cannot recover interrupted swap, retaining old clone", "path", oldPath, "error", err)
 			return gcFailed, false
+		}
+		if carryErr != nil {
+			s.logger.Error("gc: cannot recover plan retries, retaining old clone", "path", oldPath, "error", carryErr)
 		}
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		s.logger.Error("gc: cannot inspect old clone", "path", oldPath, "error", err)
@@ -730,6 +735,9 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 		}
 		_ = os.Remove(swapMarker)
 		s.logger.Info("gc: recovered orphaned artifacts from an interrupted prior GC", "path", ws.Path, "workspace", wsLabel)
+	}
+	if carryErr != nil {
+		return gcFailed, false
 	}
 
 	// clean up leftover artifacts from a previous failed GC (safe under the
@@ -986,11 +994,10 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 
 	// Carry .git/ retries, including those written during cloning. Keep .old
 	// until every entry is copied; an entry may hold the only record (#1356).
-	if err := gcCarryPlanRetries(oldPath, ws.Path); err != nil {
-		s.logger.Error("gc: failed to carry plan retries, retaining old clone", "path", oldPath, "error", err)
-		return gcFailed, false
-	}
-	if err := os.RemoveAll(oldPath); err != nil {
+	carryErr = gcCarryPlanRetries(oldPath, ws.Path)
+	if carryErr != nil {
+		s.logger.Error("gc: failed to carry plan retries, retaining old clone", "path", oldPath, "error", carryErr)
+	} else if err := os.RemoveAll(oldPath); err != nil {
 		s.logger.Warn("gc: failed to remove old clone", "path", oldPath, "error", err)
 	}
 
@@ -1057,6 +1064,9 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 	// auto-recovery apply on top of whatever a human already did with the
 	// preserved files, which is the wrong kind of "recovery".
 	_ = os.Remove(swapMarker)
+	if carryErr != nil {
+		return gcFailed, false
+	}
 
 	if isLedger && divergeCaptured {
 		// The conflict that caused the wedge also drove RecordSyncFailure
@@ -1087,8 +1097,8 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 	return gcSuccess, divergeCaptured
 }
 
-// Link retries without overwriting destination entries. Keep the source until
-// all links are durable so an interrupted carry can be retried.
+// Link retries without overwriting destination entries. Retire each source
+// after its link is durable so cleared retries cannot return from .old.
 func gcCarryPlanRetries(oldPath, newPath string) error {
 	for _, dir := range []string{ledger.PlanPushPendingDir, ledger.PlanReviewPendingDir} {
 		srcDir, dstDir := filepath.Join(oldPath, dir), filepath.Join(newPath, dir)
@@ -1107,40 +1117,52 @@ func gcCarryPlanRetries(oldPath, newPath string) error {
 			if !entry.Type().IsRegular() {
 				return fmt.Errorf("retry entry is not a regular file: %s", src)
 			}
-			if err := os.Link(src, dst); err == nil {
-				continue
-			} else if !errors.Is(err, fs.ErrExist) {
-				return err
+			if err := os.Link(src, dst); err != nil {
+				if !errors.Is(err, fs.ErrExist) {
+					return err
+				}
+				info, err := os.Lstat(dst)
+				if err != nil {
+					return err
+				}
+				if !info.Mode().IsRegular() {
+					return fmt.Errorf("retry destination is not a regular file: %s", dst)
+				}
+				source, err := os.ReadFile(src)
+				if err != nil {
+					return err
+				}
+				destination, err := os.ReadFile(dst)
+				if err != nil {
+					return err
+				}
+				if !bytes.Equal(source, destination) {
+					return fmt.Errorf("conflicting retry entries: %s and %s", src, dst)
+				}
 			}
-			info, err := os.Lstat(dst)
-			if err != nil {
-				return err
+			// Persist the link and clone swap before removing its source.
+			// Windows cannot fsync directories.
+			if runtime.GOOS != "windows" {
+				for _, path := range []string{dstDir, filepath.Dir(dstDir), newPath, filepath.Dir(newPath)} {
+					d, err := os.Open(path)
+					if err != nil {
+						return err
+					}
+					if err := errors.Join(d.Sync(), d.Close()); err != nil {
+						return fmt.Errorf("sync retry destination %s: %w", path, err)
+					}
+				}
 			}
-			if !info.Mode().IsRegular() {
-				return fmt.Errorf("retry destination is not a regular file: %s", dst)
+			if err := os.Remove(src); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return fmt.Errorf("remove copied retry %s: %w", src, err)
 			}
-			source, err := os.ReadFile(src)
-			if err != nil {
-				return err
-			}
-			destination, err := os.ReadFile(dst)
-			if err != nil {
-				return err
-			}
-			if !bytes.Equal(source, destination) {
-				return fmt.Errorf("conflicting retry entries: %s and %s", src, dst)
-			}
-		}
-		// The source can be removed only after the new directory entries
-		// and clone swap are durable. Windows cannot fsync directories.
-		if runtime.GOOS != "windows" {
-			for _, path := range []string{dstDir, filepath.Dir(dstDir), newPath, filepath.Dir(newPath)} {
-				d, err := os.Open(path)
+			if runtime.GOOS != "windows" {
+				d, err := os.Open(srcDir)
 				if err != nil {
 					return err
 				}
 				if err := errors.Join(d.Sync(), d.Close()); err != nil {
-					return fmt.Errorf("sync retry destination %s: %w", path, err)
+					return fmt.Errorf("sync retired retries %s: %w", srcDir, err)
 				}
 			}
 		}

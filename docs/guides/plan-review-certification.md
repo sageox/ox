@@ -9,7 +9,7 @@ its v0.20.0 and `651ac29a` measurements describe those older builds.
 
 | Component | Version measured |
 |---|---|
-| CLI source | `5a1ff9e1ae2de406265f8b74ddb6aa7250063cf9` plus this change |
+| CLI source | `9233a61230cc0938bb7a19d048c989c81751d813` plus this change |
 | Go module | `pkg/planreview/v0.4.0`, commit `c8dea6ae29abcf6585f5f740fc6f3c2e58a33b86` |
 | Browser package | `packages/plan-review/v0.6.0`, commit `96371222406a24a552030043aad6b06d736c4ba8`, protocol 3; [publication receipt](https://github.com/sageox/ox/actions/runs/39497717414) |
 | Embedded source digest | `45fcb6044d28725176504dfc1cbacc4f3672de4584476b0fe19c3655ce38675f`; file hashes are in `internal/plan/assets/review.manifest.json` |
@@ -31,7 +31,7 @@ and transport tests need a new Go module tag; they are not in v0.4.0.
 | Commit scope | `TestPlanReviewDurability_RetryPublishesOnlyTheOriginalRecord`, `TestPlanReviewCommit_CarriesOnlyTheRecord`, `TestFlushPending_*` | One operation cannot publish authoring edits or clear another operation's retry |
 | Lifecycle and save retry | `TestPlanLifecycle_*`, `TestPlanSave*` | Append-only event writers and failed-save recovery |
 | Session stop | `TestReconcileProducedPlansAtStop_CommitsOnlyTheFilesItWrites` | Staged and unstaged authoring edits stay local |
-| GC recovery | `TestGC_CarriesPlanRetriesIntoTheNewClone`, `TestGC_PlanRetriesRetainedWhenCarryIsRefused`, `TestGC_PlanRetriesSurviveInterruptedSwap` | Preserve both clones' entries, retain refused/conflicting copies, recover interrupted swaps automatically |
+| GC recovery | `TestGC_CarriesPlanRetriesIntoTheNewClone`, `TestGC_PlanRetriesRetainedWhenCarryIsRefused`, `TestGC_PlanRetriesSurviveInterruptedSwap` | Preserve both clones' entries, restore local edits despite conflicts, retire carried sources so acknowledged retries stay cleared, recover interrupted swaps automatically |
 | Browser outbox | `state.test.mjs`; Chrome `UnstorableReviewIsNeverSent`, `LostAnswerAndAnEditDuringSendDeliverOnce`, `TwoTabsKeepEachOthersMarks` | Storage failure, account/tab isolation, frozen requests, lost acknowledgments and newer drafts |
 | Untrusted content and permissions | Chrome `PlanCannotDriveTheComposer`, `LedgerTextCannotStyleOrScriptTheRail`, `ForgedCapturesAreCheckedAndRestamped`, `ResolveOfferedOnlyToReviewersWhoMay` | Plan/record input cannot control the host; local reviewers may only verify; hosted authorization is host-owned |
 | Drawings | `TestRegion_SharedCases`, Node `region.test.mjs`, seven drawing Chrome tests | Bounds, placement and independent reopen; `ViewOriginalAfterAnEdit` checks the visible truncation notice, retained text/ink/boxes and inert markup with the source iframe removed |
@@ -80,7 +80,7 @@ release or a consuming host.
 | npm and embedded assets | `make plan-review-check` passes: 37 Node tests, reproducible packing, offline install, file hashes, exports and consumer types. Local tarball SHA-256: `ea747cbb3959c38e16459027ff9e3f218e3d4d55606cc24bce5c848e961ba03a` |
 | Stale asset | Clean copied source passes; altering `review.js` makes `build.mjs --check` fail |
 | Chrome | 53 tests pass. Removing the truncation notice makes its regression fail |
-| CLI binary | Nine default-limit fixtures agree through `feedback show --json` and render successfully. The nested module tests `oversized` with its custom limits. Binary SHA-256: `ebad6d2f557dba2fa4bc67839b0762eec2e67851d986aaa6625e0d22ddc8540c`; worktree build reporting 0.23.0, not the release asset |
+| CLI binary | Nine default-limit fixtures agree through `feedback show --json` and render successfully. The nested module tests `oversized` with its custom limits. Binary SHA-256: `c7d6ad081223cba5805f30f6c3883e046289ecec2126a58b8fa8c449e07e1cd9`; worktree build reporting 0.23.0, not the release asset |
 | GC | Race tests pass; loss, refusal and interrupted-swap regressions first failed against the unsafe implementation |
 | CLI recovery | Review/concurrency race suite and lifecycle/save suite pass; staged/unstaged session-stop cases pass |
 | Lint | Passes with isolated golangci-lint 2.14.0 built with Go 1.27.0; installed 2.11.4 cannot read Go 1.27 export data |
@@ -96,9 +96,9 @@ release or a consuming host.
 | [#1348](https://github.com/sageox/ox/pull/1348) | Finish the existing README correction for public package visibility |
 | [ADR-025](../adr/ADR-025-plan-annotation-and-feedback-delivery.md) | Record Ryan's review of the drawing's `q-<id>` anchor; #1325's merge is not sign-off |
 
-After these merge, repeat the matrix. Publish readers before writers using the
-existing Go tags, npm workflow and CLI release workflow. Record the fixture tag,
-module checksum, npm protocol/source digest/tarball integrity/attestation, and
+Once these items are resolved, repeat the matrix. Publish readers before writers
+using the existing Go tags, npm workflow and CLI release workflow. Record the
+fixture tag, module checksum, npm protocol/source digest/tarball integrity/attestation, and
 first fully capable CLI tag and binary checksum. Those release receipts are pending.
 
 Each consuming host must pin the releases through its existing dependency update
