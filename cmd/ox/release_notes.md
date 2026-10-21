@@ -13,13 +13,13 @@ Amp orb sessions now reach your team whole and on their own, Oxy can join you in
 
 ### New
 
-- **Amp orb sessions reach your team on their own** — in an Amp orb, ox records each thread and uploads it before the orb pauses, credited to the owner of `SAGEOX_TOKEN`. Every Amp session now starts with the prompt that opened its thread, and a reply sent after the orb went idle is recorded as a continued session.
-- **Record Cursor Agents Window sessions** — `ox integrate install --cursor` captures them and shares them with your team, like Claude Code sessions.
-- **Apps can read every ox setting from ox itself** — `ox config schema --json` lists each setting with a short label and description, the values it accepts, the levels you can set it at, and its current value. It works outside a repository, so the SageOx desktop app can show your user-level ox settings without keeping its own copy of the list.
-- **Read a Visual walkthrough as joined moments** — `ox walkthrough` pairs each click, selection and pause with what was said and what happened next, shows zoomed pictures on request, and splits long recordings into chapters you can read one at a time. Recordings without this data read as before.
-- **Comment on a plan as a whole** — in review mode, the comments panel takes a comment on a plan's direction, scope or readiness without pinning it to a section. It reaches the AI coworker like any other comment.
-- **AI coworkers hear about new pull requests as outside news** — when a pull request opens on your repository, your AI coworker sees it on its next prompt and is told when it changes files the coworker is editing. Its title is shown as quoted, untrusted text, so it can never pass itself off as instructions.
+- **Amp orb sessions reach your team on their own** — in an Amp orb, ox records each thread and uploads it on its own, credited to the owner of `SAGEOX_TOKEN`. Every Amp session now starts with the prompt that opened its thread, and a reply sent after the orb went idle is recorded as a continued session.
+- **Record Cursor Agents Window sessions (preview)** — `ox integrate install --cursor` captures them and shares them with your team, like Claude Code sessions.
 - **Hatch Oxy in Claude Code** — `ox pet enable` puts Oxy, SageOx's mascot, in Claude Code's thinking line, where he reacts to what Claude is doing: swatting a bug during a test run, launching a rocket when you push, throwing confetti when a turn ends. `/hatch-pet` shows, hides or resizes him.
+- **Draw around part of a plan and comment on exactly that** — in review mode, loop around a paragraph, table rows or diagram nodes, and your comment stays attached to what you circled even after the plan changes.
+- **Comment on a plan as a whole** — in review mode, the comments panel takes a comment on a plan's direction, scope or readiness without pinning it to a section. It reaches the AI coworker like any other comment.
+- **Your AI coworker reads screen walkthroughs moment by moment** — `ox conversation walkthrough` pairs each click, selection and pause with what was said and what the screen did next, shows a close-up of the element on request, and splits long recordings into chapters.
+- **`ox config` knows every setting** — `ox config schema --json` lists each setting with its description, accepted values, levels and current value, even outside a repository, and `ox config --help` now lists exactly the settings `ox config set` accepts.
 
 ### Improved
 
@@ -28,18 +28,18 @@ Amp orb sessions now reach your team whole and on their own, Oxy can join you in
 
 ### Fixed
 
-- **Plan reviews, approvals and saves reliably reach your team** — each piece of feedback is sent exactly once and retried until your team's Ledger holds it, through dropped connections, reloads, large plans, and two people acting on one plan at once. Companion pages travel with their plan, and `ox doctor` retries anything still waiting and says why it is stuck.
+- **Plan reviews, approvals and saves reliably reach your team** — each is sent once and retried until your team's Ledger holds it, even through dropped connections, reloads and two people acting on one plan at once.
 - **Approving a plan or ending a session never publishes your unsaved edits** — only the plan's status and history are shared.
-- **Sync keeps going through conflicts and interruptions** — a plan changed on two machines, an interrupted push, a save during background sync, or a team memory note written mid-sync no longer leaves your Ledger or Team Context stuck. While a repair is needed, ox writes nothing and points you to `ox doctor --fix`.
-- **Plan review is more dependable** — Review responds to your first click, a plan's own tabs and checkboxes work in review mode, marks on Mermaid diagrams stay where you put them, and a review that can't be fully read says so instead of looking complete.
-- **`ox config --help` lists the settings ox actually has** — it no longer advertises settings `ox config set` rejects, or leaves out `murmur_send`, `murmur_receive` and eleven others.
-- **`ox logout` reliably signs you out** — it clears expired logins too, never deletes a newer login it didn't revoke, and can no longer be undone by a token refresh in progress.
-- **Large Ledgers finish their first download** — ox no longer cuts the first download off after 60 seconds, so teams with a long history get their Ledger instead of retrying forever.
-- **Imports report what actually happened** — `ox import` says a file is imported only once the server accepts it, and refreshes your sign-in before a long upload. `ox session import` no longer offers recordings you aborted.
+- **Sync keeps going through conflicts and interruptions** — a plan changed on two machines, an interrupted push, or a save during background sync no longer leaves your Ledger stuck. While a repair is needed, ox writes nothing and points you to `ox doctor --fix`.
+- **Team memory notes save while Team Context syncs** — `ox memory put` and the note `ox agent session stop` records wait for the sync instead of failing.
+- **Plan review is more dependable** — Review responds to your first click, a plan's own tabs and checkboxes work, marks on Mermaid diagrams stay where you put them, and the review page and `ox plan` commands flag damaged or conflicting feedback instead of showing a partial review.
+- **`ox logout` reliably signs you out** — a background token refresh can no longer bring the login back, expired logins are cleared too, and a newer login it didn't revoke is never deleted.
+- **Large Ledgers finish their first download** — it's no longer cut off after a minute, so teams with a long history get their Ledger instead of retrying forever.
+- **A session you abort stays private** — `ox session import` no longer offers it, and `ox import` says a file is imported only once the server has accepted it.
 
 ### Security
 
-- **Recorded and imported sessions can't reach your Ledger with a credential in them** — every way a session is saved or shared now goes through the same redaction, and anything ox can't verify as clean is held back instead of published.
+- **Credentials stay out of shared sessions** — every recorded or imported session is checked before it reaches your team, and anything that can't be checked is held back.
 
 ## [0.23.0] - 2026-10-12
 
