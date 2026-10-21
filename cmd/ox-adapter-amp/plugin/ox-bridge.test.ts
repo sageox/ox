@@ -21,7 +21,9 @@ const home = realpathSync(homedir());
 if (!home.startsWith(realpathSync(tmpdir()))) {
   throw new Error(`refusing to write Amp sidecars into ${home}: run with HOME=$(mktemp -d) bun test`);
 }
-const { bridge, createSessionEnder, endSession, resumeSession, sessionEndDelay } = await import('./ox-bridge.ts');
+const { bridge, createSessionEnder, endSession, primeIsRecording, resumeSession, sessionEndDelay } = await import(
+  './ox-bridge.ts'
+);
 type Clock = Parameters<typeof createSessionEnder>[0];
 
 const MIN = 60_000;
@@ -93,8 +95,13 @@ function fakeAmp(workspace: string, keepAlive: 'grants' | 'rejects' = 'grants') 
 // A fake `ox` on PATH that records how it was called, one log per command
 // (`ox agent hook ...` to hook.log, `ox agent prime` to prime.log), written
 // whole once the call is done. It also records the thread's last sidecar
-// line as the call saw it.
-function fakeOx(): { logOf: (command: 'hook' | 'prime') => string; restore: () => void } {
+// line as the call saw it. A prime prints primeOutput's text, by default a
+// prime that is recording.
+function fakeOx(): {
+  logOf: (command: 'hook' | 'prime') => string;
+  primeOutput: (text: string) => void;
+  restore: () => void;
+} {
   const bin = mkdtempSync(join(tmpdir(), 'ox-bridge-bin-'));
   writeFileSync(
     join(bin, 'ox'),
@@ -106,12 +113,20 @@ log="${bin}/$2.log"
   printf 'stdin='; cat; echo
 } > "$log.tmp"
 mv "$log.tmp" "$log"
+[ "$2" = prime ] && cat "${bin}/prime.out"
+exit 0
 `
   );
   chmodSync(join(bin, 'ox'), 0o755);
+  const primeOutput = (text: string) => writeFileSync(join(bin, 'prime.out'), text);
+  primeOutput('{\n  "agent_id": "OxAb12",\n  "session": {\n    "recording": true\n  }\n}\n');
   const priorPath = process.env.PATH;
   process.env.PATH = `${bin}:${priorPath}`;
-  return { logOf: (command) => join(bin, `${command}.log`), restore: () => (process.env.PATH = priorPath) };
+  return {
+    logOf: (command) => join(bin, `${command}.log`),
+    primeOutput,
+    restore: () => (process.env.PATH = priorPath),
+  };
 }
 
 async function waitFor(check: () => boolean, what: string): Promise<void> {
@@ -269,6 +284,45 @@ describe('createSessionEnder', () => {
     expect(calls).toEqual(['end T-1', 'resume T-1', 'end T-1']);
   });
 
+  test('a resume that fails while the last stop still uploads is tried again when the turn ends', async () => {
+    const { clock, advanceTo } = fakeClock();
+    const results = [false, true];
+    const resumed: string[] = [];
+    const ender = createSessionEnder(clock, async () => {}, async (tid) => (resumed.push(tid), results.shift()!));
+
+    ender.turnEnded('T-1');
+    advanceTo(2 * MIN);
+    ender.promptStarted('T-1'); // the stop still owns the recording: nothing starts
+    await flush();
+    ender.turnEnded('T-1'); // tried again, from the same prompt's line
+    await flush();
+    expect(resumed).toEqual(['T-1', 'T-1']);
+    ender.promptStarted('T-1'); // recording: nothing to resume
+    await flush();
+    expect(resumed).toEqual(['T-1', 'T-1']);
+  });
+
+  test('a prime that cannot record is tried at most 3 times per idle end', async () => {
+    const { clock, advanceTo } = fakeClock();
+    const resumed: string[] = [];
+    const ender = createSessionEnder(clock, async () => {}, async (tid) => (resumed.push(tid), false));
+
+    ender.turnEnded('T-1');
+    advanceTo(2 * MIN);
+    for (let i = 0; i < 4; i++) {
+      ender.promptStarted('T-1');
+      await flush();
+      ender.turnEnded('T-1');
+      await flush();
+    }
+    expect(resumed).toHaveLength(3); // not 8: one per prompt and turn end
+
+    advanceTo(60 * MIN); // the next idle end allows 3 more
+    ender.promptStarted('T-1');
+    await flush();
+    expect(resumed).toHaveLength(4);
+  });
+
   test('a prime that fails is tried again on the next prompt, and only until it works', async () => {
     const { clock, advanceTo } = fakeClock();
     const results = [false, true];
@@ -361,7 +415,7 @@ describe('bridge', () => {
 
       await waitFor(() => existsSync(ox.logOf('prime')), 'the quiet prime');
       const call = readFileSync(ox.logOf('prime'), 'utf8');
-      expect(call).toContain('args=agent prime\n');
+      expect(call).toContain('args=agent prime --format json\n');
       expect(call).toContain(`cwd=${realpathSync(workspace)}`);
       expect(call).toContain('agent_env=amp');
       expect(call).toContain('amp_thread_url=https://ampcode.com/threads/T-reply\n');
@@ -376,6 +430,20 @@ describe('bridge', () => {
   });
 });
 
+describe('primeIsRecording', () => {
+  test.each([
+    ['recording', '{\n  "session": {\n    "recording": true\n  }\n}\n', true],
+    ['a whisper before the JSON', '<whisper from="Avery">rebasing</whisper>\n{\n  "session": {"recording": true}\n}\n', true],
+    ['not recording', '{"session": {"recording": false}}', false],
+    ['no session', '{"agent_id": "OxAb12"}', false],
+    ['nothing printed', '', false],
+    ['cut short', '{\n  "session": {"recor', false],
+    ['a string, not true', '{"session": {"recording": "true"}}', false],
+  ])('%s', (_name, stdout, want) => {
+    expect(primeIsRecording(stdout)).toBe(want);
+  });
+});
+
 describe('endSession', () => {
   const workspace = mkdtempSync(join(tmpdir(), 'ox-bridge-ws-'));
 
@@ -386,6 +454,31 @@ describe('endSession', () => {
       await endSession(amp, 'T-nolease');
       expect(readFileSync(ox.logOf('hook'), 'utf8')).toContain('args=agent hook SessionEnd');
       expect(leases.taken).toBe(0);
+    } finally {
+      ox.restore();
+    }
+  });
+
+  test('a prime that reports recording resumes the thread', async () => {
+    const ox = fakeOx();
+    try {
+      const { amp, logs } = fakeAmp(workspace);
+      expect(await resumeSession(amp, 'T-rec')).toBe(true);
+      expect(readFileSync(ox.logOf('prime'), 'utf8')).toContain('amp_thread_url=https://ampcode.com/threads/T-rec\n');
+      expect(logs).toEqual([]);
+    } finally {
+      ox.restore();
+    }
+  });
+
+  test('a prime that exits 0 without recording is reported as failed', async () => {
+    const ox = fakeOx();
+    try {
+      // what prime prints while the last stop still owns the recording
+      ox.primeOutput('{\n  "agent_id": "OxAb12"\n}\n');
+      const { amp, logs } = fakeAmp(workspace);
+      expect(await resumeSession(amp, 'T-busy')).toBe(false);
+      expect(logs.join('\n')).toContain('ox-bridge event=session_resume_not_recording thread_id=T-busy exit_code=0');
     } finally {
       ox.restore();
     }
