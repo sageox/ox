@@ -186,9 +186,24 @@ jobs:
         # Split slots each own a runner in PR CI. Packing all eight processes
         # onto this one runner oversubscribes indexing and preview timeouts.
         # One full-suite process preserves every package, flag, and coverage gate.
+        # Unsplit, cmd/ox runs as one package against a timeout sized for a
+        # quarter of it: v0.24.0's attempt hit 25m after #1434's redaction
+        # slowdown. The flags still come from the tagged tier config; only the
+        # per-package timeout changes. Drop the override once sageox/ox#1457
+        # brings cmd/ox back under the tier timeout.
         run: |
           if [ "$STAGE" = test-release-coverage ]; then
-            make "$STAGE" TEST_SPLIT_LAYOUT=
+            full_flags="$(python3 scripts/test_tiers.py flags full)"
+            minutes="$(grep -oE '(^| )-timeout=[0-9]+m( |$)' <<<"$full_flags" | grep -oE '[0-9]+' | head -n 1)"
+            if [ -z "$minutes" ]; then
+              echo "::error::full tier flags carry no -timeout=<N>m to raise: $full_flags"
+              exit 1
+            fi
+            # Raise only: a tier timeout already above 50m stays as configured.
+            if [ "$minutes" -lt 50 ]; then
+              full_flags="$(sed -E 's/(^| )-timeout=[0-9]+m/\1-timeout=50m/' <<<"$full_flags")"
+            fi
+            make "$STAGE" TEST_SPLIT_LAYOUT= FULL_TEST_FLAGS="$full_flags"
           else
             make "$STAGE"
           fi
