@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -11,8 +12,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sageox/ox/internal/agentinstance"
 	oxruntime "github.com/sageox/ox/internal/runtime"
 	"github.com/sageox/ox/internal/session"
+	"github.com/sageox/ox/internal/session/pipeline"
 )
 
 // Customer promise (sageox/ox#1318): an Amp thread lands in the Ledger whole.
@@ -157,4 +160,29 @@ func TestSessionEnd_AmpReplyAfterIdleEndIsAContinuedSession(t *testing.T) {
 	require.True(t, second.StartOffsetKnown)
 	assert.True(t, strings.HasPrefix(string(sidecar[second.StartOffset:]), `{"content":"`+followUpPrompt),
 		"the continued recording starts at the reply's prompt, got %q", sidecar[second.StartOffset:])
+}
+
+// A live summary of an Amp session covers what its stop will upload: the
+// prompt that started the thread, and no turn from before the prime.
+func TestSessionSummarize_AmpRecordingStartsAtItsPrompt(t *testing.T) {
+	f := newAmpThreadFixture(t)
+	now := time.Now().UTC()
+	f.appendSidecar(t,
+		ampSidecarLine{Type: "user", Content: earlierPrompt, At: now.Add(-30 * time.Minute)},
+		ampSidecarLine{Type: "user", Content: orbPrompt, At: now.Add(-20 * time.Second)},
+	)
+	f.prime(t)
+	f.appendSidecar(t, ampSidecarLine{Type: "assistant", Content: orbReply, At: time.Now().Add(time.Second)})
+
+	printed := captureRealStdout(t, func() {
+		require.NoError(t, runAgentSessionSummarize(&agentinstance.Instance{AgentID: f.agentID}, nil))
+	})
+
+	dec := json.NewDecoder(bytes.NewReader(printed))
+	dec.DisallowUnknownFields()
+	var out pipeline.SummarizeOutput
+	require.NoError(t, dec.Decode(&out), "summarize prints its JSON result: %s", printed)
+	assert.Equal(t, 2, out.EntryCount, "the prompt and the reply")
+	assert.Contains(t, out.Summary, "1 user messages, 1 assistant responses")
+	assert.NotContains(t, out.Summary, "What does the billing", "the topic comes from this session's prompt")
 }
