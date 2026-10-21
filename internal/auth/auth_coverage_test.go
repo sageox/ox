@@ -283,6 +283,7 @@ func TestRefreshTokenForEndpoint_SessionTokenFallback(t *testing.T) {
 		ExpiresAt:    time.Now().Add(-time.Hour),
 		UserInfo:     UserInfo{UserID: "user-1", Email: "test@example.com"},
 	}
+	require.NoError(t, client.SaveToken(token))
 
 	newToken, err := client.refreshToken(token)
 	require.NoError(t, err)
@@ -511,6 +512,7 @@ func TestPackageLevel_RefreshTokenForEndpoint_Success(t *testing.T) {
 		ExpiresAt:    time.Now().Add(-time.Hour),
 		UserInfo:     UserInfo{UserID: "user-pkg", Email: "pkg@example.com"},
 	}
+	require.NoError(t, SaveTokenForEndpoint(mockServer.URL, token))
 
 	newToken, err := refreshTokenForEndpoint(token, mockServer.URL)
 	require.NoError(t, err)
@@ -636,6 +638,7 @@ func TestPackageLevel_RefreshTokenForEndpoint_JWTExchangeFails(t *testing.T) {
 		ExpiresAt:    time.Now().Add(-time.Hour),
 		UserInfo:     UserInfo{UserID: "u1"},
 	}
+	require.NoError(t, SaveTokenForEndpoint(mockServer.URL, token))
 
 	newToken, err := refreshTokenForEndpoint(token, mockServer.URL)
 	require.NoError(t, err)
