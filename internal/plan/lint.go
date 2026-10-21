@@ -283,6 +283,14 @@ var creditHiddenTags = map[string]bool{
 	"script": true, "style": true, "template": true, "title": true, "desc": true,
 }
 
+// voidTags never get an end tag, so they must not open a scope that an end tag
+// is expected to close.
+var voidTags = map[string]bool{
+	"area": true, "base": true, "br": true, "col": true, "embed": true, "hr": true,
+	"img": true, "input": true, "link": true, "meta": true, "source": true,
+	"track": true, "wbr": true,
+}
+
 // hasRenderedCredit reports whether a reader of the page sees a SageOx
 // enrichment credit. Three things count, all of them rendered:
 //
@@ -294,11 +302,20 @@ var creditHiddenTags = map[string]bool{
 //
 // Script and style source, comments, and attribute values (an aria-label or a
 // title) do not count on their own: the inlined chrome.js carries the credit
-// string as source on every injected page, enriched or not (ox#1432).
+// string as source on every injected page, enriched or not (ox#1432). Neither
+// does text under an element with the `hidden` attribute.
+//
+// Open elements are tracked as a stack so an end tag closes its own element and
+// any it implicitly closes (an unclosed <p>), never an outer hidden scope.
 func hasRenderedCredit(page []byte) bool {
 	z := xhtml.NewTokenizer(bytes.NewReader(page))
 	var text strings.Builder
-	hidden := 0
+	type openElem struct {
+		name  string
+		hides bool
+	}
+	var open []openElem
+	hidden := 0 // open elements that hide their text
 	chromeIsland := false
 	for {
 		tt := z.Next()
@@ -307,7 +324,9 @@ func hasRenderedCredit(page []byte) bool {
 			return footerCreditRe.MatchString(strings.Join(strings.Fields(text.String()), " "))
 		case xhtml.StartTagToken, xhtml.SelfClosingTagToken:
 			name, more := z.TagName()
+			tag := string(name)
 			chromeIsland = false
+			hides := creditHiddenTags[tag]
 			for more {
 				var key, val []byte
 				key, val, more = z.TagAttr()
@@ -316,15 +335,30 @@ func hasRenderedCredit(page []byte) bool {
 					return true
 				case "id":
 					chromeIsland = string(val) == "ox-chrome-data"
+				case "hidden":
+					hides = true
 				}
 			}
-			if tt == xhtml.StartTagToken && creditHiddenTags[string(name)] {
-				hidden++
+			if tt == xhtml.StartTagToken && !voidTags[tag] {
+				open = append(open, openElem{name: tag, hides: hides})
+				if hides {
+					hidden++
+				}
 			}
 		case xhtml.EndTagToken:
 			name, _ := z.TagName()
-			if creditHiddenTags[string(name)] && hidden > 0 {
-				hidden--
+			tag := string(name)
+			for i := len(open) - 1; i >= 0; i-- {
+				if open[i].name != tag {
+					continue
+				}
+				for _, e := range open[i:] {
+					if e.hides {
+						hidden--
+					}
+				}
+				open = open[:i]
+				break
 			}
 			chromeIsland = false
 		case xhtml.TextToken:

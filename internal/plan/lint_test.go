@@ -348,6 +348,17 @@ func TestLintBranding_CreditIsWhatTheReaderSees(t *testing.T) {
 			res:  Result{},
 		},
 		{
+			name: "credit under a hidden element, nested, is not a credit",
+			html: `<div hidden><p>Team context <em>enriched by</em> SageOx</p></div><p>plan</p>`,
+			res:  Result{},
+		},
+		{
+			name:      "credit after a closed hidden element still counts",
+			html:      `<div hidden><div><br>draft</div></div><p>Team context enriched by SageOx`,
+			res:       Result{},
+			wantRules: []string{"branding.overclaim"},
+		},
+		{
 			name:      "hand-authored visible credit without enrichment is an overclaim",
 			html:      injected(`<html><body><footer>Team context enriched by SageOx</footer></body></html>`, Result{}),
 			res:       Result{},
