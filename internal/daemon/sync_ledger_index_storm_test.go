@@ -33,13 +33,18 @@ func newLedgerStormScheduler(t *testing.T) (*SyncScheduler, string, *atomic.Int3
 }
 
 // waitLedgerBuildIdle blocks until no ledger build goroutine is in flight.
+// 30s, not 5s: a build ends with debug.FreeOSMemory, a full GC whose cost grows
+// with the whole test process. In release.yml's single-process coverage stage
+// the build took 2.6-3.7s on 4 CPUs (0.3s alone) and missed 5s on the runner.
+// A passing wait returns as soon as the build is idle, so the budget only
+// lengthens a genuine hang.
 func waitLedgerBuildIdle(t *testing.T, s *SyncScheduler) {
 	t.Helper()
 	require.Eventually(t, func() bool {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		return !s.ledgerBuildRunning
-	}, 5*time.Second, 5*time.Millisecond)
+	}, 30*time.Second, 5*time.Millisecond)
 }
 
 // TestLedgerIndexRebuild_StormCoalesced reproduces the production storm: every
