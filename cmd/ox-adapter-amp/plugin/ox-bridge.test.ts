@@ -5,7 +5,8 @@
 //
 // Customer promise (sageox/ox#1314): in an Amp orb, a thread's session is
 // ended, and so uploaded, before the orb's earliest pause; a coworker who
-// keeps working keeps one session; laptops are unchanged.
+// keeps working keeps one session; laptops are unchanged. And (sageox/ox#1318)
+// a coworker who replies after that end is recorded again.
 
 import { describe, expect, test } from 'bun:test';
 import type { PluginAPI } from '@ampcode/plugin';
@@ -89,18 +90,28 @@ function fakeAmp(workspace: string, keepAlive: 'grants' | 'rejects' = 'grants') 
   return { amp, fire, leases, logs };
 }
 
-// a fake `ox` on PATH that records how it was called
-function fakeOx(): { log: string; restore: () => void } {
+// A fake `ox` on PATH that records how it was called, one log per command
+// (`ox agent hook ...` to hook.log, `ox agent prime` to prime.log), written
+// whole once the call is done. It also records the thread's last sidecar
+// line as the call saw it.
+function fakeOx(): { logOf: (command: 'hook' | 'prime') => string; restore: () => void } {
   const bin = mkdtempSync(join(tmpdir(), 'ox-bridge-bin-'));
-  const log = join(bin, 'calls.log');
   writeFileSync(
     join(bin, 'ox'),
-    `#!/bin/sh\n{ echo "args=$*"; echo "cwd=$(pwd -P)"; echo "agent_env=$AGENT_ENV"; printf 'stdin='; cat; echo; } > "${log}"\n`
+    `#!/bin/sh
+log="${bin}/$2.log"
+{
+  echo "args=$*"; echo "cwd=$(pwd -P)"; echo "agent_env=$AGENT_ENV"; echo "amp_thread_url=$AMP_THREAD_URL"
+  echo "sidecar_tail=$(tail -n 1 "$HOME/.cache/amp/ox-sessions/\${AMP_THREAD_URL##*/}.jsonl" 2>/dev/null)"
+  printf 'stdin='; cat; echo
+} > "$log.tmp"
+mv "$log.tmp" "$log"
+`
   );
   chmodSync(join(bin, 'ox'), 0o755);
   const priorPath = process.env.PATH;
   process.env.PATH = `${bin}:${priorPath}`;
-  return { log, restore: () => (process.env.PATH = priorPath) };
+  return { logOf: (command) => join(bin, `${command}.log`), restore: () => (process.env.PATH = priorPath) };
 }
 
 async function waitFor(check: () => boolean, what: string): Promise<void> {
@@ -131,11 +142,22 @@ describe('sessionEndDelay', () => {
   });
 });
 
+// lets a test finish a session end when it chooses
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((r) => (resolve = r));
+  return { promise, resolve };
+}
+
+const flush = () => new Promise((r) => setTimeout(r, 0));
+
 describe('createSessionEnder', () => {
+  const noResume = async () => {};
+
   test('a coworker who keeps prompting keeps one session; idle ends it once', () => {
     const { clock, advanceTo } = fakeClock();
     const ended: string[] = [];
-    const ender = createSessionEnder(clock, async (tid) => void ended.push(tid));
+    const ender = createSessionEnder(clock, async (tid) => void ended.push(tid), noResume);
 
     ender.promptStarted('T-1');
     advanceTo(1 * MIN);
@@ -153,7 +175,7 @@ describe('createSessionEnder', () => {
   test('threads end independently', () => {
     const { clock, advanceTo } = fakeClock();
     const ended: string[] = [];
-    const ender = createSessionEnder(clock, async (tid) => void ended.push(tid));
+    const ender = createSessionEnder(clock, async (tid) => void ended.push(tid), noResume);
 
     ender.turnEnded('T-a'); // 2 min
     advanceTo(1 * MIN);
@@ -163,24 +185,84 @@ describe('createSessionEnder', () => {
     advanceTo(3 * MIN);
     expect(ended).toEqual(['T-a', 'T-b']);
   });
+
+  test('a reply after the idle end resumes recording once, after the end has finished', async () => {
+    const { clock, advanceTo } = fakeClock();
+    const stop = deferred();
+    const resumed: string[] = [];
+    const ender = createSessionEnder(clock, () => stop.promise, async (tid) => void resumed.push(tid));
+
+    ender.turnEnded('T-1');
+    advanceTo(2 * MIN); // idle: the session end starts uploading
+    ender.promptStarted('T-1'); // Devon replies while it uploads
+    await flush();
+    expect(resumed).toEqual([]); // the stop still owns the recording
+
+    stop.resolve();
+    await flush();
+    expect(resumed).toEqual(['T-1']);
+
+    ender.turnEnded('T-1');
+    ender.promptStarted('T-1'); // a reply before the next idle end keeps the session
+    await flush();
+    expect(resumed).toEqual(['T-1']);
+  });
+
+  test('a prompt before any idle end never resumes', async () => {
+    const { clock, advanceTo } = fakeClock();
+    const resumed: string[] = [];
+    const ender = createSessionEnder(clock, async () => {}, async (tid) => void resumed.push(tid));
+
+    ender.promptStarted('T-1');
+    advanceTo(1 * MIN);
+    ender.turnEnded('T-1');
+    advanceTo(10 * MIN);
+    ender.promptStarted('T-1');
+    await flush();
+    expect(resumed).toEqual([]);
+  });
+
+  test('a failed end still resumes: the next prime records into whatever it left', async () => {
+    const { clock, advanceTo } = fakeClock();
+    const resumed: string[] = [];
+    const ender = createSessionEnder(
+      clock,
+      () => Promise.reject(new Error('ox crashed')),
+      async (tid) => void resumed.push(tid)
+    );
+
+    ender.turnEnded('T-1');
+    advanceTo(2 * MIN);
+    ender.promptStarted('T-1');
+    await flush();
+    expect(resumed).toEqual(['T-1']);
+  });
 });
 
 describe('bridge', () => {
   const workspace = mkdtempSync(join(tmpdir(), 'ox-bridge-ws-'));
 
-  test('on a laptop nothing is scheduled; the daemon finishes sessions', () => {
+  test('on a laptop nothing is scheduled or primed; the daemon finishes sessions', async () => {
     delete process.env.AMP_ORB;
-    const { clock, pending } = fakeClock();
-    const { amp, fire } = fakeAmp(workspace);
-    bridge(amp, clock);
+    const ox = fakeOx();
+    try {
+      const { clock, pending } = fakeClock();
+      const { amp, fire } = fakeAmp(workspace);
+      bridge(amp, clock);
 
-    fire('agent.start', { thread: { id: 'T-laptop' }, message: 'fix the flaky test' });
-    fire('agent.end', { thread: { id: 'T-laptop' }, messages: [{ role: 'assistant', content: 'Fixed.' }] });
+      fire('agent.start', { thread: { id: 'T-laptop' }, message: 'fix the flaky test' });
+      fire('agent.end', { thread: { id: 'T-laptop' }, messages: [{ role: 'assistant', content: 'Fixed.' }] });
+      fire('agent.start', { thread: { id: 'T-laptop' }, message: 'and the other one' });
+      await new Promise((r) => setTimeout(r, 100));
 
-    expect(pending()).toHaveLength(0);
-    const sidecar = readFileSync(join(home, '.cache', 'amp', 'ox-sessions', 'T-laptop.jsonl'), 'utf8');
-    expect(sidecar).toContain('fix the flaky test');
-    expect(sidecar).toContain('Fixed.');
+      expect(pending()).toHaveLength(0);
+      expect(existsSync(ox.logOf('prime'))).toBe(false);
+      const sidecar = readFileSync(join(home, '.cache', 'amp', 'ox-sessions', 'T-laptop.jsonl'), 'utf8');
+      expect(sidecar).toContain('fix the flaky test');
+      expect(sidecar).toContain('Fixed.');
+    } finally {
+      ox.restore();
+    }
   });
 
   test('in an orb an idle thread runs `ox agent hook SessionEnd` with the orb held awake', async () => {
@@ -195,17 +277,50 @@ describe('bridge', () => {
       advanceTo(30 * MIN);
       fire('agent.end', { thread: { id: 'T-orb' }, messages: [] });
       advanceTo(31 * MIN);
-      expect(existsSync(ox.log)).toBe(false);
+      expect(existsSync(ox.logOf('hook'))).toBe(false);
       advanceTo(32 * MIN);
 
       await waitFor(() => leases.released === 1, 'the keepAlive lease to be released');
-      const call = readFileSync(ox.log, 'utf8');
+      const call = readFileSync(ox.logOf('hook'), 'utf8');
       expect(call).toContain('args=agent hook SessionEnd');
       expect(call).toContain(`cwd=${realpathSync(workspace)}`);
       expect(call).toContain('agent_env=amp');
       const stdin = JSON.parse(call.split('stdin=')[1]);
       expect(stdin).toEqual({ session_id: 'https://ampcode.com/threads/T-orb', hook_event_name: 'SessionEnd' });
       expect(leases.taken).toBe(1);
+    } finally {
+      ox.restore();
+      delete process.env.AMP_ORB;
+    }
+  });
+
+  test('in an orb a reply after the idle end runs `ox agent prime` for the thread, once its prompt is on disk', async () => {
+    process.env.AMP_ORB = '1';
+    const ox = fakeOx();
+    try {
+      const { clock, advanceTo } = fakeClock();
+      const { amp, fire, leases } = fakeAmp(workspace);
+      bridge(amp, clock);
+
+      fire('agent.start', { thread: { id: 'T-reply' }, message: 'rename the retry helper' });
+      advanceTo(30 * MIN);
+      fire('agent.end', { thread: { id: 'T-reply' }, messages: [] });
+      advanceTo(32 * MIN); // idle: the session ends
+      await waitFor(() => leases.released === 1, 'the session end');
+      expect(existsSync(ox.logOf('prime'))).toBe(false);
+
+      fire('agent.start', { thread: { id: 'T-reply' }, message: 'now add a unit test' });
+
+      await waitFor(() => existsSync(ox.logOf('prime')), 'the quiet prime');
+      const call = readFileSync(ox.logOf('prime'), 'utf8');
+      expect(call).toContain('args=agent prime\n');
+      expect(call).toContain(`cwd=${realpathSync(workspace)}`);
+      expect(call).toContain('agent_env=amp');
+      expect(call).toContain('amp_thread_url=https://ampcode.com/threads/T-reply\n');
+      // ox starts the new recording at the prompt's line, so it must be there
+      const tail = JSON.parse(call.split('sidecar_tail=')[1].split('\n')[0]);
+      expect(tail).toMatchObject({ type: 'user', content: 'now add a unit test' });
+      expect(call).toEndWith('stdin=\n');
     } finally {
       ox.restore();
       delete process.env.AMP_ORB;
@@ -221,7 +336,7 @@ describe('endSession', () => {
     try {
       const { amp, leases } = fakeAmp(workspace, 'rejects');
       await endSession(amp, 'T-nolease');
-      expect(readFileSync(ox.log, 'utf8')).toContain('args=agent hook SessionEnd');
+      expect(readFileSync(ox.logOf('hook'), 'utf8')).toContain('args=agent hook SessionEnd');
       expect(leases.taken).toBe(0);
     } finally {
       ox.restore();
