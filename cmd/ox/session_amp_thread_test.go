@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sageox/ox/internal/agentinstance"
+	"github.com/sageox/ox/internal/prime"
 	oxruntime "github.com/sageox/ox/internal/runtime"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/pipeline"
@@ -185,4 +186,57 @@ func TestSessionSummarize_AmpRecordingStartsAtItsPrompt(t *testing.T) {
 	assert.Equal(t, 2, out.EntryCount, "the prompt and the reply")
 	assert.Contains(t, out.Summary, "1 user messages, 1 assistant responses")
 	assert.NotContains(t, out.Summary, "What does the billing", "the topic comes from this session's prompt")
+}
+
+// runQuietPrime runs `ox agent prime --format json` the way ox-bridge.ts does
+// after an idle end: no hook payload, AGENT_ENV=amp, the thread's URL in
+// AMP_THREAD_URL, and only the printed JSON read back.
+func runQuietPrime(t *testing.T, threadURL string) prime.Output {
+	t.Helper()
+	t.Setenv("AGENT_ENV", "amp")
+	t.Setenv("AMP_THREAD_URL", threadURL)
+	var stdout bytes.Buffer
+	cmd := agentPrimeCmd
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&bytes.Buffer{})
+	require.NoError(t, cmd.Flags().Set("format", "json"))
+	t.Cleanup(func() {
+		_ = cmd.Flags().Set("format", "")
+		cmd.SetOut(nil)
+		cmd.SetErr(nil)
+	})
+	require.NoError(t, runAgentPrime(cmd, nil))
+	var out prime.Output
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &out), "prime prints its JSON result: %s", stdout.String())
+	return out
+}
+
+// The bridge's quiet re-prime is a real prime: it reuses the thread's AI
+// coworker, links the new session as continued from the one that ended,
+// starts it at the reply's prompt, and says it is recording, which is all
+// ox-bridge.ts reads from it.
+func TestAgentPrime_AmpQuietRePrimeContinuesTheThread(t *testing.T) {
+	f := newAmpThreadFixture(t)
+	now := time.Now().UTC()
+	f.appendSidecar(t, ampSidecarLine{Type: "user", Content: orbPrompt, At: now.Add(-20 * time.Second)})
+	first := f.prime(t)
+	f.appendSidecar(t, ampSidecarLine{Type: "assistant", Content: orbReply, At: time.Now().Add(time.Second)})
+	f.sendSessionEnd(t)
+	f.appendSidecar(t, ampSidecarLine{Type: "user", Content: followUpPrompt, At: time.Now()})
+
+	out := runQuietPrime(t, orbThreadURL)
+
+	require.NotNil(t, out.Session, "prime must report the recording")
+	assert.True(t, out.Session.Recording, "ox-bridge.ts counts the resume only when prime says it records")
+	assert.Equal(t, f.agentID, out.AgentID, "the thread keeps its AI coworker")
+	second, err := session.LoadRecordingStateForAgent(f.projectRoot, f.agentID)
+	require.NoError(t, err)
+	require.NotNil(t, second)
+	assert.NotEqual(t, first.SessionID, second.SessionID)
+	assert.Equal(t, first.SessionID, second.ContinuedFromSessionID, "linked as continued from the session that ended")
+	sidecar, err := os.ReadFile(f.sidecar)
+	require.NoError(t, err)
+	require.True(t, second.StartOffsetKnown)
+	assert.True(t, strings.HasPrefix(string(sidecar[second.StartOffset:]), `{"content":"`+followUpPrompt),
+		"the new session starts at the reply's prompt")
 }
