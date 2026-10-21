@@ -312,6 +312,16 @@ func (r *RecordingState) IsAgentAlive() bool {
 	return isPIDAlive(r.ParentPID)
 }
 
+// AmpStartsAtPrompt reports whether an Amp recording starts at the sidecar
+// line of the prompt that began it (sageox/ox#1318). The ox-bridge plugin
+// writes that prompt before the model runs `ox agent prime`, so StartOffset
+// alone bounds such a recording: dropping its entries older than StartedAt
+// would drop the prompt. Amp recordings from before prime set the boundary
+// keep the StartedAt filter.
+func (r *RecordingState) AmpStartsAtPrompt() bool {
+	return r.AdapterName == "amp" && r.StartOffsetKnown && r.SessionFile != ""
+}
+
 // IsSubagent returns true if this session was spawned by a parent agent.
 // Checks both explicit parent tracking and environment-detected origin.
 func (r *RecordingState) IsSubagent() bool {

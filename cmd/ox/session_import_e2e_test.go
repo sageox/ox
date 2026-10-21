@@ -534,6 +534,8 @@ func optionsFromCommand(t *testing.T, command string) importOptions {
 		switch fields[i] {
 		case "--yes":
 			opts.yes = true
+		case "--include-aborted":
+			opts.includeAborted = true
 		case "--session":
 			i++
 			opts.sessions = append(opts.sessions, strings.Split(fields[i], ",")...)

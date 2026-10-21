@@ -1122,7 +1122,11 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	// offset it is validated from: entries before it are never imported, so a
 	// foreign turn in that window can neither condemn nor ride along.
 	var rawEntries []adapters.RawEntry
-	if reader, ok := adapter.(adapters.IncrementalReader); ok && state.AdapterName == "claude-code" && state.StartOffset > 0 {
+	reader, incremental := adapter.(adapters.IncrementalReader)
+	// An Amp recording's offset is the line of the prompt that began it, which
+	// ox-bridge.ts wrote before the prime: the offset alone bounds it.
+	startsAtPrompt := incremental && state.AmpStartsAtPrompt()
+	if incremental && (startsAtPrompt || (state.AdapterName == "claude-code" && state.StartOffset > 0)) {
 		rawEntries, _, err = reader.ReadFromOffset(state.SessionFile, state.StartOffset)
 	} else {
 		rawEntries, err = adapter.Read(state.SessionFile)
@@ -1150,7 +1154,7 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	// filter out entries from before session recording started.
 	// the adapter reads ALL entries from the JSONL file, but we only want
 	// entries created after ox session start was called.
-	if !state.StartedAt.IsZero() {
+	if !state.StartedAt.IsZero() && !startsAtPrompt {
 		rawEntries = pipeline.FilterEntriesAfterStart(rawEntries, state.StartedAt)
 	}
 
@@ -1958,12 +1962,20 @@ func runAgentSessionSummarize(inst *agentinstance.Instance, args []string) error
 			if err != nil {
 				return fmt.Errorf("adapter not found: %w", err)
 			}
-			rawEntries, err := adapter.Read(state.SessionFile)
+			// an Amp recording reads from its prompt's line, as the stop does
+			var rawEntries []adapters.RawEntry
+			reader, incremental := adapter.(adapters.IncrementalReader)
+			startsAtPrompt := incremental && state.AmpStartsAtPrompt()
+			if startsAtPrompt {
+				rawEntries, _, err = reader.ReadFromOffset(state.SessionFile, state.StartOffset)
+			} else {
+				rawEntries, err = adapter.Read(state.SessionFile)
+			}
 			if err != nil {
 				return fmt.Errorf("failed to read session: %w", err)
 			}
 			// filter out entries from before session recording started
-			if !state.StartedAt.IsZero() {
+			if !state.StartedAt.IsZero() && !startsAtPrompt {
 				rawEntries = pipeline.FilterEntriesAfterStart(rawEntries, state.StartedAt)
 			}
 			entries = convertRawEntries(rawEntries)

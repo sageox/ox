@@ -73,6 +73,7 @@ type importIndex struct {
 	byAgentID   map[string][]liveRecording // ox agent instance -> recordings named for it
 	active      map[nativeKey]string       // native session -> a recording still in progress
 	activeFiles map[string]string          // native file -> a recording still in progress
+	aborted     *abortedSessions           // recordings the coworker aborted, and their native sessions
 }
 
 func newImportIndex() *importIndex {
@@ -86,6 +87,7 @@ func newImportIndex() *importIndex {
 		byAgentID:   map[string][]liveRecording{},
 		active:      map[nativeKey]string{},
 		activeFiles: map[string]string{},
+		aborted:     &abortedSessions{},
 	}
 }
 
@@ -271,28 +273,50 @@ func (idx *importIndex) addLocalCaptures(projectRoot, ledgerPath, repoID string)
 // addCapture reads a pending capture's header and footers, the crash-safe
 // carriers of its ses_ ID and native sessions, without reading its entries.
 func (idx *importIndex) addCapture(name, rawPath string) {
-	if lfs.IsPointerFile(rawPath) {
+	capture, ok := readCaptureIdentity(rawPath)
+	if !ok {
 		return
+	}
+	if capture.sessionID != "" {
+		idx.sessionIDs[capture.sessionID] = name
+	}
+	idx.addAgentName(name, "", capture.started)
+	for _, ns := range capture.natives {
+		if ns.ID != "" {
+			idx.addRecorded(nativeKey{agent: capture.agent, id: ns.ID}, name, ns.FirstSeen)
+		}
+	}
+}
+
+// captureIdentity is what a capture's header and footers say about it.
+type captureIdentity struct {
+	agent     string // canonical; empty when the header names none
+	sessionID string
+	started   time.Time
+	natives   []lfs.NativeSession
+}
+
+// readCaptureIdentity reads a local capture's header and footers. It reports
+// false for a pointer or an unreadable file; a header that does not parse
+// yields an empty identity.
+func readCaptureIdentity(rawPath string) (captureIdentity, bool) {
+	var capture captureIdentity
+	if lfs.IsPointerFile(rawPath) {
+		return capture, false
 	}
 	first, footers, err := headerAndFooters(rawPath)
 	if err != nil {
-		return
+		return capture, false
 	}
-	agent := ""
-	var started time.Time
-	var natives []lfs.NativeSession
 	var header struct {
 		Metadata *session.StoreMeta `json:"metadata"`
 	}
 	if json.Unmarshal(first, &header) == nil && header.Metadata != nil {
-		agent = canonicalImportAgent(header.Metadata.AgentType)
-		started = header.Metadata.CreatedAt
-		natives = append(natives, header.Metadata.NativeSessions...)
-		if header.Metadata.SessionID != "" {
-			idx.sessionIDs[header.Metadata.SessionID] = name
-		}
+		capture.agent = canonicalImportAgent(header.Metadata.AgentType)
+		capture.started = header.Metadata.CreatedAt
+		capture.sessionID = header.Metadata.SessionID
+		capture.natives = append(capture.natives, header.Metadata.NativeSessions...)
 	}
-	idx.addAgentName(name, "", started)
 	// Footers carry native sessions recorded after the header was written.
 	// They merge field by field, so one without native_sessions hides none;
 	// they name no agent, so the header's applies.
@@ -301,14 +325,10 @@ func (idx *importIndex) addCapture(name, rawPath string) {
 			NativeSessions []lfs.NativeSession `json:"native_sessions"`
 		}
 		if json.Unmarshal(line, &footer) == nil {
-			natives = append(natives, footer.NativeSessions...)
+			capture.natives = append(capture.natives, footer.NativeSessions...)
 		}
 	}
-	for _, ns := range natives {
-		if ns.ID != "" {
-			idx.addRecorded(nativeKey{agent: agent, id: ns.ID}, name, ns.FirstSeen)
-		}
-	}
+	return capture, true
 }
 
 // headerAndFooters returns a capture's first line and the footer records that
@@ -430,11 +450,12 @@ const (
 	stateRecordedLive    importState = "recorded_live"
 	stateNeedsSummarizer importState = "needs_summarizer"
 	stateNotShared       importState = "not_shared"
+	stateAborted         importState = "aborted"
 )
 
 // classify applies checks 4 to 6 to an in-scope session with a conversation.
 // It returns the state and, for recorded_live and already_imported, the Ledger
-// session that covers it.
+// session that covers it; for in_progress and aborted, the reason.
 func (idx *importIndex) classify(s nativeimport.Session, now time.Time) (importState, string) {
 	key := keyFor(s.Agent, s.NativeID)
 	switch {
@@ -460,7 +481,27 @@ func (idx *importIndex) classify(s nativeimport.Session, now time.Time) (importS
 	if existing := idx.markerMatch(s); existing != "" {
 		return stateRecordedLive, existing
 	}
+	if a, ok := idx.abortedMatch(s); ok {
+		return stateAborted, "you aborted its recording on " + a.AbortedAt.Local().Format("2006-01-02")
+	}
 	return stateReady, ""
+}
+
+// abortedMatch recognizes a session the coworker discarded by aborting a
+// recording of it: by its native ID, or by the aborted recording's link in
+// its transcript. It runs after the checks that say what the Ledger already
+// holds, and matches the native ID alone, so an agent spelled differently by
+// another recording can never reopen a discarded session.
+func (idx *importIndex) abortedMatch(s nativeimport.Session) (abortedSession, bool) {
+	if a, ok := idx.aborted.Sessions[s.NativeID]; ok {
+		return a, true
+	}
+	for _, m := range s.Markers {
+		if a, ok := idx.aborted.Recordings[m.SessionID()]; ok && m.SessionID() != "" {
+			return a, true
+		}
+	}
+	return abortedSession{}, false
 }
 
 // markerMatch recognizes a recording made by an ox that did not store native

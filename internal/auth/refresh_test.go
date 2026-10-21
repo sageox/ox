@@ -996,8 +996,12 @@ func TestHandle401ErrorForEndpoint_UsesPassedEndpoint(t *testing.T) {
 	// a regression would hit, instead of an untestable real prod default.
 	require.NoError(t, SaveTokenForEndpoint(wrongServer.URL, createTestToken(1*time.Hour)))
 
+	// The login being refreshed is stored under the project endpoint, as it is
+	// for every caller. It is expired, so endpoint.Get() still resolves to
+	// wrongServer.
 	oldToken := createTestToken(-1 * time.Hour)
 	oldToken.RefreshToken = "project-refresh-token"
+	require.NoError(t, SaveTokenForEndpoint(rightServer.URL, oldToken))
 
 	newToken, err := Handle401ErrorForEndpoint(oldToken, rightServer.URL)
 	require.NoError(t, err)

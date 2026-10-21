@@ -53,9 +53,37 @@ type orbSessionFixture struct {
 	*draftLedgerFixture
 	store   *fakeLFSStore
 	agentID string
+	sidecar string // ~/.cache/amp/ox-sessions/<thread id>.jsonl
 }
 
 func newOrbSessionFixture(t *testing.T) *orbSessionFixture {
+	t.Helper()
+	f := newOrbLedgerFixture(t)
+
+	// what `ox agent prime` leaves behind in the orb: a live recording keyed
+	// by the thread URL Amp exported as AMP_THREAD_URL, with no sidecar path
+	// (Amp records in hook mode, so the stop looks the sidecar up)
+	state, err := session.StartRecording(f.projectRoot, session.StartRecordingOptions{
+		AgentID: f.agentID, AdapterName: "amp", Username: "amp",
+		AgentSessionID: orbThreadURL, WorkspacePath: f.projectRoot,
+	})
+	require.NoError(t, err)
+	require.Empty(t, state.SessionFile, "precondition: the stop must find the sidecar itself")
+	require.NoError(t, writeRawHeader(f.projectRoot, state))
+
+	// what ox-bridge.ts appends for one Amp turn after that
+	at := state.StartedAt.UTC()
+	f.appendSidecar(t,
+		ampSidecarLine{Type: "user", Content: orbPrompt, At: at.Add(time.Second)},
+		ampSidecarLine{Type: "assistant", Content: orbReply, At: at.Add(2 * time.Second)},
+	)
+	return f
+}
+
+// newOrbLedgerFixture is the orb environment with no recording yet: a
+// project with a real Ledger clone of a bare remote, a fake LFS store, the
+// real ox-adapter-amp binary, and an empty bridge sidecar directory.
+func newOrbLedgerFixture(t *testing.T) *orbSessionFixture {
 	t.Helper()
 	base := newDraftLedgerFixture(t)
 	for _, key := range []string{"XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"} {
@@ -95,33 +123,9 @@ func newOrbSessionFixture(t *testing.T) *orbSessionFixture {
 	adapters.Register(ampAdapter)
 	t.Cleanup(func() { adapters.Unregister("amp") })
 
-	// what `ox agent prime` leaves behind in the orb: a live recording keyed
-	// by the thread URL Amp exported as AMP_THREAD_URL, with no sidecar path
-	// (Amp records in hook mode, so the stop looks the sidecar up)
-	const agentID = "OxOrb1"
-	state, err := session.StartRecording(base.projectRoot, session.StartRecordingOptions{
-		AgentID: agentID, AdapterName: "amp", Username: "amp",
-		AgentSessionID: orbThreadURL, WorkspacePath: base.projectRoot,
-	})
-	require.NoError(t, err)
-	require.Empty(t, state.SessionFile, "precondition: the stop must find the sidecar itself")
-	require.NoError(t, writeRawHeader(base.projectRoot, state))
 	// ox-bridge.ts writes ~/.cache/amp/ox-sessions/<thread id>.jsonl
 	sidecar := filepath.Join(os.Getenv("HOME"), ".cache", "amp", "ox-sessions", nativeThreadKey(orbThreadURL)+".jsonl")
 	require.NoError(t, os.MkdirAll(filepath.Dir(sidecar), 0o755))
-
-	// what ox-bridge.ts appends for one Amp turn after that
-	at := state.StartedAt.UTC()
-	var lines []byte
-	for _, v := range []map[string]string{
-		{"type": "user", "content": orbPrompt, "timestamp": at.Add(time.Second).Format(time.RFC3339Nano)},
-		{"type": "assistant", "content": orbReply, "timestamp": at.Add(2 * time.Second).Format(time.RFC3339Nano)},
-	} {
-		line, err := json.Marshal(v)
-		require.NoError(t, err)
-		lines = append(append(lines, line...), '\n')
-	}
-	require.NoError(t, os.WriteFile(sidecar, lines, 0o600))
 
 	// The stop child runs in-process (selfexec refuses to re-exec a test
 	// binary): the same command the child runs, and the same read of what it
@@ -139,7 +143,35 @@ func newOrbSessionFixture(t *testing.T) *orbSessionFixture {
 	}
 	t.Cleanup(func() { runSessionStopAtEnd = prior })
 
-	return &orbSessionFixture{draftLedgerFixture: base, store: store, agentID: agentID}
+	return &orbSessionFixture{draftLedgerFixture: base, store: store, agentID: "OxOrb1", sidecar: sidecar}
+}
+
+// ampSidecarLine is one line ox-bridge.ts appends to a thread's sidecar.
+type ampSidecarLine struct {
+	Type    string // user, assistant, tool_use, tool_result
+	Content string
+	At      time.Time
+}
+
+// appendSidecar appends lines the way ox-bridge.ts writes them.
+func (f *orbSessionFixture) appendSidecar(t *testing.T, lines ...ampSidecarLine) {
+	t.Helper()
+	sidecar, err := os.OpenFile(f.sidecar, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	require.NoError(t, err)
+	defer sidecar.Close()
+	for _, l := range lines {
+		v := map[string]any{"type": l.Type, "timestamp": l.At.UTC().Format(time.RFC3339Nano)}
+		switch l.Type {
+		case "tool_use":
+			v["tool_name"], v["tool_input"], v["call_id"] = "Bash", l.Content, "toolu_"+strconv.FormatInt(l.At.UnixNano(), 36)
+		default:
+			v["content"] = l.Content
+		}
+		line, err := json.Marshal(v)
+		require.NoError(t, err)
+		_, err = sidecar.Write(append(line, '\n'))
+		require.NoError(t, err)
+	}
 }
 
 // stopCommandFlags stands in for the cobra command `session stop` runs under.

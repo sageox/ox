@@ -7,13 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.24.0] - 2026-10-20
+## [0.24.0] - 2026-10-21
 
-Amp orb sessions now reach your team on their own, and plan reviews, approvals and saves reliably get there too.
+Amp orb sessions now reach your team whole and on their own, Oxy can join you in Claude Code, and plan reviews, approvals and saves reliably reach your team.
 
 ### New
 
-- **Amp orb sessions reach your team on their own** — in an Amp orb, ox records each thread from its first prime and uploads it before the orb pauses, credited to the owner of `SAGEOX_TOKEN`.
+- **Amp orb sessions reach your team on their own** — in an Amp orb, ox records each thread and uploads it before the orb pauses, credited to the owner of `SAGEOX_TOKEN`. Every Amp session now starts with the prompt that opened its thread, and a reply sent after the orb went idle is recorded as a continued session.
 - **Apps can read every ox setting from ox itself** — `ox config schema --json` lists each setting with a short label and description, the values it accepts, the levels you can set it at, and its current value. It works outside a repository, so the SageOx desktop app can show your user-level ox settings without keeping its own copy of the list.
 - **Read a Visual walkthrough as joined moments** — `ox walkthrough` pairs each click, selection and pause with what was said and what happened next, shows zoomed pictures on request, and splits long recordings into chapters you can read one at a time. Recordings without this data read as before.
 - **Comment on a plan as a whole** — in review mode, the comments panel takes a comment on a plan's direction, scope or readiness without pinning it to a section. It reaches the AI coworker like any other comment.

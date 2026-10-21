@@ -83,14 +83,22 @@ func runAgentSessionAbortActive(inst *agentinstance.Instance, cmd *cobra.Command
 
 	sessionName := session.GetSessionName(state.SessionPath)
 
+	// Remember the recording and the native sessions it covered while the
+	// state that names them still exists, so neither `ox session import` nor
+	// a resumed conversation's prime brings them back.
+	importWarning, undoAbortRecord := rememberAbort(projectRoot, sessionName, state.SessionID, nativeSessionsOfRecording(state.SessionPath, state))
+
 	// Remove any published draft placeholder from the ledger FIRST, while the
 	// local state that identifies it still exists. Doing this after
 	// os.RemoveAll would mean a failure here leaves the user's data already
 	// deleted with a live placeholder still advertising the session.
 	draftDeleted, draftWarning := removeLedgerDraftForAbort(sessionName)
 
-	// clear .recording.json so future session start works
+	// clear .recording.json so future session start works. Until it is gone
+	// the recording can still upload at stop, so a failure here takes the
+	// abort record back; after it, the session stays discarded.
 	if err := session.ClearRecordingStateForAgent(projectRoot, inst.AgentID); err != nil {
+		undoAbortRecord()
 		return fmt.Errorf("failed to clear recording state: %w", err)
 	}
 
@@ -108,7 +116,7 @@ func runAgentSessionAbortActive(inst *agentinstance.Instance, cmd *cobra.Command
 	// repair tasks server-side (fire-and-forget)
 	notifySessionAbortedAsync(projectRoot, state.SessionID, state.LifecycleRegistrationState != "deferred")
 
-	return emitAbortOutput(cmd.OutOrStdout(), inst.AgentID, sessionName, draftDeleted, draftWarning)
+	return emitAbortOutput(cmd.OutOrStdout(), inst.AgentID, sessionName, draftDeleted, joinWarnings(draftWarning, importWarning))
 }
 
 // runAgentSessionAbortByName aborts a session by name. Only allows discarding
@@ -194,7 +202,7 @@ func runAgentSessionAbortByName(inst *agentinstance.Instance, cmd *cobra.Command
 		if err := confirmAbort(inst, cmd); err != nil {
 			return err
 		}
-		return killFinalizedSession(inst, cmd, projectRoot, sessionName)
+		return killFinalizedSession(inst, cmd, projectRoot, sessionName, sessionPath)
 	case session.StatusPaused, session.StatusHeld:
 		// stopped but not uploaded (held: kept on this machine by choice);
 		// discarding by name is the coworker's explicit call
@@ -223,14 +231,17 @@ func runAgentSessionAbortByName(inst *agentinstance.Instance, cmd *cobra.Command
 	if abortedSessionID == "" {
 		abortedSessionID = session.ReadHeaderSessionID(filepath.Join(sessionPath, "raw.jsonl"))
 	}
+	importWarning, undoAbortRecord := rememberAbort(projectRoot, sessionName, abortedSessionID, nativeSessionsOfRecording(sessionPath, nil))
 
 	// Remove any published draft placeholder from the ledger before touching
 	// local data, so a git failure cannot leave the session deleted locally
 	// while a placeholder still advertises it.
 	draftDeleted, draftWarning := removeLedgerDraftForAbort(sessionName)
 
-	// remove .recording.json if present (unconditional — no agent ownership check)
+	// remove .recording.json if present (unconditional — no agent ownership
+	// check). As above, a recording still armed takes the abort record back.
 	if err := os.Remove(recPath); err != nil && !os.IsNotExist(err) {
+		undoAbortRecord()
 		return fmt.Errorf("failed to clear recording state: %w", err)
 	}
 
@@ -241,7 +252,7 @@ func runAgentSessionAbortByName(inst *agentinstance.Instance, cmd *cobra.Command
 
 	notifySessionAbortedAsync(projectRoot, abortedSessionID, abortedEverRegistered)
 
-	return emitAbortOutput(cmd.OutOrStdout(), inst.AgentID, sessionName, draftDeleted, draftWarning)
+	return emitAbortOutput(cmd.OutOrStdout(), inst.AgentID, sessionName, draftDeleted, joinWarnings(draftWarning, importWarning))
 }
 
 // buildSessionInfo constructs a SessionInfo from a session folder on disk.
@@ -428,9 +439,12 @@ func abortDraftOnlySession(inst *agentinstance.Instance, cmd *cobra.Command, pro
 		}
 	}
 
+	// A draft names no native session (ADR-029), but its ses_ id is the link
+	// prime wrote into the native transcript, which is enough for import.
+	importWarning, _ := rememberAbort(projectRoot, sessionName, abortedSessionID, nil)
 	deleted, warning := removeLedgerDraftForAbort(sessionName)
 	notifySessionAbortedAsync(projectRoot, abortedSessionID, true)
-	return emitAbortOutput(cmd.OutOrStdout(), inst.AgentID, sessionName, deleted, warning)
+	return emitAbortOutput(cmd.OutOrStdout(), inst.AgentID, sessionName, deleted, joinWarnings(warning, importWarning))
 }
 
 // removeLedgerDraftForAbort git-removes a session's draft placeholder from the
@@ -469,29 +483,48 @@ func removeLedgerDraftForAbort(sessionName string) (bool, string) {
 // (deleteSessionFromLedger + store.DeleteSession) rather than reimplementing
 // it, and add the abort-only steps delete omits: the hydration-cache purge and
 // the server notification. The caller has already confirmed and verified the
-// name is exact.
-func killFinalizedSession(inst *agentinstance.Instance, cmd *cobra.Command, projectRoot, sessionName string) error {
+// name is exact; sessionPath is where it resolved the session.
+func killFinalizedSession(inst *agentinstance.Instance, cmd *cobra.Command, projectRoot, sessionName, sessionPath string) error {
 	ledgerPath, err := resolveLedgerPath()
 	if err != nil {
 		return fmt.Errorf("could not resolve ledger to delete finalized session %q: %w", sessionName, err)
 	}
 	ledgerSessionDir := filepath.Join(ledgerPath, "sessions", sessionName)
+	repoID := getRepoIDOrDefault(projectRoot)
+	hydrationCache := filepath.Join(ledgerPath, ".sageox", "cache", "sessions", sessionName)
 
-	// Read the ses_ id before removal so the server /c/ page can flip to
-	// discarded — the meta.json that carries it is about to be git-rm'd.
+	// Read the ses_ id and native sessions before removal so the server /c/
+	// page can flip to discarded and `ox session import` never offers the
+	// session again — the meta.json that carries them is about to be git-rm'd.
 	abortedSessionID := ""
+	importWarning := ""
+	var undoAbortRecord func()
 	if meta, metaErr := lfs.ReadSessionMeta(ledgerSessionDir); metaErr == nil {
 		abortedSessionID = meta.EffectiveSessionID()
+		importWarning, undoAbortRecord = rememberAbort(projectRoot, sessionName, abortedSessionID, nativeSessionsOfMeta(meta))
+	} else {
+		// isSessionInLedger reads an unreadable meta.json as finalized, so only
+		// a local copy of the recording can still say what it covered.
+		sessionID, natives := localIdentityOfSession(sessionPath,
+			filepath.Join(session.GetContextPath(repoID), "sessions", sessionName), hydrationCache)
+		importWarning, undoAbortRecord = rememberAbort(projectRoot, sessionName, sessionID, natives)
+		if sessionID == "" && len(natives) == 0 {
+			importWarning = "could not read the session's meta.json, so the abort was not recorded for 'ox session import', which may offer this session again"
+		}
 	}
 
-	// Remove the git-tracked ledger directory: git rm -r + commit + push.
+	// Remove the git-tracked ledger directory: git rm -r + commit + push. A
+	// failure that leaves the directory in place killed nothing, so take the
+	// record back; once git rm ran, a later push still carries the kill.
 	if err := deleteSessionFromLedger(ledgerPath, sessionName, ledgerSessionDir); err != nil {
+		if _, statErr := os.Stat(ledgerSessionDir); statErr == nil {
+			undoAbortRecord()
+		}
 		return fmt.Errorf("failed to remove finalized session %q from the ledger: %w", sessionName, err)
 	}
 
 	// Remove the local recording cache copy, if one exists. ErrSessionNotFound
 	// is expected and fine — a finalized session may have no local copy left.
-	repoID := getRepoIDOrDefault(projectRoot)
 	if contextPath := session.GetContextPath(repoID); contextPath != "" {
 		if store, storeErr := session.NewStore(contextPath); storeErr == nil {
 			if delErr := store.DeleteSession(sessionName); delErr != nil && !errors.Is(delErr, session.ErrSessionNotFound) {
@@ -503,14 +536,13 @@ func killFinalizedSession(inst *agentinstance.Instance, cmd *cobra.Command, proj
 	// Remove the ledger hydration cache. git rm never touches it — it is
 	// gitignored and lives outside the tracked sessions/ tree — so without this
 	// the hydrated summary/transcript bytes would survive the kill.
-	hydrationCache := filepath.Join(ledgerPath, ".sageox", "cache", "sessions", sessionName)
 	if err := os.RemoveAll(hydrationCache); err != nil {
 		slog.Warn("failed to remove ledger hydration cache during finalized abort", "session", sessionName, "error", err)
 	}
 
 	notifySessionAbortedAsync(projectRoot, abortedSessionID, true)
 
-	return emitAbortOutput(cmd.OutOrStdout(), inst.AgentID, sessionName, false, "")
+	return emitAbortOutput(cmd.OutOrStdout(), inst.AgentID, sessionName, false, importWarning)
 }
 
 // confirmAbort checks --force flag or prompts for interactive confirmation.

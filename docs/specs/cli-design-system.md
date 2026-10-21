@@ -16,6 +16,11 @@ printer; see `.claude/rules/json-output.md`. Writer-aware helpers such as
 `PrintWarningTo` honor their supplied writer. Command-specific JSON response
 envelopes remain part of the command's stdout contract.
 
+An enumerated field in an envelope may gain values. The command's help lists
+them, and a consumer treats a value it does not know as not actionable. For
+example, `ox session import --json` added the session state `aborted`, with
+its `counts.aborted` key; like every state but `ready`, it is never uploaded.
+
 The common CLI pre-run resolves `OX_JSON=1` as the JSON default; explicit
 `--json` or `--json=false` takes precedence. It applies that result to both the
 configuration and command flags so handlers agree regardless of which they read.
