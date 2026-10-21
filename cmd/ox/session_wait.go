@@ -231,8 +231,9 @@ func sessionsOutsideLedger(ctx context.Context, projectRoot, ledgerPath string, 
 	}
 
 	// A session being written, committed or pushed already reads as published in
-	// the clone above, so compare the clone with its remote.
-	changed, err := gitutil.RunGit(ctx, ledgerPath, "diff", "--name-only", "@{upstream}", "--", "sessions/")
+	// the clone above, so compare the clone with where it last matched its remote;
+	// a fetched teammate's session is not this machine's.
+	changed, err := gitutil.RunGit(ctx, ledgerPath, "diff", "--name-only", "--merge-base", "@{upstream}", "--", "sessions/")
 	if err != nil {
 		return nil, fmt.Errorf("check the Ledger for unpushed changes: %w", err)
 	}
@@ -241,7 +242,11 @@ func sessionsOutsideLedger(ctx context.Context, projectRoot, ledgerPath string, 
 		return nil, fmt.Errorf("check the Ledger for unpushed changes: %w", err)
 	}
 	for _, name := range sessionNamesIn(changed + "\n" + untracked) {
-		add(outsideSession{name: name, reason: "in the Ledger clone but not pushed", pending: daemonUploads})
+		unpushed := outsideSession{name: name, reason: "in the Ledger clone but not pushed", pending: daemonUploads}
+		if meta, err := lfs.ReadSessionMeta(filepath.Join(ledgerPath, "sessions", name)); err == nil {
+			unpushed.finished = finishedAt(meta)
+		}
+		add(unpushed)
 	}
 	return out, nil
 }
@@ -271,15 +276,20 @@ func publishedSince(ctx context.Context, ledgerPath string, since time.Time) (in
 		if err != nil || json.Unmarshal([]byte(data), &meta) != nil || meta.IsDraft() {
 			continue
 		}
-		finished := meta.CreatedAt // a meta.json with no stop recorded
-		if meta.StoppedAt != nil {
-			finished = *meta.StoppedAt
-		}
-		if !finished.Before(since) {
+		if !finishedAt(&meta).Before(since) {
 			count++
 		}
 	}
 	return count, nil
+}
+
+// finishedAt is when a session stopped, or when it started if its meta.json
+// records no stop.
+func finishedAt(meta *lfs.SessionMeta) time.Time {
+	if meta.StoppedAt != nil {
+		return *meta.StoppedAt
+	}
+	return meta.CreatedAt
 }
 
 // sessionNamesIn returns the sorted session names in `git log --name-only`

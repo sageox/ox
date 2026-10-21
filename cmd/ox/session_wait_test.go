@@ -256,6 +256,7 @@ func TestSessionWait_ReportsEverySessionTheDaemonDidNotUpload(t *testing.T) {
 	} {
 		assert.Contains(t, report.String(), "Not in the Ledger: "+name+": "+reason+"\n")
 	}
+	assert.Contains(t, report.String(), "0 of 3 sessions finished since", "crashed, waiting and unpushed count; the rest have no stop time")
 	assert.Error(t, err)
 }
 
@@ -299,6 +300,27 @@ func TestSessionWait_UnreadableLedgerRemoteFailsTheRun(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "check the Ledger for unpushed changes")
+}
+
+// A teammate's session the clone has fetched but not merged is already on the
+// remote, so wait does not report it.
+func TestSessionWait_IgnoresSessionsOnlyOnTheRemote(t *testing.T) {
+	f := newWaitFixture(t)
+	branch := runGit(t, f.ledgerPath, "rev-parse", "--abbrev-ref", "HEAD")
+	teammate := filepath.Join(t.TempDir(), "teammate")
+	runGit(t, filepath.Dir(teammate), "clone", "--branch", branch, f.barePath, teammate)
+	dir := filepath.Join(teammate, "sessions", "2026-10-20T08-00-teammate-OxMate1")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "meta.json"), []byte(`{}`), 0o644))
+	runGit(t, teammate, "add", "sessions")
+	runGit(t, teammate, "commit", "--no-verify", "-m", "teammate session")
+	runGit(t, teammate, "push")
+	runGit(t, f.ledgerPath, "fetch", f.barePath, "+"+branch+":"+runGit(t, f.ledgerPath, "rev-parse", "--symbolic-full-name", "@{upstream}"))
+
+	out, err := runWait(t, time.Now().Add(-time.Hour), time.Minute)
+
+	assert.Empty(t, out.Failed)
+	assert.NoError(t, err)
 }
 
 func TestSessionWait_RejectsUnusableInvocation(t *testing.T) {
