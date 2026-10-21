@@ -43,5 +43,5 @@ func waitForLedgerIndexingDone(t *testing.T, mgr *CodeDBManager) {
 		mgr.mu.Lock()
 		defer mgr.mu.Unlock()
 		return !mgr.ledgerIndexing
-	}, 5*time.Second, 10*time.Millisecond, "timed out waiting for ledger indexing to complete")
+	}, codedbBuildWait, 10*time.Millisecond, "timed out waiting for ledger indexing to complete")
 }
