@@ -199,9 +199,14 @@ func runQuietPrime(t *testing.T, threadURL string) prime.Output {
 	cmd := agentPrimeCmd
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&bytes.Buffer{})
+	// agentPrimeCmd is shared by the package's tests: put the flag back as found
+	format := cmd.Flags().Lookup("format")
+	require.NotNil(t, format)
+	priorFormat, priorChanged := format.Value.String(), format.Changed
 	require.NoError(t, cmd.Flags().Set("format", "json"))
 	t.Cleanup(func() {
-		_ = cmd.Flags().Set("format", "")
+		_ = format.Value.Set(priorFormat)
+		format.Changed = priorChanged
 		cmd.SetOut(nil)
 		cmd.SetErr(nil)
 	})
