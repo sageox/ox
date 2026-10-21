@@ -1696,6 +1696,13 @@ func startSessionRecordingUnlocked(projectRoot, agentID, agentType, parentAgentI
 	if cursorStartup != nil {
 		opts.PreparedIdentity = cursorStartup.preparedIdentity
 	}
+	if canonicalAgentType(agentType) == string(agentx.AgentTypeAmp) {
+		if sidecar, offset, ok := ampRecordingStart(projectRoot, agentID, agentSessionID); ok {
+			opts.SessionFile = sidecar
+			opts.StartOffset = offset
+			opts.StartOffsetKnown = true
+		}
+	}
 	if canonicalAgentType(agentType) == string(agentx.AgentTypeCursor) && cursorBoundary != nil {
 		opts.StartOffset = cursorBoundary.Offset
 		opts.StartOffsetKnown = true

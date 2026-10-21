@@ -104,7 +104,9 @@ Installs a user-scope plugin, `ox-bridge.ts`, in Amp's system plugin directory
 (`$XDG_CONFIG_HOME/amp/plugins/` when `XDG_CONFIG_HOME` is set to an absolute path,
 otherwise `~/.config/amp/plugins/`) that records the session, and an `AGENTS.md`
 marker that primes it. Amp does not persist transcripts itself, so the plugin is
-what makes recording possible.
+what makes recording possible. In an Amp orb, the plugin ends a thread's session
+before the orb pauses, and when you reply in that thread later it starts a new
+session, linked as continued from the first.
 
 ### Pi
 ```bash

@@ -3299,9 +3299,13 @@ func recoverRawFromSessionFile(logger *slog.Logger, recPath, sessionDir, rawPath
 		}
 	}
 
+	// An Amp recording starts at its prompt's line, which the bridge wrote
+	// before the prime: the offset read above already bounds it.
+	_, incremental := adapter.(adapters.IncrementalReader)
+	startsAtPrompt := incremental && state.AmpStartsAtPrompt()
 	var filtered []adapters.RawEntry
 	for _, e := range rawEntries {
-		if !e.Timestamp.IsZero() && e.Timestamp.Before(state.StartedAt) {
+		if !startsAtPrompt && !e.Timestamp.IsZero() && e.Timestamp.Before(state.StartedAt) {
 			continue
 		}
 		filtered = append(filtered, e)

@@ -18,6 +18,13 @@
  * running `ox agent hook SessionEnd`, which uploads the session to the
  * Ledger before it returns. Elsewhere the daemon outlives the agent and
  * finishes sessions on its own, so nothing changes there.
+ *
+ * A coworker can reply in that thread after its session ended
+ * (sageox/ox#1318). Nothing else starts recording again then: the model
+ * primed once, at the thread's start. So the plugin runs `ox agent prime`
+ * itself, with the thread's URL and its output discarded, once the reply's
+ * prompt is in the sidecar. ox starts that recording at the prompt's line and
+ * links it as continued from the session that ended.
  */
 
 import type { PluginAPI } from '@ampcode/plugin';
@@ -44,8 +51,20 @@ const UPLOAD_MARGIN_MS = 3 * 60_000;
 // plugin sees as it happens.
 const ORB_START_ALLOWANCE_MS = 3 * 60_000;
 // ox waits up to 3 min for the upload (sessionEndStopWait in
-// cmd/ox/session_end_sync.go); wait a minute longer so ox returns first.
+// cmd/ox/session_end_sync.go); wait a minute longer so ox returns first. A
+// prime takes seconds; the same bound only stops the plugin waiting on one.
 const STOP_TIMEOUT_MS = 4 * 60_000;
+// A resume fails while the last stop is still uploading: SessionEnd returns
+// after 3 min and leaves a slow stop running. It is tried again when the turn
+// ends and on the next prompt, at most this many times per idle end, so a
+// prime that cannot record (ox missing, repo not set up) is not rerun on
+// every prompt.
+const RESUME_ATTEMPTS = 3;
+// prime's JSON is a few KB; this only bounds a misbehaving child
+const PRIME_OUTPUT_MAX_BYTES = 1 << 20;
+// The end of ox's output can arrive after it exits. A daemon that prime
+// starts may hold the pipe open, so wait this long for it at most.
+const STDOUT_DRAIN_MS = 1_000;
 
 const write = (tid: string, obj: Record<string, unknown>): void =>
   appendFileSync(
@@ -97,23 +116,58 @@ const realClock: Clock = {
 
 /**
  * Schedules one session end per thread: a turn ending (re)arms it, and the
- * thread's next prompt cancels it.
+ * thread's next prompt cancels it. The first prompt after an end resumes
+ * recording. A thread's ends and resumes run one at a time, in order: a
+ * prime while the stop still owns the recording would find it live and start
+ * nothing, and an end before the resume it follows would end nothing. A
+ * resume that fails leaves the thread ended, and is tried again when the turn
+ * ends and on the next prompt (RESUME_ATTEMPTS).
  */
-export function createSessionEnder(clock: Clock, end: (threadID: string) => Promise<void>) {
+export function createSessionEnder(
+  clock: Clock,
+  end: (threadID: string) => Promise<void>,
+  resume: (threadID: string) => Promise<boolean>
+) {
   const lastPrompt = new Map<string, number>();
   const pending = new Map<string, Timer>();
+  // threads whose session ended and has not been resumed
+  const ended = new Set<string>();
+  const attempts = new Map<string, number>();
+  const queue = new Map<string, Promise<void>>();
+  const settled = (): void => {};
+  const enqueue = (threadID: string, step: () => Promise<unknown>): void => {
+    const prior = queue.get(threadID) ?? Promise.resolve();
+    queue.set(threadID, prior.then(step).then(settled, settled));
+  };
   const cancel = (threadID: string): void => {
     const timer = pending.get(threadID);
     if (timer === undefined) return;
     clock.clearTimer(timer);
     pending.delete(threadID);
   };
+  const tryResume = (threadID: string): void => {
+    const tried = attempts.get(threadID) ?? 0;
+    if (tried >= RESUME_ATTEMPTS || !ended.delete(threadID)) return;
+    attempts.set(threadID, tried + 1);
+    enqueue(threadID, async () => {
+      let resumed = false;
+      try {
+        resumed = await resume(threadID);
+      } finally {
+        if (!resumed) ended.add(threadID);
+      }
+    });
+  };
   return {
     promptStarted(threadID: string): void {
       cancel(threadID);
       lastPrompt.set(threadID, clock.now());
+      tryResume(threadID);
     },
     turnEnded(threadID: string): void {
+      // A resume that failed starts at the same prompt's line when tried
+      // here, so the turn still lands whole.
+      tryResume(threadID);
       cancel(threadID);
       const delay = sessionEndDelay(clock.now(), lastPrompt.get(threadID));
       pending.set(
@@ -121,7 +175,9 @@ export function createSessionEnder(clock: Clock, end: (threadID: string) => Prom
         clock.setTimer(() => {
           pending.delete(threadID);
           lastPrompt.delete(threadID);
-          void end(threadID);
+          ended.add(threadID);
+          attempts.delete(threadID);
+          enqueue(threadID, () => end(threadID));
         }, delay)
       );
     },
@@ -136,14 +192,9 @@ export function createSessionEnder(clock: Clock, end: (threadID: string) => Prom
 export async function endSession(amp: PluginAPI, threadID: string): Promise<void> {
   const lease = await amp.system.executor.keepAlive().catch(() => undefined);
   try {
-    const code = await runOx(['agent', 'hook', 'SessionEnd'], {
-      cwd: amp.system.workspaceRoot
-        ? amp.helpers.filePathFromURI(amp.system.workspaceRoot)
-        : process.cwd(),
-      input: JSON.stringify({
-        session_id: new URL(`/threads/${threadID}`, amp.system.ampURL).toString(),
-        hook_event_name: 'SessionEnd',
-      }),
+    const { code } = await runOx(['agent', 'hook', 'SessionEnd'], {
+      cwd: workspaceDir(amp),
+      input: JSON.stringify({ session_id: threadURL(amp, threadID), hook_event_name: 'SessionEnd' }),
     });
     if (code !== 0)
       amp.logger.log(
@@ -158,23 +209,92 @@ export async function endSession(amp: PluginAPI, threadID: string): Promise<void
   }
 }
 
-// Resolves with ox's exit code, or null when ox outlives STOP_TIMEOUT_MS; ox
-// keeps uploading in its own process either way.
-function runOx(args: string[], opts: { cwd: string; input: string }): Promise<number | null> {
+/**
+ * Starts recording the thread again after its session ended, the way the
+ * model's own prime does: `ox agent prime` with the thread's URL in
+ * AMP_THREAD_URL, which keys the AI coworker and the session it continues.
+ * Its team context is for the model, which already has it, so only the
+ * recording status is read. Resolves whether the thread is recording again.
+ */
+export async function resumeSession(amp: PluginAPI, threadID: string): Promise<boolean> {
+  try {
+    const { code, stdout } = await runOx(['agent', 'prime', '--format', 'json'], {
+      cwd: workspaceDir(amp),
+      env: { AMP_THREAD_URL: threadURL(amp, threadID) },
+      captureStdout: true,
+    });
+    if (primeIsRecording(stdout)) return true;
+    amp.logger.log(
+      `ox-bridge event=session_resume_not_recording thread_id=${threadID} exit_code=${code ?? 'still_running'}`
+    );
+    return false;
+  } catch (err) {
+    amp.logger.log(
+      `ox-bridge event=session_resume_error thread_id=${threadID} error=${JSON.stringify(String(err))}`
+    );
+    return false;
+  }
+}
+
+/**
+ * Whether `ox agent prime --format json` reports the thread recording. Its
+ * exit code cannot say: a prime that finds the last stop still uploading
+ * starts nothing and still exits 0.
+ */
+export function primeIsRecording(stdout: string): boolean {
+  const start = stdout.search(/^\{/m);
+  if (start < 0) return false;
+  try {
+    const output = JSON.parse(stdout.slice(start)) as { session?: { recording?: unknown } };
+    return output.session?.recording === true;
+  } catch {
+    return false;
+  }
+}
+
+// The URL ox keys a thread's recording by: Amp exports it to the agent's
+// shell as AMP_THREAD_URL, and agentx rebuilds it in this shape in an orb.
+const threadURL = (amp: PluginAPI, threadID: string): string =>
+  new URL(`/threads/${threadID}`, amp.system.ampURL).toString();
+
+const workspaceDir = (amp: PluginAPI): string =>
+  amp.system.workspaceRoot ? amp.helpers.filePathFromURI(amp.system.workspaceRoot) : process.cwd();
+
+// Resolves with ox's exit code, or null when ox outlives STOP_TIMEOUT_MS (ox
+// keeps running in its own process either way), and what it printed when
+// captureStdout is set. Without input, ox's stdin is empty, so a prime reads
+// no hook payload.
+function runOx(
+  args: string[],
+  opts: { cwd: string; input?: string; env?: Record<string, string>; captureStdout?: boolean }
+): Promise<{ code: number | null; stdout: string }> {
   return new Promise((resolve, reject) => {
     const child = spawn('ox', args, {
       cwd: opts.cwd,
-      env: { ...process.env, AGENT_ENV: 'amp' },
-      stdio: ['pipe', 'ignore', 'ignore'],
+      env: { ...process.env, AGENT_ENV: 'amp', ...opts.env },
+      stdio: [opts.input === undefined ? 'ignore' : 'pipe', opts.captureStdout ? 'pipe' : 'ignore', 'ignore'],
     });
-    const timer = setTimeout(() => resolve(null), STOP_TIMEOUT_MS);
+    let stdout = '';
+    child.stdout?.setEncoding('utf8');
+    child.stdout?.on('data', (chunk: string) => {
+      if (stdout.length < PRIME_OUTPUT_MAX_BYTES) stdout += chunk;
+    });
+    const timer = setTimeout(() => resolve({ code: null, stdout }), STOP_TIMEOUT_MS);
     child.on('error', (err) => {
       clearTimeout(timer);
       reject(err);
     });
     child.on('exit', (code) => {
       clearTimeout(timer);
-      resolve(code);
+      const out = child.stdout;
+      if (!out || out.readableEnded) return resolve({ code, stdout });
+      const done = (): void => {
+        clearTimeout(drain);
+        out.destroy();
+        resolve({ code, stdout });
+      };
+      const drain = setTimeout(done, STDOUT_DRAIN_MS);
+      out.once('end', done);
     });
     child.stdin?.on('error', () => {}); // ox missing: 'error' above reports it
     child.stdin?.end(opts.input);
@@ -183,15 +303,24 @@ function runOx(args: string[], opts: { cwd: string; input: string }): Promise<nu
 
 export function bridge(amp: PluginAPI, clock: Clock = realClock): void {
   const ender = process.env.AMP_ORB
-    ? createSessionEnder(clock, (threadID) => endSession(amp, threadID))
+    ? createSessionEnder(
+        clock,
+        (threadID) => endSession(amp, threadID),
+        (threadID) => resumeSession(amp, threadID)
+      )
     : undefined;
 
   amp.on('session.start', (e) => {
     if (e.thread?.id) write(e.thread.id, { type: 'session_meta', session_id: e.thread.id });
   });
   amp.on('agent.start', (e) => {
-    ender?.promptStarted(e.thread.id);
-    write(e.thread.id, { type: 'user', content: e.message });
+    // The prompt goes in first: a resumed recording starts at its line. The
+    // pending end is cancelled even if the write fails.
+    try {
+      write(e.thread.id, { type: 'user', content: e.message });
+    } finally {
+      ender?.promptStarted(e.thread.id);
+    }
     return {};
   });
   amp.on('tool.call', (e) => {

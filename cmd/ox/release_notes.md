@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An Amp thread's session holds the whole thread** — the prompt that starts a thread is now part of its session. It was dropped, because Amp writes it before your AI coworker loads SageOx. In an Amp orb, a reply you send after the thread went idle is recorded again, as a session continued from the first, without repeating earlier turns.
 - **`ox config --help` lists the settings ox actually has** — the list is now built from the same registry `ox config set` uses. It had advertised `murmuring` and `github_sync*`, which `ox config set` rejects, and left out `murmur_send`, `murmur_receive` and eleven other settings.
 - **Oxy stays a crisp picture after `/clear` or a resume** — in Ghostty and kitty he no longer falls back to blocky half-block cells once you clear or switch sessions, and he keeps the size you chose and stays hidden if you hid him.
 - **A plan's tabs work while you review it** — clicking a plan's own tabs, checkboxes or collapsible notes in review mode switches or opens them, instead of starting a comment on the section around them.
