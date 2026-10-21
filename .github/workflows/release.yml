@@ -194,14 +194,32 @@ jobs:
         run: |
           if [ "$STAGE" = test-release-coverage ]; then
             full_flags="$(python3 scripts/test_tiers.py flags full)"
-            minutes="$(grep -oE '(^| )-timeout=[0-9]+m( |$)' <<<"$full_flags" | grep -oE '[0-9]+' | head -n 1)"
-            if [ -z "$minutes" ]; then
-              echo "::error::full tier flags carry no -timeout=<N>m to raise: $full_flags"
+            timeout="$(grep -oE '(^| )-timeout=[^ ]+' <<<"$full_flags" | head -n 1 | sed -E 's/^ ?-timeout=//')"
+            if [ -z "$timeout" ]; then
+              echo "::error::full tier flags carry no -timeout to raise: $full_flags"
               exit 1
             fi
-            # Raise only: a tier timeout already above 50m stays as configured.
-            if [ "$minutes" -lt 50 ]; then
-              full_flags="$(sed -E 's/(^| )-timeout=[0-9]+m/\1-timeout=50m/' <<<"$full_flags")"
+            # Sum the Go duration (test_tiers.py SAFE_TIMEOUT: integer parts in
+            # h/m/s/ms/us/µs/ns) in nanoseconds; anything else fails closed.
+            rest="$timeout"; ns=0
+            while [[ "$rest" =~ ^([0-9]+)(ns|us|µs|ms|h|m|s)(.*)$ ]]; do
+              n="${BASH_REMATCH[1]}"; rest="${BASH_REMATCH[3]}"
+              case "${BASH_REMATCH[2]}" in
+                h) ns=$((ns + n * 3600000000000)) ;;
+                m) ns=$((ns + n * 60000000000)) ;;
+                s) ns=$((ns + n * 1000000000)) ;;
+                ms) ns=$((ns + n * 1000000)) ;;
+                us|µs) ns=$((ns + n * 1000)) ;;
+                ns) ns=$((ns + n)) ;;
+              esac
+            done
+            if [ -n "$rest" ]; then
+              echo "::error::cannot parse full tier -timeout=$timeout"
+              exit 1
+            fi
+            # Raise only: a tier timeout of 50m or more stays as configured.
+            if [ "$ns" -lt 3000000000000 ]; then
+              full_flags="$(sed -E 's/(^| )-timeout=[^ ]+/\1-timeout=50m/' <<<"$full_flags")"
             fi
             make "$STAGE" TEST_SPLIT_LAYOUT= FULL_TEST_FLAGS="$full_flags"
           else
