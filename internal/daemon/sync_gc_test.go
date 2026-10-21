@@ -7,7 +7,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -412,10 +414,7 @@ func TestGC_FullCycle_Ledger(t *testing.T) {
 	assert.True(t, os.IsNotExist(err), "cache backup should be cleaned up after restore")
 }
 
-// TestGC_CarriesPlanRetriesIntoTheNewClone: the CLI keeps plan retries under
-// the Ledger clone's .git/, which a reclone replaces. Failure prevented
-// (#1356): the reclone deletes them, or the carry replaces a retry dir the
-// CLI already wrote into the new clone, or fails the reclone over it.
+// A reclone must preserve retries from both .git directories (#1356).
 func TestGC_CarriesPlanRetriesIntoTheNewClone(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: git clone operations")
@@ -460,7 +459,7 @@ func TestGC_CarriesPlanRetriesIntoTheNewClone(t *testing.T) {
 		CloneURL: "file://" + bareDir,
 		Exists:   true,
 	}
-	require.Equal(t, gcSuccess, s.runBlueGreenGC(context.Background(), ws), "a carry the new clone refuses must not fail the reclone")
+	require.Equal(t, gcSuccess, s.runBlueGreenGC(context.Background(), ws), "both clones' retries must survive")
 
 	data, err := os.ReadFile(filepath.Join(cloneDir, pushDir, "old.json"))
 	require.NoError(t, err, "a plan retry must survive the reclone")
@@ -468,6 +467,155 @@ func TestGC_CarriesPlanRetriesIntoTheNewClone(t *testing.T) {
 	data, err = os.ReadFile(filepath.Join(cloneDir, reviewDir, "newer.json"))
 	require.NoError(t, err, "the carry must not replace a retry the CLI wrote into the new clone")
 	assert.Equal(t, "newer", string(data))
+	data, err = os.ReadFile(filepath.Join(cloneDir, reviewDir, "old.json"))
+	require.NoError(t, err, "a populated destination must also retain the old clone's retry")
+	assert.Equal(t, "old", string(data))
+}
+
+func TestGC_PlanRetriesRetainedWhenCarryIsRefused(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
+	for _, obstruction := range []string{"destination is a file", "conflicting entry"} {
+		t.Run(obstruction, func(t *testing.T) {
+			conflict := obstruction == "conflicting entry"
+			isolateCredentials(t)
+			bareDir, cloneDir := gcInitBareAndClone(t, t.TempDir())
+			require.NoError(t, os.MkdirAll(filepath.Join(cloneDir, "sessions"), 0755))
+			require.NoError(t, os.WriteFile(filepath.Join(cloneDir, "sessions", ".gitkeep"), nil, 0644))
+			require.NoError(t, exec.Command("git", "-C", cloneDir, "add", "sessions").Run())
+			require.NoError(t, exec.Command("git", "-C", cloneDir, "commit", "-m", "ledger structure").Run())
+			require.NoError(t, exec.Command("git", "-C", cloneDir, "push").Run())
+			pushDir := filepath.Join(".git", "ox-plan-push-pending")
+			reviewDir := filepath.Join(".git", "ox-plan-review-pending")
+			for _, dir := range []string{pushDir, reviewDir} {
+				require.NoError(t, os.MkdirAll(filepath.Join(cloneDir, dir), 0755))
+				require.NoError(t, os.WriteFile(filepath.Join(cloneDir, dir, "old.json"), []byte("original retry"), 0644))
+			}
+			s := gcTestScheduler(t)
+			s.gcSwapWindowTestHook = func() {
+				blocked := filepath.Join(cloneDir+".new", reviewDir)
+				if conflict {
+					require.NoError(t, os.MkdirAll(blocked, 0755))
+					blocked = filepath.Join(blocked, "old.json")
+				}
+				require.NoError(t, os.WriteFile(blocked, []byte("newer retry"), 0644))
+			}
+			ws := WorkspaceState{ID: "carry-refused", Type: WorkspaceTypeLedger, Path: cloneDir, CloneURL: "file://" + bareDir, Exists: true}
+			require.Equal(t, gcFailed, s.runBlueGreenGC(context.Background(), ws), "a refused carry must retain the old clone")
+			for _, dir := range []string{pushDir, reviewDir} {
+				data, err := os.ReadFile(filepath.Join(cloneDir+".old", dir, "old.json"))
+				require.NoError(t, err)
+				require.Equal(t, "original retry", string(data))
+			}
+			blocked := filepath.Join(cloneDir, reviewDir)
+			if conflict {
+				blocked = filepath.Join(blocked, "old.json")
+			}
+			data, err := os.ReadFile(blocked)
+			require.NoError(t, err)
+			require.Equal(t, "newer retry", string(data), "never replace destination bytes")
+			require.NoFileExists(t, cloneDir+".gc-swap-lock", "a failed carry must release the CLI swap signal")
+
+			// A restart must refuse the same conflict before another clone can
+			// remove .old. Once the obstruction clears, recovery is automatic.
+			s = gcTestScheduler(t)
+			require.Equal(t, gcFailed, s.runBlueGreenGC(context.Background(), ws))
+			require.NoDirExists(t, cloneDir+".new")
+			require.FileExists(t, filepath.Join(cloneDir+".old", reviewDir, "old.json"))
+			require.NoError(t, os.Remove(blocked))
+			require.Equal(t, gcSuccess, s.runBlueGreenGC(context.Background(), ws))
+			for _, dir := range []string{pushDir, reviewDir} {
+				data, err := os.ReadFile(filepath.Join(cloneDir, dir, "old.json"))
+				require.NoError(t, err)
+				require.Equal(t, "original retry", string(data))
+			}
+			require.NoDirExists(t, cloneDir+".old")
+		})
+	}
+}
+
+func TestGC_PlanRetriesSurviveInterruptedSwap(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
+	for _, phase := range []string{"before rename", "between renames", "between renames scheduled", "after swap scheduled", "before marker", "before carry", "partial carry", "equivalent carry"} {
+		t.Run(phase, func(t *testing.T) {
+			isolateCredentials(t)
+			bareDir, cloneDir := gcInitBareAndClone(t, t.TempDir())
+			require.NoError(t, os.MkdirAll(filepath.Join(cloneDir, "sessions"), 0755))
+			require.NoError(t, os.WriteFile(filepath.Join(cloneDir, "sessions", ".gitkeep"), nil, 0644))
+			require.NoError(t, exec.Command("git", "-C", cloneDir, "add", "sessions").Run())
+			require.NoError(t, exec.Command("git", "-C", cloneDir, "commit", "-m", "ledger structure").Run())
+			require.NoError(t, exec.Command("git", "-C", cloneDir, "push").Run())
+			pushDir := filepath.Join(".git", "ox-plan-push-pending")
+			reviewDir := filepath.Join(".git", "ox-plan-review-pending")
+			for _, dir := range []string{pushDir, reviewDir} {
+				require.NoError(t, os.MkdirAll(filepath.Join(cloneDir, dir), 0755))
+				require.NoError(t, os.WriteFile(filepath.Join(cloneDir, dir, "old.json"), []byte("original retry"), 0644))
+			}
+			require.NoError(t, os.WriteFile(filepath.Join(cloneDir, "README.md"), []byte("unpublished edit"), 0644))
+			s := gcTestScheduler(t)
+			hasDiff, err := s.gcCaptureDiff(context.Background(), cloneDir, cloneDir+".gc-diff", "HEAD")
+			require.NoError(t, err)
+			require.True(t, hasDiff)
+			require.NoError(t, exec.Command("git", "clone", "file://"+bareDir, cloneDir+".new").Run())
+			require.NoError(t, os.WriteFile(cloneDir+".gc-swap-lock", nil, 0600))
+			if phase != "before rename" {
+				require.NoError(t, os.Rename(cloneDir, cloneDir+".old"))
+				if !strings.HasPrefix(phase, "between renames") {
+					require.NoError(t, os.Rename(cloneDir+".new", cloneDir))
+				}
+			}
+			if phase == "before carry" || phase == "partial carry" || phase == "equivalent carry" {
+				require.NoError(t, os.WriteFile(cloneDir+".gc-swap-done", nil, 0600))
+			}
+			if phase == "partial carry" || phase == "equivalent carry" {
+				require.NoError(t, os.MkdirAll(filepath.Join(cloneDir, pushDir), 0755))
+				if phase == "partial carry" {
+					require.NoError(t, os.Link(filepath.Join(cloneDir+".old", pushDir, "old.json"), filepath.Join(cloneDir, pushDir, "old.json")))
+				} else {
+					require.NoError(t, os.WriteFile(filepath.Join(cloneDir, pushDir, "old.json"), []byte("original retry"), 0644))
+				}
+			}
+			ws := WorkspaceState{ID: "interrupted-carry", Type: WorkspaceTypeLedger, Path: cloneDir, CloneURL: "file://" + bareDir, Exists: true}
+			if strings.HasPrefix(phase, "between renames") || strings.HasSuffix(phase, "scheduled") {
+				ws.ID, ws.Exists = "ledger", !strings.HasPrefix(phase, "between renames")
+				if phase == "after swap scheduled" {
+					ws.LastGCTime = time.Now()
+					require.NoError(t, exec.Command("git", "-C", cloneDir, "config", "remote.origin.promisor", "true").Run())
+				}
+				registry := s.WorkspaceRegistry()
+				registry.mu.Lock()
+				primeConfigCacheLocked(registry)
+				registry.ledger = &ws
+				registry.workspaces[ws.ID] = &ws
+				registry.mu.Unlock()
+				if strings.HasSuffix(phase, "scheduled") {
+					s.checkAndRunGC(context.Background())
+				} else {
+					response := s.TriggerGC(context.Background())
+					require.True(t, response.LedgerTriggered)
+					require.Empty(t, response.Errors)
+				}
+				require.True(t, registry.GetLedger().Exists, "restoring the clone must resume ordinary sync")
+			} else {
+				require.Equal(t, gcSuccess, s.runBlueGreenGC(context.Background(), ws))
+			}
+			for _, dir := range []string{pushDir, reviewDir} {
+				data, err := os.ReadFile(filepath.Join(cloneDir, dir, "old.json"))
+				require.NoError(t, err, "the only retry copy must survive every swap boundary")
+				require.Equal(t, "original retry", string(data))
+			}
+			data, err := os.ReadFile(filepath.Join(cloneDir, "README.md"))
+			require.NoError(t, err)
+			require.Equal(t, "unpublished edit", string(data))
+			for _, suffix := range []string{".old", ".new", ".gc-swap-lock", ".gc-swap-done", ".gc-diff"} {
+				require.NoFileExists(t, cloneDir+suffix)
+				require.NoDirExists(t, cloneDir+suffix)
+			}
+		})
+	}
 }
 
 func TestGC_SkipsWhenLocked(t *testing.T) {
