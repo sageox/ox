@@ -180,3 +180,44 @@ func TestPlanLintFile_RoutesByFileName(t *testing.T) {
 		t.Errorf("lint must refuse a markdown file, got %v", err)
 	}
 }
+
+// TestPlanLintFile_StrictOutsideEnrichedCheckout drives `ox plan lint --file
+// --strict` from a repo with no SageOx enrichment (ox#1432).
+// Failure prevented: an author linting a page outside an enriched checkout
+// gets a false branding.overclaim failure on a page that credits nothing,
+// while a page that really claims enrichment must still fail.
+func TestPlanLintFile_StrictOutsideEnrichedCheckout(t *testing.T) {
+	tests := []struct {
+		name     string
+		page     string
+		wantRule string // "" = strict lint passes
+	}{
+		{name: "issue repro passes strict", page: `<!doctype html><html><body><main><h1>x</h1></main></body></html>`},
+		{
+			name:     "page claiming unearned enrichment fails strict",
+			page:     `<!doctype html><html><body><main><h1>x</h1></main><footer>Team context enriched by SageOx</footer></body></html>`,
+			wantRule: "branding.overclaim",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := newPlanEnrichTestRepo(t)
+			page := filepath.Join(root, "p.html")
+			writePlanSource(t, page, tt.page)
+			var out bytes.Buffer
+			cmd := &cobra.Command{}
+			cmd.SetOut(&out)
+
+			err := runPlanLintFile(cmd, page, true, "")
+			if tt.wantRule == "" {
+				if err != nil {
+					t.Fatalf("strict lint failed on an un-enriched page that credits nothing: %v\n%s", err, out.String())
+				}
+				return
+			}
+			if err == nil || !strings.Contains(out.String(), "["+tt.wantRule+"]") {
+				t.Fatalf("want strict failure with %s, got err=%v\n%s", tt.wantRule, err, out.String())
+			}
+		})
+	}
+}
