@@ -186,9 +186,42 @@ jobs:
         # Split slots each own a runner in PR CI. Packing all eight processes
         # onto this one runner oversubscribes indexing and preview timeouts.
         # One full-suite process preserves every package, flag, and coverage gate.
+        # Unsplit, cmd/ox runs as one package against a timeout sized for a
+        # quarter of it: v0.24.0's attempt hit 25m after #1434's redaction
+        # slowdown. The flags still come from the tagged tier config; only the
+        # per-package timeout changes. Drop the override once sageox/ox#1457
+        # brings cmd/ox back under the tier timeout.
         run: |
           if [ "$STAGE" = test-release-coverage ]; then
-            make "$STAGE" TEST_SPLIT_LAYOUT=
+            full_flags="$(python3 scripts/test_tiers.py flags full)"
+            timeout="$(grep -oE '(^| )-timeout=[^ ]+' <<<"$full_flags" | head -n 1 | sed -E 's/^ ?-timeout=//')"
+            if [ -z "$timeout" ]; then
+              echo "::error::full tier flags carry no -timeout to raise: $full_flags"
+              exit 1
+            fi
+            # Sum the Go duration (test_tiers.py SAFE_TIMEOUT: integer parts in
+            # h/m/s/ms/us/µs/ns) in nanoseconds; anything else fails closed.
+            rest="$timeout"; ns=0
+            while [[ "$rest" =~ ^([0-9]+)(ns|us|µs|ms|h|m|s)(.*)$ ]]; do
+              n="${BASH_REMATCH[1]}"; rest="${BASH_REMATCH[3]}"
+              case "${BASH_REMATCH[2]}" in
+                h) ns=$((ns + 10#$n * 3600000000000)) ;;
+                m) ns=$((ns + 10#$n * 60000000000)) ;;
+                s) ns=$((ns + 10#$n * 1000000000)) ;;
+                ms) ns=$((ns + 10#$n * 1000000)) ;;
+                us|µs) ns=$((ns + 10#$n * 1000)) ;;
+                ns) ns=$((ns + 10#$n)) ;;
+              esac
+            done
+            if [ -n "$rest" ]; then
+              echo "::error::cannot parse full tier -timeout=$timeout"
+              exit 1
+            fi
+            # Raise only: a tier timeout of 50m or more stays as configured.
+            if [ "$ns" -lt 3000000000000 ]; then
+              full_flags="$(sed -E 's/(^| )-timeout=[^ ]+/\1-timeout=50m/' <<<"$full_flags")"
+            fi
+            make "$STAGE" TEST_SPLIT_LAYOUT= FULL_TEST_FLAGS="$full_flags"
           else
             make "$STAGE"
           fi
