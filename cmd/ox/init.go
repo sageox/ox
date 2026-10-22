@@ -1069,7 +1069,7 @@ func runInit() error {
 			step++
 		}
 
-		// step N: invite teammates — ox invite sends the invitations directly,
+		// step N: invite teammates — ox team invite sends the invitations directly,
 		// so this no longer sends people to the dashboard to copy a link.
 		if cfg.TeamID != "" {
 			teamLabel := cfg.TeamName
@@ -1077,9 +1077,9 @@ func runInit() error {
 				teamLabel = cfg.TeamID
 			}
 			fmt.Printf("  %d. Invite teammates (%s):\n", step, teamLabel)
-			fmt.Printf("     Run %s\n", cli.StyleCommand.Render("ox invite alice@example.com,bob@example.com"))
+			fmt.Printf("     Run %s\n", cli.StyleCommand.Render("ox team invite alice@example.com,bob@example.com"))
 		} else {
-			fmt.Printf("  %d. Invite teammates with %s\n", step, cli.StyleCommand.Render("ox invite <email>..."))
+			fmt.Printf("  %d. Invite teammates with %s\n", step, cli.StyleCommand.Render("ox team invite <email>..."))
 		}
 		step++
 
@@ -2503,6 +2503,30 @@ type initEndpointInfo struct {
 	IsValid   bool
 }
 
+// soleLoggedInEndpoint returns the one endpoint ox init can default to without
+// asking: the only valid login, or failing that the only stored login.
+// storedSlugs marks endpoints that came from stored logins, so the injected
+// production row is not mistaken for one.
+func soleLoggedInEndpoint(endpoints []initEndpointInfo, storedSlugs map[string]bool) (initEndpointInfo, bool) {
+	var stored, valid []initEndpointInfo
+	for _, ep := range endpoints {
+		if !storedSlugs[ep.Slug] {
+			continue
+		}
+		stored = append(stored, ep)
+		if ep.IsValid {
+			valid = append(valid, ep)
+		}
+	}
+	switch {
+	case len(valid) == 1:
+		return valid[0], true
+	case len(stored) == 1:
+		return stored[0], true
+	}
+	return initEndpointInfo{}, false
+}
+
 // selectInitEndpoint shows endpoint selection UI for ox init.
 // needsLogin is true if the user must log in first. Cancellation returns an
 // empty endpoint; --no-input returns an error when a choice is needed.
@@ -2533,6 +2557,12 @@ func selectInitEndpoint() (string, bool, error) {
 		seenSlugs[info.Slug] = true
 	}
 
+	// remember which endpoints are real logins before the production row is injected
+	storedSlugs := make(map[string]bool, len(seenSlugs))
+	for slug := range seenSlugs {
+		storedSlugs[slug] = true
+	}
+
 	// add production endpoint if not already present
 	prodSlug := endpoint.NormalizeSlug(endpoint.Default)
 	if !seenSlugs[prodSlug] {
@@ -2553,6 +2583,12 @@ func selectInitEndpoint() (string, bool, error) {
 		return "", false, nil
 	}
 	if cli.NoInput() {
+		// logged in to exactly one endpoint: there is no choice to make. The
+		// injected production row is not a login, so it does not count, and a
+		// stale expired login does not make a single valid one ambiguous.
+		if only, ok := soleLoggedInEndpoint(endpoints, storedSlugs); ok {
+			return only.URL, !only.IsValid, nil
+		}
 		return "", false, fmt.Errorf("--no-input requires --endpoint <endpoint> to choose where to initialize")
 	}
 
