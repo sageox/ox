@@ -93,3 +93,40 @@ func TestRunTeams_LoggedOutKeepsLoginGuidance(t *testing.T) {
 	assert.Empty(t, got.LookupError)
 	assert.Contains(t, got.Guidance, "ox login")
 }
+
+// Failure prevented: a coworker authenticated only by SAGEOX_TOKEN (CI, a
+// container) was told to log in, because endpoint selection looked only at
+// stored logins and never at the env token's endpoint.
+func TestServerLookupEndpoints_IncludesEnvTokenEndpoint(t *testing.T) {
+	noInputCLIEnv(t)
+	t.Setenv("SAGEOX_ENDPOINT", "")
+	t.Setenv("SAGEOX_TOKEN", "opaque-env-token-for-test")
+	t.Chdir(t.TempDir())
+
+	got, err := serverLookupEndpoints("")
+
+	require.NoError(t, err)
+	assert.Contains(t, got, auth.EnvTokenEndpoint())
+}
+
+// Failure prevented: when refreshing a stored login failed, the endpoint was
+// counted as logged out, so `ox team list` told the coworker to log in instead
+// of saying it could not check the account.
+func TestRunTeams_TokenRefreshFailureIsALookupFailure(t *testing.T) {
+	noInputCLIEnv(t)
+	server := testguard.SafeMockServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "refresh unavailable", http.StatusInternalServerError)
+	}))
+	t.Setenv("SAGEOX_ENDPOINT", "")
+	require.NoError(t, auth.SaveTokenForEndpoint(server.URL, &auth.StoredToken{
+		AccessToken: "expired-access", RefreshToken: "test-refresh", TokenType: "Bearer",
+		ExpiresAt: time.Now().Add(-time.Hour),
+	}))
+	t.Chdir(t.TempDir())
+
+	got := runTeamsJSON(t)
+
+	assert.Empty(t, got.Teams)
+	assert.NotEmpty(t, got.LookupError, "a failed token refresh must be reported as a lookup failure")
+	assert.NotContains(t, got.Guidance, "ox login", "must not recommend login when the account was never checked")
+}

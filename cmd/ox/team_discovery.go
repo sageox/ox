@@ -201,10 +201,25 @@ func serverLookupEndpoints(projectRoot string) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list logged-in endpoints: %w", err)
 	}
+	// SAGEOX_TOKEN logs in without anything on disk (CI, containers), so its
+	// endpoint is a candidate even when no login is stored.
+	if envEp := auth.EnvTokenEndpoint(); auth.IsEnvTokenEndpoint(envEp) && !containsEndpoint(stored, envEp) {
+		stored = append(stored, envEp)
+	}
 	if len(stored) == 0 {
 		return nil, errNoServerLogin
 	}
 	return stored, nil
+}
+
+func containsEndpoint(endpoints []string, ep string) bool {
+	want := endpoint.NormalizeEndpoint(ep)
+	for _, candidate := range endpoints {
+		if endpoint.NormalizeEndpoint(candidate) == want {
+			return true
+		}
+	}
+	return false
 }
 
 // lookupServerTeams asks the server which teams the logged-in coworker belongs
@@ -224,8 +239,14 @@ func lookupServerTeams(projectRoot string) ([]serverEndpointTeams, error) {
 	loggedOut := 0
 	for _, ep := range endpoints {
 		token, tokenErr := auth.EnsureValidTokenForEndpoint(ep, 300)
-		if tokenErr != nil || token == nil || token.AccessToken == "" {
-			slog.Debug("team lookup on server skipped: no usable login", "endpoint", ep, "error", tokenErr)
+		if tokenErr != nil {
+			// a login exists but could not be refreshed: the account was not checked
+			slog.Debug("team lookup on server failed: token refresh", "endpoint", ep, "error", tokenErr)
+			errs = append(errs, fmt.Errorf("%s: refresh login: %w", endpoint.NormalizeSlug(ep), tokenErr))
+			continue
+		}
+		if token == nil || token.AccessToken == "" {
+			slog.Debug("team lookup on server skipped: no usable login", "endpoint", ep)
 			loggedOut++
 			continue
 		}
