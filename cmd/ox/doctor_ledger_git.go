@@ -205,7 +205,7 @@ func checkLedgerRemoteReachable() checkResult {
 			if errors.As(err, &exitErr) && exitErr.ExitCode() == 128 {
 				// distinguish 403 (access denied) from 401 (auth failed)
 				stderrLower := strings.ToLower(stderrOutput)
-				if strings.Contains(stderrLower, "403") || strings.Contains(stderrLower, "forbidden") {
+				if gitutil.IsHTTP403(stderrOutput) || strings.Contains(stderrLower, "forbidden") {
 					return WarningCheck("Ledger remote connectivity", "access denied",
 						"You are not a member of this team. Request an invite URL from a team admin.")
 				}
