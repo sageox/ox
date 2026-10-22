@@ -8,8 +8,9 @@
 # eval team (TEAM below), never a production team:
 # - team-recall uses your `ox login`; its seed step pins the repo to TEAM, and
 #   the eval team holds docs/adr/002-daemon-architecture.md (imported once).
-# - connect-repo lets the agent pick the team, so it runs only on a team token
-#   for the eval team (export SAGEOX_TOKEN=oxt_...); without one its setup fails.
+# - connect-repo also uses your `ox login`; the agent picks the team, so the
+#   prompt names the eval team (as a user with several teams would) and a check
+#   fails the run if the repo landed anywhere else.
 
 vars:
   TEAM: team_ki87y91n1b
@@ -66,12 +67,12 @@ tests:
   # Configured: local build on PATH, user already logged in. A user who ran
   # `ox login` knows the product, so this one test names it (no commands).
   - name: connect-repo
-    install: require-eval-token.sh
+    install: copy-ox-login.sh
     prompt: >-
       I've installed SageOx and I'm logged in. Every coding session my AI agent
-      starts from zero. My team keeps
-      repeating our decisions and conventions to it. Set this repo up so our
-      agents start with what the team already figured out. Show me it works. Keep it minimal. What's installed on PATH is
+      starts from zero. My team keeps repeating our decisions and conventions
+      to it. Set this repo up for our Firegoat team so our agents start with
+      what the team already figured out. Show me it works. Keep it minimal. What's installed on PATH is
       the build under test; don't reinstall or upgrade it.
     end_goal: >-
       `ox init` initializes the repo (.sageox/config.json exists), the agent
@@ -83,6 +84,8 @@ tests:
       - run: >-
           grep -Eq '^\[[0-9]+\] \$ (.*[ /])?ox +init' "$FIREGOAT_TRANSCRIPT"
       - run: test -f "$FIREGOAT_WORKDIR/.sageox/config.json"
+      - run: >-
+          grep -q '"team_id": *"{{vars.TEAM}}"' "$FIREGOAT_WORKDIR/.sageox/config.json"
       - run: >-
           grep -rqs 'ox agent prime' "$FIREGOAT_WORKDIR/AGENTS.md" "$FIREGOAT_WORKDIR/CLAUDE.md" "$FIREGOAT_WORKDIR/.claude"
       - run: >-
