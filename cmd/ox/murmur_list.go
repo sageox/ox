@@ -51,22 +51,36 @@ Useful for seeing what your team is working on right now.
 Examples:
   ox murmur list                    # last 10 murmurs (default 12h window)
   ox murmur list wip                # filter by topic
-  ox murmur list --last=20          # last 20 murmurs
+  ox murmur list --limit=20         # last 20 murmurs
   ox murmur list --since=2h         # murmurs from the last 2 hours
+  ox murmur list --since=6h --until=1h  # murmurs from 6 hours ago to 1 hour ago
   ox murmur list --topic=conflict   # filter by topic (flag form)
   ox murmur list --json             # JSON output for scripting`,
-	Args: cobra.MaximumNArgs(1),
-	RunE: runMurmurList,
+	Annotations: map[string]string{annotationTimeOrdered: "true"},
+	Args:        cobra.MaximumNArgs(1),
+	RunE:        runMurmurList,
 }
 
 func init() {
 	murmurCmd.AddCommand(murmurListCmd)
-	murmurListCmd.Flags().Int("last", 10, "number of murmurs to show (0 for no limit)")
-	murmurListCmd.Flags().String("since", "", "time window: e.g. 30m, 2h, 1d (default: 12h)")
-	murmurListCmd.Flags().String("topic", "", "filter by topic slug")
-	murmurListCmd.Flags().String("scope", "", "filter by scope: ledger or team")
-	murmurListCmd.Flags().String("agent-id", "", "filter by coworker ID")
-	murmurListCmd.Flags().Bool("show-file-changes", false, "include daemon-published file-change murmurs in the output")
+	registerMurmurListFlags(murmurListCmd)
+}
+
+// registerMurmurListFlags binds the list flags in one place so the command and
+// its tests share the exact production surface.
+func registerMurmurListFlags(cmd *cobra.Command) {
+	cmd.Flags().Int("limit", 10, "number of murmurs to show (0 for no limit)")
+	// --last is the pre-vocabulary spelling of --limit. It keeps working for
+	// existing scripts but is hidden so new callers learn the one name every
+	// time-ordered list shares.
+	cmd.Flags().Int("last", 10, "deprecated alias of --limit")
+	_ = cmd.Flags().MarkHidden("last")
+	cmd.Flags().String("since", "", "only murmurs at or after this time: a duration (30m, 2h, 1d), RFC3339, or YYYY-MM-DD (default: 12h ago; murmurs are kept 24h)")
+	cmd.Flags().String("until", "", "only murmurs before this time (same forms as --since; a bare date includes that whole day)")
+	cmd.Flags().String("topic", "", "filter by topic slug")
+	cmd.Flags().String("scope", "", "filter by scope: ledger or team")
+	cmd.Flags().String("agent-id", "", "filter by coworker ID")
+	cmd.Flags().Bool("show-file-changes", false, "include daemon-published file-change murmurs in the output")
 }
 
 // murmurListOutput is the JSON output format.
@@ -104,8 +118,9 @@ func runMurmurList(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("not in a SageOx project: %w", err)
 	}
 
-	last, _ := cmd.Flags().GetInt("last")
+	limit := resolveMurmurLimit(cmd)
 	sinceStr, _ := cmd.Flags().GetString("since")
+	untilStr, _ := cmd.Flags().GetString("until")
 	topicFilter, _ := cmd.Flags().GetString("topic")
 	scopeFilter, _ := cmd.Flags().GetString("scope")
 	agentFilter, _ := cmd.Flags().GetString("agent-id")
@@ -117,15 +132,22 @@ func runMurmurList(cmd *cobra.Command, args []string) error {
 	}
 	jsonOutput, _ := cmd.Root().PersistentFlags().GetBool("json")
 
+	since, until, windowErr := resolveTimeWindow(sinceStr, untilStr)
+	if windowErr != nil {
+		return windowErr
+	}
+
 	// parse --since into hours for ReadMurmursInWindow (capped at 24h)
 	windowHours := ledger.DefaultMurmurWindowHours // 12h default
 	windowLabel := "12h"
-	if sinceStr != "" {
-		d, parseErr := parseDuration(sinceStr)
-		if parseErr != nil {
-			return fmt.Errorf("invalid --since value %q: %w\nExamples: 30m, 2h, 1d", sinceStr, parseErr)
-		}
-		hours := int(d.Hours())
+	if !until.IsZero() && since.IsZero() {
+		// an upper bound alone asks for older murmurs than the 12h default
+		// would ever read, so look back as far as murmurs are kept
+		windowHours = ledger.MaxMurmurWindowHours
+		windowLabel = "24h"
+	}
+	if !since.IsZero() {
+		hours := int(time.Since(since).Hours())
 		if hours < 1 {
 			hours = 1 // minimum 1 hour granularity for directory scanning
 		}
@@ -163,13 +185,11 @@ func runMurmurList(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// apply --since filter precisely (directory scanning is hourly granularity)
-	if sinceStr != "" {
-		d, _ := parseDuration(sinceStr)
-		cutoff := time.Now().UTC().Add(-d)
+	// apply --since/--until precisely (directory scanning is hourly granularity)
+	if !since.IsZero() || !until.IsZero() {
 		filtered := allMurmurs[:0]
 		for _, m := range allMurmurs {
-			if !m.Timestamp.Before(cutoff) {
+			if inTimeWindow(m.Timestamp, since, until) {
 				filtered = append(filtered, m)
 			}
 		}
@@ -203,11 +223,11 @@ func runMurmurList(cmd *cobra.Command, args []string) error {
 
 	total := len(allMurmurs)
 
-	// JSON output: agents need full data, no file-changes hiding, --last still applies
+	// JSON output: agents need full data, no file-changes hiding, --limit still applies
 	if jsonOutput {
 		jsonMurmurs := allMurmurs
-		if last > 0 && len(jsonMurmurs) > last {
-			jsonMurmurs = jsonMurmurs[:last]
+		if limit > 0 && len(jsonMurmurs) > limit {
+			jsonMurmurs = jsonMurmurs[:limit]
 		}
 		var jsonDiag *murmurListDiagnostic
 		if total == 0 {
@@ -243,9 +263,9 @@ func runMurmurList(cmd *cobra.Command, args []string) error {
 		total = len(allMurmurs)
 	}
 
-	// apply --last limit
-	if last > 0 && len(allMurmurs) > last {
-		allMurmurs = allMurmurs[:last]
+	// apply --limit
+	if limit > 0 && len(allMurmurs) > limit {
+		allMurmurs = allMurmurs[:limit]
 	}
 
 	// collect diagnostics when empty (check sync/auth health)
@@ -386,21 +406,16 @@ func dropFileChangeMurmurs(in []ledger.MurmurFile) ([]ledger.MurmurFile, int) {
 	return out, dropped
 }
 
-// parseDuration extends time.ParseDuration with support for "d" (days).
-func parseDuration(s string) (time.Duration, error) {
-	// handle "d" suffix for days
-	if strings.HasSuffix(s, "d") {
-		numStr := strings.TrimSuffix(s, "d")
-		var days int
-		if _, err := fmt.Sscanf(numStr, "%d", &days); err != nil {
-			return 0, fmt.Errorf("invalid day count %q", numStr)
-		}
-		if days < 1 {
-			return 0, fmt.Errorf("days must be >= 1")
-		}
-		return time.Duration(days) * 24 * time.Hour, nil
+// resolveMurmurLimit returns the row cap. --limit is the canonical name every
+// time-ordered list shares; --last is its hidden legacy spelling. When both
+// are set, --limit wins.
+func resolveMurmurLimit(cmd *cobra.Command) int {
+	if !cmd.Flags().Changed("limit") && cmd.Flags().Changed("last") {
+		last, _ := cmd.Flags().GetInt("last")
+		return last
 	}
-	return time.ParseDuration(s)
+	limit, _ := cmd.Flags().GetInt("limit")
+	return limit
 }
 
 // collectMurmurDiagnostics checks auth, ledger, and push health to explain

@@ -17,6 +17,7 @@ import (
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/lfs"
@@ -138,10 +139,43 @@ Output is JSON by default (the AI-coworker/plumbing path). Use --text for a huma
 var planListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "Browse saved ledger plans",
+	Long: `Browse saved ledger plans, newest first.
+
+Every saved plan is listed, whatever its status (abandoned and superseded
+plans included). Narrow the list the same way as 'ox session list' and
+'ox conversation list':
+
+  --limit N    show at most N plans (0 = no limit, the default)
+  --since X    only plans saved at or after X
+  --until X    only plans saved before X; a bare date includes that whole day
+
+X is a duration (30m, 2h, 7d, 1w), an RFC3339 instant, or a date (2026-10-01).
+
+Examples:
+  ox plan list                         # every saved plan
+  ox plan list --limit 5               # the five newest
+  ox plan list --since 7d              # saved in the last week
+  ox plan list --since 2026-10-01 --until 2026-10-07 --json`,
+	Annotations: map[string]string{annotationTimeOrdered: "true"},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		jsonOut, _ := cmd.Flags().GetBool("json")
 		return runPlanList(cmd, jsonOut)
 	},
+}
+
+// registerPlanListFlags binds the list flags in one place so the command and
+// its tests share the exact production surface.
+func registerPlanListFlags(cmd *cobra.Command) {
+	cmd.Flags().Bool("json", false, "emit the plan list as JSON (scripting path)")
+	cmd.Flags().Int("limit", 0, "show at most N plans, newest first (0 = no limit)")
+	cmd.Flags().String("since", "", "only plans saved at or after this time: a duration (30m, 2h, 7d, 1w), RFC3339, or YYYY-MM-DD")
+	cmd.Flags().String("until", "", "only plans saved before this time (same forms as --since; a bare date includes that whole day)")
+	// 'ox session list' hides sessions older than a week unless --all is passed,
+	// so agents carry --all over to this command. plan list has no such default
+	// view (it always shows every saved plan), so --all is an accepted no-op,
+	// hidden to keep it out of the documented surface.
+	cmd.Flags().Bool("all", false, "include everything (a no-op: plan list always shows every saved plan)")
+	_ = cmd.Flags().MarkHidden("all")
 }
 
 var planViewCmd = &cobra.Command{
@@ -1559,9 +1593,27 @@ func runPlanList(cmd *cobra.Command, jsonOut bool) error {
 	out := cmd.OutOrStdout()
 	gitRoot := findGitRoot()
 
-	plans, err := plan.List(gitRoot)
+	// the flags are read leniently: callers that build a bare command (no list
+	// flags registered) get the unfiltered, unlimited list.
+	limit, _ := cmd.Flags().GetInt("limit")
+	sinceRaw, _ := cmd.Flags().GetString("since")
+	untilRaw, _ := cmd.Flags().GetString("until")
+	if limit < 0 {
+		return errkind.Errorf(errkind.Usage, "invalid --limit value %d: use 0 for no limit, or a positive count like --limit 10", limit)
+	}
+	since, until, err := resolveTimeWindow(sinceRaw, untilRaw)
+	if err != nil {
+		return err
+	}
+
+	saved, err := plan.List(gitRoot)
 	if err != nil {
 		return fmt.Errorf("list plans: %w", err)
+	}
+	plans := filterPlansByWindow(saved, since, until)
+	matched := len(plans)
+	if limit > 0 && matched > limit {
+		plans = plans[:limit]
 	}
 	if jsonOut {
 		if plans == nil {
@@ -1570,6 +1622,10 @@ func runPlanList(cmd *cobra.Command, jsonOut bool) error {
 		return cli.PrintJSONTo(out, plans)
 	}
 	if len(plans) == 0 {
+		if len(saved) > 0 {
+			fmt.Fprintf(out, "No saved plans match that window (%d saved). Widen --since/--until.\n", len(saved))
+			return nil
+		}
 		fmt.Fprintln(out, "No saved plans yet. Run 'ox plan enrich --text' on a plan to capture one.")
 		// Deliberately NOT a bare return: a project whose only plan-shaped
 		// artifact is an authored page nobody saved is precisely the shape the
@@ -1601,6 +1657,9 @@ func runPlanList(cmd *cobra.Command, jsonOut bool) error {
 	if err := tw.Flush(); err != nil {
 		return err
 	}
+	if matched > len(plans) {
+		fmt.Fprintln(out, cli.StyleDim.Render(fmt.Sprintf("%d of %d plans shown (--limit %d; use --limit 0 for all)", len(plans), matched, limit)))
+	}
 	if anyOpen {
 		cli.PrintHint("Plans with open review items — `ox plan feedback show <slug>`, address, then `ox plan feedback resolve`.")
 	}
@@ -1609,6 +1668,22 @@ func runPlanList(cmd *cobra.Command, jsonOut bool) error {
 	}
 	printUnsavedArtifactHint(gitRoot)
 	return nil
+}
+
+// filterPlansByWindow keeps the plans saved in [since, until); a zero bound is
+// open. plan.List already orders newest-first and the filter preserves that
+// order, so --limit afterwards keeps the newest matches.
+func filterPlansByWindow(plans []plan.PlanInfo, since, until time.Time) []plan.PlanInfo {
+	if since.IsZero() && until.IsZero() {
+		return plans
+	}
+	kept := make([]plan.PlanInfo, 0, len(plans))
+	for _, p := range plans {
+		if inTimeWindow(p.CreatedAt, since, until) {
+			kept = append(kept, p)
+		}
+	}
+	return kept
 }
 
 // printUnsavedArtifactHint is the second surface for the artifact gap. The
@@ -1853,7 +1928,7 @@ func init() {
 	planRenderCmd.Flags().Bool("artifact", false, "render a strictly self-contained, CSP-safe page for publishing as a Claude Code Artifact (no external fonts/scripts, no review loop; enrichment links preserved)")
 	planRenderCmd.Flags().StringSlice("companion", nil, "bundle a rich self-contained HTML companion with the plan (repeatable; relative .html links in the plan markdown are auto-detected)")
 
-	planListCmd.Flags().Bool("json", false, "emit the plan list as JSON (scripting path)")
+	registerPlanListFlags(planListCmd)
 
 	planSaveCmd.Flags().String("file", "", "the plan of record: an authored self-contained .html page (preferred; saved as canonical, markdown derived) or a .md quick plan; annotations optional (ox self-enriches)")
 	planLintCmd.Flags().String("file", "", "lint an UNSAVED authored page before the first save (authoring-time checks)")

@@ -7,7 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Improved
+
+- **AI coworkers get the command they meant more often** — ox now runs the right command when a coworker passes a whole command as one word (a zsh loop over `"plan list"`), types a subcommand as a flag (`daemon --list`), or adds arguments to a known shortcut (`auth --help`, `plan show <slug>`). A correction that would change what the command does, or that would not parse, stays a suggestion, and short unknown words no longer get guesses that point at unrelated commands.
+- **List commands share one set of flags** — `plan list`, `murmur list`, `session list` and `conversation list` all accept `--limit`, `--since`, `--until` and `--json`, and `conversation transcript` accepts `--limit`. `murmur list --last` and `session list --window` keep working.
+
 ### Fixed
+
+- **Usage reports no longer carry what you typed** — when a command fails to parse, ox reports only its command and flag names. Paths, IDs, names and free text are removed on your machine before the report is sent, and the daemon removes them again.
 
 - **A plain `ox doctor` no longer publishes plans you have not saved** — the commits its automatic cleanup makes, and the commit that uploads a session, now leave plans out. A `plan.md` you are still editing, a plan change someone already staged, and a large `plan.html` whose upload failed stay on your machine until the plan's own save, or its retry, shares them. Before, a plain `ox doctor` could commit and push them, the multi-megabyte page included.
 - **`ox doctor` finishes plan saves that never committed, and names plan edits nobody saved** — a save that wrote the plan but never committed it (ox was interrupted, or an older version left it) is queued and shared by the same `ox doctor` run. Edits nobody saved are listed by plan; `ox doctor --fix-slug=plan-unsaved-edits` shares them as they are once you confirm.

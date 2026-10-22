@@ -22,8 +22,9 @@ ox conversation list [flags]
       --format string   output format: json|text (default "json")
   -h, --help            help for list
       --limit int       cap the number of conversations returned (default 20)
-      --since string    only conversations recorded on or after this instant (RFC3339 or YYYY-MM-DD)
+      --since string    only conversations recorded on or after this time: a duration (30m, 2h, 7d, 1w), RFC3339, or YYYY-MM-DD
       --text            shorthand for --format text
+      --until string    only conversations recorded before this time (same forms as --since; a YYYY-MM-DD date includes that whole day)
 ```
 
 ### Options inherited from parent commands

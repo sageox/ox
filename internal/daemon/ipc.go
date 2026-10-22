@@ -414,6 +414,9 @@ type FrictionPayload struct {
 
 	// ErrorMsg is the redacted, truncated error message (max 200 chars).
 	ErrorMsg string `json:"error_msg"`
+
+	// Suggestion is the redacted corrected command the CLI proposed, when it had one.
+	Suggestion string `json:"suggestion,omitempty"`
 }
 
 // SessionFinalizeIPCPayload carries the minimum info needed for the daemon

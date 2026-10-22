@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -11,6 +13,8 @@ import (
 	"time"
 
 	friction "github.com/sageox/frictionax"
+	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/daemon"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -20,7 +24,8 @@ import (
 // the sendFrictionEvent call was silently dropped during the frictionax migration,
 // breaking the CLI→daemon telemetry pipeline with zero test failures.
 func TestSendFrictionEvent_DeliversToSocket(t *testing.T) {
-	t.Parallel()
+	// not parallel: redaction walks the real rootCmd tree, and cobra sorts a
+	// command's children in place on first read
 
 	// set up a temp Unix socket (short path for macOS 104-char limit)
 	socketPath := filepath.Join(os.TempDir(), fmt.Sprintf("ox-ftest-%d.sock", time.Now().UnixNano()%100000))
@@ -61,11 +66,114 @@ func TestSendFrictionEvent_DeliversToSocket(t *testing.T) {
 	case msg := <-received:
 		msgStr := string(msg)
 		assert.Contains(t, msgStr, `"type":"friction"`)
-		assert.Contains(t, msgStr, `"ox badcommand"`)
 		assert.Contains(t, msgStr, `"unknown-command"`)
+		// the mistyped word is user input, so it is redacted before it leaves
+		assert.NotContains(t, msgStr, "badcommand")
 	case <-time.After(1 * time.Second):
 		t.Fatal("friction IPC event was not delivered to socket")
 	}
+}
+
+type receivedFrictionMessage struct {
+	raw     string
+	payload daemon.FrictionPayload
+}
+
+// listenForFrictionPayload accepts one connection on a temp Unix socket and
+// delivers the friction payload it carries. The raw line is returned too, so a
+// test can assert on bytes as well as fields.
+func listenForFrictionPayload(t *testing.T) (socketPath string, got <-chan receivedFrictionMessage) {
+	t.Helper()
+
+	// short path for macOS's 104-char socket limit
+	socketPath = filepath.Join(os.TempDir(), fmt.Sprintf("ox-fred-%d.sock", time.Now().UnixNano()%1000000))
+	t.Cleanup(func() { os.Remove(socketPath) })
+
+	listener, err := net.Listen("unix", socketPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { listener.Close() })
+
+	out := make(chan receivedFrictionMessage, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		line, err := bufio.NewReader(conn).ReadBytes('\n')
+		if err != nil {
+			return
+		}
+		var msg daemon.Message
+		if json.Unmarshal(line, &msg) != nil {
+			return
+		}
+		var payload daemon.FrictionPayload
+		if json.Unmarshal(msg.Payload, &payload) != nil {
+			return
+		}
+		out <- receivedFrictionMessage{raw: string(line), payload: payload}
+	}()
+	return socketPath, out
+}
+
+// hermeticFrictionEnv makes sendFrictionEventTo's opt-out checks deterministic:
+// an inherited DO_NOT_TRACK or a real user config with telemetry off would
+// suppress the send and every assertion below would be about nothing.
+func hermeticFrictionEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("DO_NOT_TRACK", "")
+	t.Setenv("SAGEOX_FRICTION", "true")
+	t.Setenv(config.EnvUserConfig, filepath.Join(t.TempDir(), "config.yaml"))
+}
+
+// TestSendFrictionEvent_RedactsUserDataBeforeTheSocket drives the real send path
+// with an event stuffed with synthetic user data and reads what arrives on the
+// daemon socket. The daemon forwards these strings to the cloud, so the socket
+// is the last point the CLI controls.
+//
+// Failure prevented: a coworker's home path (with OS username), team ID,
+// conversation ID, and pasted free text shipped to the cloud inside a friction
+// event, which is how a 30-day export came to contain them.
+func TestSendFrictionEvent_RedactsUserDataBeforeTheSocket(t *testing.T) {
+	hermeticFrictionEnv(t)
+	socketPath, received := listenForFrictionPayload(t)
+
+	event := &friction.FrictionEvent{
+		Timestamp:  time.Now().UTC().Format(time.RFC3339),
+		Kind:       "unknown-flag",
+		Command:    "ox plan",
+		Actor:      "human",
+		PathBucket: "repo",
+		Input: "plan list --limit 50 --json --file /Users/person-a/src/x.html " +
+			"--team team_abc123 --id cnv_01a00000-0000-7000-8000-000000000000 fix the login bug",
+		ErrorMsg: `unknown command "plan show /Users/person-a/src/x.html team_abc123 fix the login bug" for "ox"` +
+			"\n\nRun 'ox --help' for usage",
+		Suggestion: "plan view /Users/person-a/src/x.html team_abc123 cnv_01a00000-0000-7000-8000-000000000000 --json",
+	}
+
+	sendFrictionEventTo(event, socketPath)
+
+	var msg receivedFrictionMessage
+	select {
+	case msg = <-received:
+	case <-time.After(2 * time.Second):
+		t.Fatal("friction event was not delivered to the socket")
+	}
+
+	for _, leak := range []string{
+		"person-a", "/Users", "x.html", "team_abc123", "cnv_01a", "01a00000", "fix the login bug", "login",
+	} {
+		assert.NotContains(t, msg.raw, leak, "the socket payload must not carry %q", leak)
+	}
+
+	// the command path and flag names are the diagnostic signal and must survive
+	assert.Equal(t, "ox plan", msg.payload.Command)
+	assert.Equal(t, "unknown-flag", msg.payload.Kind)
+	assert.Equal(t, "plan list --limit <arg> --json --file <arg> --team <arg> --id <arg>", msg.payload.Input)
+	assert.Equal(t, `unknown command "plan <arg>" for "ox"`, msg.payload.ErrorMsg)
+	assert.Equal(t, "plan view <arg> --json", msg.payload.Suggestion)
 }
 
 // TestFrictionIPC_CalledFromRecoveryPath is a source-level contract test.

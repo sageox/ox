@@ -18,8 +18,9 @@ Useful for seeing what your team is working on right now.
 Examples:
   ox murmur list                    # last 10 murmurs (default 12h window)
   ox murmur list wip                # filter by topic
-  ox murmur list --last=20          # last 20 murmurs
+  ox murmur list --limit=20         # last 20 murmurs
   ox murmur list --since=2h         # murmurs from the last 2 hours
+  ox murmur list --since=6h --until=1h  # murmurs from 6 hours ago to 1 hour ago
   ox murmur list --topic=conflict   # filter by topic (flag form)
   ox murmur list --json             # JSON output for scripting
 
@@ -32,11 +33,12 @@ ox murmur list [topic] [flags]
 ```
       --agent-id string     filter by coworker ID
   -h, --help                help for list
-      --last int            number of murmurs to show (0 for no limit) (default 10)
+      --limit int           number of murmurs to show (0 for no limit) (default 10)
       --scope string        filter by scope: ledger or team
       --show-file-changes   include daemon-published file-change murmurs in the output
-      --since string        time window: e.g. 30m, 2h, 1d (default: 12h)
+      --since string        only murmurs at or after this time: a duration (30m, 2h, 1d), RFC3339, or YYYY-MM-DD (default: 12h ago; murmurs are kept 24h)
       --topic string        filter by topic slug
+      --until string        only murmurs before this time (same forms as --since; a bare date includes that whole day)
 ```
 
 ### Options inherited from parent commands

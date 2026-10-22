@@ -13,6 +13,7 @@ import (
 	"github.com/sageox/agentx"
 	friction "github.com/sageox/frictionax"
 	frictioncobra "github.com/sageox/frictionax/adapters/cobra"
+	"github.com/sageox/frictionax/redactors/secrets"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/spf13/cobra"
@@ -36,6 +37,10 @@ func initFriction(rootCmd *cobra.Command) {
 		friction.WithCatalog("ox"),
 		friction.WithCachePath(getCatalogCachePath()),
 		friction.WithActorDetector(&oxActorDetector{}),
+		// credential patterns run when the event is built, before truncation can
+		// cut a token in half; sendFrictionEventTo then reduces the rest of the
+		// text to command structure (friction_redact.go)
+		friction.WithRedactor(secrets.New()),
 	)
 
 	// load embedded default catalog (baseline patterns for offline/first-run)
@@ -138,16 +143,25 @@ func sendFrictionEventTo(event *friction.FrictionEvent, socketPath string) {
 		client = daemon.NewClientForCurrentRepoWithTimeout(5 * time.Millisecond)
 	}
 
+	// the event carries what the coworker typed (paths, names, free text), so
+	// only its command structure is sent. frictionax's default redactor is a
+	// no-op, and the daemon forwards these strings to the cloud verbatim.
+	redacted, ok := redactFrictionEvent(rootCmd, event)
+	if !ok {
+		return
+	}
+
 	payload := daemon.FrictionPayload{
 		Timestamp:  event.Timestamp,
 		Kind:       string(event.Kind),
-		Command:    event.Command,
-		Subcommand: event.Subcommand,
+		Command:    redacted.Command,
+		Subcommand: redacted.Subcommand,
 		Actor:      event.Actor,
 		AgentType:  event.AgentType,
 		PathBucket: event.PathBucket,
-		Input:      event.Input,
-		ErrorMsg:   event.ErrorMsg,
+		Input:      redacted.Input,
+		ErrorMsg:   redacted.ErrorMsg,
+		Suggestion: redacted.Suggestion,
 	}
 
 	data, err := json.Marshal(payload)
