@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "approvals": [
+    {
+      "name": "security-audit",
+      "digest": "sha256:2964ffdb1ef5250ef8af6f90119db30a341de314ff0daba6b9a9b15bd67e6458",
+      "approved_at": "2026-10-22T04:58:28.656575Z",
+      "capabilities": [
+        "bundled-script"
+      ],
+      "allow_scripts": true
+    }
+  ]
+}
