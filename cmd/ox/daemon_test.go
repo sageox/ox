@@ -116,11 +116,10 @@ func resetDaemonStartFlags(t *testing.T) {
 	fg.Changed = false
 }
 
-// Failure prevented: on a disposable machine, the daemon that restarts after
-// the Ledger's first clone starts in $HOME, where StabilizeCWD moved it, finds
-// no project there, and comes up without its Ledger or workspace. Other
-// machines keep today's behavior.
-func TestReexecDaemon_DisposableMachineReturnsToTheProject(t *testing.T) {
+// Failure prevented: after StabilizeCWD moves to HOME, a restart loses the
+// project and its Ledger. Both version upgrades and first-clone restarts must
+// return to the original project, regardless of disposable_machine.
+func TestReexecDaemon_ReturnsToTheProject(t *testing.T) {
 	for _, disposable := range []bool{false, true} {
 		t.Run(fmt.Sprintf("disposable_machine=%v", disposable), func(t *testing.T) {
 			project, elsewhere := t.TempDir(), t.TempDir()
@@ -135,17 +134,29 @@ func TestReexecDaemon_DisposableMachineReturnsToTheProject(t *testing.T) {
 			cfg := &daemon.Config{ProjectRoot: project, DisposableMachine: disposable}
 			require.NoError(t, reexecDaemon(cfg, slog.New(slog.DiscardHandler)))
 
-			want := elsewhere
-			if disposable {
-				want = project
-			}
-			want, err := filepath.EvalSymlinks(want)
+			want, err := filepath.EvalSymlinks(project)
 			require.NoError(t, err)
 			got, err := filepath.EvalSymlinks(dir)
 			require.NoError(t, err)
 			assert.Equal(t, want, got)
 		})
 	}
+}
+
+// A deleted worktree must fail the restart rather than serve another directory.
+func TestReexecDaemon_DeletedProjectDoesNotExec(t *testing.T) {
+	called := false
+	execProcess = func(string, []string, []string) error {
+		called = true
+		return nil
+	}
+	t.Cleanup(func() { execProcess = syscall.Exec })
+	cfg := &daemon.Config{ProjectRoot: filepath.Join(t.TempDir(), "deleted")}
+
+	err := reexecDaemon(cfg, slog.New(slog.DiscardHandler))
+
+	require.ErrorIs(t, err, os.ErrNotExist)
+	require.False(t, called)
 }
 
 // Failure prevented: disposable_machine is on, but `ox daemon start` never

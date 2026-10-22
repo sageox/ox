@@ -67,7 +67,7 @@ ACCEPTANCE_INTEGRATION_COVER_FLAGS = $(if $(strip $(ACCEPTANCE_GO_COVER_DIR)),-c
 ACCEPTANCE_SLOW_COVER_FLAGS = $(if $(strip $(ACCEPTANCE_GO_COVER_DIR)),-coverprofile=$(ACCEPTANCE_GO_COVER_DIR)/slow-test.out -covermode=atomic,)
 ACCEPTANCE_INTEGRATION_TESTS := TestCodeActivityE2E TestFreshInstall_MockServer_InitThenDoctor TestFreshInstall_MockServer_SyncUnavailableThenDoctorStillWorks TestNoInputCLI TestUnexpectedArgumentsCLI TestUpgradeCLI TestDoctorExitCLI TestJSONOutputModesCLI TestCLIOutputWriteFailures TestCLIInvalidSubcommands
 ifneq ($(filter darwin linux freebsd,$(shell $(GO) env GOOS)),)
-ACCEPTANCE_INTEGRATION_TESTS += TestBackgroundDaemonSurvivesCommandCleanup
+ACCEPTANCE_INTEGRATION_TESTS += TestBackgroundDaemonSurvivesCommandCleanup TestDaemonUpgradeRetainsProject
 endif
 ifneq ($(filter darwin linux,$(shell $(GO) env GOOS)),)
 # Exercise terminal output modes against the instrumented binary in CI.
