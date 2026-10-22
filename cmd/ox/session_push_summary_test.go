@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -201,6 +202,7 @@ func TestPushSummaryToLedger_RefusesIndexMutationDuringRebase(t *testing.T) {
 			result := pushSummaryToLedger(summaryFile, sessionDir)
 			assert.False(t, result.Success)
 			assert.Contains(t, result.Error, "rebase")
+			assert.NotContains(t, result.Error, "git commit:", "a preflight refusal is not a failed git commit")
 			assert.Equal(t, beforeHead, runGit(t, ledger, "rev-parse", "HEAD"))
 			assert.Equal(t, beforeHead, runGit(t, bare, "rev-parse", "HEAD"))
 			assert.Equal(t, beforeIndex, runGit(t, ledger, "ls-files", "--stage"))
@@ -352,6 +354,7 @@ func TestWrapCommitError_PreservesUnrelatedFailures(t *testing.T) {
 			assert.NotContains(t, got, "ox doctor --fix",
 				"recovery hint must NOT appear for non-wedge failures (%s) — would mislead the user", tc.name)
 			assert.Contains(t, got, tc.stderr, "raw stderr must be preserved verbatim for non-wedge failures")
+			assert.Equal(t, tc.stderr, wrapCommitError(tc.stderr, errors.New(tc.stderr)), "an already contextualized failure must appear only once")
 		})
 	}
 }

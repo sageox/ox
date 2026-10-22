@@ -569,5 +569,8 @@ func wrapCommitError(stderr string, err error) string {
 			trimmed,
 		)
 	}
+	if err != nil && trimmed == strings.TrimSpace(err.Error()) {
+		return trimmed
+	}
 	return fmt.Sprintf("git commit: %s: %v", trimmed, err)
 }
