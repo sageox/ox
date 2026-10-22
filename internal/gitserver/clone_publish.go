@@ -2,10 +2,12 @@ package gitserver
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"time"
 )
 
 // A full clone is written into a temp sibling of its target and only moved
@@ -53,20 +55,126 @@ func MoveCloneIntoPlace(tempPath, target string) error {
 	return nil
 }
 
-// IsCacheOnlyDir reports whether dir holds nothing except
-// .sageox/cache (optionally empty), all real directories. That is what CodeDB
-// leaves when it opens its shared index before the first clone lands; it is
-// not a clone and must not be treated as one, nor moved aside as corrupt.
+// IsCacheOnlyDir reports whether dir is a local-only skeleton: nothing except
+// .sageox/cache (optionally empty) plus, at most, empty directories (an empty
+// sessions/ folder is what a recording leaves before the first clone). All
+// entries must be real directories. That is what CodeDB, the whisper store and
+// session recording leave when they run before the first clone lands; it is not
+// a clone and must not be treated as one, nor moved aside as corrupt.
 func IsCacheOnlyDir(dir string) bool {
 	entries, err := os.ReadDir(dir)
-	if err != nil || len(entries) != 1 || entries[0].Name() != ".sageox" || !entries[0].IsDir() {
+	if err != nil || len(entries) == 0 {
 		return false
 	}
-	inner, err := os.ReadDir(filepath.Join(dir, ".sageox"))
-	if err != nil || len(inner) > 1 {
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			return false
+		}
+		if entry.Name() != ".sageox" {
+			if !onlyEmptyDirs(filepath.Join(dir, entry.Name())) {
+				return false
+			}
+			continue
+		}
+		inner, err := os.ReadDir(filepath.Join(dir, ".sageox"))
+		if err != nil || len(inner) > 1 {
+			return false
+		}
+		if len(inner) == 1 && (inner[0].Name() != "cache" || !inner[0].IsDir()) {
+			return false
+		}
+	}
+	return true
+}
+
+// onlyEmptyDirs reports whether dir is a tree of real directories holding no
+// files, symlinks, or anything else.
+func onlyEmptyDirs(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
 		return false
 	}
-	return len(inner) == 0 || (inner[0].Name() == "cache" && inner[0].IsDir())
+	for _, entry := range entries {
+		if !entry.IsDir() || !onlyEmptyDirs(filepath.Join(dir, entry.Name())) {
+			return false
+		}
+	}
+	return true
+}
+
+// removeEmptyDirs removes an empty-directory tree bottom-up with os.Remove only,
+// so unexpected content makes it fail instead of being deleted.
+func removeEmptyDirs(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if err := removeEmptyDirs(filepath.Join(dir, entry.Name())); err != nil {
+			return err
+		}
+	}
+	return os.Remove(dir)
+}
+
+// SetAsideCacheOnlyTarget readies a clone target that the clone itself
+// populates in place (the team-context two-phase clone writes straight into the
+// target, and the clone refuses a non-empty directory). A local-only skeleton,
+// see IsCacheOnlyDir, has its .sageox/cache moved to a sibling and the skeleton
+// removed so the clone can proceed. Call the returned func once the clone
+// finishes: on success it moves the cache into the clone, on failure it
+// rebuilds the skeleton. The func is never nil; any other target is untouched.
+func SetAsideCacheOnlyTarget(target string) (finish func(cloned bool), err error) {
+	finish = func(bool) {}
+	if !IsCacheOnlyDir(target) {
+		return finish, nil
+	}
+	cacheDir := filepath.Join(target, ".sageox", "cache")
+	asideDir := fmt.Sprintf("%s.cache-aside-%d", target, time.Now().UnixNano())
+	hadCache := false
+	if _, statErr := os.Lstat(cacheDir); statErr == nil {
+		if err := os.Rename(cacheDir, asideDir); err != nil {
+			return finish, fmt.Errorf("set aside local cache: %w", err)
+		}
+		hadCache = true
+	}
+	top, err := os.ReadDir(target)
+	if err == nil {
+		for _, entry := range top {
+			if err = removeEmptyDirs(filepath.Join(target, entry.Name())); err != nil {
+				break
+			}
+		}
+	}
+	if err == nil {
+		err = os.Remove(target)
+	}
+	if err != nil {
+		if hadCache {
+			_ = os.Rename(asideDir, cacheDir)
+		}
+		return func(bool) {}, fmt.Errorf("clear local-only clone target: %w", err)
+	}
+	return func(cloned bool) {
+		if !hadCache {
+			return
+		}
+		if !cloned {
+			if os.MkdirAll(filepath.Dir(cacheDir), 0o755) == nil {
+				_ = os.Rename(asideDir, cacheDir)
+			}
+			return
+		}
+		// the clone may ship its own cache dir; the old one is derived data
+		if _, statErr := os.Lstat(cacheDir); statErr == nil {
+			_ = os.RemoveAll(asideDir)
+			return
+		}
+		if os.MkdirAll(filepath.Dir(cacheDir), 0o755) == nil && os.Rename(asideDir, cacheDir) == nil {
+			return
+		}
+		_ = os.RemoveAll(asideDir)
+	}, nil
 }
 
 // AdoptCacheOnlyTarget handles a clone target that exists but holds nothing
@@ -85,7 +193,7 @@ func AdoptCacheOnlyTarget(tempPath, target string) (restore func(), err error) {
 	}
 	sageoxDir := filepath.Join(target, ".sageox")
 	inner, err := os.ReadDir(sageoxDir)
-	if err != nil {
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return restore, err
 	}
 	if len(inner) == 1 {
@@ -119,9 +227,16 @@ func AdoptCacheOnlyTarget(tempPath, target string) (restore func(), err error) {
 		}
 	}
 	// remove only empty directories; never recurse into unexpected content
-	if err := os.Remove(sageoxDir); err != nil {
+	top, err := os.ReadDir(target)
+	if err != nil {
 		restore()
 		return func() {}, err
+	}
+	for _, entry := range top {
+		if err := removeEmptyDirs(filepath.Join(target, entry.Name())); err != nil {
+			restore()
+			return func() {}, err
+		}
 	}
 	if err := os.Remove(target); err != nil {
 		restore()

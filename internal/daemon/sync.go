@@ -2590,7 +2590,15 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 			if progress != nil {
 				_ = progress.WriteStage("cloning", "Fetching repository structure...")
 			}
+			// the clone refuses a non-empty target, so a local-only skeleton
+			// (a whisper cache created before the first clone) steps aside
+			// for it and is carried back in afterwards
+			finishSkeleton, skeletonErr := gitserver.SetAsideCacheOnlyTarget(payload.RepoPath)
+			if skeletonErr != nil {
+				return skeletonErr
+			}
 			mCfg, err := s.twoPhaseClone(cloneCtx, cloneURL, payload.RepoPath, progress)
+			finishSkeleton(err == nil)
 			if err != nil {
 				s.logger.Error("checkout: two-phase clone failed", "error", err)
 				// Keyed by pullTeamContext's repoName, the key clearErrors is
