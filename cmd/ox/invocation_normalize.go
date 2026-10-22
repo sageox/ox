@@ -221,7 +221,7 @@ func dryParseFlags(cmd *cobra.Command, args []string) (positional []string, help
 
 	scratch := pflag.NewFlagSet(cmd.CommandPath(), pflag.ContinueOnError)
 	scratch.SetOutput(io.Discard)
-	scratch.ParseErrorsWhitelist = pflag.ParseErrorsWhitelist(cmd.FParseErrWhitelist)
+	scratch.ParseErrorsAllowlist = pflag.ParseErrorsAllowlist(cmd.FParseErrWhitelist)
 	cmd.Flags().VisitAll(func(f *pflag.Flag) {
 		scratch.AddFlag(&pflag.Flag{
 			Name:        f.Name,

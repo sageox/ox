@@ -50,7 +50,7 @@ func loadFlagAliases(catalogJSON []byte) map[string]string {
 		// only fully-qualified patterns drive runtime rewrites; bare flag
 		// names like "--format" are suggestion-only unless the entry opts in
 		// with "rewrite": true (a boolean, so there is no value to consume).
-		if !strings.Contains(t.Pattern, "=") && !(t.Rewrite && strings.HasPrefix(t.Pattern, "--")) {
+		if !strings.Contains(t.Pattern, "=") && (!t.Rewrite || !strings.HasPrefix(t.Pattern, "--")) {
 			continue
 		}
 		out[t.Pattern] = t.Target

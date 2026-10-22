@@ -437,7 +437,7 @@ func TestEmitCorrection(t *testing.T) {
 		assert.Contains(t, got.Corrected.Note, "${=var}")
 	})
 
-	t.Run("a suggestion is labelled as one", func(t *testing.T) {
+	t.Run("a suggestion is labeled as one", func(t *testing.T) {
 		out := captureStdoutForPlanCLI(t, func() { emitCorrection(suggestOnly, true) })
 		var got struct {
 			Suggestion struct{ Try, Note string } `json:"_suggestion"`
