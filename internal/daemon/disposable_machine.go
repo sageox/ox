@@ -35,9 +35,10 @@ func clearLedgerLocksOnFirstStart(ctx context.Context, ledgerPath string, logger
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
-		// Reserve the marker before deletion: if it cannot be written, a
-		// later daemon must not repeat cleanup over this machine's live locks.
-		if err := markLedgerLocksCleared(ledgerPath); err != nil {
+		// Prepare the marker before deletion, but publish completion only
+		// afterwards. A start interrupted here is retried under the repo lock.
+		pending := marker + ".pending"
+		if err := writeLedgerLockMarker(pending); err != nil {
 			return err
 		}
 		removed, errs := gitutil.RemoveAllLockFiles(filepath.Join(ledgerPath, ".git"))
@@ -45,20 +46,16 @@ func clearLedgerLocksOnFirstStart(ctx context.Context, ledgerPath string, logger
 			logger.Info("removed git locks a previous machine left in the Ledger", "path", ledgerPath, "locks", removed)
 		}
 		if err := errors.Join(errs...); err != nil {
-			return errors.Join(err, os.Remove(marker))
+			return err
 		}
-		return nil
+		return os.Rename(pending, marker)
 	})
 	if err != nil {
 		logger.Warn("could not clear the Ledger's git locks on this machine's first start", "path", ledgerPath, "error", err)
 	}
 }
 
-// markLedgerLocksCleared records that no other machine's locks remain in the
-// Ledger at ledgerPath, so later daemon starts on this machine leave its locks
-// alone.
-func markLedgerLocksCleared(ledgerPath string) error {
-	marker := ledgerLocksClearedMarker(ledgerPath)
+func writeLedgerLockMarker(marker string) error {
 	if err := os.MkdirAll(filepath.Dir(marker), 0o700); err != nil {
 		return err
 	}

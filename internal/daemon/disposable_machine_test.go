@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -90,7 +91,7 @@ func TestRemoveLedgerLocksAtStart(t *testing.T) {
 				// The second start has passed its first marker check and is
 				// blocked on the in-process repo lock before we write the marker.
 				synctest.Wait()
-				require.NoError(t, markLedgerLocksCleared(ledger))
+				require.NoError(t, writeLedgerLockMarker(ledgerLocksClearedMarker(ledger)))
 				leaveLocks(t, ledger)
 				return nil
 			}))
@@ -140,8 +141,8 @@ func TestRemoveLedgerLocksAtStart(t *testing.T) {
 		leaveLocks(t, ledger)
 		marker := ledgerLocksClearedMarker(ledger)
 		require.NoError(t, os.MkdirAll(filepath.Dir(marker), 0o700))
-		// Stat reports absence, but writing through this dangling symlink fails.
-		if err := os.Symlink(filepath.Join(t.TempDir(), "missing", "marker"), marker); err != nil {
+		// Completion is absent, but preparing its pending marker fails.
+		if err := os.Symlink(filepath.Join(t.TempDir(), "missing", "marker"), marker+".pending"); err != nil {
 			t.Skipf("symlinks unavailable: %v", err)
 		}
 
@@ -167,6 +168,26 @@ func TestRemoveLedgerLocksAtStart(t *testing.T) {
 		require.NoError(t, commit(ledger), "the Ledger must recover on retry")
 	})
 
+	t.Run("interrupted cleanup is retried instead of marked complete", func(t *testing.T) {
+		onNewMachine(t)
+		ledger := newLedger(t)
+		leaveLocks(t, ledger)
+		logger := slog.New(slog.NewTextHandler(interruptedLockCleanupWriter{}, nil))
+
+		require.PanicsWithValue(t, "interrupted lock cleanup", func() {
+			clearLedgerLocksOnFirstStart(context.Background(), ledger, logger)
+		})
+
+		marker := ledgerLocksClearedMarker(ledger)
+		require.NoFileExists(t, marker, "an interrupted attempt must not claim completion")
+		require.FileExists(t, marker+".pending")
+		leaveLocks(t, ledger)
+		start(ledger, true)
+		require.NoError(t, commit(ledger), "a new start must finish interrupted cleanup")
+		require.FileExists(t, marker)
+		require.NoFileExists(t, marker+".pending")
+	})
+
 	t.Run("without the setting fresh locks stay, as before", func(t *testing.T) {
 		onNewMachine(t)
 		ledger := newLedger(t)
@@ -177,6 +198,17 @@ func TestRemoveLedgerLocksAtStart(t *testing.T) {
 		require.FileExists(t, filepath.Join(ledger, ".git", "index.lock"))
 		require.Error(t, commit(ledger))
 	})
+}
+
+// Interrupt at the cleanup log, before completion is recorded, without adding a
+// production test hook. The repo lock's deferred release still runs.
+type interruptedLockCleanupWriter struct{}
+
+func (interruptedLockCleanupWriter) Write(p []byte) (int, error) {
+	if strings.Contains(string(p), "removed git locks") {
+		panic("interrupted lock cleanup")
+	}
+	return len(p), nil
 }
 
 // Failure prevented: an hour into a job on a disposable machine, GC reclones
