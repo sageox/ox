@@ -158,7 +158,7 @@ func TestCommitLedgerSnapshot_IgnoresBlobStagedAfterSnapshot(t *testing.T) {
 	writeGitutilFixture(t, repo, "sessions/y/meta.json", conflictMarkerFixture)
 	gitInRepo(t, repo, "add", "--sparse", "sessions/y/meta.json")
 
-	require.NoError(t, commitTreeToBranch(ctx, repo, tree, parent, "session: x"))
+	require.NoError(t, commitTreeToBranch(ctx, repo, tree, parent, parent, "session: x"))
 	assert.Equal(t, cleanMeta, headBlob(t, repo, "sessions/x/meta.json"))
 	assert.False(t, headHasPath(t, repo, "sessions/y/meta.json"), "a blob staged after the snapshot must not be committed")
 }
@@ -184,7 +184,7 @@ func TestCommitTreeToBranch_RefusesWhenBranchAdvanced(t *testing.T) {
 	gitInRepo(t, repo, "commit", "-m", "theirs")
 	theirs := gitInRepo(t, repo, "rev-parse", "HEAD")
 
-	err = commitTreeToBranch(ctx, repo, tree, parent, "ours")
+	err = commitTreeToBranch(ctx, repo, tree, parent, parent, "ours")
 	require.ErrorContains(t, err, "concurrent ledger commit")
 	assert.Equal(t, theirs, gitInRepo(t, repo, "rev-parse", "HEAD"), "the concurrent commit must survive")
 }
@@ -214,7 +214,7 @@ func TestCommitTreeToBranch_RefusesWhenUnbornBranchWasBorn(t *testing.T) {
 	gitInRepo(t, repo, "commit", "-m", "theirs")
 	theirs := gitInRepo(t, repo, "rev-parse", "HEAD")
 
-	err = commitTreeToBranch(ctx, repo, tree, parent, "ours")
+	err = commitTreeToBranch(ctx, repo, tree, parent, parent, "ours")
 	require.ErrorContains(t, err, "concurrent ledger commit")
 	assert.Equal(t, theirs, gitInRepo(t, repo, "rev-parse", "HEAD"), "the concurrent first commit must survive")
 }

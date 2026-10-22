@@ -231,9 +231,9 @@ func reconcileUnpushedPointers(ctx context.Context, ledgerPath string, logger *s
 		return result, fmt.Errorf("validate Ledger before LFS reconcile: staged session artifacts hold plain content and are not this coworker's to upload: %s", strings.Join(refused, ", "))
 	}
 
-	// The squash below is unscoped and republishes every unpushed change.
-	// Validate both the current index and the final unpushed tip before
-	// uploading or changing local state.
+	// The squash below republishes every unpushed change. Validate both the
+	// current index and the final unpushed tip before uploading or changing
+	// local state.
 	if err := gitutil.ValidateStagedLedgerCommit(ctx, ledgerPath); err != nil {
 		return result, fmt.Errorf("validate Ledger before LFS reconcile: %w", err)
 	}

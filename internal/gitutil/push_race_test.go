@@ -19,7 +19,7 @@ import (
 //   - "lockfail": the first `fetch` fails with a cannot-lock-ref error.
 //   - "fetchhead": `pull` fails the way git does when another fetch rewrote
 //     FETCH_HEAD with several for-merge heads; fetch and rebase pass through.
-//   - "revlistfail", "updatereffail", "resetfail": that one subcommand fails,
+//   - "revlistfail", "updatereffail": that one subcommand fails,
 //     for the squash's refusal paths.
 //   - "stashstorefail": `stash store` fails while `stash apply` and `stash
 //     create` pass through, for the leftover-autostash failure path.
@@ -62,9 +62,6 @@ case "` + mode + `:$sub" in
     exit 128;;
   updatereffail:update-ref)
     echo "fatal: update-ref refused" >&2
-    exit 128;;
-  resetfail:reset)
-    echo "fatal: reset refused" >&2
     exit 128;;
   stashstorefail:stash)
     case " $* " in *" store "*)

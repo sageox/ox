@@ -426,3 +426,63 @@ func TestHasUncommittedSave_CommittedSaveIsNotStranded(t *testing.T) {
 		t.Error("a HEAD that could not be read read as a save that never committed")
 	}
 }
+
+// TestDoctorFix_RepairsLeaveAStagedPlanEditStaged runs each --fix-only Ledger
+// repair beside plan edits (leavePlanEdits). Failure prevented: the repair's
+// commit took the whole index and published a staged plan edit (#1442), or
+// left what it staged uncommitted.
+func TestDoctorFix_RepairsLeaveAStagedPlanEditStaged(t *testing.T) {
+	const legacySession = "2026-01-01T00-00-test-Ox0001"
+	for _, tc := range []struct {
+		slug    string
+		seed    func(t *testing.T, ledger string) // what the repair changes
+		subject string                            // the repair's commit
+		carries string                            // a path prefix that commit changes
+	}{
+		{
+			slug: CheckSlugSessionIDsBackfilled,
+			seed: func(t *testing.T, ledger string) {
+				writeTestSessionMeta(t, filepath.Join(ledger, "sessions"), legacySession, "")
+			},
+			subject: "session: backfill stable session_id for 1 legacy session(s)",
+			carries: "sessions/" + legacySession + "/meta.json",
+		},
+		{
+			slug: CheckSlugGitHubDataMigration,
+			seed: func(t *testing.T, ledger string) {
+				writeLedgerFile(t, ledger, "data/github/2026/10/01/pr/42.json", `{"number":42}`+"\n")
+			},
+			subject: "ox doctor: migrate 1 legacy GitHub data file(s)",
+			carries: "data/github/2026/10/01/pr/42",
+		},
+	} {
+		t.Run(tc.slug, func(t *testing.T) {
+			ledger, origin := plansLedger(t)
+			tc.seed(t, ledger)
+			runGitInDir(t, ledger, "add", "-A")
+			runGitInDir(t, ledger, "commit", "-q", "-m", "seed")
+			runGitInDir(t, ledger, "push", "-q")
+			base := runGitInDir(t, ledger, "rev-parse", "HEAD")
+			files := leavePlanEdits(t, ledger)
+
+			runDoctor(t, ledger, doctorOptions{fix: true, fixSlugs: []string{tc.slug}})
+
+			made := false
+			for _, c := range commitsSince(t, ledger, base) {
+				for _, p := range c.paths {
+					if strings.HasPrefix(p, "data/plans/") {
+						t.Errorf("commit %q carries %s", c.subject, p)
+					}
+					made = made || c.subject == tc.subject && strings.HasPrefix(p, tc.carries)
+				}
+			}
+			if !made {
+				t.Errorf("no %q commit changing %s", tc.subject, tc.carries)
+			}
+			if staged := runGitInDir(t, ledger, append([]string{"diff", "--cached", "--name-only", "--"}, allButPlansPathspec...)...); staged != "" {
+				t.Errorf("left %q staged", staged)
+			}
+			assertPlanEditsKept(t, ledger, origin, files)
+		})
+	}
+}

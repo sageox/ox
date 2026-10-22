@@ -185,15 +185,18 @@ The CLI reads and writes review records only through `pkg/planreview`.
   the page stays unstored it commits and pushes the rest of the dir and keeps
   the marker.
 - **Whole-index commits** (`commitLedgerSnapshot` in `cmd/ox`: the commit
-  that uploads a session, at stop and in `ox doctor`'s upload retry, and the
+  that uploads a session, at stop and in `ox doctor`'s upload retry, the
   automatic doctor sweeps `ledger-clean-workdir`, `ledger-cache-tracked` and
-  `ledger-rej-tracked`) commit everything but `data/plans/`, through
+  `ledger-rej-tracked`, and the `--fix`-only GitHub data migration) commit
+  everything but `data/plans/`, through
   `CommitLedgerSnapshot` with an exclude pathspec, and the sweeps stage nothing
   there. A plan file stays as it was, staged or not, as do its retry marker
   and review entries: the plan's own writers and their retries commit it.
   Plan files alone make `ledger-clean-workdir` commit nothing. The `--fix`-only
-  session-id backfill and GitHub data migration, and H12's squash, still commit
-  the whole index.
+  session-id backfill commits only the `meta.json` files it rewrote, and H12's
+  squash commits the tree of the commits it collapses, so neither carries a
+  staged plan file (#1442). The mass-deletion guard does not count removed
+  `*.rej` and `*.needs-summary` files (#1443).
 - **Plan changes no retry owns** (`ox doctor`, just before
   `plan-pending-writes`): a plan dir with uncommitted changes, no plan retry
   marker, and changes outside the review records an entry lands. If its
@@ -262,7 +265,10 @@ ended, so neither holds that lock for long. Still open:
   trusting it.
 - H5 remains only where picking a side would drop entries: `events.jsonl`
   without its union attribute, and review records.
-- H10–H12 are unchanged.
+- H10 and H11 are unchanged.
+
+**Since #1442:** H12 is fixed: `SquashUnpushed` commits the unpushed tip's tree,
+never the index.
 
 **Reproductions** (real clones of one Ledger with a bare remote, publishing
 through `commitAndPushPlanDir`; one-off, not kept as tests because they assert
