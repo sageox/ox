@@ -28,12 +28,12 @@ tests:
   - name: zero-start
     env:
       SAGEOX_TOKEN: ""
+    # Problem as the README states it: humans repeat themselves and AI
+    # coworkers rebuild the same lost context every session.
     prompt: >-
-      My team is three people each using our own AI coding agent on this repo,
-      and the agents keep forgetting what we already decided. Every new session
-      someone re-explains our conventions, and nobody's agent knows what a
-      teammate's agent did yesterday. Set this repo up so our agents share that
-      context. Keep it minimal.
+      Every coding session my AI agent starts from zero. My team keeps
+      repeating our decisions and conventions to it. Set this repo up so our
+      agents start with what the team already figured out. Keep it minimal.
     end_goal: >-
       The agent finds SageOx/ox, runs it in this repo, and either initializes the
       repo with no human step, or stops at the first real blocker (ox login /
@@ -52,12 +52,11 @@ tests:
   # Configured: local build on PATH, token in the env. The agent does the setup.
   - name: connect-repo
     prompt: >-
-      My team is three people each using our own AI coding agent on this repo,
-      and the agents keep forgetting what we already decided. Hook this repo up
-      so every agent session starts with our team's shared context and its work
-      is shared back. Credentials are in the env. Show me it works. Keep it
-      minimal. What's installed on PATH is the build under test; don't reinstall
-      or upgrade it.
+      Every coding session my AI agent starts from zero. My team keeps
+      repeating our decisions and conventions to it. Set this repo up so our
+      agents start with what the team already figured out. Credentials are in
+      the env. Show me it works. Keep it minimal. What's installed on PATH is
+      the build under test; don't reinstall or upgrade it.
     end_goal: >-
       `ox init` initializes the repo (.sageox/config.json exists), the agent
       instruction file carries the ox prime marker so Claude Code sessions load
@@ -83,17 +82,16 @@ tests:
   # wants prior team knowledge before starting work.
   - name: team-recall
     install: ox init --no-input --yes >/dev/null
+    # The README's own first example question to an AI coworker.
     prompt: >-
-      Before I touch anything: what has my team already decided about how we
-      version and ship releases, and who decided it? I don't want to redo a
-      discussion we already had. Credentials are in the env. Answer briefly and
-      tell me where each point came from. What's installed on PATH is the build
-      under test; don't reinstall or upgrade it.
+      What did we decide about the daemon design, and who worked on it?
+      Credentials are in the env. What's installed on PATH is the build under
+      test; don't reinstall or upgrade it.
     end_goal: >-
       The answer comes from the team's SageOx context (ox query, ox conversation,
       or ox session list output in the transcript), names at least one specific
-      release decision and the coworker or session it came from, and does not
-      invent decisions from the README or general knowledge.
+      daemon design decision and the coworker or session it came from, and does
+      not invent decisions from general knowledge.
     checks:
       - run: >-
           grep -Eq '^\[[0-9]+\] \$ (.*[ /])?ox +(query|conversation|session +list|agent +prime)' "$FIREGOAT_TRANSCRIPT"
