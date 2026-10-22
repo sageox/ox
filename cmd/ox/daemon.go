@@ -534,15 +534,14 @@ var execProcess = syscall.Exec
 // reexecDaemon re-executes this daemon in place (same PID, same FDs), running
 // the binary now installed. The daemon moved to $HOME at start (StabilizeCWD),
 // and `daemon start` finds its project, Ledger, and workspace from the working
-// directory. Under disposable_machine it returns to the project first: the
-// restart after the Ledger's first clone must come up for this project. Without
-// the setting the re-exec starts in $HOME, as it always has.
+// directory. Return to the original project before re-exec so version upgrades
+// and restarts after the Ledger's first clone retain its workspace and Ledger.
 func reexecDaemon(cfg *daemon.Config, logger *slog.Logger) error {
 	exe, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("self-restart: resolve executable: %w", err)
 	}
-	if cfg.DisposableMachine && cfg.ProjectRoot != "" {
+	if cfg.ProjectRoot != "" {
 		if err := os.Chdir(cfg.ProjectRoot); err != nil {
 			return fmt.Errorf("self-restart: return to the project: %w", err)
 		}
