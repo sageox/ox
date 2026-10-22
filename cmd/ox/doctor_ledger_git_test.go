@@ -4,6 +4,10 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,10 +15,76 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// TestCheckLedgerRemoteReachable_AccessDeniedOnlyForHTTP403 runs the doctor
+// check against a real `git ls-remote`. A 401 from a server whose port
+// contains 403 must read as a sign-in failure, not "not a member of this team".
+func TestCheckLedgerRemoteReachable_AccessDeniedOnlyForHTTP403(t *testing.T) {
+	tests := []struct {
+		name   string
+		ports  []int // candidate ports containing 403; nil picks a random port
+		status int
+		want   string
+	}{
+		{"401 on a port containing 403", []int{14032, 24032, 34032, 40313, 54032}, http.StatusUnauthorized, "auth failed"},
+		{"real 403", nil, http.StatusForbidden, "access denied"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gitRoot, cleanup := setupTempGitRepo(t)
+			defer cleanup()
+			t.Setenv("GIT_ALLOW_PROTOCOL", "file:http")
+			t.Setenv("GIT_TERMINAL_PROMPT", "0")
+
+			server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("WWW-Authenticate", `Basic realm="test"`)
+				http.Error(w, http.StatusText(tt.status), tt.status)
+			}))
+			if tt.ports != nil {
+				var ln net.Listener
+				for _, port := range tt.ports {
+					if l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port)); err == nil {
+						ln = l
+						break
+					}
+				}
+				if ln == nil {
+					t.Skip("no free loopback port containing 403")
+				}
+				_ = server.Listener.Close()
+				server.Listener = ln
+			}
+			server.Start()
+			t.Cleanup(server.Close)
+
+			ledgerPath := t.TempDir()
+			for _, args := range [][]string{
+				{"init", "--quiet"},
+				{"remote", "add", "origin", server.URL + "/ledger.git"},
+				{"config", "credential.helper", ""},
+				{"config", "http.proxy", ""},
+			} {
+				out, err := exec.Command("git", append([]string{"-C", ledgerPath}, args...)...).CombinedOutput()
+				require.NoError(t, err, "git %v: %s", args, out)
+			}
+			requireSageoxDir(t, gitRoot)
+			require.NoError(t, config.SaveLocalConfig(gitRoot, &config.LocalConfig{
+				Ledger: &config.LedgerConfig{Path: ledgerPath},
+			}))
+			restoreCwd := changeToDir(t, gitRoot)
+			defer restoreCwd()
+
+			res := checkLedgerRemoteReachable()
+
+			assert.Equal(t, tt.want, res.message)
+		})
+	}
+}
 
 func TestCheckLedgerURLAPIMatch_Skip_NoLedger(t *testing.T) {
 	// run in a temp dir with no ledger configured
