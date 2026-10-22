@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **A plain `ox doctor` no longer publishes plans you have not saved** — the commits its automatic cleanup makes, and the commit that uploads a session, now leave plans out. A `plan.md` you are still editing, a plan change someone already staged, and a large `plan.html` whose upload failed stay on your machine until the plan's own save, or its retry, shares them. Before, a plain `ox doctor` could commit and push them, the multi-megabyte page included.
 - **`ox doctor` finishes plan saves that never committed, and names plan edits nobody saved** — a save that wrote the plan but never committed it (ox was interrupted, or an older version left it) is queued and shared by the same `ox doctor` run. Edits nobody saved are listed by plan; `ox doctor --fix-slug=plan-unsaved-edits` shares them as they are once you confirm.
+- **"Access denied" means access denied** — a Ledger push and `ox doctor`'s Ledger check say you lack access only when the server answered HTTP 403. A sign-in failure on a server whose address or port contains 403 is now reported as a sign-in failure.
 
 ## [0.24.2] - 2026-10-21
 

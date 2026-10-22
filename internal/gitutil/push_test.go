@@ -354,6 +354,74 @@ func TestPushWithRetry_PermanentErrorShortCircuits(t *testing.T) {
 	assert.Contains(t, err.Error(), "not retryable")
 }
 
+// pushToLoopback pushes a new commit to an HTTP remote that handler serves and
+// returns PushWithRetry's error. The remote URL carries dummy credentials and a
+// /403/ path: with credentials, git's 401 message prints the full URL
+// ("Authentication failed for '…/403/repo.git/'"), which reproduces the
+// false 403 match on any port. Without them it prints only scheme://host:port.
+func pushToLoopback(t *testing.T, handler http.HandlerFunc) error {
+	t.Helper()
+	t.Setenv("GIT_ALLOW_PROTOCOL", "file:http")
+	t.Setenv("GIT_TERMINAL_PROMPT", "0")
+	repo, _ := initBareRemoteRepo(t)
+	addCommit(t, repo, "a.txt", "hello", "add a")
+
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	remote := strings.Replace(server.URL, "http://", "http://user:wrong@", 1) + "/403/repo.git"
+	run(t, repo, "git", "remote", "set-url", "origin", remote)
+	run(t, repo, "git", "config", "http.proxy", "")
+	run(t, repo, "git", "config", "credential.helper", "")
+
+	return PushWithRetry(context.Background(), repo, PushOpts{MaxRetries: 3, OpTimeout: 15 * time.Second})
+}
+
+func TestPushWithRetry_AuthFailureWithURLContaining403IsNotAccessDenied(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git push with retry")
+	}
+	err := pushToLoopback(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("WWW-Authenticate", `Basic realm="test"`)
+		http.Error(w, "Authentication failed", http.StatusUnauthorized)
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not retryable")
+	assert.NotContains(t, err.Error(), "access denied")
+}
+
+func TestIsHTTP403(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+		want   bool
+	}{
+		{"git https 403", "fatal: unable to access 'https://git.example.test/team/ledger.git/': The requested URL returned error: 403", true},
+		{"git-lfs batch 403", "batch response: HTTP 403: forbidden", true},
+		{"401 on a port containing 403", "fatal: could not read Username for 'http://127.0.0.1:40303': terminal prompts disabled", false},
+		{"commit hash containing 403", "error: failed to push some refs; hint: 9f4031c is not a fast-forward", false},
+		{"URL path containing 403", "remote: HTTP Basic: Access denied\nfatal: Authentication failed for 'https://git.example.test/403/ledger.git/'", false},
+		{"empty", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, IsHTTP403(tt.output))
+		})
+	}
+}
+
+func TestPushWithRetry_HTTP403IsAccessDenied(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git push with retry")
+	}
+	err := pushToLoopback(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "access denied (HTTP 403)")
+}
+
 func TestPushWithRetry_ContextCancellationExitsPromptly(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: git push with retry")
