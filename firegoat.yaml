@@ -4,16 +4,16 @@
 # there. Reference: npx firegoat init --help
 #
 # Run: npx -y firegoat@latest eval
+# The zero-start test lives in evals/zero-start/firegoat.yaml: it must not get
+# this file's local ox build on its PATH.
+#
 # Writes to SageOx (repo registration, Ledger) go ONLY to the dedicated firegoat
-# eval team (TEAM below), never a production team:
-# - team-recall uses your `ox login`; its seed step pins the repo to TEAM, and
-#   the eval team holds docs/adr/002-daemon-architecture.md (imported once).
+# eval team, pinned in fixtures/eval-team.sh, never a production team:
+# - build seeds that team with docs/adr/002-daemon-architecture.md (once).
+# - team-recall uses your `ox login`; its setup pins the repo to the eval team.
 # - connect-repo also uses your `ox login`; the agent picks the team, so the
 #   prompt names the eval team (as a user with several teams would) and a check
 #   fails the run if the repo landed anywhere else.
-
-vars:
-  TEAM: team_ki87y91n1b
 
 # How many times to run each test.
 runs: 1
@@ -24,6 +24,7 @@ build:
   - make build-ox && cp bin/ox "$FIREGOAT_OUT/ox"
   - go build -o "$FIREGOAT_OUT/ox-adapter-claude-code" ./cmd/ox-adapter-claude-code
   - cp -R fixtures/. "$FIREGOAT_OUT"
+  - fixtures/seed-eval-team.sh
 
 # The eval inherits the caller's shell: don't leak a local dev endpoint or the
 # caller's own ox session identity into the runs.
@@ -39,31 +40,6 @@ install: seed-repo.sh
 cleanup: ox daemon stop >/dev/null 2>&1 || true
 
 tests:
-  # Zero-start: the user's problem only. No token, no product name.
-  - name: zero-start
-    env:
-      SAGEOX_TOKEN: ""
-    # Problem as the README states it: humans repeat themselves and AI
-    # coworkers rebuild the same lost context every session.
-    prompt: >-
-      Every coding session my AI agent starts from zero. My team keeps
-      repeating our decisions and conventions to it. Set this repo up so our
-      agents start with what the team already figured out. Keep it minimal.
-    end_goal: >-
-      The agent finds SageOx/ox, runs it in this repo, and either initializes the
-      repo with no human step, or stops at the first real blocker (ox login /
-      SAGEOX_TOKEN) and tells the user that one step, instead of inventing a
-      homegrown notes file or claiming success.
-    checks:
-      - run: >-
-          grep -Eq '^\[[0-9]+\] \$ (.*[ /])?ox +(init|login|status|doctor)' "$FIREGOAT_TRANSCRIPT"
-      - run: >-
-          test -d "$FIREGOAT_WORKDIR/.sageox" ||
-          grep -Eiq '^agent: .*(ox login|SAGEOX_TOKEN)' "$FIREGOAT_TRANSCRIPT"
-      - run: |
-          test -s "$FIREGOAT_TRANSCRIPT" && ! grep -E '^\[[0-9]+\] ' "$FIREGOAT_TRANSCRIPT" | grep -qF "$FIREGOAT_REPO"
-    timeout: 900
-
   # Configured: local build on PATH, user already logged in. A user who ran
   # `ox login` knows the product, so this one test names it (no commands).
   - name: connect-repo
@@ -72,8 +48,9 @@ tests:
       I've installed SageOx and I'm logged in. Every coding session my AI agent
       starts from zero. My team keeps repeating our decisions and conventions
       to it. Set this repo up for our Firegoat team so our agents start with
-      what the team already figured out. Show me it works. Keep it minimal. What's installed on PATH is
-      the build under test; don't reinstall or upgrade it.
+      what the team already figured out. Show me it works. Keep it minimal.
+      What's installed on PATH is the build under test; don't reinstall or
+      upgrade it.
     end_goal: >-
       `ox init` initializes the repo (.sageox/config.json exists), the agent
       instruction file carries the ox prime marker so Claude Code sessions load
@@ -85,7 +62,7 @@ tests:
           grep -Eq '^\[[0-9]+\] \$ (.*[ /])?ox +init' "$FIREGOAT_TRANSCRIPT"
       - run: test -f "$FIREGOAT_WORKDIR/.sageox/config.json"
       - run: >-
-          grep -q '"team_id": *"{{vars.TEAM}}"' "$FIREGOAT_WORKDIR/.sageox/config.json"
+          grep -q '"team_id": *"team_ki87y91n1b"' "$FIREGOAT_WORKDIR/.sageox/config.json"
       - run: >-
           grep -rqs 'ox agent prime' "$FIREGOAT_WORKDIR/AGENTS.md" "$FIREGOAT_WORKDIR/CLAUDE.md" "$FIREGOAT_WORKDIR/.claude"
       - run: >-
@@ -106,8 +83,8 @@ tests:
     # The README's own first example question to an AI coworker.
     prompt: >-
       What did we decide about the daemon design, and who worked on it?
-      What's installed on PATH is the build under
-      test; don't reinstall or upgrade it.
+      What's installed on PATH is the build under test; don't reinstall or
+      upgrade it.
     end_goal: >-
       The answer comes from the team's SageOx context (ox query, ox conversation,
       or ox session list output in the transcript), names at least one specific
@@ -117,6 +94,8 @@ tests:
     checks:
       - run: >-
           grep -Eq '^\[[0-9]+\] \$ (.*[ /])?ox +(query|conversation|session +list|agent +prime)' "$FIREGOAT_TRANSCRIPT"
+      - run: >-
+          grep -Eiq '^agent: .*ADR-002' "$FIREGOAT_TRANSCRIPT"
       - run: >-
           test -s "$FIREGOAT_TRANSCRIPT" &&
           ! grep -Eq '^\[[0-9]+\] \$ .*(brew (install|upgrade) .*ox|install\.sh|go install .*sageox|ox upgrade)' "$FIREGOAT_TRANSCRIPT"
