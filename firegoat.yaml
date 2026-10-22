@@ -85,17 +85,40 @@ tests:
       What did we decide about the daemon design, and who worked on it?
       What's installed on PATH is the build under test; don't reinstall or
       upgrade it.
+    # Contract: the answer must come through ox retrieval, not by reading the
+    # team-context checkout by hand. Until imported docs are searchable this
+    # test fails on purpose: that failure is the product finding.
     end_goal: >-
-      The answer comes from the team's SageOx context (ox query, ox conversation,
-      or ox session list output in the transcript), names at least one specific
-      decision from ADR-002 (the background daemon for session management),
-      cites that ADR as its source, and says plainly when who decided it is
-      not recorded rather than guessing a name.
+      An ox retrieval command (ox query, ox conversation, ox kb query, ox
+      session list) returns ADR-002 in its output; the answer names at least
+      one decision from it (a background daemon for session management and
+      caching), cites ADR-002 as the source, and says plainly that who decided
+      it is not recorded rather than guessing a name. Reading the team-context
+      files directly does not count.
     checks:
-      - run: >-
-          grep -Eq '^\[[0-9]+\] \$ (.*[ /])?ox +(query|conversation|session +list|agent +prime)' "$FIREGOAT_TRANSCRIPT"
+      # retrieval returned the doc: a call that runs an ox retrieval command and
+      # never reads files itself (git, cat, find, the team folder) must print ADR-002
+      - run: |
+          awk '
+            function settle() { if (call != "" && retrieval && !reads && hit) found = 1 }
+            match($0, /^\[[0-9]+\] /) {
+              n = substr($0, 2, RLENGTH - 3)
+              if (n != call) { settle(); call = n; retrieval = reads = hit = 0 }
+              if ($0 ~ /^\[[0-9]+\] \$ (.*[ \/;&|])?ox +(query|conversation|kb +query|session +list)/) retrieval = 1
+              if ($0 ~ /(^|[ ;&|(])(git|cat|find|head|tail|sed|less|grep|rg|ls)( |$)|teams\/team_|\.local\/share\/sageox/) reads = 1
+              next
+            }
+            /^    / && tolower($0) ~ /adr-002|daemon-architecture/ { hit = 1 }
+            END { settle(); exit !found }
+          ' "$FIREGOAT_TRANSCRIPT"
       - run: >-
           grep -Eiq '^agent: .*ADR-002' "$FIREGOAT_TRANSCRIPT"
+      # the decision itself, not just the ADR's name
+      - run: >-
+          grep -Eiq '^agent: .*daemon.*(session|cach)|^agent: .*(session|cach).*daemon' "$FIREGOAT_TRANSCRIPT"
+      # attribution is admitted missing, not invented
+      - run: >-
+          grep -Eiq '^agent: .*(no author|not recorded|isn.t recorded|couldn.t (find|tell|say) who|unknown author|doesn.t (say|record|name) who)' "$FIREGOAT_TRANSCRIPT"
       - run: >-
           test -s "$FIREGOAT_TRANSCRIPT" &&
           ! grep -Eq '^\[[0-9]+\] \$ .*(brew (install|upgrade) .*ox|install\.sh|go install .*sageox|ox upgrade)' "$FIREGOAT_TRANSCRIPT"
