@@ -324,3 +324,29 @@ func TestMoveCloneIntoPlace_AdoptsCacheAndRemovesEmptyFolders(t *testing.T) {
 	assert.FileExists(t, filepath.Join(target, ".sageox", "cache", "whisper", "whisper.db"))
 	assert.NoDirExists(t, filepath.Join(target, "sessions"))
 }
+
+// Failure prevented: MoveCloneIntoPlace renamed a clone over a symlinked
+// target, replacing a coworker's relocation link. The link and the temp clone
+// must both survive the refusal.
+func TestMoveCloneIntoPlace_RejectsSymlinkedTarget(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks need privileges on windows")
+	}
+	root := t.TempDir()
+	real := filepath.Join(root, "relocated")
+	require.NoError(t, os.MkdirAll(filepath.Join(real, ".sageox", "cache"), 0o755))
+	temp := filepath.Join(root, "temp")
+	require.NoError(t, os.MkdirAll(filepath.Join(temp, ".git"), 0o755))
+	target := filepath.Join(root, "target")
+	require.NoError(t, os.Symlink(real, target))
+
+	err := MoveCloneIntoPlace(temp, target)
+
+	require.ErrorIs(t, err, ErrTargetIsSymlink)
+	fi, lerr := os.Lstat(target)
+	require.NoError(t, lerr)
+	assert.NotZero(t, fi.Mode()&os.ModeSymlink)
+	assert.DirExists(t, filepath.Join(real, ".sageox", "cache"))
+	assert.DirExists(t, filepath.Join(temp, ".git"))
+}

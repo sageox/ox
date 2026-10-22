@@ -17,6 +17,22 @@ import (
 // doctor's direct Ledger clone both publish through these helpers, so the two
 // cannot drift.
 
+// ErrTargetIsSymlink reports a clone target that is a symlink. A symlinked
+// target is a coworker's relocation of the checkout; moving it aside or
+// renaming a clone over it would undo that move (and could replace a link to
+// data the clone knows nothing about), so nothing touches it.
+var ErrTargetIsSymlink = errors.New("clone target is a symlink")
+
+// RejectSymlinkTarget returns ErrTargetIsSymlink when target is itself a
+// symlink (including a dangling one). It uses Lstat on purpose: os.Stat would
+// follow the link and describe whatever it points at.
+func RejectSymlinkTarget(target string) error {
+	if fi, err := os.Lstat(target); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%w: %s (remove or repoint the link, then re-run `ox doctor --fix`)", ErrTargetIsSymlink, target)
+	}
+	return nil
+}
+
 // VerifyClone checks that the clone at dir is complete: it has a .git and its
 // HEAD resolves. An early-EOF clone usually exits non-zero, but can also exit
 // zero and leave a HEAD that resolves to nothing, as a clone of an empty
@@ -42,6 +58,9 @@ func VerifyClone(ctx context.Context, dir string) error {
 // carried into the clone (AdoptCacheOnlyTarget) so the rename can land instead
 // of failing "file exists" forever, and handed back if the rename fails.
 func MoveCloneIntoPlace(tempPath, target string) error {
+	if err := RejectSymlinkTarget(target); err != nil {
+		return err
+	}
 	restoreCache, adoptErr := AdoptCacheOnlyTarget(tempPath, target)
 	if err := os.Rename(tempPath, target); err != nil {
 		// the caller deletes the temp clone; give the adopted cache back
