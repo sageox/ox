@@ -39,12 +39,17 @@ func SessionMarkerDir() string {
 //   - Idempotency: re-priming the same session reuses the ox agent ID
 //   - Hook context: agent_hook.go reads markers to pass agent state to handlers
 type SessionMarker struct {
-	AgentID              string                `json:"agent_id"`
-	SessionID            string                `json:"session_id,omitempty"`           // ox-generated agent-instance server session ID
-	RecordingSessionID   string                `json:"recording_session_id,omitempty"` // durable ses_ recording ID for resume linkage
-	AgentSessionID       string                `json:"agent_session_id"`               // coding agent's native session identifier
-	PrimedAt             time.Time             `json:"primed_at"`                      // when session was primed
-	ParentPID            int                   `json:"parent_pid,omitempty"`           // parent agent process ID
+	AgentID            string    `json:"agent_id"`
+	SessionID          string    `json:"session_id,omitempty"`           // ox-generated agent-instance server session ID
+	RecordingSessionID string    `json:"recording_session_id,omitempty"` // durable ses_ recording ID for resume linkage
+	AgentSessionID     string    `json:"agent_session_id"`               // coding agent's native session identifier
+	PrimedAt           time.Time `json:"primed_at"`                      // when session was primed
+	// FullPrimeViaHook records that this native session received a full prime
+	// through its SessionStart hook, the one channel known to land in the AI
+	// coworker's context. Only then may a repeat prime be compact; a bare prime
+	// can be piped through head or otherwise never read.
+	FullPrimeViaHook     bool                  `json:"full_prime_via_hook,omitempty"`
+	ParentPID            int                   `json:"parent_pid,omitempty"` // parent agent process ID
 	CursorSourceBoundary *CursorSourceBoundary `json:"cursor_source_boundary,omitempty"`
 }
 

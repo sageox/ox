@@ -346,9 +346,16 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// match a stale marker from an unrelated prior session and silently
 	// cross-link identities. Requiring a live agent detection keeps the
 	// fallback limited to the scenario it was designed for.
+	//
+	// markerIsThisSession: identity may be shared across native sessions under
+	// one agent process, but "this session already received a full prime" is a
+	// per-native-session fact. A PID-matched marker only speaks for this call
+	// when the call carries no session ID of its own.
+	markerIsThisSession := existingMarker != nil
 	if !isCursor && existingMarker == nil && agentx.CurrentAgent() != nil {
 		if agentPID := proc.FindAgentAncestorPID(); agentPID > 0 {
 			existingMarker = FindSessionMarkerByPID(agentPID)
+			markerIsThisSession = existingMarker != nil && agentSessionID == ""
 			if existingMarker != nil && agentSessionID == "" {
 				// promote the marker's native session ID so downstream
 				// marker writes reuse the same key
@@ -762,7 +769,14 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// (primeCallCount==1, set above), always yields compactReprime=false
 	// (full preamble). See prime.ShouldCompactReprime for the full
 	// belt-and-suspenders rationale.
-	compactReprime := prime.ShouldCompactReprimeForEvent(primeCallCount, hookEventName, hookSource)
+	//
+	// Compact additionally requires proof that THIS native session already
+	// received a full prime through its hook. primeCallCount counts invocations
+	// per shared agent identity, not deliveries: a bare prime piped through
+	// head, or a second Claude Code session under the same parent process, would
+	// otherwise be told "you were already primed" and never see team knowledge.
+	fullPrimeDelivered := existingMarker != nil && markerIsThisSession && existingMarker.FullPrimeViaHook
+	compactReprime := fullPrimeDelivered && prime.ShouldCompactReprimeForEvent(primeCallCount, hookEventName, hookSource)
 
 	contentWithAttribution := withAttributionGuidance("", isLoggedIn, attribution)
 
@@ -1093,6 +1107,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 			AgentSessionID:     agentSessionID,
 			PrimedAt:           time.Now(),
 			ParentPID:          proc.FindAgentAncestorPID(),
+			FullPrimeViaHook:   fullPrimeDelivered || (hookInput != nil && !compactReprime),
 		}
 		if isCursor && hookInput != nil {
 			marker.PrimedAt = time.Time{} // completed by the successful hook parent
