@@ -184,6 +184,27 @@ The CLI reads and writes review records only through `pkg/planreview`.
   it uploads a page still awaiting upload before it takes the lock, and while
   the page stays unstored it commits and pushes the rest of the dir and keeps
   the marker.
+- **Whole-index commits** (`commitLedgerSnapshot` in `cmd/ox`: the commit
+  that uploads a session, at stop and in `ox doctor`'s upload retry, and the
+  automatic doctor sweeps `ledger-clean-workdir`, `ledger-cache-tracked` and
+  `ledger-rej-tracked`) commit everything but `data/plans/`, through
+  `CommitLedgerSnapshot` with an exclude pathspec, and the sweeps stage nothing
+  there. A plan file stays as it was, staged or not, as do its retry marker
+  and review entries: the plan's own writers and their retries commit it.
+  Plan files alone make `ledger-clean-workdir` commit nothing. The `--fix`-only
+  session-id backfill and GitHub data migration, and H12's squash, still commit
+  the whole index.
+- **Plan changes no retry owns** (`ox doctor`, just before
+  `plan-pending-writes`): a plan dir with uncommitted changes, no plan retry
+  marker, and changes outside the review records an entry lands. If its
+  `events.jsonl` holds more `created` or `revised` events than HEAD's, the
+  save ran and never committed (a crash, an older ox, a lost marker):
+  `plan-stranded-saves`, automatic, gives it a whole-dir marker and this run's
+  retry publishes it. Otherwise the change was never saved:
+  `plan-unsaved-edits` lists it in plain `ox doctor` output, and publishes it
+  as it is (a whole-dir marker, then the retry) only when
+  `ox doctor --fix-slug=plan-unsaved-edits` is confirmed at a terminal or with
+  `--yes`. `ox agent prime` retries only what is already queued.
 - **Pushes** (`pushLedger`) ignore their caller's cancellation: a cancel
   during the pull-rebase that a rejected push runs kills git and skips its
   abort, leaving the clone mid-rebase. `PushWithRetry`'s own timeouts bound

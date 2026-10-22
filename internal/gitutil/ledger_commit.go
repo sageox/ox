@@ -107,7 +107,11 @@ func CommitLedgerSnapshotPreserving(ctx context.Context, repoPath, message strin
 		}
 	}
 
-	if err := validateLedgerTree(ctx, repoPath, parent, tree, pathspecs...); err != nil {
+	// A scoped tree differs from parent only under pathspecs, so its whole
+	// delta is what this commit publishes. Filtering by pathspecs again would
+	// break an exclude pathspec on an unborn branch: validation lists that
+	// tree with ls-tree, which refuses exclude magic.
+	if err := validateLedgerTree(ctx, repoPath, parent, tree); err != nil {
 		return false, err
 	}
 	if err := assertNoSacredMassDeletion(ctx, repoPath, parent, tree, preserved); err != nil {

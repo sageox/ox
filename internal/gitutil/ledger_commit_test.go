@@ -263,24 +263,32 @@ func TestCommitLedgerSnapshot_RefusesInvalidBlob(t *testing.T) {
 	}
 }
 
+// TestCommitLedgerSnapshot_UnbornBranch: a scope holds on the first commit,
+// whether it names a path or excludes one, as `ox doctor` excludes data/plans/.
+// Failure prevented: the first commit publishes what its scope left out, or an
+// exclude pathspec fails it outright.
 func TestCommitLedgerSnapshot_UnbornBranch(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: real git repository")
 	}
-	repo := t.TempDir()
-	gitInRepo(t, repo, "init", "-b", "main")
-	gitInRepo(t, repo, "config", "user.name", "Test")
-	gitInRepo(t, repo, "config", "user.email", "test@example.com")
-	writeGitutilFixture(t, repo, "sessions/x/meta.json", cleanMeta)
-	writeGitutilFixture(t, repo, "data/murmurs/m.json", "{}\n")
-	gitInRepo(t, repo, "add", "--sparse", ".")
+	for _, pathspecs := range [][]string{{"sessions/x/"}, {":/", ":(exclude)data/murmurs"}} {
+		t.Run(strings.Join(pathspecs, " "), func(t *testing.T) {
+			repo := t.TempDir()
+			gitInRepo(t, repo, "init", "-b", "main")
+			gitInRepo(t, repo, "config", "user.name", "Test")
+			gitInRepo(t, repo, "config", "user.email", "test@example.com")
+			writeGitutilFixture(t, repo, "sessions/x/meta.json", cleanMeta)
+			writeGitutilFixture(t, repo, "data/murmurs/m.json", "{}\n")
+			gitInRepo(t, repo, "add", "--sparse", ".")
 
-	committed, err := CommitLedgerSnapshot(context.Background(), repo, "first", "sessions/x/")
-	require.NoError(t, err)
-	require.True(t, committed)
-	assert.True(t, headHasPath(t, repo, "sessions/x/meta.json"))
-	assert.False(t, headHasPath(t, repo, "data/murmurs/m.json"), "scope must hold on the first commit too")
-	assert.Equal(t, "main", strings.TrimSpace(gitInRepo(t, repo, "branch", "--show-current")))
+			committed, err := CommitLedgerSnapshot(context.Background(), repo, "first", pathspecs...)
+			require.NoError(t, err)
+			require.True(t, committed)
+			assert.True(t, headHasPath(t, repo, "sessions/x/meta.json"))
+			assert.False(t, headHasPath(t, repo, "data/murmurs/m.json"), "scope must hold on the first commit too")
+			assert.Equal(t, "main", strings.TrimSpace(gitInRepo(t, repo, "branch", "--show-current")))
+		})
+	}
 }
 
 // TestCommitLedgerSnapshot_RefusesUnmergedIndexOutsideScope — git refuses every
