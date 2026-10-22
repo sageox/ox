@@ -15,6 +15,13 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # actions/cache waits this many minutes (default 10) for each 128 MiB piece
+  # of a cache download, and a healthy piece takes about a second. A stalled
+  # download then costs one minute, not ten, before the job carries on
+  # without the cache.
+  SEGMENT_DOWNLOAD_TIMEOUT_MINS: '1'
+
 jobs:
   # The PR gate runs the full unit tier as one runner per slot (see `make
   # test-split-slots`), acceptance and twins on runners of their own, and a
@@ -231,10 +238,16 @@ jobs:
           retention-days: 14
           overwrite: true
 
-      # The repo's Actions cache sits near its 10 GB budget, so exactly one
-      # ~1.5 GB entry is kept; GitHub would otherwise evict by LRU.
       - name: Warm the build cache for PRs
         run: make warm-test-cache
+
+      # Drop what this run did not use. Go stamps a cache entry's mtime when it
+      # uses one stamped over an hour ago, so with this job well under an hour,
+      # an entry older than two hours went unused. Go's own trim is the same
+      # rule at 5 days, under which restore-and-resave grew this cache to
+      # ~6 GiB that every job spent ~2.5 minutes restoring.
+      - name: Trim the build cache to what this run used
+        run: find ~/.cache/go-build -mindepth 2 -maxdepth 2 -name '*-[ad]' -mmin +120 -exec rm -rf {} +
 
       - name: Save build cache
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -244,6 +257,10 @@ jobs:
             ~/go/pkg/mod
           key: go-${{ runner.os }}-test-${{ github.sha }}
 
+      # Keep the two newest entries. A PR job that picked the previous one may
+      # still be downloading it, and deleting it mid-download fails that restore
+      # ("The specified blob does not exist") and leaves the job compiling from
+      # scratch. Two trimmed entries fit the repo's 10 GB Actions cache budget.
       - name: Prune superseded build caches
         env:
           GH_TOKEN: ${{ github.token }}
@@ -252,7 +269,7 @@ jobs:
         # fails the step.
         run: |
           gh cache list --repo "$GITHUB_REPOSITORY" --ref refs/heads/main --key "go-${RUNNER_OS}-" \
-            --sort created_at --order desc --limit 100 --json id --jq '.[1:][].id' \
+            --sort created_at --order desc --limit 100 --json id --jq '.[2:][].id' \
             | while read -r id; do
                 out=$(gh cache delete --repo "$GITHUB_REPOSITORY" "$id" 2>&1) && continue
                 case "$out" in *"Could not find a cache"*) ;; *) echo "$out" >&2; exit 1 ;; esac
