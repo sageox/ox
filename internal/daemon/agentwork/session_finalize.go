@@ -27,6 +27,7 @@ import (
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/paths"
+	"github.com/sageox/ox/internal/proc"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/internal/session/claudesource"
@@ -2676,10 +2677,11 @@ func extractPayload(item *WorkItem) (*SessionFinalizePayload, error) {
 // callers that need to know how strong the evidence is compare the method.
 //
 // Only stalenessPIDDead rests on an actual liveness check: a PID was available
-// and kill(pid, 0) refused it. That check reads ANY signal error as death,
-// which on Unix means ESRCH (gone) or EPERM — and EPERM can only arise here
-// from PID reuse by another user's process, in which case the original owner is
-// gone too.
+// and kill(pid, 0) refused it, or the process holding it started at another
+// time than the one recorded in parent_start_time. That check reads ANY signal
+// error as death, which on Unix means ESRCH (gone) or EPERM — and EPERM can
+// only arise here from PID reuse by another user's process, in which case the
+// original owner is gone too.
 //
 // stalenessTimeThreshold is the opposite: it fires precisely when there was no
 // PID to ask (unreadable/unparseable marker, or a legacy marker predating
@@ -2712,12 +2714,13 @@ func isStaleRecording(recPath string, info os.FileInfo, pidLookup func(string) i
 	}
 
 	var state struct {
-		StartedAt   time.Time  `json:"started_at"`
-		AgentID     string     `json:"agent_id"`
-		ParentPID   int        `json:"parent_pid"`
-		AdapterName string     `json:"adapter_name"`
-		LastHookAt  *time.Time `json:"last_hook_at,omitempty"`
-		StoppedAt   *time.Time `json:"stopped_at,omitempty"`
+		StartedAt       time.Time  `json:"started_at"`
+		AgentID         string     `json:"agent_id"`
+		ParentPID       int        `json:"parent_pid"`
+		ParentStartTime int64      `json:"parent_start_time"` // set only under disposable_machine
+		AdapterName     string     `json:"adapter_name"`
+		LastHookAt      *time.Time `json:"last_hook_at,omitempty"`
+		StoppedAt       *time.Time `json:"stopped_at,omitempty"`
 	}
 	if jsonErr := json.Unmarshal(data, &state); jsonErr != nil {
 		age = time.Since(info.ModTime())
@@ -2757,8 +2760,8 @@ func isStaleRecording(recPath string, info os.FileInfo, pidLookup func(string) i
 	// if we have a PID, check liveness — dead process = stale immediately,
 	// live process = never stale (wait for next cycle)
 	if pid > 0 {
-		proc, procErr := os.FindProcess(pid)
-		if procErr != nil || proc.Signal(syscall.Signal(0)) != nil {
+		p, procErr := os.FindProcess(pid)
+		if procErr != nil || p.Signal(syscall.Signal(0)) != nil || proc.IsReused(pid, state.ParentStartTime) {
 			// grace period: young recordings with dead PIDs may have stored a
 			// transient shell PID. Don't mark stale until grace period expires.
 			if age < session.GhostGracePeriod {
