@@ -43,7 +43,7 @@ Examples:
 
 func init() {
 	sessionCmd.AddCommand(sessionWaitCmd)
-	sessionWaitCmd.Flags().String("since", "", "count sessions that finished at or after this time (RFC3339 or YYYY-MM-DD); required")
+	sessionWaitCmd.Flags().String("since", "", "count sessions that finished at or after this time: a duration back from now (2h), RFC3339, or YYYY-MM-DD; required")
 	sessionWaitCmd.Flags().Duration("timeout", 20*time.Minute, "how long to wait for the daemon to upload this machine's sessions")
 }
 
@@ -67,7 +67,7 @@ func runSessionWait(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	if since.IsZero() {
-		return errkind.Errorf(errkind.Usage, "--since needs a time: RFC3339 or YYYY-MM-DD")
+		return errkind.Errorf(errkind.Usage, "--since needs a time: a duration (2h), RFC3339, or YYYY-MM-DD")
 	}
 	timeout, _ := cmd.Flags().GetDuration("timeout")
 	// requireProjectRoot accepts any directory holding a .sageox folder, and the

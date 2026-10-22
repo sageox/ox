@@ -337,7 +337,7 @@ func TestSessionWait_RejectsUnusableInvocation(t *testing.T) {
 		sageox            string // "": no .sageox folder; "bare": as the legacy ~/.sageox leaves in $HOME; "initialized": no Ledger cloned yet
 	}{
 		{"missing --since", "", "--since needs a time", ""},
-		{"malformed --since", "yesterday", "--since must be RFC3339", ""},
+		{"malformed --since", "yesterday", "--since must be", ""},
 		{"outside a SageOx project", "2026-10-12", "not in a SageOx project", ""},
 		{"under a legacy .sageox folder", "2026-10-12", "not in a SageOx project", "bare"},
 		{"before the Ledger is cloned", "2026-10-12", "ox doctor --fix", "initialized"},
