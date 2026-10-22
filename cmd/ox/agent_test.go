@@ -372,9 +372,11 @@ func TestGenerateAgentID(t *testing.T) {
 	t.Run("generates multiple unique IDs", func(t *testing.T) {
 		seen := make(map[string]bool)
 		iterations := 100
+		existingIDs := make([]string, 0, iterations)
 
 		for i := 0; i < iterations; i++ {
-			agentID, err := agentinstance.GenerateAgentID([]string{})
+			// collision avoidance needs the IDs already issued by the caller
+			agentID, err := agentinstance.GenerateAgentID(existingIDs)
 			if err != nil {
 				t.Fatalf("iteration %d: expected no error, got %v", i, err)
 			}
@@ -383,6 +385,7 @@ func TestGenerateAgentID(t *testing.T) {
 				t.Errorf("iteration %d: duplicate agent ID generated: %s", i, agentID)
 			}
 			seen[agentID] = true
+			existingIDs = append(existingIDs, agentID)
 		}
 	})
 }
