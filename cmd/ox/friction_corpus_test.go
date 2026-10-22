@@ -49,6 +49,11 @@ func TestFrictionCorpus(t *testing.T) {
 		name := strings.Join(c.Argv, " ")
 		t.Run(name, func(t *testing.T) {
 			outcome, detail := whatOxDoes(c.Argv, c.RuntimeError)
+			if outcome == "suggest" {
+				for _, banned := range corpusBannedSuggestions {
+					require.NotEqual(t, banned, strings.Fields(detail + " ")[0], "%q must not suggest %q", name, banned)
+				}
+			}
 			switch c.Expect {
 			case "resolves":
 				require.Equal(t, "resolves", outcome, "ox should run %q as typed; got %s (%s)", name, outcome, detail)
@@ -59,11 +64,7 @@ func TestFrictionCorpus(t *testing.T) {
 				require.Equal(t, "suggest", outcome, "ox should suggest a fix for %q without running it; got %s (%s)", name, outcome, detail)
 				require.Contains(t, detail, c.Target, "ox suggested the wrong command for %q", name)
 			case "error":
-				require.NotEqual(t, "resolves", outcome, "%q should stay an error", name)
-				require.NotEqual(t, "auto", outcome, "%q must not be corrected and run (ran %s)", name, detail)
-				for _, banned := range corpusBannedSuggestions {
-					require.NotEqual(t, banned, strings.Fields(detail+" ")[0], "%q must not suggest %q", name, banned)
-				}
+				require.Equal(t, "error", outcome, "%q should stay an error; got %s (%s)", name, outcome, detail)
 			default:
 				t.Fatalf("unknown expectation %q", c.Expect)
 			}

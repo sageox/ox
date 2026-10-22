@@ -1,5 +1,5 @@
 {
- "_comment": "Anonymized invocation shapes from failed ox commands (friction telemetry, 2026-09-22 to 2026-10-22). Every value is a placeholder; only command words, flag names and shape survive. expect is the intended outcome: resolves (runs as typed), auto (ox corrects and runs target), suggest (ox shows target, does not run it), error (stays an error, never auto-runs, never suggests a destructive command). runtime_error is what the agent dispatcher raises at run time, which cobra cannot predict.",
+ "_comment": "Anonymized invocation shapes from failed ox commands (friction telemetry, 2026-09-22 to 2026-10-22). Every value is a placeholder; only command words, flag names and shape survive. expect is the intended outcome: resolves (runs as typed), auto (ox corrects and runs target), suggest (ox shows target, does not run it), error (stays an error without suggesting a correction). runtime_error is what the agent dispatcher raises at run time, which cobra cannot predict.",
  "cases": [
   {
    "argv": [
@@ -140,7 +140,8 @@
     "--help"
    ],
    "events": 1,
-   "expect": "error"
+   "expect": "suggest",
+   "target": "pet"
   },
   {
    "argv": [

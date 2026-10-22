@@ -128,13 +128,18 @@ func getDisplayName(ep string) string {
 	return p.DisplayName
 }
 
+// verifyRedactionSignature is a test seam. A dev build embeds no signature, so
+// the real verifier only ever reports StatusNotConfigured and the tamper
+// warning below could never be exercised.
+var verifyRedactionSignature = session.VerifyRedactionSignature
+
 // warnIfRedactionSignatureInvalid checks the redaction policy signature and prints
 // a warning to stderr if it's invalid. This is called at the start of session
 // operations to alert users of potential tampering.
 //
 // Returns true if signature is valid or not configured (dev build), false if invalid.
 func warnIfRedactionSignatureInvalid() bool {
-	result := session.VerifyRedactionSignature()
+	result := verifyRedactionSignature()
 
 	switch result.Status {
 	case signing.StatusNotConfigured:
