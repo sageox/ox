@@ -15,6 +15,7 @@ import (
 
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/secretguard"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -40,6 +41,7 @@ func executeFeedbackTest(t *testing.T, input string, args ...string) (string, er
 
 func feedbackTestDependencies(t *testing.T) {
 	t.Helper()
+	t.Setenv(config.EnvUserConfig, filepath.Join(t.TempDir(), "config.yaml"))
 	originalAuth, originalRules := feedbackTokenForEndpoint, feedbackLoadLatestRules
 	t.Cleanup(func() {
 		feedbackTokenForEndpoint, feedbackLoadLatestRules = originalAuth, originalRules
@@ -107,8 +109,8 @@ func TestFeedbackDryRunIsOffline(t *testing.T) {
 	assert.NotContains(t, output, "email")
 }
 
-// A preview must bypass the real root lifecycle, including queued telemetry flushes.
-func TestFeedbackPreviewSkipsRootLifecycle(t *testing.T) {
+// Feedback must never link its request trace to authenticated command telemetry.
+func TestFeedbackSkipsRootLifecycle(t *testing.T) {
 	t.Setenv("DO_NOT_TRACK", "1")
 	previousContext, previousConfig := cliCtx, cfg
 	previousPreRun := preRunReached
@@ -119,17 +121,67 @@ func TestFeedbackPreviewSkipsRootLifecycle(t *testing.T) {
 	})
 	cmd, _, err := rootCmd.Find([]string{"feedback"})
 	require.NoError(t, err)
+	cmd.InheritedFlags()
 	flag := cmd.Flags().Lookup("dry-run")
 	previousValue, previousChanged := flag.Value.String(), flag.Changed
 	t.Cleanup(func() { _ = flag.Value.Set(previousValue); flag.Changed = previousChanged })
-	require.NoError(t, cmd.Flags().Set("dry-run", "true"))
-	require.NoError(t, rootCmd.PersistentPreRunE(cmd, nil))
-	assert.True(t, preRunReached)
-	assert.Nil(t, cliCtx, "a preview must never initialize the network/telemetry context")
-	require.NoError(t, rootCmd.PersistentPostRunE(cmd, nil))
-	assert.Nil(t, cliCtx)
-	require.NoError(t, cmd.Flags().Set("dry-run", "false"))
-	assert.False(t, isFeedbackPreview(cmd))
+	configFlag := cmd.Flags().Lookup("config")
+	previousConfigValue, previousConfigChanged := configFlag.Value.String(), configFlag.Changed
+	t.Cleanup(func() { _ = configFlag.Value.Set(previousConfigValue); configFlag.Changed = previousConfigChanged })
+	configFile := filepath.Join(t.TempDir(), "selected.yaml")
+	require.NoError(t, os.WriteFile(configFile, []byte("display_name: feedback\n"), 0o600))
+	t.Setenv(config.EnvUserConfig, "")
+	require.NoError(t, cmd.Flags().Set("config", configFile))
+	for _, dryRun := range []string{"false", "true"} {
+		require.NoError(t, cmd.Flags().Set("dry-run", dryRun))
+		require.NoError(t, rootCmd.PersistentPreRunE(cmd, nil))
+		assert.True(t, preRunReached)
+		assert.Nil(t, cliCtx, "feedback must never initialize the network/telemetry context")
+		require.NoError(t, rootCmd.PersistentPostRunE(cmd, nil))
+		assert.Nil(t, cliCtx)
+		assert.Equal(t, configFile, os.Getenv(config.EnvUserConfig))
+	}
+	assert.False(t, isFeedbackCommand(rootCmd))
+}
+
+func TestFeedbackJSONEnvironment(t *testing.T) {
+	for _, tc := range []struct {
+		name, environment string
+		args              []string
+		wantJSON          bool
+	}{
+		{name: "environment", environment: "1", wantJSON: true},
+		{name: "explicit false", environment: "1", args: []string{"--json=false"}},
+		{name: "explicit true", args: []string{"--json"}, wantJSON: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			feedbackTestDependencies(t)
+			t.Setenv("OX_JSON", tc.environment)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, `{"case_id":"`+feedbackTestReceipt+`"}`)
+			}))
+			defer server.Close()
+			t.Setenv("SAGEOX_ENDPOINT", server.URL)
+			output, err := executeFeedbackTest(t, feedbackTestReport, append([]string{"--file", "-", "--anonymous"}, tc.args...)...)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantJSON, json.Valid([]byte(output)))
+			assert.Contains(t, output, feedbackTestReceipt)
+		})
+	}
+}
+
+func TestFeedbackRejectedInvocationSkipsTelemetry(t *testing.T) {
+	restoreRootCmdState(t)
+	t.Setenv("DO_NOT_TRACK", "1")
+	cmd, _, err := rootCmd.Find([]string{"feedback"})
+	require.NoError(t, err)
+	flag := cmd.Flags().Lookup("anonymous")
+	previousValue, previousChanged := flag.Value.String(), flag.Changed
+	t.Cleanup(func() { _ = flag.Value.Set(previousValue); flag.Changed = previousChanged })
+	cliCtx = nil
+	code := executeWithFrictionRecovery(context.Background(), []string{"feedback", "--anonymous", "--unknown-feedback-flag"}, 0)
+	assert.NotZero(t, code)
+	assert.Nil(t, cliCtx, "rejected feedback must not create a usage telemetry context")
 }
 
 // Invalid input and credentials in any field must fail before auth or any HTTP request.
@@ -154,6 +206,8 @@ func TestFeedbackUnsafeInputNeverLeavesMachine(t *testing.T) {
 		{"oversize", "Oversize report example\n" + strings.Repeat("a", 4096), nil},
 		{"invalid type", feedbackTestReport, []string{"--type", "internal"}},
 		{"invalid email", feedbackTestReport, []string{"--email", "A Person <person@example.com>"}},
+		{"empty email", feedbackTestReport, []string{"--email="}},
+		{"anonymous token", "Login fails with a private token\noxp_" + strings.Repeat("a", 40), []string{"--anonymous"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			args := append([]string{"--file", "-"}, tc.args...)
@@ -217,14 +271,13 @@ func TestFeedbackFreshRulesScanEscapedReport(t *testing.T) {
 	assert.NotContains(t, err.Error(), "synthetic-private-value")
 }
 
-// Missing identity and broken credentials must not silently become successful anonymous reports.
-func TestFeedbackRequiresReplyIdentity(t *testing.T) {
+// A broken stored identity must not silently turn into an anonymous submission.
+func TestFeedbackBrokenLoginRequiresExplicitChoice(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		token *auth.StoredToken
 		err   error
 	}{
-		{name: "no login"},
 		{name: "empty token", token: &auth.StoredToken{}},
 		{name: "broken login", err: errors.New("private refresh error")},
 	} {
@@ -240,6 +293,76 @@ func TestFeedbackRequiresReplyIdentity(t *testing.T) {
 			assert.Empty(t, output)
 			assert.Contains(t, err.Error(), "email")
 			assert.NotContains(t, err.Error(), "private refresh error")
+		})
+	}
+}
+
+func TestFeedbackAnonymousSubmission(t *testing.T) {
+	for _, explicit := range []bool{false, true} {
+		t.Run(map[bool]string{false: "no login", true: "explicit anonymous"}[explicit], func(t *testing.T) {
+			feedbackTestDependencies(t)
+			authCalls := 0
+			feedbackTokenForEndpoint = func(context.Context, string, int) (*auth.StoredToken, error) {
+				authCalls++
+				if explicit {
+					t.Fatal("--anonymous consulted stored credentials")
+				}
+				return nil, nil
+			}
+			var submitted []byte
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				assert.Empty(t, r.Header.Get("Authorization"))
+				var err error
+				submitted, err = io.ReadAll(r.Body)
+				assert.NoError(t, err)
+				_, _ = io.WriteString(w, `{"case_id":"`+feedbackTestReceipt+`"}`)
+			}))
+			defer server.Close()
+			t.Setenv("SAGEOX_ENDPOINT", server.URL)
+			args := []string{"--file", "-"}
+			if explicit {
+				args = append(args, "--anonymous")
+			}
+			preview, err := executeFeedbackTest(t, feedbackTestReport, append(args, "--dry-run")...)
+			require.NoError(t, err)
+			assert.Zero(t, authCalls)
+			require.Nil(t, submitted)
+			output, err := executeFeedbackTest(t, feedbackTestReport, append(args, "--json")...)
+			require.NoError(t, err)
+			assert.Equal(t, preview, string(submitted))
+			var payload map[string]any
+			require.NoError(t, json.Unmarshal(submitted, &payload))
+			assert.NotContains(t, payload, "email")
+			assert.NotContains(t, payload, "anonymous")
+			var receipt map[string]any
+			require.NoError(t, json.Unmarshal([]byte(output), &receipt))
+			assert.Equal(t, feedbackTestReceipt, receipt["id"])
+			assert.Equal(t, "sent", receipt["status"])
+			assert.Contains(t, receipt["guidance"], "support cannot reply")
+			if explicit {
+				assert.Zero(t, authCalls)
+			} else {
+				assert.Equal(t, 1, authCalls)
+			}
+		})
+	}
+}
+
+func TestFeedbackAnonymousConflictsWithEmail(t *testing.T) {
+	for _, email := range []string{"person@example.com", ""} {
+		t.Run(email, func(t *testing.T) {
+			feedbackTestDependencies(t)
+			feedbackTokenForEndpoint = func(context.Context, string, int) (*auth.StoredToken, error) {
+				t.Fatal("conflicting flags reached authentication")
+				return nil, nil
+			}
+			feedbackLoadLatestRules = func(context.Context) (*secretguard.RuleSet, error) {
+				t.Fatal("conflicting flags reached network checks")
+				return nil, nil
+			}
+			output, err := executeFeedbackTest(t, feedbackTestReport, "--file", "-", "--anonymous", "--email="+email)
+			require.Error(t, err)
+			assert.Empty(t, output)
 		})
 	}
 }

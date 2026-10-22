@@ -9,6 +9,7 @@ import (
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/cli"
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/version"
@@ -32,8 +33,9 @@ automatically.
 Possible secrets are refused locally. Sending also requires current secret
 checks; --dry-run works offline and prints the exact JSON body without sending.
 
-Replies use your signed-in account's notification address. Without login,
-provide --email. This sends private correspondence to SageOx Support; it does
+Replies use your signed-in account's notification address, or --email. Without
+login or email, reports have no reply address. Use --anonymous to skip login
+explicitly. This sends private correspondence to SageOx Support; it does
 not create a public GitHub issue. Explicit feedback works with telemetry off.
 
 Examples:
@@ -47,6 +49,8 @@ Examples:
 	_ = cmd.MarkFlagRequired("file")
 	cmd.Flags().String("type", "feedback", "Report category: bug, feature-request, or feedback")
 	cmd.Flags().String("email", "", "Submit without login using this reply address")
+	cmd.Flags().Bool("anonymous", false, "Submit without using login or supplying a reply address")
+	cmd.MarkFlagsMutuallyExclusive("anonymous", "email")
 	cmd.Flags().Bool("dry-run", false, "Print the locally checked JSON body without sending")
 	return cmd
 }
@@ -55,26 +59,29 @@ func init() {
 	rootCmd.AddCommand(newFeedbackCommand())
 }
 
-// Previews must not start telemetry or flush previously queued command events.
-func isFeedbackPreview(cmd *cobra.Command) bool {
-	if cmd.CommandPath() != "ox feedback" {
-		return false
-	}
-	dryRun, _ := cmd.Flags().GetBool("dry-run")
-	return dryRun
+// Feedback must not correlate an anonymous report with authenticated telemetry.
+func isFeedbackCommand(cmd *cobra.Command) bool {
+	return cmd != nil && cmd.CommandPath() == "ox feedback"
 }
 
 func runFeedback(cmd *cobra.Command, _ []string) error {
 	source, _ := cmd.Flags().GetString("file")
 	category, _ := cmd.Flags().GetString("type")
 	email, _ := cmd.Flags().GetString("email")
+	anonymous, _ := cmd.Flags().GetBool("anonymous")
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
 	jsonOutput, _ := cmd.Flags().GetBool("json")
+	if !cmd.Flags().Changed("json") {
+		jsonOutput = config.Load().JSON
+	}
 	if err := validateFeedbackType(category); err != nil {
 		return errkind.WithDetail(errkind.Usage, "invalid feedback type", err)
 	}
 	if err := validateFeedbackEmail(email); err != nil {
 		return errkind.WithDetail(errkind.Usage, "invalid feedback email", err)
+	}
+	if cmd.Flags().Changed("email") && email == "" {
+		return errkind.Errorf(errkind.Usage, "--email needs a reply address; omit it or use --anonymous to submit without one")
 	}
 	reader := cmd.InOrStdin()
 	if source != "-" {
@@ -120,14 +127,14 @@ func runFeedback(cmd *cobra.Command, _ []string) error {
 	projectRoot, _ := findProjectRoot()
 	ep := endpoint.GetForProject(projectRoot)
 	var token *auth.StoredToken
-	if email == "" {
+	if !anonymous && email == "" {
 		token, err = feedbackTokenForEndpoint(cmd.Context(), ep, 300)
 		if err != nil {
-			return errors.New("feedback not submitted: authentication could not be refreshed; run ox login or supply --email and retry")
+			return errors.New("feedback not submitted: authentication could not be refreshed; run ox login, use --anonymous, or supply --email and retry")
 		}
 	}
-	if (token == nil || token.AccessToken == "") && email == "" {
-		return errkind.Errorf(errkind.NotLoggedIn, "feedback needs a reply address: use --email or run ox login")
+	if token != nil && token.AccessToken == "" {
+		return errors.New("feedback not submitted: stored login has no access credential; run ox login, use --anonymous, or supply --email and retry")
 	}
 	if err := validateFeedbackPayload(cmd.Context(), payload); err != nil {
 		return err
@@ -140,13 +147,20 @@ func runFeedback(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("feedback submission not confirmed: %w; keep your report before retrying (a retry may send a duplicate)", err)
 	}
+	guidance := "SageOx Support accepted the report. Keep this receipt for follow-up."
+	if token == nil && email == "" {
+		guidance += " No reply address was supplied; support cannot reply."
+	}
 	if jsonOutput {
 		return cli.PrintJSONTo(cmd.OutOrStdout(), struct {
 			ID       string `json:"id"`
 			Status   string `json:"status"`
 			Guidance string `json:"guidance"`
-		}{id, "sent", "SageOx Support accepted the report. Keep this receipt for follow-up."})
+		}{id, "sent", guidance})
 	}
 	_, err = fmt.Fprintf(cmd.OutOrStdout(), "Accepted by SageOx Support · receipt %s\n", id)
+	if err == nil && token == nil && email == "" {
+		_, err = fmt.Fprintln(cmd.OutOrStdout(), "No reply address supplied; support cannot reply.")
+	}
 	return err
 }

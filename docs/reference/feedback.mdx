@@ -20,8 +20,9 @@ automatically.
 Possible secrets are refused locally. Sending also requires current secret
 checks; --dry-run works offline and prints the exact JSON body without sending.
 
-Replies use your signed-in account's notification address. Without login,
-provide --email. This sends private correspondence to SageOx Support; it does
+Replies use your signed-in account's notification address, or --email. Without
+login or email, reports have no reply address. Use --anonymous to skip login
+explicitly. This sends private correspondence to SageOx Support; it does
 not create a public GitHub issue. Explicit feedback works with telemetry off.
 
 Examples:
@@ -36,6 +37,7 @@ ox feedback --file <path|-> [flags]
 ### Options
 
 ```
+      --anonymous      Submit without using login or supplying a reply address
       --dry-run        Print the locally checked JSON body without sending
       --email string   Submit without login using this reply address
       --file string    Report file, or - to read stdin (required)
