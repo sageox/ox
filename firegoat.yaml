@@ -13,9 +13,16 @@ runs: 1
 # Local build under test. $FIREGOAT_OUT is first on the agent's PATH, so this
 # ox shadows any ox already installed on the machine.
 build:
-  - go build -o "$FIREGOAT_OUT/ox" ./cmd/ox
+  - make build-ox && cp bin/ox "$FIREGOAT_OUT/ox"
   - go build -o "$FIREGOAT_OUT/ox-adapter-claude-code" ./cmd/ox-adapter-claude-code
   - cp -R fixtures/. "$FIREGOAT_OUT"
+
+# The eval inherits the caller's shell: don't leak a local dev endpoint or the
+# caller's own ox session identity into the runs.
+env:
+  SAGEOX_API: ""
+  SAGEOX_AGENT_ID: ""
+  SAGEOX_SESSION_ID: ""
 
 # Every test starts in a small, already-committed project repo.
 install: seed-repo.sh
@@ -81,7 +88,7 @@ tests:
   # Configured: repo already connected (seeded with the public CLI); the user
   # wants prior team knowledge before starting work.
   - name: team-recall
-    install: ox init --no-input --yes >/dev/null
+    install: ox init --no-input --yes --endpoint https://sageox.ai >/dev/null
     # The README's own first example question to an AI coworker.
     prompt: >-
       What did we decide about the daemon design, and who worked on it?
