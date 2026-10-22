@@ -52,11 +52,12 @@ func TestMurmurDeleteLeavesUnrelatedChangesStaged(t *testing.T) {
 			head := runGitInDir(t, targetDir, "rev-parse", "HEAD")
 			staged := runGitInDir(t, targetDir, "rev-parse", ":unrelated.md")
 			index := runGitInDir(t, targetDir, "write-tree")
-			if tc.state == "rebase" {
+			switch tc.state {
+			case "rebase":
 				if err := os.Mkdir(filepath.Join(targetDir, ".git", "rebase-merge"), 0o755); err != nil {
 					t.Fatal(err)
 				}
-			} else if tc.state == "missing committer" {
+			case "missing committer":
 				t.Setenv("GIT_COMMITTER_NAME", "")
 				t.Setenv("GIT_COMMITTER_EMAIL", "")
 			}
