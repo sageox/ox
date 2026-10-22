@@ -52,6 +52,7 @@ var named={
 };
 window.addEventListener('message',function(e){
  var d=e.data||{};if(e.source!==parent)return;
+ if(d.text)document.getElementById('double-fire').textContent=d.text;
  if(d.open)document.querySelector('details').open=true;
  if(d.check)document.getElementById(d.check).checked=true;
  if(d.which)parent.postMessage({which:document.querySelector('input[name=rollout]:checked').id},'*');
@@ -613,28 +614,76 @@ func committedDrawing(region map[string]any, state, note string) map[string]any 
 		"status": "request-change", "state": state, "note": note, "reviewer": "Devon", "region": region}
 }
 
-// TestBrowser_ViewOriginalAfterAnEdit opens the host on revision c, where a
-// drawn sentence was reworded and a drawn diagram node renamed. Both drawings
-// are listed as text changed, and View original redraws each from its record:
-// the original text, the revision and layout it was drawn at, and that this
-// is not the revision shown. Record text that looks like markup stays text.
-// Failure prevented: once the plan is edited a drawing is lost or shown over
-// what the plan now says, or a member-written record runs script in the host.
+// View original must reconstruct drawings from their records after an edit,
+// show when context was truncated, and render record text without running it.
 func TestBrowser_ViewOriginalAfterAnEdit(t *testing.T) {
 	ctx := drawBrowser(t)
+	base := serveDrawFixture(t, drawHost("a", revisionDigest(t, "a"), "[]", ""))
+	if err := chromedp.Run(ctx, chromedp.Navigate(base), chromedp.WaitVisible(".rev-draw", chromedp.ByQuery)); err != nil {
+		t.Fatalf("open the host for a bounded capture: %v", err)
+	}
+	reachFrame(t, ctx)
+	const markup = `<img src=x onerror="window.pwned=1">`
+	longText := markup + " " + strings.Repeat("Retained context ", 160) + "UNRETAINED TAIL"
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`window.ask({text:`+jsString(longText)+`})`, nil), chromedp.Click(".rev-draw", chromedp.ByQuery)); err != nil {
+		t.Fatal(err)
+	}
+	// A loop within a long paragraph still targets the paragraph, without
+	// requiring a screen tall enough to circle every line of its text.
+	b := partOf(t, ctx, "sentence")
+	b.X, b.Y, b.W, b.H = b.X+b.W/4, b.Y+80, b.W/2, 80
+	stroke(t, ctx, b)
+	if !waitJS(ctx, `document.querySelector('.rev-pop .rev-note')`, 10*time.Second) {
+		t.Fatalf("drawing over long text opened no note: %s", evalString(t, ctx, `(document.querySelector('.rev-toast')||{}).textContent`))
+	}
+	if err := chromedp.Run(ctx, chromedp.SendKeys(".rev-pop .rev-note", "Keep the bounded original.", chromedp.ByQuery),
+		chromedp.Click(".rev-pop .rev-save", chromedp.ByQuery), chromedp.Click(".rev-submit", chromedp.ByQuery)); err != nil {
+		t.Fatal(err)
+	}
+	if !waitJS(ctx, `window.sent.length===1`, 5*time.Second) {
+		t.Fatal("Submit sent no bounded drawing")
+	}
+	var round struct {
+		Marks []struct{ Region map[string]any }
+	}
+	if err := json.Unmarshal([]byte(evalString(t, ctx, `window.sent[0].body`)), &round); err != nil || len(round.Marks) != 1 {
+		t.Fatalf("decode the submitted bounded drawing: %v; %d marks", err, len(round.Marks))
+	}
+	bounded := round.Marks[0].Region
+	capturedContext := bounded["context"].(map[string]any)
+	items := capturedContext["items"].([]any)
+	if capturedContext["truncated"] != true || len(items) != 1 || items[0].(map[string]any)["text"] != longText[:1999]+"…" {
+		t.Fatalf("long paragraph was not retained as one bounded target with truncation: %s", evalString(t, ctx, `JSON.stringify(JSON.parse(window.sent[0].body).marks[0].region.context)`))
+	}
+	for _, part := range []struct {
+		name  string
+		value any
+		limit int
+	}{
+		{"context", capturedContext, 16384},
+		{"region", bounded, 65536},
+	} {
+		encoded, err := json.Marshal(part.value)
+		if err != nil || len(encoded) > part.limit {
+			t.Fatalf("submitted %s is %d bytes, limit %d: %v", part.name, len(encoded), part.limit, err)
+		}
+	}
 	recs := fixtureDrawings(t)
 	r1, r9 := recs["r1-double-fire"], recs["r9-mermaid-renamed-node"]
 	// a neighbour's text that looks like markup
 	r1["context"].(map[string]any)["items"].([]any)[1].(map[string]any)["text"] = `<img src=x onerror="window.pwned=1">`
 	nodeItem := committedDrawing(r9, "open", "Rename it?")
 	nodeItem["section"], nodeItem["label"] = "Flow", "Drawing: Retry budget"
-	committed, _ := json.Marshal([]any{committedDrawing(r1, "open", "Both retries fire here."), nodeItem})
-	base := serveDrawFixture(t, drawHost("c", revisionDigest(t, "c"), string(committed), ""))
+	committed, _ := json.Marshal([]any{committedDrawing(r1, "open", "Both retries fire here."), nodeItem, committedDrawing(bounded, "open", "Keep the bounded original.")})
+	base = serveDrawFixture(t, drawHost("c", revisionDigest(t, "c"), string(committed), ""))
 	if err := chromedp.Run(ctx, chromedp.Navigate(base), chromedp.WaitVisible(".rev-rail-orig", chromedp.ByQuery)); err != nil {
 		t.Fatalf("open the host: %v", err)
 	}
-	if !waitJS(ctx, `document.querySelectorAll('.rev-rail-item').length===2&&[].every.call(document.querySelectorAll('.rev-rail-item'),function(li){return li.textContent.indexOf('text changed')>=0})`, 10*time.Second) {
-		t.Fatalf("the rail does not list both drawings with their text changed: %s", evalString(t, ctx, `document.querySelector('.rev-rail').textContent`))
+	if !waitJS(ctx, `document.querySelectorAll('.rev-rail-item').length===3&&[].every.call(document.querySelectorAll('.rev-rail-item'),function(li){return li.textContent.indexOf('text changed')>=0})`, 10*time.Second) {
+		t.Fatalf("the rail does not list all drawings with their text changed: %s", evalString(t, ctx, `document.querySelector('.rev-rail').textContent`))
+	}
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`document.querySelector('#doc').remove()`, nil)); err != nil {
+		t.Fatal(err)
 	}
 	open := func(note string) string {
 		t.Helper()
@@ -653,8 +702,22 @@ func TestBrowser_ViewOriginalAfterAnEdit(t *testing.T) {
 	if n := evalString(t, ctx, `document.querySelectorAll('.rev-original img').length+':'+window.pwned`); n != "0:undefined" {
 		t.Errorf("record text became markup in the host: img count and pwned = %s", n)
 	}
+	got = open("Keep the bounded original.")
+	if err := chromedp.Run(ctx, chromedp.WaitVisible(".rev-original .rev-orig-cut", chromedp.ByQuery)); err != nil {
+		t.Fatalf("truncation notice is not visible: %v", err)
+	}
+	if !strings.Contains(got, "Context truncated: some of what lay here was not kept.") ||
+		!strings.Contains(got, markup) || !strings.Contains(got, "Retained context") || strings.Contains(got, "UNRETAINED TAIL") {
+		t.Errorf("View original lost the retained context or its truncation notice: %q", got)
+	}
+	if got := evalString(t, ctx, `document.querySelectorAll('.rev-original .rev-orig-box').length+':'+document.querySelectorAll('.rev-original .rev-orig-ink path').length+':'+document.querySelectorAll('.rev-original img').length+':'+window.pwned`); got != "1:2:0:undefined" {
+		t.Errorf("bounded original did not reconstruct safe context and ink from its record alone: %s", got)
+	}
 	if got := open("Rename it?"); !strings.Contains(got, "Retry budget") {
 		t.Errorf("View original of the renamed node: %q lacks the node as drawn", got)
+	}
+	if got := evalString(t, ctx, `document.querySelectorAll('.rev-original .rev-orig-cut').length`); got != "0" {
+		t.Errorf("complete context has a truncation notice: %s", got)
 	}
 	if err := chromedp.Run(ctx, chromedp.KeyEvent(kb.Escape)); err != nil {
 		t.Fatal(err)

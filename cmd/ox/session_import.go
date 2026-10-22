@@ -7,14 +7,12 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/sageox/agentx"
@@ -214,8 +212,7 @@ const (
 		"never offer it for upload, and never add --include-aborted on your own."
 )
 
-// runSessionImport validates the Cobra invocation, keeps preflight and review
-// inside the interrupt lifetime, and delegates the import flow.
+// runSessionImport validates the Cobra invocation and delegates the import flow.
 func runSessionImport(cmd *cobra.Command, _ []string) error {
 	opts, failure := parseImportOptions(cmd)
 	out := cmd.OutOrStdout()
@@ -226,8 +223,6 @@ func runSessionImport(cmd *cobra.Command, _ []string) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	ctx, stop := importSignalContext(ctx)
-	defer stop()
 	env, dest, failure := importPreflight(ctx, opts)
 	if failure != nil {
 		return renderImportFailure(out, opts.jsonOut, *failure)
@@ -238,14 +233,6 @@ func runSessionImport(cmd *cobra.Command, _ []string) error {
 		fmt.Fprintln(cmd.ErrOrStderr(), "Reading sessions from test data in "+opts.testData)
 	}
 	return runSessionImportFlow(ctx, out, opts, env, dest)
-}
-
-// importSignalContext covers preflight and review as well as the import. Its
-// signal registration must end on cancellation while final publication drains.
-func importSignalContext(parent context.Context) (context.Context, context.CancelFunc) {
-	ctx, stop := signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM)
-	context.AfterFunc(ctx, stop)
-	return ctx, stop
 }
 
 // importInvocationEnvironment excludes installed project integrations from runtime
@@ -658,10 +645,6 @@ func runLockedImport(ctx context.Context, out io.Writer, opts importOptions, env
 	}
 	// From here an interrupt finishes cleanly: the session being summarized
 	// stops in every worker, no new one starts, and committed work is pushed.
-	// The first interrupt restores default handling, so a second quits at once.
-	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	context.AfterFunc(ctx, stop)
 	progress := io.Discard
 	if !opts.jsonOut {
 		progress = out

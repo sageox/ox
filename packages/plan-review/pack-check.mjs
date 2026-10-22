@@ -18,7 +18,8 @@ const sha256 = (data) => createHash('sha256').update(data).digest('hex');
 function pack(name) {
   const dest = join(tmp, name);
   mkdirSync(dest);
-  const [r] = JSON.parse(run('npm', ['pack', '--json', '--pack-destination', dest], root));
+  // npm versions return either an array or an object keyed by package name.
+  const [r] = Object.values(JSON.parse(run('npm', ['pack', '--json', '--pack-destination', dest], root)));
   return join(dest, r.filename);
 }
 

@@ -152,6 +152,22 @@ func TestCheckAndRunGC_LockBusyDoesNotSpendWedgeCooldown(t *testing.T) {
 	assert.True(t, lastWedgeCheck.IsZero(), "lock contention did not run a probe and must not consume the six-hour cooldown")
 }
 
+func TestCheckAndRunGC_CanceledProbeDoesNotSpendWedgeCooldown(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git clone and divergence fixture")
+	}
+	fixture := newDivergedLedgerFixture(t, true, true, time.Now().Add(-8*24*time.Hour))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	fixture.scheduler.checkAndRunGC(ctx)
+
+	fixture.scheduler.mu.Lock()
+	lastWedgeCheck := fixture.scheduler.lastWedgeCheck
+	fixture.scheduler.mu.Unlock()
+	assert.True(t, lastWedgeCheck.IsZero(), "a canceled probe must not consume the six-hour cooldown")
+}
+
 func TestTriggerGC_ForcedLedgerRecoveryCapturesDivergence(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: real git clone and forced divergence recovery")

@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"testing"
 	"time"
@@ -37,13 +38,9 @@ type fixtureItem struct {
 	RemappedFrom string `json:"remapped_from,omitempty"`
 }
 
-// TestContractFixtures runs every shared fixture through two transports, the
-// local Capture and a plain read of every file under feedback/, and checks
-// that the assembler reports exactly the items, failures and conflicts its
-// expect.json records. Other hosts prove their own transport is byte-exact
-// and run this assembler over it. Failure prevented: a reader change
-// reinterprets, drops or silently skips review data released CLIs and other
-// hosts read too.
+// Every transport must yield expect.json's items, failures and conflicts,
+// regardless of listing order or whether plan metadata is present.
+// Failure prevented: transport differences hide or reinterpret stored feedback.
 func TestContractFixtures(t *testing.T) {
 	t.Parallel()
 	const root = "testdata/review-contract"
@@ -67,6 +64,13 @@ func TestContractFixtures(t *testing.T) {
 			limits := Limits{Records: want.Limits.Records, RecordBytes: want.Limits.RecordBytes, CaptureBytes: want.Limits.CaptureBytes}
 			plan := filepath.Join(root, d.Name(), "plan")
 
+			plain := readAll(t, plan)
+			reordered := Inventory{Files: slices.Clone(plain.Files)}
+			slices.Reverse(reordered.Files)
+			retained := t.TempDir()
+			for _, f := range plain.Files {
+				write(t, filepath.Join(retained, filepath.FromSlash(f.Path)), string(f.Data))
+			}
 			captured := Capture(plan, "", limits)
 			for _, f := range captured.Files {
 				disk, err := os.ReadFile(filepath.Join(plan, filepath.FromSlash(f.Path)))
@@ -74,7 +78,10 @@ func TestContractFixtures(t *testing.T) {
 					t.Errorf("Capture: %s is not byte-exact (%v)", f.Path, err)
 				}
 			}
-			for name, inv := range map[string]Inventory{"Capture": captured, "plain read": readAll(t, plan)} {
+			for name, inv := range map[string]Inventory{
+				"Capture": captured, "plain read": plain, "reordered": reordered,
+				"retained feedback only": Capture(retained, "", limits),
+			} {
 				rev := Assemble(inv, limits)
 				var items []fixtureItem
 				for _, it := range rev.Items {
@@ -98,6 +105,26 @@ func TestContractFixtures(t *testing.T) {
 				if rev.Complete() != (len(want.Failures) == 0) {
 					t.Errorf("%s: Complete() = %v with failures %v", name, rev.Complete(), rev.Failures)
 				}
+			}
+
+			// Retained records still assemble when a fetch fails, but the
+			// review must remain incomplete.
+			if len(plain.Files) == 0 {
+				t.Fatal("fixture has no retained review files")
+			}
+			missing := plain.Files[len(plain.Files)-1]
+			partial := Inventory{Files: plain.Files[:len(plain.Files)-1]}
+			withoutFailure := Assemble(partial, limits)
+			failure := Failure{Path: missing.Path, Reason: ReasonUnreadable, Detail: "transport failed to fetch retained record"}
+			partial.Failures = []Failure{failure}
+			rev := Assemble(partial, limits)
+			if rev.Complete() || !slices.Contains(rev.Failures, failure) {
+				t.Errorf("incomplete transport lost its failure: %+v", rev)
+			}
+			if !reflect.DeepEqual(rev.Items, withoutFailure.Items) ||
+				!reflect.DeepEqual(rev.Rounds, withoutFailure.Rounds) ||
+				!reflect.DeepEqual(rev.Conflicts, withoutFailure.Conflicts) {
+				t.Error("incomplete transport discarded or reinterpreted retained records")
 			}
 		})
 	}
