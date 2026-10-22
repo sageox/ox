@@ -150,3 +150,12 @@ func TestCommittedSessionScanChecksFilenamesWhenNoBlobIsNew(t *testing.T) {
 	addCommit(t, ledger, "sessions/synthetic/archive.p12", "", "same empty blob, sensitive name")
 	require.ErrorContains(t, ValidateSessionPublication(context.Background(), ledger), "session filename refused")
 }
+
+func TestCommittedSessionScanAcceptsProducedCommits(t *testing.T) {
+	useFreshFixtureRules(t)
+	ledger := publicationLedger(t, "sessions/synthetic/meta.json", `{"produced_commits":["`+syntheticCommitSHA+`"]}`)
+	require.NoError(t, ValidateSessionPublication(context.Background(), ledger))
+
+	leaked := publicationLedger(t, "sessions/synthetic/meta.json", `{"produced_commits":["`+syntheticCommitSHA+`","AKIAIOSFODNN7EXAMPLE"]}`)
+	require.ErrorContains(t, ValidateSessionPublication(context.Background(), leaked), "committed session content refused")
+}

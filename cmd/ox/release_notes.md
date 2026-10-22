@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Sessions that made a commit reach the Ledger again** — since 0.24.0, the secret guard read the commit IDs a session records in `meta.json` as Sourcegraph access tokens, so every recording that committed code stayed on your machine and held back any other session waiting in the same Ledger commit. Exact git commit IDs in that list are no longer treated as credentials. Everything else in `meta.json` is still scanned, and held sessions publish on the next sync after you upgrade.
 - **AI coworkers can follow ox's own instructions again** — `ox agent <id> session log --role/--content/--stdin`, which ox suggests to coworkers that record by hand, was rejected before it ran; it now writes the entry. `--agent-id` names the coworker for `ox agent heartbeat` and the other agent commands, and hints that pointed at commands ox doesn't have (`ox ledger sync`, `ox conventions`, `ox redaction verify`) now name the real ones.
 - **Usage reports no longer carry what you typed** — when a command fails to parse, ox reports only its command and flag names. Paths, IDs, names and free text are removed on your machine before the report is sent, and the daemon removes them again.
 

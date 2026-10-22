@@ -35,9 +35,11 @@ func ValidateSessionPublication(ctx context.Context, ledgerPath string) error {
 		return nil
 	}
 	ids := make([]string, 0)
+	paths := make([]string, 0)
 	for line := range strings.SplitSeq(strings.TrimSpace(string(out)), "\n") {
-		id, _, _ := strings.Cut(line, " ")
+		id, path, _ := strings.Cut(line, " ")
 		ids = append(ids, id)
+		paths = append(paths, path)
 	}
 	cmd := exec.CommandContext(ctx, "git", "-C", ledgerPath, "cat-file", "--batch")
 	cmd.Stdin = strings.NewReader(strings.Join(ids, "\n") + "\n")
@@ -51,7 +53,7 @@ func ValidateSessionPublication(ctx context.Context, ledgerPath string) error {
 	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
 	reader := bufio.NewReader(stdout)
 	var rules *secretguard.RuleSet
-	for range ids {
+	for i := range ids {
 		header, err := reader.ReadString('\n')
 		if err != nil {
 			return errors.New("cannot read committed session objects; publication pending")
@@ -79,7 +81,7 @@ func ValidateSessionPublication(ctx context.Context, ledgerPath string) error {
 		if _, err := io.ReadFull(reader, data); err != nil || data[len(data)-1] != '\n' {
 			return errors.New("incomplete committed session blob; publication pending")
 		}
-		data = data[:len(data)-1]
+		data = secretScanView(paths[i], data[:len(data)-1])
 		if err := secretguard.ValidateContent("sessions/content", data); err != nil {
 			return fmt.Errorf("committed session content refused; clean unpushed history before retry: %w", err)
 		}
