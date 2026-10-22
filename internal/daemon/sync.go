@@ -2595,15 +2595,18 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 			if progress != nil {
 				_ = progress.WriteStage("cloning", "Fetching repository structure...")
 			}
-			// the clone refuses a non-empty target, so a local-only skeleton
-			// (a whisper cache created before the first clone) steps aside
-			// for it and is carried back in afterwards
-			finishSkeleton, skeletonErr := gitserver.SetAsideCacheOnlyTarget(payload.RepoPath)
-			if skeletonErr != nil {
-				return skeletonErr
+			// Clone into a hidden temp sibling and move it into place, like the
+			// ledger: the clone refuses a non-empty target, and a local-only
+			// skeleton (a whisper cache created before the first clone) is
+			// adopted by MoveCloneIntoPlace instead of being set aside in the
+			// teams directory where enumerators would list it as a team.
+			sweepStaleTeamCloneTemps(payload.RepoPath)
+			teamTemp := teamCloneTempPath(payload.RepoPath)
+			defer func() { _ = os.RemoveAll(teamTemp) }() // no-op once renamed away
+			mCfg, err := s.twoPhaseClone(cloneCtx, cloneURL, teamTemp, progress)
+			if err == nil {
+				err = gitserver.MoveCloneIntoPlace(teamTemp, payload.RepoPath)
 			}
-			mCfg, err := s.twoPhaseClone(cloneCtx, cloneURL, payload.RepoPath, progress)
-			finishSkeleton(err == nil)
 			if err != nil {
 				s.logger.Error("checkout: two-phase clone failed", "error", err)
 				// Keyed by pullTeamContext's repoName, the key clearErrors is

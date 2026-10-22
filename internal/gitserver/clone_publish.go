@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"time"
 )
 
 // A full clone is written into a temp sibling of its target and only moved
@@ -62,6 +61,11 @@ func MoveCloneIntoPlace(tempPath, target string) error {
 // session recording leave when they run before the first clone lands; it is not
 // a clone and must not be treated as one, nor moved aside as corrupt.
 func IsCacheOnlyDir(dir string) bool {
+	// a symlinked target is a coworker's relocation, not a skeleton: adopting
+	// it would remove the link and the clone would silently undo the move
+	if fi, err := os.Lstat(dir); err != nil || fi.Mode()&os.ModeSymlink != 0 {
+		return false
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil || len(entries) == 0 {
 		return false
@@ -115,66 +119,6 @@ func removeEmptyDirs(dir string) error {
 		}
 	}
 	return os.Remove(dir)
-}
-
-// SetAsideCacheOnlyTarget readies a clone target that the clone itself
-// populates in place (the team-context two-phase clone writes straight into the
-// target, and the clone refuses a non-empty directory). A local-only skeleton,
-// see IsCacheOnlyDir, has its .sageox/cache moved to a sibling and the skeleton
-// removed so the clone can proceed. Call the returned func once the clone
-// finishes: on success it moves the cache into the clone, on failure it
-// rebuilds the skeleton. The func is never nil; any other target is untouched.
-func SetAsideCacheOnlyTarget(target string) (finish func(cloned bool), err error) {
-	finish = func(bool) {}
-	if !IsCacheOnlyDir(target) {
-		return finish, nil
-	}
-	cacheDir := filepath.Join(target, ".sageox", "cache")
-	asideDir := fmt.Sprintf("%s.cache-aside-%d", target, time.Now().UnixNano())
-	hadCache := false
-	if _, statErr := os.Lstat(cacheDir); statErr == nil {
-		if err := os.Rename(cacheDir, asideDir); err != nil {
-			return finish, fmt.Errorf("set aside local cache: %w", err)
-		}
-		hadCache = true
-	}
-	top, err := os.ReadDir(target)
-	if err == nil {
-		for _, entry := range top {
-			if err = removeEmptyDirs(filepath.Join(target, entry.Name())); err != nil {
-				break
-			}
-		}
-	}
-	if err == nil {
-		err = os.Remove(target)
-	}
-	if err != nil {
-		if hadCache {
-			_ = os.Rename(asideDir, cacheDir)
-		}
-		return func(bool) {}, fmt.Errorf("clear local-only clone target: %w", err)
-	}
-	return func(cloned bool) {
-		if !hadCache {
-			return
-		}
-		if !cloned {
-			if os.MkdirAll(filepath.Dir(cacheDir), 0o755) == nil {
-				_ = os.Rename(asideDir, cacheDir)
-			}
-			return
-		}
-		// the clone may ship its own cache dir; the old one is derived data
-		if _, statErr := os.Lstat(cacheDir); statErr == nil {
-			_ = os.RemoveAll(asideDir)
-			return
-		}
-		if os.MkdirAll(filepath.Dir(cacheDir), 0o755) == nil && os.Rename(asideDir, cacheDir) == nil {
-			return
-		}
-		_ = os.RemoveAll(asideDir)
-	}, nil
 }
 
 // AdoptCacheOnlyTarget handles a clone target that exists but holds nothing

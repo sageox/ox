@@ -40,6 +40,7 @@ func TestSyncScheduler_Checkout_CloneLandsOverLocalOnlySkeleton(t *testing.T) {
 	}{
 		{name: "ledger: cache plus empty sessions appear mid-clone", repoType: "ledger", prepare: cacheAndEmptySessions},
 		{name: "ledger: cache plus empty sessions exist before Checkout", repoType: "ledger", prepare: cacheAndEmptySessions, before: true},
+		{name: "team context: whisper cache appears mid-clone", repoType: "team-context", prepare: whisperCache},
 		{name: "team context: whisper cache exists before Checkout", repoType: "team-context", prepare: whisperCache, before: true},
 		{name: "team context: whisper cache plus empty dir exist before Checkout", repoType: "team-context", prepare: cacheAndEmptySessions, before: true},
 	}
@@ -66,9 +67,36 @@ func TestSyncScheduler_Checkout_CloneLandsOverLocalOnlySkeleton(t *testing.T) {
 			assert.DirExists(t, filepath.Join(repoPath, ".git"), "the clone must land")
 			assert.FileExists(t, filepath.Join(repoPath, ".sageox", "cache", "whisper", "whisper.db"), "local cache is carried into the clone")
 			assert.Empty(t, tmpCloneSiblings(t, repoPath))
+			siblings, err := os.ReadDir(filepath.Dir(repoPath))
+			require.NoError(t, err)
+			assert.Len(t, siblings, 1, "nothing but the clone may remain in its parent (no staging or aside directory): %v", siblings)
 			backups, _ := filepath.Glob(repoPath + ".bak.*")
 			assert.Empty(t, backups, "a local-only skeleton must not be moved aside as corrupt")
 			assert.NoDirExists(t, filepath.Join(repoPath, "sessions"), "the empty skeleton folder is not carried")
 		})
 	}
+}
+
+// Failure prevented: a team-context clone that fails (server unreachable) left
+// the coworker's local cache moved away, or stranded a staging directory in the
+// teams directory where it would be listed as a team.
+func TestSyncScheduler_Checkout_FailedTeamCloneKeepsCacheAndLeavesNoOrphan(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
+	s := checkoutTestScheduler(t)
+	repoPath := filepath.Join(t.TempDir(), "team_failing")
+	cache := filepath.Join(repoPath, ".sageox", "cache", "whisper", "whisper.db")
+	require.NoError(t, os.MkdirAll(filepath.Dir(cache), 0o755))
+	require.NoError(t, os.WriteFile(cache, []byte("db"), 0o644))
+
+	_, err := s.Checkout(CheckoutPayload{CloneURL: "http://127.0.0.1:1/team.git", RepoPath: repoPath, RepoType: "team-context"}, nil)
+
+	require.Error(t, err)
+	assert.FileExists(t, cache, "a failed clone must leave the local cache where it was")
+	siblings, readErr := os.ReadDir(filepath.Dir(repoPath))
+	require.NoError(t, readErr)
+	assert.Len(t, siblings, 1, "a failed clone must not strand a staging directory: %v", siblings)
+	lastErr, _ := s.LastError()
+	assert.Contains(t, lastErr, "clone team-context failed", "the failure must be surfaced, not swallowed")
 }

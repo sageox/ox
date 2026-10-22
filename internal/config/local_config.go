@@ -634,7 +634,7 @@ func FindAllTeamContexts(projectRoot string) []TeamContext {
 
 	var result []TeamContext
 	for _, entry := range entries {
-		if !entry.IsDir() {
+		if !entry.IsDir() || paths.IsHiddenTeamsEntry(entry.Name()) {
 			continue
 		}
 		teamPath := filepath.Join(teamsDir, entry.Name())
