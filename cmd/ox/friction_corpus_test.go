@@ -43,7 +43,7 @@ func TestFrictionCorpus(t *testing.T) {
 	require.NoError(t, json.Unmarshal(raw, &doc))
 	require.NotEmpty(t, doc.Cases)
 
-	var firstTry, total int
+	var predictedFirstTry, total int
 	for _, c := range doc.Cases {
 		total += c.Events
 		name := strings.Join(c.Argv, " ")
@@ -70,10 +70,10 @@ func TestFrictionCorpus(t *testing.T) {
 			}
 		})
 		if c.Expect == "resolves" || c.Expect == "auto" {
-			firstTry += c.Events
+			predictedFirstTry += c.Events
 		}
 	}
-	t.Logf("friction corpus: %d of %d failed invocations now reach a real command on the first try", firstTry, total)
+	t.Logf("friction corpus: %d of %d failed invocations are predicted to reach a command on the first try", predictedFirstTry, total)
 }
 
 // whatOxDoes predicts, without executing anything, how ox handles argv: the

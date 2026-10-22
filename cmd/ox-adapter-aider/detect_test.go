@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -65,33 +67,59 @@ func TestDiagnose_HooksMissing(t *testing.T) {
 	}
 }
 
-// TestDiagnose_HooksMissingFixInstallsHooks runs the exact command the issue
-// recommends and checks it repairs the repo.
-// Failure prevented: doctor tells a coworker to run an adapter command with
-// flags the adapter rejects, so the "safe fix" never fixes anything and the
-// warning returns on every diagnosis.
+// TestDiagnose_HooksMissingFixInstallsHooks checks that the recommended shell
+// command preserves the repository path and that its arguments repair the repo.
+// Failure prevented: a path is split or interpreted as shell syntax, so the
+// recommended fix targets the wrong directory or never repairs the warning.
 func TestDiagnose_HooksMissingFixInstallsHooks(t *testing.T) {
-	repoRoot := t.TempDir()
-	if err := os.WriteFile(filepath.Join(repoRoot, "CONVENTIONS.md"), []byte("# House rules\n"), 0o644); err != nil {
-		t.Fatal(err)
+	tests := []struct {
+		name string
+		path string
+	}{
+		{name: "plain path", path: "repository"},
+		{name: "spaces", path: "repository with spaces"},
+		{name: "single quote", path: "repository's files"},
+		{name: "shell metacharacters", path: "repository $HOME $(printf expanded) ; #"},
+		{name: "combined", path: "repository's $HOME $(printf expanded) ; #"},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repoRoot := filepath.Join(t.TempDir(), tt.path)
+			if err := os.Mkdir(repoRoot, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(repoRoot, "CONVENTIONS.md"), []byte("# House rules\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
 
-	issue := hooksMissingIssue(t, repoRoot)
-	if issue == nil {
-		t.Fatal("expected a hooks-missing issue for a CONVENTIONS.md without the ox marker")
-	}
+			issue := hooksMissingIssue(t, repoRoot)
+			if issue == nil {
+				t.Fatal("expected a hooks-missing issue for a CONVENTIONS.md without the ox marker")
+			}
+			args := []string{"install-hooks", "--repo-root", repoRoot, "--scope", "project"}
+			t.Run("shell round trip", func(t *testing.T) {
+				if runtime.GOOS == "windows" {
+					t.Skip("the recommended command uses POSIX shell quoting; Windows has no required POSIX shell")
+				}
+				command := "set -- " + issue.Fix + `; printf '%s\000' "$@"`
+				output, err := exec.Command("sh", "-c", command).CombinedOutput()
+				if err != nil {
+					t.Fatalf("parse recommended fix %q: %v\noutput: %s", issue.Fix, err, output)
+				}
+				want := strings.Join(append([]string{"ox-adapter-aider"}, args...), "\x00") + "\x00"
+				if string(output) != want {
+					t.Fatalf("recommended fix changed shell arguments: got %q, want %q", output, want)
+				}
+			})
 
-	fields := strings.Fields(issue.Fix)
-	if len(fields) < 2 || fields[0] != "ox-adapter-aider" {
-		t.Fatalf("fix %q must invoke ox-adapter-aider", issue.Fix)
-	}
-	var out bytes.Buffer
-	if err := adapterruntime.RunWithArgs(newConfig(), fields[1:], nil, &out); err != nil {
-		t.Fatalf("running the recommended fix %q failed: %v\noutput: %s", issue.Fix, err, out.String())
-	}
-
-	if after := hooksMissingIssue(t, repoRoot); after != nil {
-		t.Errorf("hooks-missing persists after running its own fix %q", issue.Fix)
+			var out bytes.Buffer
+			if err := adapterruntime.RunWithArgs(newConfig(), args, nil, &out); err != nil {
+				t.Fatalf("running fix arguments failed: %v\noutput: %s", err, out.String())
+			}
+			if after := hooksMissingIssue(t, repoRoot); after != nil {
+				t.Errorf("hooks-missing persists after running its fix arguments")
+			}
+		})
 	}
 }
 

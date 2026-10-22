@@ -392,6 +392,30 @@ func TestAgentID_FlagSuppliesIdentityForShorthand(t *testing.T) {
 	})
 }
 
+func TestAgentSessionLog_ExplicitBlankIDRejectsEnvironmentFallback(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+	}{
+		{"empty", ""},
+		{"whitespace only", " \t\n "},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := dispatchTestEnv(t)
+			file := startDispatchRecording(t, root, dispatchOtherAgent)
+			t.Setenv("SAGEOX_AGENT_ID", dispatchOtherAgent)
+			require.NoFileExists(t, file)
+
+			_, err := executeRootCLI(t, "agent", "session", "log", "--agent-id", tt.value,
+				"--role", "user", "--content", "must not reach the environment coworker")
+			assert.Error(t, err, "an explicitly blank ID must not fall back to the environment")
+			assert.Equal(t, errkind.Usage, errkind.Of(err))
+			assert.NoFileExists(t, file, "the environment coworker's session must remain unchanged")
+		})
+	}
+}
+
 // manualAgentFlagSources are the files holding dispatched handlers that parse
 // flags from a raw []string. A flag literal in any of them must be registered
 // on agentCmd, or cobra rejects it before the handler runs.
@@ -517,26 +541,31 @@ func TestAgentTasksAdd_OwnFlagsShadowDispatcherFlags(t *testing.T) {
 // TestExplicitAgentIDFlag pins the three outcomes of the --agent-id helper.
 func TestExplicitAgentIDFlag(t *testing.T) {
 	tests := []struct {
-		name    string
-		value   string
-		want    string
-		wantErr bool
+		name     string
+		value    string
+		supplied bool
+		want     string
+		wantErr  bool
 	}{
-		{"absent", "", "", false},
-		{"blank is absent", "   ", "", false},
-		{"valid", dispatchAgentID, dispatchAgentID, false},
-		{"valid with padding", "  " + dispatchAgentID + " ", dispatchAgentID, false},
-		{"malformed", "not-an-id", "", true},
-		{"uuid is classified", "123e4567-e89b-12d3-a456-426614174000", "", true},
+		{"absent", "", false, "", false},
+		{"empty", "", true, "", true},
+		{"whitespace only", " \t\n ", true, "", true},
+		{"valid", dispatchAgentID, true, dispatchAgentID, false},
+		{"valid with padding", "  " + dispatchAgentID + " ", true, dispatchAgentID, false},
+		{"malformed", "not-an-id", true, "", true},
+		{"uuid is classified", "123e4567-e89b-12d3-a456-426614174000", true, "", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			resetAgentDispatchFlags(t)
 			_ = agentCmd.LocalFlags() // merge persistent flags into cmd.Flags(), as cobra does before RunE
-			require.NoError(t, agentCmd.Flags().Set("agent-id", tt.value))
+			if tt.supplied {
+				require.NoError(t, agentCmd.Flags().Set("agent-id", tt.value))
+			}
 			got, err := explicitAgentIDFlag(agentCmd)
 			if tt.wantErr {
 				require.Error(t, err)
+				assert.Equal(t, errkind.Usage, errkind.Of(err))
 				assert.False(t, agentinstance.IsValidAgentID(tt.value))
 				return
 			}

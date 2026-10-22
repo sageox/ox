@@ -600,7 +600,7 @@ func registerHiddenAgentBoolFlag(name, usage string) {
 // when the flag is absent. A present but malformed value is a usage error.
 func explicitAgentIDFlag(cmd *cobra.Command) (string, error) {
 	raw, err := cmd.Flags().GetString("agent-id")
-	if err != nil || strings.TrimSpace(raw) == "" {
+	if err != nil || !cmd.Flags().Changed("agent-id") {
 		return "", nil
 	}
 	id := strings.TrimSpace(raw)
