@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -74,6 +75,27 @@ type CursorSourceBoundary struct {
 // writes the normal prime marker.
 func (m *SessionMarker) IsPrimed() bool {
 	return m != nil && m.AgentID != "" && !m.PrimedAt.IsZero()
+}
+
+// hookStdinWait bounds how long a bare `ox agent prime` waits for a hook
+// payload. A real hook writes its JSON and closes stdin at once; a harness's
+// background shell hands over a pipe or socket that never reaches EOF.
+const hookStdinWait = 2 * time.Second
+
+// readHookInputBounded is agentx.ReadHookInputFromStdin with a deadline.
+// agentx reads stdin to EOF, so on an inherited stdin that stays open it never
+// returns and the whole prime hangs. On timeout the payload is treated as
+// absent; the abandoned read ends with the process.
+func readHookInputBounded(wait time.Duration) *agentx.HookInput {
+	done := make(chan *agentx.HookInput, 1)
+	go func() { done <- agentx.ReadHookInputFromStdin() }()
+	select {
+	case input := <-done:
+		return input
+	case <-time.After(wait):
+		slog.Debug("prime: no hook payload on stdin within deadline, continuing without one", "wait", wait)
+		return nil
+	}
 }
 
 // AgentHookInput is an alias for agentx.HookInput.
@@ -327,7 +349,7 @@ func DeleteSessionMarker(agentSessionID string) error {
 // Delegates to agentx.ReadHookInputFromStdin and validates session_id is present.
 // Works for any coding agent that pipes hook context via stdin JSON.
 func ReadAgentHookInput() *AgentHookInput {
-	input := agentx.ReadHookInputFromStdin()
+	input := readHookInputBounded(hookStdinWait)
 	if input == nil {
 		return nil
 	}
