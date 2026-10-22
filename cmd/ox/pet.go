@@ -29,7 +29,7 @@ var petCmd = &cobra.Command{
 
 While Claude works, Oxy animates beside the thinking word and follows what
 Claude is doing: thinking, typing at his laptop, chattering out an answer,
-and his own routines for ox prime, ox query, ox plan, ox murmur, and ox
+and his own routines for ox agent prime, ox query, ox plan, ox murmur, and ox
 doctor. When a turn ends, Oxy throws confetti on the closing line, or falls
 flat if it failed.
 

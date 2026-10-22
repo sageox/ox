@@ -52,7 +52,7 @@ func handleDiagnose(p adapterprotocol.DiagnoseParams) (*adapterprotocol.Diagnose
 					Slug:     "aider:hooks-missing",
 					Severity: "warning",
 					Title:    "Aider hooks not installed",
-					Detail:   "CONVENTIONS.md does not contain ox prime marker.",
+					Detail:   "CONVENTIONS.md does not contain the ox agent prime marker.",
 					Fix:      "ox-adapter-aider install-hooks --repo-root " + p.RepoRoot + " --scope project",
 					FixSafe:  true,
 				})

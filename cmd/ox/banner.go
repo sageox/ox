@@ -54,7 +54,7 @@ func ShowErrorBannerIfNeeded() {
 	// if multiple errors, mention the count
 	if len(errors) > 1 {
 		fmt.Fprintf(os.Stderr, "%s\n",
-			cli.StyleDim.Render(fmt.Sprintf("    Run 'ox daemon errors' to see all %d errors", len(errors))),
+			cli.StyleDim.Render(fmt.Sprintf("    Run 'ox daemon logs' to see all %d errors", len(errors))),
 		)
 	}
 }

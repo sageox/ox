@@ -157,7 +157,7 @@ func warnIfRedactionSignatureInvalid() bool {
 		fmt.Fprintln(os.Stderr, "    2. Verify the checksum matches")
 		fmt.Fprintln(os.Stderr, "    3. Report this issue if you downloaded from official sources")
 		fmt.Fprintln(os.Stderr, "")
-		fmt.Fprintln(os.Stderr, "  Run 'ox redaction verify' for details.")
+		fmt.Fprintln(os.Stderr, "  Run 'ox session redaction verify' for details.")
 		fmt.Fprintln(os.Stderr, "")
 		return false
 

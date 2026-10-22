@@ -16,7 +16,7 @@ func init() {
 		Name:        "Hook completeness",
 		Category:    "Integration",
 		FixLevel:    FixLevelAuto,
-		Description: "Verifies project hooks have ox prime for all required events",
+		Description: "Verifies project hooks have ox agent prime for all required events",
 		Run: func(fix bool) checkResult {
 			return checkProjectHookCompleteness(fix)
 		},

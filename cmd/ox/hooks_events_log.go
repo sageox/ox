@@ -14,7 +14,7 @@ var hooksEventsLogCmd = &cobra.Command{
 		fmt.Println("Hook execution is logged to the daemon log.")
 		fmt.Println()
 		fmt.Println("View hook entries:")
-		fmt.Println("  ox doctor --logs | grep hook")
+		fmt.Println("  ox daemon logs --all | grep hook")
 		fmt.Println()
 		fmt.Println("Hook log levels:")
 		fmt.Println("  DEBUG  hook completed (exit 0)")

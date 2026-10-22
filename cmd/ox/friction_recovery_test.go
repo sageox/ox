@@ -30,7 +30,7 @@ var (
 // the original value; unsetting afterwards makes the variable truly absent.
 func withoutAgentContext(t *testing.T) {
 	t.Helper()
-	for _, pair := range os.Environ() {
+	for _, pair := range os.Environ() { // safe: reads names only, to unset agent-detection vars
 		name, _, _ := strings.Cut(pair, "=")
 		drop := false
 		for _, prefix := range agentEnvPrefixes {

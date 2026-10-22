@@ -20,6 +20,6 @@ Keywords: prime, session start, guidance, team context, conventions, init sessio
 
 ### Stale guidance
 **Symptom:** Guidance doesn't reflect recent changes
-**Solution:** Run `ox agent prime --refresh` to reload from source
+**Solution:** Run `ox agent prime` again to reload from source
 
 $ox agent prime
