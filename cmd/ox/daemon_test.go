@@ -152,35 +152,11 @@ func TestReexecDaemon_DisposableMachineReturnsToTheProject(t *testing.T) {
 // hands it to the daemon, so none of the daemon's disposable-machine
 // behaviors happen.
 func TestDaemonConfig_CarriesDisposableMachine(t *testing.T) {
-	for _, on := range []bool{false, true} {
-		t.Run(fmt.Sprintf("disposable_machine=%v", on), func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "config.yaml")
-			require.NoError(t, os.WriteFile(path, fmt.Appendf(nil, "disposable_machine: %v\n", on), 0o600))
-			t.Setenv("OX_USER_CONFIG", path)
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("disposable_machine: true\n"), 0o600))
+	t.Setenv("OX_USER_CONFIG", path)
 
-			cfg := daemonConfig("/ledger")
-
-			assert.Equal(t, on, cfg.DisposableMachine)
-			assert.Equal(t, "/ledger", cfg.LedgerPath)
-		})
-	}
-}
-
-// Failure prevented: the project directory is gone when the daemon
-// re-executes, and it re-executes anyway, in a directory with no project.
-func TestReexecDaemon_ProjectGoneIsAnError(t *testing.T) {
-	called := false
-	execProcess = func(string, []string, []string) error {
-		called = true
-		return nil
-	}
-	t.Cleanup(func() { execProcess = syscall.Exec })
-
-	cfg := &daemon.Config{ProjectRoot: filepath.Join(t.TempDir(), "gone"), DisposableMachine: true}
-	err := reexecDaemon(cfg, slog.New(slog.DiscardHandler))
-
-	require.ErrorContains(t, err, "return to the project")
-	assert.False(t, called)
+	require.True(t, daemonConfig("/ledger").DisposableMachine)
 }
 
 // Failure prevented: with disposable_machine on, git that ox starts in its

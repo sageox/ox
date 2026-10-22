@@ -13,24 +13,18 @@ import (
 	"github.com/sageox/ox/internal/paths"
 )
 
-// clearLedgerLocksOnFirstStart removes every git lock file in the Ledger, and
-// the GC swap marker beside it, the first time a daemon starts for this Ledger
-// on this machine. Under disposable_machine the Ledger outlives the machine,
-// and a machine that went away mid-command leaves locks no process here holds.
-// RemoveStaleLockFiles keeps those: an index.lock for an hour, a lock naming a
-// PID for as long as some process here has that PID, and a ref lock forever.
+// clearLedgerLocksOnFirstStart removes every git lock file in the Ledger the
+// first time a daemon starts for this Ledger on this machine. Under
+// disposable_machine the Ledger outlives the machine, and a machine that went
+// away mid-command leaves locks no process here holds. RemoveStaleLockFiles
+// keeps those: an index.lock for an hour, a lock naming a PID for as long as
+// some process here has that PID, and a ref lock forever.
 func clearLedgerLocksOnFirstStart(ctx context.Context, ledgerPath string, logger *slog.Logger) {
 	if _, err := os.Stat(ledgerLocksClearedMarker(ledgerPath)); err == nil {
 		return
 	}
 	err := gitutil.WithRepoLock(ctx, ledgerPath, func() error {
 		removed, errs := gitutil.RemoveAllLockFiles(filepath.Join(ledgerPath, ".git"))
-		swapLock := ledgerPath + ".gc-swap-lock"
-		if err := os.Remove(swapLock); err == nil {
-			removed = append(removed, filepath.Base(swapLock))
-		} else if !errors.Is(err, os.ErrNotExist) {
-			errs = append(errs, err)
-		}
 		if len(removed) > 0 {
 			logger.Info("removed git locks a previous machine left in the Ledger", "path", ledgerPath, "locks", removed)
 		}
@@ -57,8 +51,8 @@ func markLedgerLocksCleared(ledgerPath string, logger *slog.Logger) {
 	}
 }
 
-// ledgerLocksClearedMarker is in the daemon state dir ($XDG_RUNTIME_DIR, else
-// the temp dir), which a new machine starts without.
+// ledgerLocksClearedMarker is in the daemon state dir (by default under
+// $XDG_RUNTIME_DIR, else the temp dir), which a new machine starts without.
 func ledgerLocksClearedMarker(ledgerPath string) string {
 	sum := sha256.Sum256([]byte(ledgerPath))
 	return filepath.Join(paths.DaemonStateDir(), "ledger-locks-cleared-"+hex.EncodeToString(sum[:8]))

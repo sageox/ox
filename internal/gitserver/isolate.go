@@ -2,6 +2,7 @@ package gitserver
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -37,7 +38,7 @@ func IsolateManagedClones() error {
 		return err
 	}
 
-	// Rewritten on every start: the cache dir is on the home, so a previous
+	// Checked on every start: the cache dir is on the home, and a previous
 	// machine may have changed the file.
 	file := filepath.Join(paths.CacheDir(), "git", "managed-clones.gitconfig")
 	content := []byte("[core]\n\thooksPath = /dev/null\n" +
@@ -63,13 +64,11 @@ func IsolateManagedClones() error {
 			return nil // inherited from the ox process that started this one
 		}
 	}
-	if err := os.Setenv(fmt.Sprintf("GIT_CONFIG_KEY_%d", n), key); err != nil {
-		return err
-	}
-	if err := os.Setenv(fmt.Sprintf("GIT_CONFIG_VALUE_%d", n), file); err != nil {
-		return err
-	}
-	return os.Setenv("GIT_CONFIG_COUNT", strconv.Itoa(n+1))
+	return errors.Join(
+		os.Setenv(fmt.Sprintf("GIT_CONFIG_KEY_%d", n), key),
+		os.Setenv(fmt.Sprintf("GIT_CONFIG_VALUE_%d", n), file),
+		os.Setenv("GIT_CONFIG_COUNT", strconv.Itoa(n+1)),
+	)
 }
 
 // gitConfigQuote quotes v as a git config file value, so '#' and ';' in it

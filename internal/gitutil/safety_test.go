@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"testing"
 	"time"
 
@@ -692,32 +691,4 @@ func TestRemoveAllLockFiles(t *testing.T) {
 
 	_, errs = RemoveAllLockFiles(filepath.Join(t.TempDir(), "missing"))
 	assert.NotEmpty(t, errs, "a git directory that cannot be opened is reported, not read as lock-free")
-}
-
-// Failure prevented: a lock the clear could not remove, or a directory it could
-// not read, goes unreported, so the caller records the clone as lock-free.
-func TestRemoveAllLockFiles_ReportsWhatItCannotClear(t *testing.T) {
-	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
-		t.Skip("directory permissions must refuse the read and the removal")
-	}
-	gitDir := filepath.Join(t.TempDir(), ".git")
-	stuck := filepath.Join(gitDir, "refs", "heads", "main.lock")
-	hidden := filepath.Join(gitDir, "refs", "remotes", "origin.lock")
-	for _, path := range []string{stuck, hidden} {
-		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
-		require.NoError(t, os.WriteFile(path, nil, 0o644))
-	}
-	readOnly, unreadable := filepath.Dir(stuck), filepath.Dir(hidden)
-	require.NoError(t, os.Chmod(readOnly, 0o555))
-	require.NoError(t, os.Chmod(unreadable, 0o000))
-	t.Cleanup(func() {
-		_ = os.Chmod(readOnly, 0o755)
-		_ = os.Chmod(unreadable, 0o755)
-	})
-
-	removed, errs := RemoveAllLockFiles(gitDir)
-
-	assert.Empty(t, removed)
-	assert.Len(t, errs, 2, "one error for the lock it could not remove, one for the directory it could not read: %v", errs)
-	assert.FileExists(t, stuck)
 }

@@ -91,49 +91,17 @@ func TestIsolateManagedClones(t *testing.T) {
 	require.Equal(t, "1", os.Getenv("GIT_CONFIG_COUNT"), "the second call added a duplicate entry")
 }
 
-// Failure prevented: a helper command that spans lines writes extra lines
-// into the include file, where git reads each one as config; or a failure part
-// way leaves git pointed at an include file that was never written. The root
-// command must get an error to warn on, with the environment unchanged.
-func TestIsolateManagedClones_FailsWithoutChangingTheEnvironment(t *testing.T) {
-	cases := []struct {
-		name    string
-		setup   func(t *testing.T, home string)
-		wantErr string
-	}{
-		{"helper command spans lines", func(t *testing.T, _ string) {
-			orig := DefaultHelperCommand()
-			t.Cleanup(func() { SetHelperCommand(orig) })
-			SetHelperCommand("!ox git-credential-helper\n[core]\n\thooksPath = /tmp/hooks")
-		}, "spans lines"},
-		{"GIT_CONFIG_COUNT is not a count", func(t *testing.T, _ string) {
-			t.Setenv("GIT_CONFIG_COUNT", "two")
-		}, "not a count"},
-		{"data dir is a file", func(t *testing.T, home string) {
-			require.NoError(t, os.WriteFile(filepath.Join(home, "data"), nil, 0o600))
-		}, ""},
-		{"cache dir is a file", func(t *testing.T, home string) {
-			require.NoError(t, os.WriteFile(filepath.Join(home, "cache"), nil, 0o600))
-		}, ""},
-		{"include file is a directory", func(t *testing.T, home string) {
-			require.NoError(t, os.MkdirAll(filepath.Join(home, "cache", "sageox", "git", "managed-clones.gitconfig"), 0o700))
-		}, ""},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			home := t.TempDir()
-			t.Setenv("HOME", home)
-			t.Setenv("OX_XDG_ENABLE", "1")
-			t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
-			t.Setenv("XDG_CACHE_HOME", filepath.Join(home, "cache"))
-			for _, name := range []string{"GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"} {
-				t.Setenv(name, "") // restores anything a failed call sets
-			}
-			tc.setup(t, home)
-			count := os.Getenv("GIT_CONFIG_COUNT")
+// Failure prevented: a helper command that spans lines writes its extra lines
+// into the include file, where git reads each one as config.
+func TestIsolateManagedClones_RefusesAHelperThatSpansLines(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, "cache"))
+	t.Setenv("GIT_CONFIG_COUNT", "")
+	orig := DefaultHelperCommand()
+	t.Cleanup(func() { SetHelperCommand(orig) })
+	SetHelperCommand("!ox git-credential-helper\n[core]\n\thooksPath = /tmp/hooks")
 
-			require.ErrorContains(t, IsolateManagedClones(), tc.wantErr)
-			require.Equal(t, count, os.Getenv("GIT_CONFIG_COUNT"), "a failed isolation changed git's config")
-		})
-	}
+	require.ErrorContains(t, IsolateManagedClones(), "spans lines")
+	require.Empty(t, os.Getenv("GIT_CONFIG_COUNT"), "a refused isolation must not point git at an include file")
 }

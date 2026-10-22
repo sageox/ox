@@ -379,12 +379,10 @@ func (d *Daemon) startAutofix() {
 	}()
 }
 
-// restartAfterFirstLedgerClone has the daemon restart once a background clone
-// lands the Ledger it started without, under disposable_machine. A daemon
-// started before the Ledger's first clone leaves the parts that need a Ledger
-// unwired until it restarts, because LedgerPath is fixed at start, and a
-// disposable machine's daemon runs for the whole job. This machine made that
-// clone, so the restarted daemon finds no other machine's locks to clear.
+// restartAfterFirstLedgerClone restarts the daemon, under disposable_machine,
+// once a background clone lands the Ledger it started without: LedgerPath is
+// fixed at start, and a disposable machine's daemon runs for the whole job.
+// This machine made the clone, so none of its locks are another machine's.
 func (d *Daemon) restartAfterFirstLedgerClone() {
 	if !d.config.DisposableMachine || d.config.LedgerPath != "" {
 		return

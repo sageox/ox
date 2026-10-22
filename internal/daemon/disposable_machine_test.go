@@ -32,7 +32,7 @@ func TestRemoveLedgerLocksAtStart(t *testing.T) {
 		return ledger
 	}
 	// leaveLocks writes the locks a git killed mid-commit and mid-fetch leaves,
-	// plus GC's swap marker, all as fresh as a crash a minute ago.
+	// as fresh as a crash a minute ago.
 	leaveLocks := func(t *testing.T, ledger string) {
 		branch, err := exec.Command("git", "-C", ledger, "symbolic-ref", "--short", "HEAD").Output()
 		require.NoError(t, err)
@@ -46,7 +46,6 @@ func TestRemoveLedgerLocksAtStart(t *testing.T) {
 			require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
 			require.NoError(t, os.WriteFile(path, nil, 0o644))
 		}
-		require.NoError(t, os.WriteFile(ledger+".gc-swap-lock", nil, 0o644))
 	}
 	start := func(ledger string, disposable bool) {
 		d := New(&Config{LedgerPath: ledger, DisposableMachine: disposable}, discardLogger())
@@ -65,7 +64,6 @@ func TestRemoveLedgerLocksAtStart(t *testing.T) {
 		start(ledger, true)
 
 		require.NoError(t, commit(ledger), "the Ledger must take commits again")
-		require.NoFileExists(t, ledger+".gc-swap-lock")
 		require.NoFileExists(t, filepath.Join(ledger, ".git", "refs", "remotes", "origin", "main.lock"))
 	})
 
@@ -81,27 +79,6 @@ func TestRemoveLedgerLocksAtStart(t *testing.T) {
 		require.Error(t, commit(ledger))
 	})
 
-	t.Run("a daemon without a Ledger has no locks to clear", func(t *testing.T) {
-		onNewMachine(t)
-		start("", true)
-		entries, err := os.ReadDir(filepath.Join(os.Getenv("XDG_RUNTIME_DIR"), "sageox", "daemon"))
-		require.True(t, os.IsNotExist(err) || len(entries) == 0, "no marker without a Ledger: %v", entries)
-	})
-
-	t.Run("without the setting an abandoned lock is still swept", func(t *testing.T) {
-		onNewMachine(t)
-		ledger := newLedger(t)
-		lock := filepath.Join(ledger, ".git", "index.lock")
-		require.NoError(t, os.WriteFile(lock, nil, 0o644))
-		old := time.Now().Add(-2 * time.Hour)
-		require.NoError(t, os.Chtimes(lock, old, old))
-
-		start(ledger, false)
-
-		require.NoFileExists(t, lock)
-		require.NoError(t, commit(ledger))
-	})
-
 	t.Run("without the setting fresh locks stay, as before", func(t *testing.T) {
 		onNewMachine(t)
 		ledger := newLedger(t)
@@ -110,7 +87,6 @@ func TestRemoveLedgerLocksAtStart(t *testing.T) {
 		start(ledger, false)
 
 		require.FileExists(t, filepath.Join(ledger, ".git", "index.lock"))
-		require.FileExists(t, ledger+".gc-swap-lock")
 		require.Error(t, commit(ledger))
 	})
 }

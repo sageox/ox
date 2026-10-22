@@ -210,7 +210,6 @@ type SyncScheduler struct {
 	onTelemetry  func(syncType, operation, status string, duration time.Duration) // called on sync complete for telemetry
 	getAuthToken func() string                                                    // returns cached auth token from heartbeat
 
-	// onLedgerCloned is set by SetLedgerClonedCallback.
 	onLedgerCloned func(ledgerPath string)
 
 	// issues tracker for health check system
