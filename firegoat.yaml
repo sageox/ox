@@ -4,8 +4,14 @@
 # there. Reference: npx firegoat init --help
 #
 # Run: npx -y firegoat@latest eval
-# The two configured tests need a SageOx team token in the shell that runs eval:
-#   export SAGEOX_TOKEN=...   (never commit it here)
+# The two configured tests write to SageOx (repo registration, Ledger), so they
+# run ONLY against a team created for firegoat evals, never a production team:
+#   export SAGEOX_TOKEN=oxt_...   # team token for the eval team (never commit it)
+#   npx -y firegoat@latest eval --var TEAM=<eval team id>
+# fixtures/require-eval-token.sh refuses to run them on a personal login.
+
+vars:
+  TEAM: ""
 
 # How many times to run each test.
 runs: 1
@@ -56,13 +62,15 @@ tests:
           test -s "$FIREGOAT_TRANSCRIPT" && ! grep -E '^\[[0-9]+\] ' "$FIREGOAT_TRANSCRIPT" | grep -qF "$FIREGOAT_REPO"
     timeout: 900
 
-  # Configured: local build on PATH, token in the env. The agent does the setup.
+  # Configured: local build on PATH, user already logged in. A user who ran
+  # `ox login` knows the product, so this one test names it (no commands).
   - name: connect-repo
+    install: require-eval-token.sh
     prompt: >-
-      Every coding session my AI agent starts from zero. My team keeps
+      I've installed SageOx and I'm logged in. Every coding session my AI agent
+      starts from zero. My team keeps
       repeating our decisions and conventions to it. Set this repo up so our
-      agents start with what the team already figured out. Credentials are in
-      the env. Show me it works. Keep it minimal. What's installed on PATH is
+      agents start with what the team already figured out. Show me it works. Keep it minimal. What's installed on PATH is
       the build under test; don't reinstall or upgrade it.
     end_goal: >-
       `ox init` initializes the repo (.sageox/config.json exists), the agent
@@ -88,11 +96,13 @@ tests:
   # Configured: repo already connected (seeded with the public CLI); the user
   # wants prior team knowledge before starting work.
   - name: team-recall
-    install: ox init --no-input --yes --endpoint https://sageox.ai >/dev/null
+    install:
+      - require-eval-token.sh
+      - seed-ox-init.sh
     # The README's own first example question to an AI coworker.
     prompt: >-
       What did we decide about the daemon design, and who worked on it?
-      Credentials are in the env. What's installed on PATH is the build under
+      What's installed on PATH is the build under
       test; don't reinstall or upgrade it.
     end_goal: >-
       The answer comes from the team's SageOx context (ox query, ox conversation,
