@@ -4,14 +4,15 @@
 # there. Reference: npx firegoat init --help
 #
 # Run: npx -y firegoat@latest eval
-# The two configured tests write to SageOx (repo registration, Ledger), so they
-# run ONLY against a team created for firegoat evals, never a production team:
-#   export SAGEOX_TOKEN=oxt_...   # team token for the eval team (never commit it)
-#   npx -y firegoat@latest eval --var TEAM=<eval team id>
-# fixtures/require-eval-token.sh refuses to run them on a personal login.
+# Writes to SageOx (repo registration, Ledger) go ONLY to the dedicated firegoat
+# eval team (TEAM below), never a production team:
+# - team-recall uses your `ox login`; its seed step pins the repo to TEAM, and
+#   the eval team holds docs/adr/002-daemon-architecture.md (imported once).
+# - connect-repo lets the agent pick the team, so it runs only on a team token
+#   for the eval team (export SAGEOX_TOKEN=oxt_...); without one its setup fails.
 
 vars:
-  TEAM: ""
+  TEAM: team_ki87y91n1b
 
 # How many times to run each test.
 runs: 1
@@ -97,7 +98,7 @@ tests:
   # wants prior team knowledge before starting work.
   - name: team-recall
     install:
-      - require-eval-token.sh
+      - copy-ox-login.sh
       - seed-ox-init.sh
     # The README's own first example question to an AI coworker.
     prompt: >-
@@ -107,8 +108,9 @@ tests:
     end_goal: >-
       The answer comes from the team's SageOx context (ox query, ox conversation,
       or ox session list output in the transcript), names at least one specific
-      daemon design decision and the coworker or session it came from, and does
-      not invent decisions from general knowledge.
+      decision from ADR-002 (the background daemon for session management),
+      cites that ADR as its source, and says plainly when who decided it is
+      not recorded rather than guessing a name.
     checks:
       - run: >-
           grep -Eq '^\[[0-9]+\] \$ (.*[ /])?ox +(query|conversation|session +list|agent +prime)' "$FIREGOAT_TRANSCRIPT"
