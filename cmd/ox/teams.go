@@ -79,6 +79,10 @@ func runTeams(cmd *cobra.Command, args []string) error {
 		// not in a project — discover from credentials across all endpoints
 		teams = discoverTeamsGlobal()
 	}
+	if len(teams) == 0 {
+		// nothing synced here yet; the account may still have teams on the server
+		teams = teamsFromServer(projectRoot)
+	}
 
 	var primaryTeamID string
 	for _, t := range teams {

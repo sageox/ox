@@ -173,6 +173,64 @@ func discoverTeamsGlobal() []enrichedTeam {
 	return teams
 }
 
+// serverTeamMemberships asks the server which teams the logged-in coworker
+// belongs to. It is the fallback for a machine where no team context has been
+// synced yet, so local discovery has nothing to report even though the account
+// has teams. It returns nil when there is no usable login or the server cannot
+// be reached; callers treat that as "could not look", not as "no teams".
+func serverTeamMemberships(projectRoot string) []api.TeamMembership {
+	ep := endpoint.GetForProject(projectRoot)
+	token, err := auth.EnsureValidTokenForEndpoint(ep, 300)
+	if err != nil || token == nil || token.AccessToken == "" {
+		slog.Debug("team lookup on server skipped: no usable login", "endpoint", ep, "error", err)
+		return nil
+	}
+	client := api.NewRepoClientForProject(projectRoot).WithAuthToken(token.AccessToken)
+	resp, err := client.GetRepos()
+	if err != nil {
+		slog.Debug("team lookup on server failed", "endpoint", ep, "error", err)
+		return nil
+	}
+	return usableTeams(resp.TeamMembershipsFromRepos())
+}
+
+// teamsFromServer lists the coworker's teams from the server for `ox team list`
+// when nothing is synced locally. Paths point where the team context will land
+// once synced; LastSync stays zero because nothing has synced.
+func teamsFromServer(projectRoot string) []enrichedTeam {
+	memberships := serverTeamMemberships(projectRoot)
+	if len(memberships) == 0 {
+		return nil
+	}
+	ep := endpoint.GetForProject(projectRoot)
+	var primaryTeamID string
+	if cfg, _ := config.LoadProjectConfig(projectRoot); cfg != nil {
+		primaryTeamID = cfg.TeamID
+	}
+	teams := make([]enrichedTeam, 0, len(memberships))
+	for _, m := range memberships {
+		name := m.Name
+		if name == "" {
+			name = m.ID
+		}
+		slug := m.Slug
+		if slug == "" {
+			slug = api.DeriveSlug(name)
+		}
+		if slug == "" {
+			slug = m.ID
+		}
+		teams = append(teams, enrichedTeam{
+			TeamID:  m.ID,
+			Name:    name,
+			Slug:    slug,
+			Path:    paths.TeamContextDir(m.ID, ep),
+			Primary: m.ID == primaryTeamID,
+		})
+	}
+	return teams
+}
+
 // resolveTeamByQuery finds a team by slug, team ID, or name.
 // Resolution order: exact slug -> exact team ID -> case-insensitive name.
 func resolveTeamByQuery(projectRoot, query string) *enrichedTeam {
