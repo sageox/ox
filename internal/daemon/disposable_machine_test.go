@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -77,6 +78,29 @@ func TestRemoveLedgerLocksAtStart(t *testing.T) {
 
 		require.FileExists(t, filepath.Join(ledger, ".git", "index.lock"))
 		require.Error(t, commit(ledger))
+	})
+
+	t.Run("a daemon that waited for the lock leaves alone what the first one's git holds", func(t *testing.T) {
+		onNewMachine(t)
+		ledger := newLedger(t)
+		holding, release := make(chan struct{}), make(chan struct{})
+		go func() {
+			_ = gitutil.WithRepoLock(context.Background(), ledger, func() error {
+				close(holding)
+				<-release
+				return nil
+			})
+		}()
+		<-holding
+		second := make(chan struct{})
+		go func() { start(ledger, true); close(second) }()
+		// the daemon holding the lock clears, marks, and its git takes new locks
+		markLedgerLocksCleared(ledger, discardLogger())
+		leaveLocks(t, ledger)
+		close(release)
+		<-second
+
+		require.FileExists(t, filepath.Join(ledger, ".git", "index.lock"))
 	})
 
 	t.Run("without the setting fresh locks stay, as before", func(t *testing.T) {

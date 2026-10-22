@@ -20,21 +20,29 @@ import (
 // keeps those: an index.lock for an hour, a lock naming a PID for as long as
 // some process here has that PID, and a ref lock forever.
 func clearLedgerLocksOnFirstStart(ctx context.Context, ledgerPath string, logger *slog.Logger) {
-	if _, err := os.Stat(ledgerLocksClearedMarker(ledgerPath)); err == nil {
+	marker := ledgerLocksClearedMarker(ledgerPath)
+	if _, err := os.Stat(marker); err == nil {
 		return
 	}
 	err := gitutil.WithRepoLock(ctx, ledgerPath, func() error {
+		// Checked again under the lock: another daemon for this Ledger may have
+		// cleared them while this one waited, and its git may hold new ones.
+		if _, err := os.Stat(marker); err == nil {
+			return nil
+		}
 		removed, errs := gitutil.RemoveAllLockFiles(filepath.Join(ledgerPath, ".git"))
 		if len(removed) > 0 {
 			logger.Info("removed git locks a previous machine left in the Ledger", "path", ledgerPath, "locks", removed)
 		}
-		return errors.Join(errs...)
+		if err := errors.Join(errs...); err != nil {
+			return err
+		}
+		markLedgerLocksCleared(ledgerPath, logger)
+		return nil
 	})
 	if err != nil {
 		logger.Warn("could not clear the Ledger's git locks on this machine's first start", "path", ledgerPath, "error", err)
-		return
 	}
-	markLedgerLocksCleared(ledgerPath, logger)
 }
 
 // markLedgerLocksCleared records that no other machine's locks remain in the
