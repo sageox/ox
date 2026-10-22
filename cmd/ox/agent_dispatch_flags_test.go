@@ -465,15 +465,18 @@ func TestAgentDispatchedFlagsAreReinjected(t *testing.T) {
 	}
 
 	var hidden []string
-	agentCmd.PersistentFlags().VisitAll(func(f *pflag.Flag) {
+	checkHidden := func(f *pflag.Flag) {
 		if !f.Hidden || readDirectly[f.Name] {
 			return
 		}
 		hidden = append(hidden, f.Name)
 		assert.True(t, reinjected[f.Name], "hidden agent flag --%s is registered but never reinjected: its value would be dropped", f.Name)
-	})
+	}
+	agentCmd.PersistentFlags().VisitAll(checkHidden)
+	agentCmd.LocalNonPersistentFlags().VisitAll(checkHidden)
 	for name := range reinjected {
-		assert.NotNil(t, agentCmd.PersistentFlags().Lookup(name), "reinjection list names --%s but agentCmd does not register it", name)
+		registered := agentCmd.PersistentFlags().Lookup(name) != nil || agentCmd.Flags().Lookup(name) != nil
+		assert.True(t, registered, "reinjection list names --%s but agentCmd does not register it", name)
 	}
 	sort.Strings(hidden)
 	assert.NotEmpty(t, hidden)
@@ -530,7 +533,7 @@ func TestExplicitAgentIDFlag(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			resetAgentDispatchFlags(t)
 			_ = agentCmd.LocalFlags() // merge persistent flags into cmd.Flags(), as cobra does before RunE
-			require.NoError(t, agentCmd.PersistentFlags().Set("agent-id", tt.value))
+			require.NoError(t, agentCmd.Flags().Set("agent-id", tt.value))
 			got, err := explicitAgentIDFlag(agentCmd)
 			if tt.wantErr {
 				require.Error(t, err)

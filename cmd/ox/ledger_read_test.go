@@ -569,7 +569,12 @@ func TestOnlySessionListAmongListCommandsTakesARepoFlag(t *testing.T) {
 	var found []string
 	var walk func(*cobra.Command)
 	walk = func(cmd *cobra.Command) {
-		if cmd.Name() == "list" && cmd.Flags().Lookup("repo") != nil {
+		// inherited flags count: cobra merges a parent's persistent flags before
+		// parsing, so an inherited --repo is accepted on the command line. Checking
+		// cmd.Flags() alone sees them only after something merged them, which made
+		// this guard depend on test order.
+		takesRepo := cmd.Flags().Lookup("repo") != nil || cmd.InheritedFlags().Lookup("repo") != nil
+		if cmd.Name() == "list" && takesRepo {
 			found = append(found, cmd.CommandPath())
 		}
 		for _, child := range cmd.Commands() {

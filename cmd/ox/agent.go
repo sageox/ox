@@ -577,18 +577,23 @@ var (
 	agentQueryBoolFlags   = []string{"local"}
 )
 
-// registerHiddenAgentFlag registers a hidden persistent string flag on
-// agentCmd for a flag that a dispatched handler parses by hand. Hidden because
-// each applies to one subcommand and would clutter agent-level help.
+// registerHiddenAgentFlag registers a hidden string flag on agentCmd for a
+// flag that a dispatched handler parses by hand. Hidden because each applies to
+// one verb and would clutter agent-level help.
+//
+// Local, not persistent: a dispatched invocation (`ox agent <id> query …`)
+// resolves to agentCmd itself, so a local flag is enough, while a persistent
+// one would leak into real subcommands. `ox agent list` inheriting --repo, for
+// one, would look like a hosted ledger read to isHeadlessLedgerRead.
 func registerHiddenAgentFlag(name, usage string) {
-	agentCmd.PersistentFlags().String(name, "", usage)
-	_ = agentCmd.PersistentFlags().MarkHidden(name)
+	agentCmd.Flags().String(name, "", usage)
+	_ = agentCmd.Flags().MarkHidden(name)
 }
 
 // registerHiddenAgentBoolFlag is registerHiddenAgentFlag for presence flags.
 func registerHiddenAgentBoolFlag(name, usage string) {
-	agentCmd.PersistentFlags().Bool(name, false, usage)
-	_ = agentCmd.PersistentFlags().MarkHidden(name)
+	agentCmd.Flags().Bool(name, false, usage)
+	_ = agentCmd.Flags().MarkHidden(name)
 }
 
 // explicitAgentIDFlag returns the AI coworker ID passed via --agent-id, or ""
