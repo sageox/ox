@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os/exec"
@@ -72,8 +73,10 @@ func checkGitHubDataMigration(fix bool) checkResult {
 	return PassedCheck(name, msg)
 }
 
-// commitGitHubMigration stages and commits only the migration changes in the ledger.
-// Scopes staging to data/github/ to avoid sweeping unrelated dirty files into the commit.
+// commitGitHubMigration stages the migration's changes under data/github/ and
+// commits everything staged except plans (commitLedgerSnapshot): the ignore
+// entry and untracking EnsureGitignoreBeforeCommit stages land with it, and a
+// staged plan edit stays staged (#1442).
 func commitGitHubMigration(ledgerPath string, migrated, deleted int) error {
 	gitserver.EnsureGitignoreBeforeCommit(ledgerPath)
 
@@ -88,14 +91,6 @@ func commitGitHubMigration(ledgerPath string, migrated, deleted int) error {
 	if deleted > 0 {
 		commitMsg += fmt.Sprintf(", delete %d corrupted", deleted)
 	}
-	commitCmd := exec.Command("git", "-C", ledgerPath, "commit", "-m", commitMsg)
-	if output, err := commitCmd.CombinedOutput(); err != nil {
-		errStr := strings.TrimSpace(string(output))
-		if strings.Contains(errStr, "nothing to commit") {
-			return nil
-		}
-		return fmt.Errorf("git commit: %w: %s", err, errStr)
-	}
-
-	return nil
+	_, err := commitLedgerSnapshot(context.Background(), ledgerPath, commitMsg)
+	return err
 }
