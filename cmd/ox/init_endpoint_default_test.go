@@ -25,8 +25,12 @@ func TestSelectInitEndpoint_NoInputDefaultsToSoleLoggedInEndpoint(t *testing.T) 
 		wantErr       bool
 	}{
 		{name: "one non-default endpoint, valid", stored: []string{"http://127.0.0.1:9"}, wantEndpoint: "http://127.0.0.1:9"},
-		{name: "one non-default endpoint, expired", stored: []string{"http://127.0.0.1:9"}, expired: true, wantEndpoint: "http://127.0.0.1:9", wantNeedLogin: true},
-		{name: "one valid plus one stale login picks the valid one", stored: []string{"http://127.0.0.1:9"}, staleEndpoint: "http://127.0.0.1:19", wantEndpoint: "http://127.0.0.1:9"},
+		// an expired access token is the normal state of a login not used recently:
+		// the auth gate refreshes it, so init must not tell the coworker to log in
+		{name: "one non-default endpoint, expired access token", stored: []string{"http://127.0.0.1:9"}, expired: true, wantEndpoint: "http://127.0.0.1:9"},
+		// the other login may refresh fine, so a valid one beside an expired one is
+		// still two logins: silently preferring the valid one picks the wrong team host
+		{name: "one valid plus one expired login stays ambiguous", stored: []string{"http://127.0.0.1:9"}, staleEndpoint: "http://127.0.0.1:19", wantErr: true},
 		{name: "two endpoints stay ambiguous", stored: []string{"http://127.0.0.1:9", "http://127.0.0.1:19"}, wantErr: true},
 	}
 	for _, tt := range tests {

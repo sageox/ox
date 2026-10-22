@@ -2504,24 +2504,19 @@ type initEndpointInfo struct {
 }
 
 // soleLoggedInEndpoint returns the one endpoint ox init can default to without
-// asking: the only valid login, or failing that the only stored login.
+// asking: the only stored login, whatever the age of its access token. An
+// expired access token is the normal state of a login not used recently (the
+// auth gate refreshes it), so expiry must not rank logins against each other.
 // storedSlugs marks endpoints that came from stored logins, so the injected
 // production row is not mistaken for one.
 func soleLoggedInEndpoint(endpoints []initEndpointInfo, storedSlugs map[string]bool) (initEndpointInfo, bool) {
-	var stored, valid []initEndpointInfo
+	var stored []initEndpointInfo
 	for _, ep := range endpoints {
-		if !storedSlugs[ep.Slug] {
-			continue
-		}
-		stored = append(stored, ep)
-		if ep.IsValid {
-			valid = append(valid, ep)
+		if storedSlugs[ep.Slug] {
+			stored = append(stored, ep)
 		}
 	}
-	switch {
-	case len(valid) == 1:
-		return valid[0], true
-	case len(stored) == 1:
+	if len(stored) == 1 {
 		return stored[0], true
 	}
 	return initEndpointInfo{}, false
@@ -2584,10 +2579,11 @@ func selectInitEndpoint() (string, bool, error) {
 	}
 	if cli.NoInput() {
 		// logged in to exactly one endpoint: there is no choice to make. The
-		// injected production row is not a login, so it does not count, and a
-		// stale expired login does not make a single valid one ambiguous.
+		// injected production row is not a login, so it does not count. Not
+		// needsLogin even when the access token expired: the auth gate that
+		// follows refreshes it, or reports the login problem itself.
 		if only, ok := soleLoggedInEndpoint(endpoints, storedSlugs); ok {
-			return only.URL, !only.IsValid, nil
+			return only.URL, false, nil
 		}
 		return "", false, fmt.Errorf("--no-input requires --endpoint <endpoint> to choose where to initialize")
 	}
