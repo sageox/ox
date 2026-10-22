@@ -252,8 +252,8 @@ func porcelainPaths(out []byte) []string {
 }
 
 // gitOutputContext runs a read-only git command in dir. --no-optional-locks
-// keeps `git status` from refreshing the index, so this hook never holds
-// index.lock while the coworker's own git commands run.
+// keeps `git status` from refreshing the index, so a read never holds the
+// index.lock a concurrent git command needs.
 func gitOutputContext(ctx context.Context, dir string, args ...string) ([]byte, error) {
 	return exec.CommandContext(ctx, "git", append([]string{"--no-optional-locks", "-C", dir}, args...)...).Output()
 }
