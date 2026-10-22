@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/sageox/ox/internal/gitutil"
@@ -83,24 +84,87 @@ func TestRemoveLedgerLocksAtStart(t *testing.T) {
 	t.Run("a daemon that waited for the lock leaves alone what the first one's git holds", func(t *testing.T) {
 		onNewMachine(t)
 		ledger := newLedger(t)
-		holding, release := make(chan struct{}), make(chan struct{})
-		go func() {
-			_ = gitutil.WithRepoLock(context.Background(), ledger, func() error {
-				close(holding)
-				<-release
+		synctest.Test(t, func(t *testing.T) {
+			require.NoError(t, gitutil.WithRepoLock(context.Background(), ledger, func() error {
+				go start(ledger, true)
+				// The second start has passed its first marker check and is
+				// blocked on the in-process repo lock before we write the marker.
+				synctest.Wait()
+				require.NoError(t, markLedgerLocksCleared(ledger))
+				leaveLocks(t, ledger)
 				return nil
+			}))
+			synctest.Wait()
+
+			require.FileExists(t, filepath.Join(ledger, ".git", "index.lock"))
+		})
+	})
+
+	for _, afterWaiting := range []bool{false, true} {
+		t.Run(fmt.Sprintf("an unreadable marker preserves locks after_waiting=%v", afterWaiting), func(t *testing.T) {
+			onNewMachine(t)
+			ledger := newLedger(t)
+			leaveLocks(t, ledger)
+			marker := ledgerLocksClearedMarker(ledger)
+			require.NoError(t, os.MkdirAll(filepath.Dir(marker), 0o700))
+			breakMarker := func(t *testing.T) {
+				t.Helper()
+				if err := os.Symlink(marker, marker); err != nil {
+					t.Skipf("symlinks unavailable: %v", err)
+				}
+				_, err := os.Stat(marker)
+				require.Error(t, err)
+				require.NotErrorIs(t, err, os.ErrNotExist)
+			}
+			if !afterWaiting {
+				breakMarker(t)
+			}
+			synctest.Test(t, func(t *testing.T) {
+				require.NoError(t, gitutil.WithRepoLock(context.Background(), ledger, func() error {
+					go start(ledger, true)
+					synctest.Wait()
+					if afterWaiting {
+						breakMarker(t)
+					}
+					return nil
+				}))
+				synctest.Wait()
+				require.FileExists(t, filepath.Join(ledger, ".git", "index.lock"))
 			})
-		}()
-		<-holding
-		second := make(chan struct{})
-		go func() { start(ledger, true); close(second) }()
-		// the daemon holding the lock clears, marks, and its git takes new locks
-		markLedgerLocksCleared(ledger, discardLogger())
+		})
+	}
+
+	t.Run("an unwritable marker preserves locks", func(t *testing.T) {
+		onNewMachine(t)
+		ledger := newLedger(t)
 		leaveLocks(t, ledger)
-		close(release)
-		<-second
+		marker := ledgerLocksClearedMarker(ledger)
+		require.NoError(t, os.MkdirAll(filepath.Dir(marker), 0o700))
+		// Stat reports absence, but writing through this dangling symlink fails.
+		if err := os.Symlink(filepath.Join(t.TempDir(), "missing", "marker"), marker); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+
+		start(ledger, true)
 
 		require.FileExists(t, filepath.Join(ledger, ".git", "index.lock"))
+	})
+
+	t.Run("failed cleanup can be retried", func(t *testing.T) {
+		onNewMachine(t)
+		ledger := newLedger(t)
+		gitDir := filepath.Join(ledger, ".git")
+		require.NoError(t, os.Rename(gitDir, gitDir+"-saved"))
+		require.NoError(t, os.WriteFile(gitDir, nil, 0o600))
+
+		start(ledger, true)
+
+		require.NoFileExists(t, ledgerLocksClearedMarker(ledger))
+		require.NoError(t, os.Remove(gitDir))
+		require.NoError(t, os.Rename(gitDir+"-saved", gitDir))
+		leaveLocks(t, ledger)
+		start(ledger, true)
+		require.NoError(t, commit(ledger), "the Ledger must recover on retry")
 	})
 
 	t.Run("without the setting fresh locks stay, as before", func(t *testing.T) {
@@ -216,6 +280,12 @@ func TestInitComponents_RestartsAfterFirstLedgerClone(t *testing.T) {
 			}
 			require.NotNil(t, d.scheduler.onLedgerCloned, "the daemon never hears that the Ledger's first clone landed")
 			cloned := filepath.Join(t.TempDir(), "ledger")
+			marker := ledgerLocksClearedMarker(cloned)
+			require.NoError(t, os.MkdirAll(marker, 0o700))
+			d.scheduler.onLedgerCloned(cloned)
+			require.False(t, d.RestartRequested(), "restarting without a marker would clear this machine's live locks")
+			require.NoError(t, os.Remove(marker))
+
 			d.scheduler.onLedgerCloned(cloned)
 			require.True(t, d.RestartRequested())
 			require.FileExists(t, ledgerLocksClearedMarker(cloned), "the restarted daemon must not clear this machine's own locks")

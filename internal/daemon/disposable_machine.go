@@ -23,21 +23,30 @@ func clearLedgerLocksOnFirstStart(ctx context.Context, ledgerPath string, logger
 	marker := ledgerLocksClearedMarker(ledgerPath)
 	if _, err := os.Stat(marker); err == nil {
 		return
+	} else if !errors.Is(err, os.ErrNotExist) {
+		logger.Warn("could not inspect the Ledger lock marker", "marker", marker, "error", err)
+		return
 	}
 	err := gitutil.WithRepoLock(ctx, ledgerPath, func() error {
 		// Checked again under the lock: another daemon for this Ledger may have
 		// cleared them while this one waited, and its git may hold new ones.
 		if _, err := os.Stat(marker); err == nil {
 			return nil
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		// Reserve the marker before deletion: if it cannot be written, a
+		// later daemon must not repeat cleanup over this machine's live locks.
+		if err := markLedgerLocksCleared(ledgerPath); err != nil {
+			return err
 		}
 		removed, errs := gitutil.RemoveAllLockFiles(filepath.Join(ledgerPath, ".git"))
 		if len(removed) > 0 {
 			logger.Info("removed git locks a previous machine left in the Ledger", "path", ledgerPath, "locks", removed)
 		}
 		if err := errors.Join(errs...); err != nil {
-			return err
+			return errors.Join(err, os.Remove(marker))
 		}
-		markLedgerLocksCleared(ledgerPath, logger)
 		return nil
 	})
 	if err != nil {
@@ -48,15 +57,12 @@ func clearLedgerLocksOnFirstStart(ctx context.Context, ledgerPath string, logger
 // markLedgerLocksCleared records that no other machine's locks remain in the
 // Ledger at ledgerPath, so later daemon starts on this machine leave its locks
 // alone.
-func markLedgerLocksCleared(ledgerPath string, logger *slog.Logger) {
+func markLedgerLocksCleared(ledgerPath string) error {
 	marker := ledgerLocksClearedMarker(ledgerPath)
-	err := os.MkdirAll(filepath.Dir(marker), 0o700)
-	if err == nil {
-		err = os.WriteFile(marker, nil, 0o600)
+	if err := os.MkdirAll(filepath.Dir(marker), 0o700); err != nil {
+		return err
 	}
-	if err != nil {
-		logger.Warn("could not record that the Ledger's git locks were cleared", "marker", marker, "error", err)
-	}
+	return os.WriteFile(marker, nil, 0o600)
 }
 
 // ledgerLocksClearedMarker is in the daemon state dir (by default under

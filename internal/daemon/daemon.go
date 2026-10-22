@@ -388,7 +388,10 @@ func (d *Daemon) restartAfterFirstLedgerClone() {
 		return
 	}
 	d.scheduler.SetLedgerClonedCallback(func(ledgerPath string) {
-		markLedgerLocksCleared(ledgerPath, d.logger)
+		if err := markLedgerLocksCleared(ledgerPath); err != nil {
+			d.logger.Warn("could not record that the Ledger's git locks were cleared", "path", ledgerPath, "error", err)
+			return
+		}
 		d.logger.Info("restarting to pick up the Ledger's first clone", "path", ledgerPath)
 		d.requestRestart()
 	})
