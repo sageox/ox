@@ -299,3 +299,20 @@ func TestRecovery_TelemetryRecordsTheOffer(t *testing.T) {
 	require.GreaterOrEqual(t, send, 0)
 	assert.Less(t, attach, send, "the suggestion must be attached before the event is sent")
 }
+
+// TestRecovery_GatedCommandIsFixedBeforeCobra prevents an enabled feature-gated
+// command from missing the pre-cobra rewrite. Normalization must run after the
+// feature-gate sync; otherwise "carts --help" typed as one word cannot resolve,
+// cobra rejects it, and the correction costs a failed attempt and a retry.
+func TestRecovery_GatedCommandIsFixedBeforeCobra(t *testing.T) {
+	recoveryEnv(t)
+	t.Setenv("FEATURE_CARTS", "true")
+	wasRegistered := commandRegistered(rootCmd, cartsCmd)
+	t.Cleanup(func() { setCommandRegistered(rootCmd, cartsCmd, wasRegistered) })
+
+	run := runRecovery(t, "carts --help")
+
+	require.Equal(t, 0, run.code, "stdout=%s stderr=%s", run.stdout, run.stderr)
+	assert.Empty(t, os.Getenv("OX_FRICTION_RETRY"), "the one-word command must be fixed on the first attempt, not by a retry")
+	assert.Contains(t, run.stdout+run.stderr, "carts")
+}

@@ -139,10 +139,7 @@ func main() {
 		_ = godotenv.Load(".env")
 	}
 
-	// normalize first: a one-word command line or a subcommand typed as a flag
-	// must be fixed before flag aliases look at the argv
-	args := applyCatalogTokenRewrites(normalizeInvocation(os.Args[1:]), loadFlagAliases(defaultCatalogJSON))
-	exitCode := executeWithSignalContext(args)
+	exitCode := executeWithSignalContext(os.Args[1:])
 	// Flush the result before deciding success, while stderr can still report
 	// a failed destination. Preserve an existing command failure's exit code.
 	os.Stdout.Close()
@@ -227,6 +224,13 @@ func executeWithFrictionRecovery(ctx context.Context, args []string, attempt int
 	if !headlessLedgerReadRequested(args) {
 		initFeatureFlags(rootCmd)
 		syncFeatureGatedCommands(rootCmd)
+	}
+	// the first attempt gets the pre-cobra rewrites: a one-word command line or
+	// a subcommand typed as a flag is fixed before flag aliases look at the
+	// argv. Both run after the feature-gate sync so an enabled gated command
+	// resolves like any other.
+	if attempt == 0 {
+		args = applyCatalogTokenRewrites(normalizeInvocation(args), loadFlagAliases(defaultCatalogJSON))
 	}
 	rootCmd.SetArgs(args)
 	preRunReached = false

@@ -449,8 +449,10 @@ func TestFrictionCollector_RecordFromIPC_ScrubsUserData(t *testing.T) {
 
 	fc := NewFrictionCollector(testLogger(), "")
 	fc.RecordFromIPC(FrictionPayload{
-		Kind:  "unknown-command",
-		Actor: "human",
+		Kind:       "unknown-command",
+		Command:    "ox /Users/person-a/notes",
+		Subcommand: "team_abc123",
+		Actor:      "human",
 		Input: "plan view /Users/person-a/src/x.html team_abc123 person@example.com\n" +
 			"second line of a pasted prompt: fix the login bug",
 		ErrorMsg:   `unknown command "cnv_01a00000-0000-7000-8000-000000000000" for "ox"`,
@@ -464,8 +466,10 @@ func TestFrictionCollector_RecordFromIPC_ScrubsUserData(t *testing.T) {
 	assert.Equal(t, "plan view ~/<path> <id> <email>", event.Input, "text after the first newline is dropped")
 	assert.Equal(t, `unknown command "<id>" for "ox"`, event.ErrorMsg)
 	assert.Equal(t, "plan view ~/<path> <url>", event.Suggestion)
+	assert.Equal(t, "ox ~/<path>", event.Command)
+	assert.Equal(t, "<id>", event.Subcommand)
 	for _, leak := range []string{"person-a", "/Users", "/home", "team_abc123", "cnv_01a", "example.com", "login", "acme-corp"} {
-		assert.NotContains(t, event.Input+event.ErrorMsg+event.Suggestion, leak)
+		assert.NotContains(t, event.Command+event.Subcommand+event.Input+event.ErrorMsg+event.Suggestion, leak)
 	}
 }
 

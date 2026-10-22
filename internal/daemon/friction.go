@@ -129,8 +129,8 @@ func (f *FrictionCollector) RecordFromIPC(payload FrictionPayload) {
 	event := friction.FrictionEvent{
 		Timestamp:  payload.Timestamp,
 		Kind:       friction.FailureKind(payload.Kind),
-		Command:    payload.Command,
-		Subcommand: payload.Subcommand,
+		Command:    ScrubFrictionText(payload.Command),
+		Subcommand: ScrubFrictionText(payload.Subcommand),
 		Actor:      payload.Actor,
 		AgentType:  payload.AgentType,
 		PathBucket: payload.PathBucket,
