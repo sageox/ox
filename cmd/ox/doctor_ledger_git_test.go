@@ -4,8 +4,6 @@ package main
 
 import (
 	"context"
-	"fmt"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -22,17 +20,18 @@ import (
 )
 
 // TestCheckLedgerRemoteReachable_AccessDeniedOnlyForHTTP403 runs the doctor
-// check against a real `git ls-remote`. A 401 from a server whose port
+// check against a real `git ls-remote`. A 401 from a server whose URL
 // contains 403 must read as a sign-in failure, not "not a member of this team".
+// The remote carries dummy credentials so git's 401 message prints the full
+// URL, /403/ path included; without them it prints only scheme://host:port.
 func TestCheckLedgerRemoteReachable_AccessDeniedOnlyForHTTP403(t *testing.T) {
 	tests := []struct {
 		name   string
-		ports  []int // candidate ports containing 403; nil picks a random port
 		status int
 		want   string
 	}{
-		{"401 on a port containing 403", []int{14032, 24032, 34032, 40313, 54032}, http.StatusUnauthorized, "auth failed"},
-		{"real 403", nil, http.StatusForbidden, "access denied"},
+		{"401 with a URL containing 403", http.StatusUnauthorized, "auth failed"},
+		{"real 403", http.StatusForbidden, "access denied"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -41,31 +40,17 @@ func TestCheckLedgerRemoteReachable_AccessDeniedOnlyForHTTP403(t *testing.T) {
 			t.Setenv("GIT_ALLOW_PROTOCOL", "file:http")
 			t.Setenv("GIT_TERMINAL_PROMPT", "0")
 
-			server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("WWW-Authenticate", `Basic realm="test"`)
 				http.Error(w, http.StatusText(tt.status), tt.status)
 			}))
-			if tt.ports != nil {
-				var ln net.Listener
-				for _, port := range tt.ports {
-					if l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port)); err == nil {
-						ln = l
-						break
-					}
-				}
-				if ln == nil {
-					t.Skip("no free loopback port containing 403")
-				}
-				_ = server.Listener.Close()
-				server.Listener = ln
-			}
-			server.Start()
 			t.Cleanup(server.Close)
+			remote := strings.Replace(server.URL, "http://", "http://user:wrong@", 1) + "/403/ledger.git"
 
 			ledgerPath := t.TempDir()
 			for _, args := range [][]string{
 				{"init", "--quiet"},
-				{"remote", "add", "origin", server.URL + "/ledger.git"},
+				{"remote", "add", "origin", remote},
 				{"config", "credential.helper", ""},
 				{"config", "http.proxy", ""},
 			} {

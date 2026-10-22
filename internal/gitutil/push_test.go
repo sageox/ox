@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -355,47 +354,33 @@ func TestPushWithRetry_PermanentErrorShortCircuits(t *testing.T) {
 	assert.Contains(t, err.Error(), "not retryable")
 }
 
-// pushToLoopback pushes a new commit to an HTTP remote that handler serves on
-// ln (a random port when ln is nil) and returns PushWithRetry's error.
-func pushToLoopback(t *testing.T, ln net.Listener, handler http.HandlerFunc) error {
+// pushToLoopback pushes a new commit to an HTTP remote that handler serves and
+// returns PushWithRetry's error. The remote URL carries dummy credentials and a
+// /403/ path: with credentials, git's 401 message prints the full URL
+// ("Authentication failed for '…/403/repo.git/'"), which reproduces the
+// false 403 match on any port. Without them it prints only scheme://host:port.
+func pushToLoopback(t *testing.T, handler http.HandlerFunc) error {
 	t.Helper()
 	t.Setenv("GIT_ALLOW_PROTOCOL", "file:http")
 	t.Setenv("GIT_TERMINAL_PROMPT", "0")
 	repo, _ := initBareRemoteRepo(t)
 	addCommit(t, repo, "a.txt", "hello", "add a")
 
-	server := httptest.NewUnstartedServer(handler)
-	if ln != nil {
-		_ = server.Listener.Close()
-		server.Listener = ln
-	}
-	server.Start()
+	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
-	run(t, repo, "git", "remote", "set-url", "origin", server.URL+"/repo.git")
+	remote := strings.Replace(server.URL, "http://", "http://user:wrong@", 1) + "/403/repo.git"
+	run(t, repo, "git", "remote", "set-url", "origin", remote)
 	run(t, repo, "git", "config", "http.proxy", "")
 	run(t, repo, "git", "config", "credential.helper", "")
 
 	return PushWithRetry(context.Background(), repo, PushOpts{MaxRetries: 3, OpTimeout: 15 * time.Second})
 }
 
-// listenOnPortContaining403 binds a loopback port whose digits contain "403",
-// the shape that made a bare substring check report a 401 as access denied.
-func listenOnPortContaining403(t *testing.T) net.Listener {
-	t.Helper()
-	for _, port := range []int{14030, 14031, 24030, 24031, 34030, 34031, 40303, 40304, 54030, 54031} {
-		if ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port)); err == nil {
-			return ln
-		}
-	}
-	t.Skip("no free loopback port containing 403")
-	return nil
-}
-
-func TestPushWithRetry_AuthFailureOnPort403IsNotAccessDenied(t *testing.T) {
+func TestPushWithRetry_AuthFailureWithURLContaining403IsNotAccessDenied(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: git push with retry")
 	}
-	err := pushToLoopback(t, listenOnPortContaining403(t), func(w http.ResponseWriter, r *http.Request) {
+	err := pushToLoopback(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("WWW-Authenticate", `Basic realm="test"`)
 		http.Error(w, "Authentication failed", http.StatusUnauthorized)
 	})
@@ -429,7 +414,7 @@ func TestPushWithRetry_HTTP403IsAccessDenied(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: git push with retry")
 	}
-	err := pushToLoopback(t, nil, func(w http.ResponseWriter, r *http.Request) {
+	err := pushToLoopback(t, func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 	})
 
