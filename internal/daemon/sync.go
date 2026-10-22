@@ -1470,6 +1470,11 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 		}
 
 		s.clearDisprovedBySkip("ledger", result.SkipReason)
+		if s.issues != nil {
+			// a skipped pull still found a cloned ledger; a clone_failed issue
+			// from before an out-of-band repair (`ox doctor --fix`) is stale
+			s.issues.ClearIssue(IssueTypeCloneFailed, "ledger")
+		}
 
 		// remote-unchanged or recently-fetched: update sync timestamps
 		if result.SkipReason == "remote unchanged" || result.SkipReason == "recently fetched" {

@@ -373,6 +373,8 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 			// cleared inside pullTeamContext instead, next to where they're
 			// raised, so the key is never re-derived or guessed here.
 			s.issues.ClearIssue(IssueTypeSyncBackoff, r.ws.ID)
+			// the clone-failure issue is also keyed on the workspace ID
+			s.issues.ClearIssue(IssueTypeCloneFailed, r.ws.ID)
 		}
 
 		mCfg := s.applySparseCheckout(ctx, r.ws.Path)
@@ -700,6 +702,15 @@ func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) (teamP
 			return outcome, fmt.Errorf("corrupt team context at %s but rename failed: %w", path, err)
 		}
 		return outcome, fmt.Errorf("team context repo was corrupt and moved aside for re-clone; re-run after the daemon re-clones it (path: %s)", path)
+	}
+
+	// The repo exists and is not corrupt, so it is cloned: drop a clone_failed
+	// issue left by an earlier attempt. `ox doctor --fix` repairs a clone
+	// without going through the daemon's clone path, which is the only other
+	// place that clears it, so the warning would otherwise print every session.
+	// Before the skip branch: an unchanged remote skips every cycle.
+	if s.issues != nil {
+		s.issues.ClearIssue(IssueTypeCloneFailed, repoName)
 	}
 
 	// handle skip
