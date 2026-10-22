@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -17,6 +18,43 @@ import (
 const sessionPublicationScanLimit = 8 << 20
 
 var freshSessionPublicationRules = secretguard.LatestRules
+
+// sessionBlobPaths maps each blob the unpushed session history adds or changes
+// to every path it lands at. rev-list --objects names one path per blob, so a
+// blob shared by meta.json and another file would otherwise get meta.json's
+// exemption at both.
+func sessionBlobPaths(ctx context.Context, ledgerPath string) (map[string][]string, error) {
+	args := []string{"-C", ledgerPath, "log", "--full-history", "-m", "--format=", "--raw", "--no-abbrev", "-z", "--no-renames", "--diff-filter=ACMT", "HEAD"}
+	if exec.CommandContext(ctx, "git", "-C", ledgerPath, "rev-parse", "--verify", "@{upstream}").Run() == nil {
+		args = append(args, "^@{upstream}")
+	}
+	args = append(args, "--", "sessions/")
+	out, err := exec.CommandContext(ctx, "git", args...).Output()
+	if err != nil {
+		return nil, err
+	}
+	paths := map[string][]string{}
+	fields := strings.Split(string(out), "\x00")
+	for i := 0; i+1 < len(fields); i++ {
+		// -z raw records are ":<old mode> <new mode> <old oid> <new oid> <status>" then the path.
+		record := strings.Fields(strings.TrimLeft(fields[i], "\n"))
+		if len(record) != 5 || !strings.HasPrefix(record[0], ":") {
+			continue
+		}
+		paths[record[3]] = append(paths[record[3]], fields[i+1])
+		i++
+	}
+	return paths, nil
+}
+
+// metaOnlyPath returns a session meta path only when every path of a blob is
+// one; otherwise "" so the blob is scanned unmodified.
+func metaOnlyPath(paths []string) string {
+	if len(paths) == 0 || slices.ContainsFunc(paths, func(p string) bool { return !isSessionMetaPath(p) }) {
+		return ""
+	}
+	return paths[0]
+}
 
 // ValidateSessionPublication checks every newly reachable session blob, not
 // the working tree or only the final diff. A later redaction/deletion commit
@@ -35,11 +73,13 @@ func ValidateSessionPublication(ctx context.Context, ledgerPath string) error {
 		return nil
 	}
 	ids := make([]string, 0)
-	paths := make([]string, 0)
 	for line := range strings.SplitSeq(strings.TrimSpace(string(out)), "\n") {
-		id, path, _ := strings.Cut(line, " ")
+		id, _, _ := strings.Cut(line, " ")
 		ids = append(ids, id)
-		paths = append(paths, path)
+	}
+	blobPaths, err := sessionBlobPaths(ctx, ledgerPath)
+	if err != nil {
+		return errors.New("cannot inspect committed session paths; publication pending")
 	}
 	cmd := exec.CommandContext(ctx, "git", "-C", ledgerPath, "cat-file", "--batch")
 	cmd.Stdin = strings.NewReader(strings.Join(ids, "\n") + "\n")
@@ -53,7 +93,7 @@ func ValidateSessionPublication(ctx context.Context, ledgerPath string) error {
 	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
 	reader := bufio.NewReader(stdout)
 	var rules *secretguard.RuleSet
-	for i := range ids {
+	for _, id := range ids {
 		header, err := reader.ReadString('\n')
 		if err != nil {
 			return errors.New("cannot read committed session objects; publication pending")
@@ -81,7 +121,7 @@ func ValidateSessionPublication(ctx context.Context, ledgerPath string) error {
 		if _, err := io.ReadFull(reader, data); err != nil || data[len(data)-1] != '\n' {
 			return errors.New("incomplete committed session blob; publication pending")
 		}
-		data = secretScanView(paths[i], data[:len(data)-1])
+		data = secretScanView(metaOnlyPath(blobPaths[id]), data[:len(data)-1])
 		if err := secretguard.ValidateContent("sessions/content", data); err != nil {
 			return fmt.Errorf("committed session content refused; clean unpushed history before retry: %w", err)
 		}

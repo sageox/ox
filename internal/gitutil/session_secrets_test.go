@@ -49,3 +49,18 @@ func TestSessionMetaCommitExemptionStaysNarrow(t *testing.T) {
 		t.Fatal("bare SHA outside session meta was exempted")
 	}
 }
+
+// The view must change nothing but the array: re-encoding the object would
+// drop an earlier duplicate of any other key before the guard saw it.
+func TestSessionMetaScanViewKeepsEveryOtherByte(t *testing.T) {
+	in := `{"summary":"first" , "summary":"second","produced_commits":[ "` + syntheticCommitSHA + `", "keep" ],"z":1}`
+	want := `{"summary":"first" , "summary":"second","produced_commits":["keep"],"z":1}`
+	if got := string(secretScanView("sessions/synthetic/meta.json", []byte(in))); got != want {
+		t.Fatalf("scan view changed bytes outside produced_commits:\n got %s\nwant %s", got, want)
+	}
+	for _, in := range []string{`{"produced_commits":["` + syntheticCommitSHA + `"]} trailing`, `[{"produced_commits":["` + syntheticCommitSHA + `"]}]`} {
+		if got := string(secretScanView("sessions/synthetic/meta.json", []byte(in))); got != in {
+			t.Fatalf("non-object input was rewritten: %s", got)
+		}
+	}
+}

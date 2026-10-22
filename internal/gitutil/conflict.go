@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -359,19 +360,21 @@ var gitObjectID = regexp.MustCompile(`^(?:[0-9a-f]{40}|[0-9a-f]{64})$`)
 // secretScanView returns the bytes the secret guard scans for path. Session
 // metadata records the commits a recording produced as bare object IDs, and a
 // bare 40-hex string is also the legacy Sourcegraph token shape, so the full
-// catalog refused every recording that committed. Only exact object IDs under
-// that one key are dropped; any other shape, a duplicated key or invalid JSON
-// scans the original bytes. Publication always sends the original bytes.
+// catalog refused every recording that committed. Only exact object IDs inside
+// that one array are removed, and every other byte is kept as-is, so the view
+// never hides a value the original would expose to the guard. Any other shape,
+// a duplicated key or invalid JSON scans the original bytes. Publication always
+// sends the original bytes.
 func secretScanView(path string, data []byte) []byte {
 	if !isSessionMetaPath(path) {
 		return data
 	}
-	var object map[string]json.RawMessage
-	if json.Unmarshal(data, &object) != nil || topLevelKeyCount(data, producedCommitsKey) != 1 {
+	start, end, ok := producedCommitsSpan(data)
+	if !ok {
 		return data
 	}
 	var commits []string
-	if json.Unmarshal(object[producedCommitsKey], &commits) != nil {
+	if json.Unmarshal(data[start:end], &commits) != nil {
 		return data
 	}
 	kept := make([]string, 0, len(commits))
@@ -380,40 +383,53 @@ func secretScanView(path string, data []byte) []byte {
 			kept = append(kept, sha)
 		}
 	}
-	if len(kept) == 0 {
-		delete(object, producedCommitsKey)
-	} else {
-		object[producedCommitsKey], _ = json.Marshal(kept)
-	}
-	view, err := json.Marshal(object)
+	array, err := json.Marshal(kept)
 	if err != nil {
 		return data
 	}
-	return view
+	view := make([]byte, 0, len(data))
+	view = append(view, data[:start]...)
+	view = append(view, array...)
+	return append(view, data[end:]...)
 }
 
-// topLevelKeyCount counts decoded top-level keys, so an escaped spelling of key
-// still counts. -1 means data is not a single well-formed JSON object.
-func topLevelKeyCount(data []byte, key string) int {
+// producedCommitsSpan returns the byte range of the value of the one top-level
+// produced_commits key. Keys are compared decoded, so an escaped spelling still
+// counts. ok is false for a duplicated key or anything but one JSON object.
+func producedCommitsSpan(data []byte) (start, end int, ok bool) {
 	d := json.NewDecoder(bytes.NewReader(data))
 	if t, err := d.Token(); err != nil || t != json.Delim('{') {
-		return -1
+		return 0, 0, false
 	}
-	n := 0
 	for d.More() {
-		t, err := d.Token()
+		key, err := d.Token()
 		if err != nil {
-			return -1
-		}
-		if t == key {
-			n++
+			return 0, 0, false
 		}
 		var value json.RawMessage
 		if d.Decode(&value) != nil {
-			return -1
+			return 0, 0, false
 		}
+		if key != producedCommitsKey {
+			continue
+		}
+		if ok {
+			return 0, 0, false
+		}
+		end = int(d.InputOffset())
+		start = end - len(value)
+		if start < 0 || !bytes.Equal(data[start:end], value) {
+			return 0, 0, false
+		}
+		ok = true
 	}
-	return n
+	if t, err := d.Token(); err != nil || t != json.Delim('}') {
+		return 0, 0, false
+	}
+	if _, err := d.Token(); err != io.EOF {
+		return 0, 0, false
+	}
+	return start, end, ok
 }
 
 func isSessionMetaPath(path string) bool {
