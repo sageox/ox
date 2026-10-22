@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -23,6 +24,9 @@ type teamsOutput struct {
 	PrimaryTeam string      `json:"primary_team"` // team ID of this repo's team
 	Teams       []teamEntry `json:"teams"`
 	Guidance    string      `json:"guidance"`
+	// LookupError is set when the server could not be checked, so an empty
+	// Teams list means "unknown", not "this account has no teams".
+	LookupError string `json:"lookup_error,omitempty"`
 }
 
 // teamEntry represents a single team in the output.
@@ -73,6 +77,7 @@ func runTeams(cmd *cobra.Command, args []string) error {
 	projectRoot, _ := findProjectRoot()
 
 	var teams []enrichedTeam
+	var lookupErr error // server could not be checked; distinct from "no teams"
 	if projectRoot != "" {
 		teams = discoverAllTeams(projectRoot)
 	} else {
@@ -81,7 +86,11 @@ func runTeams(cmd *cobra.Command, args []string) error {
 	}
 	if len(teams) == 0 {
 		// nothing synced here yet; the account may still have teams on the server
-		teams = teamsFromServer(projectRoot)
+		var serverErr error
+		teams, serverErr = teamsFromServer(projectRoot)
+		if serverErr != nil && !errors.Is(serverErr, errNoServerLogin) {
+			lookupErr = serverErr
+		}
 	}
 
 	var primaryTeamID string
@@ -92,7 +101,24 @@ func runTeams(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	if lookupErr != nil && !jsonMode {
+		// stderr keeps stdout clean; a partial answer is still shown below
+		cli.PrintWarning(fmt.Sprintf("Could not check your account on the server: %v", cli.SanitizeTerminalText(lookupErr.Error())))
+	}
+
 	if len(teams) == 0 {
+		if lookupErr != nil {
+			if jsonMode {
+				return cli.PrintJSONTo(out, teamsOutput{
+					Teams:       []teamEntry{},
+					Guidance:    "Could not reach the server to list your teams. Check your connection and run 'ox team list' again.",
+					LookupError: lookupErr.Error(),
+				})
+			}
+			fmt.Fprintln(out, "Team list unavailable: the server could not be checked.")
+			fmt.Fprintln(out, "Check your connection, then run 'ox team list' again.")
+			return nil
+		}
 		if jsonMode {
 			return cli.PrintJSONTo(out, teamsOutput{
 				Teams:    []teamEntry{},
@@ -111,6 +137,9 @@ func runTeams(cmd *cobra.Command, args []string) error {
 			PrimaryTeam: primaryTeamID,
 			Teams:       entries,
 			Guidance:    "Use 'ox team show <slug>' for one team's details, or 'ox team members' for its coworkers.",
+		}
+		if lookupErr != nil {
+			output.LookupError = lookupErr.Error()
 		}
 		return cli.PrintJSONTo(out, output)
 	}

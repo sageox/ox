@@ -1,8 +1,10 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"time"
 
@@ -173,62 +175,127 @@ func discoverTeamsGlobal() []enrichedTeam {
 	return teams
 }
 
-// serverTeamMemberships asks the server which teams the logged-in coworker
-// belongs to. It is the fallback for a machine where no team context has been
-// synced yet, so local discovery has nothing to report even though the account
-// has teams. It returns nil when there is no usable login or the server cannot
-// be reached; callers treat that as "could not look", not as "no teams".
-func serverTeamMemberships(projectRoot string) []api.TeamMembership {
-	ep := endpoint.GetForProject(projectRoot)
-	token, err := auth.EnsureValidTokenForEndpoint(ep, 300)
-	if err != nil || token == nil || token.AccessToken == "" {
-		slog.Debug("team lookup on server skipped: no usable login", "endpoint", ep, "error", err)
-		return nil
+// errNoServerLogin means there was no usable login to ask the server with. It is
+// not a lookup failure: a logged-out coworker legitimately has nothing to report,
+// and the right guidance is "ox login", not "check your connection".
+var errNoServerLogin = errors.New("no usable login")
+
+// serverEndpointTeams is one endpoint's membership list, kept with the endpoint
+// that produced it so team paths are built from the same endpoint as the request.
+type serverEndpointTeams struct {
+	endpoint string
+	teams    []api.TeamMembership
+}
+
+// serverLookupEndpoints picks the endpoints to ask. Inside a project that is the
+// project's endpoint. Outside one (findProjectRoot falls back to the cwd, so a
+// non-empty root is not proof of a project) there is no project config to
+// consult, and endpoint.GetForProject would return the production default even when the
+// coworker is logged in only to another endpoint, so every stored login is asked
+// (SAGEOX_ENDPOINT still wins as the explicit override).
+func serverLookupEndpoints(projectRoot string) ([]string, error) {
+	if os.Getenv(endpoint.EnvVar) != "" || (projectRoot != "" && config.IsInitialized(projectRoot)) {
+		return []string{endpoint.GetForProject(projectRoot)}, nil
 	}
-	client := api.NewRepoClientForProject(projectRoot).WithAuthToken(token.AccessToken)
-	resp, err := client.GetRepos()
+	stored, err := auth.ListEndpoints()
 	if err != nil {
-		slog.Debug("team lookup on server failed", "endpoint", ep, "error", err)
-		return nil
+		return nil, fmt.Errorf("list logged-in endpoints: %w", err)
 	}
-	return usableTeams(resp.TeamMembershipsFromRepos())
+	if len(stored) == 0 {
+		return nil, errNoServerLogin
+	}
+	return stored, nil
+}
+
+// lookupServerTeams asks the server which teams the logged-in coworker belongs
+// to. It is the fallback for a machine where no team context has been synced yet.
+//
+// The error is kept apart from an empty list so callers can tell "the account has
+// no teams" from "could not check". errNoServerLogin (wrapped) means no endpoint
+// had a usable login; any other error is a real lookup failure. Endpoints that
+// answered are still returned alongside the joined errors of those that did not.
+func lookupServerTeams(projectRoot string) ([]serverEndpointTeams, error) {
+	endpoints, err := serverLookupEndpoints(projectRoot)
+	if err != nil {
+		return nil, err
+	}
+	var found []serverEndpointTeams
+	var errs []error
+	loggedOut := 0
+	for _, ep := range endpoints {
+		token, tokenErr := auth.EnsureValidTokenForEndpoint(ep, 300)
+		if tokenErr != nil || token == nil || token.AccessToken == "" {
+			slog.Debug("team lookup on server skipped: no usable login", "endpoint", ep, "error", tokenErr)
+			loggedOut++
+			continue
+		}
+		// one resolved endpoint for token, client, and (later) team paths
+		client := api.NewRepoClientWithEndpoint(ep).WithAuthToken(token.AccessToken)
+		resp, getErr := client.GetRepos()
+		if getErr != nil {
+			slog.Debug("team lookup on server failed", "endpoint", ep, "error", getErr)
+			errs = append(errs, fmt.Errorf("%s: %w", endpoint.NormalizeSlug(ep), getErr))
+			continue
+		}
+		found = append(found, serverEndpointTeams{endpoint: ep, teams: usableTeams(resp.TeamMembershipsFromRepos())})
+	}
+	if loggedOut == len(endpoints) {
+		return nil, errNoServerLogin
+	}
+	return found, errors.Join(errs...)
+}
+
+// serverTeamMemberships flattens lookupServerTeams for callers that only need to
+// resolve a reference. A failed lookup yields no memberships and is logged by
+// lookupServerTeams; the caller falls back to the server-validated passthrough.
+func serverTeamMemberships(projectRoot string) []api.TeamMembership {
+	found, err := lookupServerTeams(projectRoot)
+	if err != nil {
+		slog.Debug("team memberships unavailable", "error", err)
+	}
+	var all []api.TeamMembership
+	for _, f := range found {
+		all = append(all, f.teams...)
+	}
+	return all
 }
 
 // teamsFromServer lists the coworker's teams from the server for `ox team list`
 // when nothing is synced locally. Paths point where the team context will land
 // once synced; LastSync stays zero because nothing has synced.
-func teamsFromServer(projectRoot string) []enrichedTeam {
-	memberships := serverTeamMemberships(projectRoot)
-	if len(memberships) == 0 {
-		return nil
-	}
-	ep := endpoint.GetForProject(projectRoot)
+//
+// The error is non-nil when any endpoint could not be checked (teams from the
+// endpoints that did answer are still returned) and wraps errNoServerLogin when
+// there was no login to check with.
+func teamsFromServer(projectRoot string) ([]enrichedTeam, error) {
+	found, err := lookupServerTeams(projectRoot)
 	var primaryTeamID string
 	if cfg, _ := config.LoadProjectConfig(projectRoot); cfg != nil {
 		primaryTeamID = cfg.TeamID
 	}
-	teams := make([]enrichedTeam, 0, len(memberships))
-	for _, m := range memberships {
-		name := m.Name
-		if name == "" {
-			name = m.ID
+	var teams []enrichedTeam
+	for _, f := range found {
+		for _, m := range f.teams {
+			name := m.Name
+			if name == "" {
+				name = m.ID
+			}
+			// show only a reference `ox team show` can resolve: the server slug,
+			// else the membership ID. resolveTeamMembership never derives slugs.
+			slug := m.Slug
+			if slug == "" {
+				slug = m.ID
+			}
+			teams = append(teams, enrichedTeam{
+				TeamID:  m.ID,
+				Name:    name,
+				Slug:    slug,
+				Path:    paths.TeamContextDir(m.ID, f.endpoint),
+				Primary: primaryTeamID != "" && m.ID == primaryTeamID,
+			})
 		}
-		slug := m.Slug
-		if slug == "" {
-			slug = api.DeriveSlug(name)
-		}
-		if slug == "" {
-			slug = m.ID
-		}
-		teams = append(teams, enrichedTeam{
-			TeamID:  m.ID,
-			Name:    name,
-			Slug:    slug,
-			Path:    paths.TeamContextDir(m.ID, ep),
-			Primary: m.ID == primaryTeamID,
-		})
 	}
-	return teams
+	return teams, err
 }
 
 // resolveTeamByQuery finds a team by slug, team ID, or name.
