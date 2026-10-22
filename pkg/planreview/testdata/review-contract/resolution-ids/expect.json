@@ -1,0 +1,50 @@
+{
+  "conflicts": [
+    {
+      "kind": "resolution",
+      "id": "resolve-payload-0001",
+      "paths": [
+        "feedback/resolutions/20261001-020000.000000000-resolve-payload-0001.870961c51f2d3af9.json",
+        "feedback/resolutions/20261001-040000.000000000-resolve-payload-0001.414c844c16d87b6e.json"
+      ]
+    },
+    {
+      "kind": "resolution",
+      "id": "resolve-reviewer-0001",
+      "paths": [
+        "feedback/resolutions/20261001-020000.000000000-resolve-reviewer-0001.6192b632e2ac4420.json",
+        "feedback/resolutions/20261001-040000.000000000-resolve-reviewer-0001.4f07e53515483d76.json"
+      ]
+    }
+  ],
+  "items": [
+    {
+      "anchor": "hretry",
+      "label": "Retry remains reopened",
+      "note": "The fix still misses a case.",
+      "open": true,
+      "resolution": "verified",
+      "reviewer": "Ana",
+      "status": "request-change"
+    },
+    {
+      "anchor": "hpayload",
+      "label": "Keep the original disposition",
+      "note": "Name the owner.",
+      "open": false,
+      "resolution": "addressed",
+      "reviewer": "Ana",
+      "status": "flag"
+    },
+    {
+      "anchor": "hreviewer",
+      "label": "Preserve the accepting reviewer",
+      "note": "Verify the change.",
+      "open": false,
+      "resolution": "verified",
+      "reviewer": "Ana",
+      "status": "comment"
+    }
+  ],
+  "summary": "Immutable resolution IDs: a retry accepted after hretry was reopened assembles at its original acceptance, so it cannot close the new mark; a changed payload or another reviewer under one ID is a conflict naming every copy, and the earliest disposition remains. Every record was made with the public request/Record/Publish writers."
+}

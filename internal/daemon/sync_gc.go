@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -50,7 +52,8 @@ func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
 
 	teamContexts := s.workspaceRegistry.GetTeamContexts()
 	for _, ws := range teamContexts {
-		if !ws.Exists || ws.CloneURL == "" {
+		interruptedSwap := gitutil.IsGitRepo(ws.Path + ".old")
+		if (!ws.Exists && !interruptedSwap) || ws.CloneURL == "" {
 			continue
 		}
 
@@ -70,13 +73,16 @@ func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
 		// trigger 2: full clone detected (upgrade pre-v4 installs to partial clone)
 		fullClone := !isPartialClone(ws.Path)
 
-		if !intervalExceeded && !fullClone {
+		if !intervalExceeded && !fullClone && !interruptedSwap {
 			continue
 		}
 
 		reason := "interval exceeded"
 		if fullClone {
 			reason = "full clone upgrade"
+		}
+		if interruptedSwap {
+			reason = "interrupted swap"
 		}
 		s.logger.Info("gc: workspace due for reclone", "team", ws.TeamName, "id", ws.ID,
 			"reason", reason, "interval_days", intervalDays, "last_gc", ws.LastGCTime)
@@ -116,7 +122,7 @@ func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
 	}
 
 	// ledger GC reclone — same blue-green pattern as team contexts
-	if l := s.workspaceRegistry.GetLedger(); l != nil && l.Exists && l.CloneURL != "" {
+	if l := s.workspaceRegistry.GetLedger(); l != nil && (l.Exists || gitutil.IsGitRepo(l.Path+".old")) && l.CloneURL != "" {
 		if _, loaded := s.cloneInFlight.Load(l.ID); !loaded {
 			intervalDays := l.GCIntervalDays
 			if intervalDays <= 0 {
@@ -125,6 +131,7 @@ func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
 			interval := time.Duration(intervalDays) * 24 * time.Hour
 			intervalExceeded := l.LastGCTime.IsZero() || time.Since(l.LastGCTime) >= interval
 			fullClone := !isPartialClone(l.Path)
+			interruptedSwap := gitutil.IsGitRepo(l.Path + ".old")
 
 			// trigger 3: a genuinely wedged ledger (ahead AND behind for
 			// longer than ledgerSyncWedgeAge) — checkAndRunGC's normal
@@ -153,16 +160,19 @@ func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
 				// A lock-busy result means no check actually ran — spending
 				// the cooldown on it would let frequent contention from the
 				// daemon's own sync cycle silently disable wedge detection.
-				if !lockBusy {
+				// A canceled probe must remain retryable too.
+				if !lockBusy && ctx.Err() == nil {
 					s.mu.Lock()
 					s.lastWedgeCheck = time.Now()
 					s.mu.Unlock()
 				}
 			}
 
-			if intervalExceeded || fullClone || wedged {
+			if intervalExceeded || fullClone || wedged || interruptedSwap {
 				reason := "interval exceeded"
 				switch {
+				case interruptedSwap:
+					reason = "interrupted swap"
 				case wedged:
 					reason = "sync wedge detected"
 				case fullClone:
@@ -409,7 +419,7 @@ func (s *SyncScheduler) runTriggerGC(ctx context.Context) *TriggerGCResponse {
 	resp := &TriggerGCResponse{}
 	teamContexts := s.workspaceRegistry.GetTeamContexts()
 	for _, ws := range teamContexts {
-		if !ws.Exists || ws.CloneURL == "" {
+		if (!ws.Exists && !gitutil.IsGitRepo(ws.Path+".old")) || ws.CloneURL == "" {
 			continue
 		}
 		if _, loaded := s.cloneInFlight.Load(ws.ID); loaded {
@@ -471,7 +481,7 @@ func (s *SyncScheduler) runTriggerGC(ctx context.Context) *TriggerGCResponse {
 	}
 
 	// ledger GC reclone
-	if l := s.workspaceRegistry.GetLedger(); l != nil && l.Exists && l.CloneURL != "" {
+	if l := s.workspaceRegistry.GetLedger(); l != nil && (l.Exists || gitutil.IsGitRepo(l.Path+".old")) && l.CloneURL != "" {
 		if _, loaded := s.cloneInFlight.Load(l.ID); !loaded {
 			s.logger.Info("trigger_gc: forced ledger reclone", "id", l.ID)
 			// A forced repair is an explicit recovery request, so preserve
@@ -591,6 +601,7 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 	untrackedDir := ws.Path + ".gc-untracked"
 	lockPath := ws.Path + ".gc-lock"
 	cacheBackupDir := ws.Path + ".gc-cache"
+	swapLockPath := ws.Path + ".gc-swap-lock"
 	isLedger := ws.Type == WorkspaceTypeLedger
 
 	wsLabel := ws.TeamName
@@ -610,6 +621,9 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 		return gcSkippedLocked, false
 	}
 	defer releaseGCLock(gcLock, lockPath)
+	if isLedger {
+		defer os.Remove(swapLockPath)
+	}
 
 	// Heartbeat the lock mtime every 30s so acquireGCLock's 5-minute
 	// stale-lock reclaim doesn't steal an actively-held lock when the
@@ -630,6 +644,52 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 	}()
 	defer close(stopLockHeartbeat)
 
+	swapMarker := ws.Path + ".gc-swap-done"
+	var carryErr error
+	if _, err := os.Stat(oldPath); err == nil {
+		// Recover .old before cleanup: it may hold the only copy of a retry.
+		if isLedger {
+			if err := os.WriteFile(swapLockPath, nil, 0o600); err != nil {
+				s.logger.Error("gc: cannot protect interrupted swap recovery", "path", ws.Path, "error", err)
+				return gcFailed, false
+			}
+		}
+		err := func() error {
+			if isLedger {
+				s.ledgerMu.Lock()
+				defer s.ledgerMu.Unlock()
+			}
+			if _, err := os.Stat(ws.Path); errors.Is(err, fs.ErrNotExist) {
+				// The process stopped between the two renames.
+				if err := os.Rename(oldPath, ws.Path); err != nil {
+					return err
+				}
+				s.workspaceRegistry.RefreshExists()
+				return nil
+			} else if err != nil {
+				return err
+			}
+			if err := os.WriteFile(swapMarker, nil, 0o600); err != nil {
+				return err
+			}
+			carryErr = gcCarryPlanRetries(oldPath, ws.Path)
+			return nil
+		}()
+		if err != nil {
+			s.logger.Error("gc: cannot recover interrupted swap, retaining old clone", "path", oldPath, "error", err)
+			return gcFailed, false
+		}
+		if carryErr != nil {
+			s.logger.Error("gc: cannot recover plan retries, retaining old clone", "path", oldPath, "error", carryErr)
+		}
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		s.logger.Error("gc: cannot inspect old clone", "path", oldPath, "error", err)
+		return gcFailed, false
+	}
+	if isLedger {
+		_ = os.Remove(swapLockPath)
+	}
+
 	// If a prior GC attempt on this workspace crashed AFTER completing the
 	// rename-swap but BEFORE finishing phase 2's restore, ws.Path already
 	// holds the fresh clone and diffFile/untrackedDir/cacheBackupDir (if
@@ -642,7 +702,6 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 	// artifacts and deleted them unconditionally here regardless of which
 	// case it was, silently discarding live wedge-recovered content on
 	// exactly this crash timing.
-	swapMarker := ws.Path + ".gc-swap-done"
 	if _, err := os.Stat(swapMarker); err == nil {
 		s.logger.Warn("gc: found an interrupted prior GC that completed its swap but not its restore, recovering before continuing",
 			"path", ws.Path, "workspace", wsLabel)
@@ -677,6 +736,9 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 		}
 		_ = os.Remove(swapMarker)
 		s.logger.Info("gc: recovered orphaned artifacts from an interrupted prior GC", "path", ws.Path, "workspace", wsLabel)
+	}
+	if carryErr != nil {
+		return gcFailed, false
 	}
 
 	// clean up leftover artifacts from a previous failed GC (safe under the
@@ -869,7 +931,6 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 	// rename+cleanup window (not the whole, potentially multi-minute GC)
 	// so the CLI can check it without risking a long wait; see
 	// commitAndPushLedger's corresponding check.
-	swapLockPath := ws.Path + ".gc-swap-lock"
 	if isLedger {
 		if err := os.WriteFile(swapLockPath, nil, 0o600); err != nil {
 			s.logger.Warn("gc: failed to write swap lock, CLI writes racing this swap would be undetected",
@@ -882,7 +943,13 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 	}
 
 	if _, err := os.Stat(oldPath); err == nil {
-		_ = os.RemoveAll(oldPath)
+		if err := os.RemoveAll(oldPath); err != nil {
+			if isLedger {
+				s.ledgerMu.Unlock()
+			}
+			s.logger.Error("gc: cannot remove recovered old clone", "path", oldPath, "error", err)
+			return gcFailed, false
+		}
 	}
 
 	if err := os.Rename(ws.Path, oldPath); err != nil {
@@ -918,26 +985,20 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 	// between here and the end of phase 2, the next invocation must NOT
 	// treat those backup files as ordinary leftovers to discard; this
 	// marker is how it tells the difference (see the orphan-recovery
-	// check at the top of this function). Best-effort: if the marker
-	// itself can't be written, proceed anyway — restore still runs
-	// immediately below in the common (non-crash) case either way.
+	// check at the top of this function). Keep .old if the marker cannot be
+	// written, so a restart can still recognize and recover the swap.
 	if err := os.WriteFile(swapMarker, nil, 0o600); err != nil {
-		s.logger.Warn("gc: failed to write swap marker, crash-recovery for this cycle would be degraded",
+		s.logger.Error("gc: failed to write swap marker, retaining old clone",
 			"path", ws.Path, "error", err)
+		return gcFailed, false
 	}
 
-	// step 4: carry the CLI's plan retries into the new clone, then remove
-	// the old one. The retries live under .git/, so the fresh clone does not
-	// have them, and a review entry can hold the only copy of its record
-	// (#1356). Moving them at the swap, rather than copying them in phase 0
-	// like the cache, also carries any written during the clone.
-	for _, dir := range []string{ledger.PlanPushPendingDir, ledger.PlanReviewPendingDir} {
-		err := os.Rename(filepath.Join(oldPath, dir), filepath.Join(ws.Path, dir))
-		if err != nil && !errors.Is(err, fs.ErrNotExist) {
-			s.logger.Error("gc: failed to carry plan retries into the new clone", "dir", dir, "error", err)
-		}
-	}
-	if err := os.RemoveAll(oldPath); err != nil {
+	// Carry .git/ retries, including those written during cloning. Keep .old
+	// until every entry is copied; an entry may hold the only record (#1356).
+	carryErr = gcCarryPlanRetries(oldPath, ws.Path)
+	if carryErr != nil {
+		s.logger.Error("gc: failed to carry plan retries, retaining old clone", "path", oldPath, "error", carryErr)
+	} else if err := os.RemoveAll(oldPath); err != nil {
 		s.logger.Warn("gc: failed to remove old clone", "path", oldPath, "error", err)
 	}
 
@@ -1004,6 +1065,9 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 	// auto-recovery apply on top of whatever a human already did with the
 	// preserved files, which is the wrong kind of "recovery".
 	_ = os.Remove(swapMarker)
+	if carryErr != nil {
+		return gcFailed, false
+	}
 
 	if isLedger && divergeCaptured {
 		// The conflict that caused the wedge also drove RecordSyncFailure
@@ -1032,6 +1096,79 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 
 	s.logger.Info("gc: reclone complete", "workspace", wsLabel, "path", ws.Path)
 	return gcSuccess, divergeCaptured
+}
+
+// Link retries without overwriting destination entries. Retire each source
+// after its link is durable so cleared retries cannot return from .old.
+func gcCarryPlanRetries(oldPath, newPath string) error {
+	for _, dir := range []string{ledger.PlanPushPendingDir, ledger.PlanReviewPendingDir} {
+		srcDir, dstDir := filepath.Join(oldPath, dir), filepath.Join(newPath, dir)
+		entries, err := os.ReadDir(srcDir)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(dstDir, 0o755); err != nil {
+			return err
+		}
+		for _, entry := range entries {
+			src, dst := filepath.Join(srcDir, entry.Name()), filepath.Join(dstDir, entry.Name())
+			if !entry.Type().IsRegular() {
+				return fmt.Errorf("retry entry is not a regular file: %s", src)
+			}
+			if err := os.Link(src, dst); err != nil {
+				if !errors.Is(err, fs.ErrExist) {
+					return err
+				}
+				info, err := os.Lstat(dst)
+				if err != nil {
+					return err
+				}
+				if !info.Mode().IsRegular() {
+					return fmt.Errorf("retry destination is not a regular file: %s", dst)
+				}
+				source, err := os.ReadFile(src)
+				if err != nil {
+					return err
+				}
+				destination, err := os.ReadFile(dst)
+				if err != nil {
+					return err
+				}
+				if !bytes.Equal(source, destination) {
+					return fmt.Errorf("conflicting retry entries: %s and %s", src, dst)
+				}
+			}
+			// Persist the link and clone swap before removing its source.
+			// Windows cannot fsync directories.
+			if runtime.GOOS != "windows" {
+				for _, path := range []string{dstDir, filepath.Dir(dstDir), newPath, filepath.Dir(newPath)} {
+					d, err := os.Open(path)
+					if err != nil {
+						return err
+					}
+					if err := errors.Join(d.Sync(), d.Close()); err != nil {
+						return fmt.Errorf("sync retry destination %s: %w", path, err)
+					}
+				}
+			}
+			if err := os.Remove(src); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return fmt.Errorf("remove copied retry %s: %w", src, err)
+			}
+			if runtime.GOOS != "windows" {
+				d, err := os.Open(srcDir)
+				if err != nil {
+					return err
+				}
+				if err := errors.Join(d.Sync(), d.Close()); err != nil {
+					return fmt.Errorf("sync retired retries %s: %w", srcDir, err)
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // gcPushUnpushedCommits pushes any local commits not yet on the remote.

@@ -555,6 +555,9 @@ under `region` (`plan-review-drawn-context.md`, section 7; fixture
 
 ## 4. Compatibility
 
+The tables describe older builds. Current test results and release dependencies
+are in [the certification matrix](../guides/plan-review-certification.md).
+
 Measured on the official `ox_0.20.0_darwin_arm64` release asset (checksum
 verified, commit `5428a78a`) and on a build of main at `651ac29a` (unreleased;
 it also reports 0.20.0). Each of the four #1287 fixtures was installed as a plan in a scratch
@@ -563,32 +566,33 @@ Ledger and read with `ox plan feedback show <slug> --json` and
 dir, `SAGEOX_DAEMON=false` and `DO_NOT_TRACK=1`. Both commands agreed on every
 fixture.
 
-| Fixture | v0.20.0 | main |
+| Fixture | v0.20.0 | prototype `651ac29a` |
 |---|---|---|
 | `resolution-layouts` | h2 **open**: per-entry resolutions are invisible | as `expect.json` |
 | `same-id` | h1 **reopened** by the repeated acceptance; h3 from the conflicting payload shown | as `expect.json`; h3 hidden (H4) |
 | `corrupt-records` | same items; the torn round is not reported (bare-array JSON) | reports the torn round; resolution and remaps failures unreported (H6) |
 | `unknown-fields` | as `expect.json` | as `expect.json` |
 
-| Writer | v0.20.0 | main |
+| Writer | v0.20.0 | prototype `651ac29a` |
 |---|---|---|
 | `feedback resolve` | rewrites the shared legacy array (H1) and drops unknown fields of every existing entry | writes a per-entry file; legacy array untouched |
 | `feedback apply` twice | two rounds; drops `id` and unknown fields | one round; keeps `id`; drops unknown fields |
 | `remaps.json` (from code; `remap.go` is unchanged since v0.20.0) | read-modify-write, drops unknown fields, resets an unreadable file | same |
 | `show --json` shape | bare array | `{items, corrupt_rounds}` |
 
-Neither build rewrites a round or a per-entry resolution, so those records and
-their unknown fields survive on disk. Mixed teams today: v0.20.0 users see
+Neither measured build rewrites rounds or per-entry resolutions, so their
+unknown fields survive on disk. Mixed teams with v0.20.0 users see
 items resolved by newer clients as open, can see a retried round reopen a
 resolved item, and write the shared legacy array, so their resolutions are
 subject to H1.
 
-**First fully supported release: none yet.** main reads every fixture as
-`expect.json` says but is not released, and still carries H1–H9. A release is
-fully supported when it reads every fixture as `expect.json` says, its writers
-keep unknown fields and write no shared review file, H1–H9 are fixed, and
-conflicts and failed reads are reported. #1294 records that release by
-repeating the measurement above against its binary.
+**First fully supported release: none certified yet.** Current `feedback apply`
+preserves unknown fields and drawing records
+(`TestRunPlanFeedbackApply_StoresAnExportedDrawingWhole`). The released
+Go module is v0.4.0 and the browser package is 0.6.0 (protocol 3); the latest
+released CLI at the 2026-10-20 audit is v0.23.0, whose page predates drawing
+writers. H1–H9 describe the older builds. #1294 still needs recovery fixes,
+owner review, a fully capable CLI release and consuming-host test results.
 
 ---
 
