@@ -1374,14 +1374,8 @@ func (d *Daemon) initComponents() time.Duration {
 		}
 		awCfg := configLoader()
 		sfh.SetQualityThresholds(awCfg.GetQualityUploadThreshold(), awCfg.GetQualityDiscardThreshold())
-		// Under disposable_machine the CLI uploads every session itself: at
-		// session end, and with `ox session wait` when the job ends. With no
-		// handler the daemon detects nothing to finalize, and a dead agent's
-		// sessions are left to the CLI too.
-		if !d.config.DisposableMachine {
-			d.sessionFinalizeHandler = sfh
-			d.agentWorker.RegisterHandler(sfh)
-		}
+		d.sessionFinalizeHandler = sfh
+		d.agentWorker.RegisterHandler(sfh)
 		d.agentWorker.SetOnComplete(func(result agentwork.WorkResult) {
 			status := "success"
 			if !result.Success {
@@ -1969,11 +1963,6 @@ func finalizeSessionDir(ledgerPath, sessionName, cachePath string) (string, bool
 func (s *daemonServiceImpl) SessionFinalize(payload SessionFinalizeIPCPayload) {
 	if s.d.agentWorker == nil {
 		s.d.logger.Warn("session_finalize received but agent worker not initialized")
-		return
-	}
-	// The session waits in the cache for `ox session wait`; see initComponents.
-	if s.d.config.DisposableMachine {
-		s.d.logger.Info("session_finalize not taken on a disposable machine", "session", payload.SessionName)
 		return
 	}
 	// Trust boundary: SessionName flows into filepath.Join under sessions/ —

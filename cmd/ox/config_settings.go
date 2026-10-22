@@ -199,8 +199,6 @@ keeping only its home directory, such as a pod with a persistent home
 volume. Leave it off on a laptop or a long-lived server.
 
 When on:
-  - Session end uploads the session before it returns, as on an Amp orb,
-    and the daemon finalizes no sessions.
   - The daemon's first start on a machine removes the Ledger's git lock
     files, which a machine that went away mid-command leaves behind.
   - The daemon runs no periodic auto-fix and no clone garbage collection.

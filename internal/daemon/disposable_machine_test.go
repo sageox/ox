@@ -233,24 +233,25 @@ func TestInitComponents_VersionMismatchRequestsRestart(t *testing.T) {
 	require.True(t, d.RestartRequested())
 }
 
-// Failure prevented: on a disposable machine the daemon finalizes a session
-// the CLI is also uploading (the cross-owner finalize class), or one it cannot
-// finish before the machine goes away.
-func TestInitComponents_DisposableMachineTakesNoSessionFinalizeWork(t *testing.T) {
+// Failure prevented: on a disposable machine the daemon stops finalizing
+// sessions, so they reach the Ledger without a summary and a crashed one is
+// never uploaded. Sessions there finalize as on a laptop, which
+// `ox session wait` relies on.
+func TestInitComponents_DisposableMachineFinalizesSessionsLikeALaptop(t *testing.T) {
 	for _, disposable := range []bool{false, true} {
 		t.Run(fmt.Sprintf("disposable_machine=%v", disposable), func(t *testing.T) {
 			ledger := t.TempDir()
 			d := initComponentsForTest(t, disposable, ledger)
-			// a stopped session with a turn, as `/clear` hands one over
+			require.NotNil(t, d.sessionFinalizeHandler, "the daemon finds no session to finalize")
+
+			// a stopped session with a turn, as session end hands one over
 			const name = "2026-10-20T10-00-devon-OxFin1"
 			dir := filepath.Join(ledger, ".sageox", "cache", "sessions", name)
 			require.NoError(t, os.MkdirAll(dir, 0o755))
 			require.NoError(t, os.WriteFile(filepath.Join(dir, "raw.jsonl"), []byte(`{"type":"user","content":"a turn"}`+"\n"), 0o600))
-
 			(&daemonServiceImpl{d: d}).SessionFinalize(SessionFinalizeIPCPayload{SessionName: name, CachePath: dir})
-			d.agentWorker.ForceDetect()
 
-			require.Equal(t, !disposable, d.agentWorker.HasPendingWork(), "session finalize work queued")
+			require.True(t, d.agentWorker.HasPendingWork(), "the daemon did not take the session handed over at session end")
 		})
 	}
 }

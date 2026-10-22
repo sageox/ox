@@ -20,7 +20,6 @@ import (
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/lfs"
-	oxruntime "github.com/sageox/ox/internal/runtime"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/internal/testguard"
@@ -216,27 +215,6 @@ func TestSessionEnd_AmpOrbUploadsBeforeTheOrbPauses(t *testing.T) {
 	assert.Nil(t, state, "the recording is finished, not left live in the orb")
 	assert.False(t, session.HasExplicitStop(f.projectRoot, f.agentID),
 		"the agent ended, the coworker did not opt out: a later prime must record again")
-}
-
-// Customer promise (#1132): Devon's team runs AI coworkers on pods that keep
-// only a persistent home. With `ox config set disposable_machine on`, the
-// session reaches the Ledger before SessionEnd returns, as on an Amp orb: no
-// daemon outlives the pod to upload it later.
-func TestSessionEnd_DisposableMachineUploadsBeforeTheMachineGoesAway(t *testing.T) {
-	f := newOrbSessionFixture(t)
-	oxConfigSetUser(t, "disposable_machine", "on")
-	t.Cleanup(func() { oxruntime.SetUserConfigDisposableMachine(nil) })
-	// what the hook's own ox process does first: load the user config, which
-	// publishes the setting before anything reads the runtime's capabilities
-	oxruntime.Reset()
-	config.Load()
-
-	f.sendSessionEnd(t)
-
-	require.Len(t, remoteSessionDirs(t, f.barePath), 1, "the session must reach the Ledger before the machine goes away")
-	state, err := session.LoadRecordingStateForAgent(f.projectRoot, f.agentID)
-	require.NoError(t, err)
-	assert.Nil(t, state, "the recording is finished, not left live on the machine")
 }
 
 // TestSessionEnd_LaptopStillHandsOffToTheDaemon is the control: on a laptop

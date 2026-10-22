@@ -56,28 +56,6 @@ func SetUserConfigEphemeralPreference(value *bool) {
 	userConfigEphemeral.Store(copy)
 }
 
-// userConfigDisposableMachine is the user's persisted `disposable_machine`
-// setting, published by the config layer the way userConfigEphemeral is.
-// nil = unset.
-var userConfigDisposableMachine atomic.Pointer[bool]
-
-// SetUserConfigDisposableMachine publishes the user's `disposable_machine`
-// setting; nil clears it. Like SetUserConfigEphemeralPreference, it lives here
-// so the capability probe can read it without a config → runtime cycle.
-func SetUserConfigDisposableMachine(value *bool) {
-	if value == nil {
-		userConfigDisposableMachine.Store(nil)
-		return
-	}
-	v := *value
-	userConfigDisposableMachine.Store(&v)
-}
-
-func userConfigSaysDisposable() bool {
-	value := userConfigDisposableMachine.Load()
-	return value != nil && *value
-}
-
 // Reason returns the highest-precedence venue / explicit-override signal
 // that suggests this is a constrained / ephemeral environment, or "" if
 // none. Precedence (highest to lowest):

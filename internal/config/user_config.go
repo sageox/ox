@@ -13,7 +13,6 @@ import (
 	"github.com/sageox/ox/internal/ephemeral"
 	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/paths"
-	"github.com/sageox/ox/internal/runtime"
 	"gopkg.in/yaml.v3"
 )
 
@@ -583,8 +582,8 @@ func (c *UserConfig) SetMurmurReceive(mode string) {
 // LoadUserConfig loads user configuration using standard path discovery.
 // Checks OX_USER_CONFIG env var first, then XDG/default paths.
 //
-// Also publishes the user's ephemeral and disposable_machine settings into
-// internal/runtime so subsystem checks pick them up without forming a
+// Also publishes the user's ephemeral-mode preference into
+// internal/ephemeral so subsystem checks pick it up without forming a
 // reverse import edge.
 //
 // For tests that need to load from an explicit directory, use LoadUserConfigFrom.
@@ -595,26 +594,24 @@ func LoadUserConfig() (*UserConfig, error) {
 		if errors.Is(err, os.ErrNotExist) {
 			err = nil // an absent environment-selected file still means defaults
 		}
-		publishRuntimePreferences(cfg)
+		publishEphemeralPreference(cfg)
 		return cfg, err
 	}
 
 	cfg, err := LoadUserConfigFrom("")
-	publishRuntimePreferences(cfg)
+	publishEphemeralPreference(cfg)
 	return cfg, err
 }
 
-// publishRuntimePreferences forwards the user-config Ephemeral and
-// DisposableMachine pointers to internal/runtime, so the capability probe
-// stays in sync with disk. Tolerates nil cfg.
-func publishRuntimePreferences(cfg *UserConfig) {
+// publishEphemeralPreference forwards the user-config Ephemeral pointer to
+// the ephemeral package so its lowest-precedence signal stays in sync with
+// disk. Tolerates nil cfg.
+func publishEphemeralPreference(cfg *UserConfig) {
 	if cfg == nil {
 		ephemeral.SetUserConfigPreference(nil)
-		runtime.SetUserConfigDisposableMachine(nil)
 		return
 	}
 	ephemeral.SetUserConfigPreference(cfg.Ephemeral)
-	runtime.SetUserConfigDisposableMachine(cfg.DisposableMachine)
 }
 
 // LoadUserConfigFrom loads user configuration from the specified config directory.
