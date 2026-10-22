@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### New
+
+- **Send private feedback from the terminal** — `ox feedback --file report.txt` sends a report to SageOx Support and returns a receipt. Preview the exact request with `--dry-run`, use `--email` without login, and choose `bug`, `feature-request`, or `feedback`. Local secret checks run before sending; no logs or session content are collected automatically.
+
 ### Improved
 
 - **AI coworkers get the command they meant more often** — ox now runs the right command when a coworker passes a whole command as one word (a zsh loop over `"plan list"`), types a subcommand as a flag (`daemon --list`), or adds arguments to a known shortcut (`auth --help`, `plan show <slug>`). A correction that would change what the command does, or that would not parse, stays a suggestion, and short unknown words no longer get guesses that point at unrelated commands.
