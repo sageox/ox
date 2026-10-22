@@ -210,6 +210,37 @@ func init() {
 		"generic note, alternate spelling for --result/--reason (tasks done, tasks cancel)")
 	_ = agentCmd.PersistentFlags().MarkHidden("note")
 
+	// Same reinjection mechanism for every other flag a dispatched handler
+	// parses by hand. Each name below is consumed by a manual parser, so
+	// without a registration here cobra rejects it with "unknown flag" before
+	// the dispatcher runs. TestAgentDispatchedFlagsAreRegistered scans the
+	// handler sources so a new manual flag cannot ship unregistered.
+	//
+	// session log: parseSessionLogArgs. ox's own next-action guidance tells AI
+	// coworkers to run `session log --role user --content ...`.
+	registerHiddenAgentFlag("role", "entry role: user, assistant, system, tool (session log)")
+	registerHiddenAgentFlag("content", "entry content (session log)")
+	registerHiddenAgentFlag("tool-name", "tool name for a tool entry (session log)")
+	registerHiddenAgentFlag("tool-input", "tool input for a tool entry (session log)")
+	registerHiddenAgentBoolFlag("stdin", "read entry content from stdin (session log)")
+	// session record / session subagent-complete
+	registerHiddenAgentFlag("entries", "JSON array of entries (session record)")
+	registerHiddenAgentFlag("parent", "parent session path (session subagent-complete)")
+	registerHiddenAgentFlag("summary", "subagent summary (session subagent-complete)")
+	// query: parseQueryArgs. The agent help text advertises --limit/--team/--repo.
+	registerHiddenAgentFlag("mode", "search mode (query)")
+	registerHiddenAgentFlag("limit", "max results (query)")
+	registerHiddenAgentFlag("k", "alias for --limit (query)")
+	registerHiddenAgentFlag("team", "team ID filter (query)")
+	registerHiddenAgentFlag("repo", "repo ID filter (query)")
+	registerHiddenAgentFlag("source", "source filter (query)")
+	registerHiddenAgentBoolFlag("local", "search local data only (query)")
+
+	// Explicit identity for the agent-ID-free shorthands. `ox agent heartbeat
+	// --agent-id OxA1b2` mirrors `ox murmur list --agent-id`, so AI coworkers
+	// reach for it; see runAgentDispatcher.
+	registerHiddenAgentFlag("agent-id", "explicit AI coworker ID when none is given positionally")
+
 	// Session-stop escape hatch: skip the summary-input optimization pass
 	// entirely and hand raw.jsonl directly to the summarizer. Useful as a
 	// per-session opt-out while the optimized path is still being proven,
@@ -301,6 +332,18 @@ func runAgentDispatcher(cmd *cobra.Command, args []string) error {
 		// the env-var lookup so even the "missing agent id" error
 		// path gets the correct span name.
 		renameDispatcherSpan(dispatchedCommandPath(args)...)
+		// an explicit --agent-id outranks implicit resolution: the caller
+		// named the coworker, so guessing from env or process ancestry could
+		// only pick a different one. A malformed value is an error rather
+		// than a fall-through, since acting on another coworker's session
+		// after a typo is worse than failing.
+		explicitID, err := explicitAgentIDFlag(cmd)
+		if err != nil {
+			return err
+		}
+		if explicitID != "" {
+			return runWithAgentID(cmd, explicitID, args)
+		}
 		if agentID := resolveImplicitAgentID(); agentID != "" {
 			return runWithAgentID(cmd, agentID, args)
 		}
@@ -518,6 +561,69 @@ func isAgentSubcommand(name string) bool {
 	return agentSubcommands[name]
 }
 
+// Flags the dispatcher hands back to each verb's manual parser. Cobra strips
+// registered flags from args before the dispatcher runs, so every name here
+// must also be registered on agentCmd (see init) or it is rejected as unknown.
+var (
+	agentSessionStringFlags = []string{
+		"title", "file", "session-id", "adapter", // start, import, capture-prior, summarize
+		"role", "content", "tool-name", "tool-input", // log
+		"entries",           // record
+		"parent", "summary", // subagent-complete
+	}
+	agentSessionBoolFlags = []string{"stdin"} // log
+	agentTasksStringFlags = []string{"result", "reason", "note"}
+	agentQueryStringFlags = []string{"mode", "limit", "k", "team", "repo", "source"}
+	agentQueryBoolFlags   = []string{"local"}
+)
+
+// registerHiddenAgentFlag registers a hidden persistent string flag on
+// agentCmd for a flag that a dispatched handler parses by hand. Hidden because
+// each applies to one subcommand and would clutter agent-level help.
+func registerHiddenAgentFlag(name, usage string) {
+	agentCmd.PersistentFlags().String(name, "", usage)
+	_ = agentCmd.PersistentFlags().MarkHidden(name)
+}
+
+// registerHiddenAgentBoolFlag is registerHiddenAgentFlag for presence flags.
+func registerHiddenAgentBoolFlag(name, usage string) {
+	agentCmd.PersistentFlags().Bool(name, false, usage)
+	_ = agentCmd.PersistentFlags().MarkHidden(name)
+}
+
+// explicitAgentIDFlag returns the AI coworker ID passed via --agent-id, or ""
+// when the flag is absent. A present but malformed value is a usage error.
+func explicitAgentIDFlag(cmd *cobra.Command) (string, error) {
+	raw, err := cmd.Flags().GetString("agent-id")
+	if err != nil || strings.TrimSpace(raw) == "" {
+		return "", nil
+	}
+	id := strings.TrimSpace(raw)
+	if agentinstance.IsValidAgentID(id) {
+		return id, nil
+	}
+	msg := agentinstance.ClassifyBadID(id)
+	if msg == "" {
+		msg = fmt.Sprintf("%q is not an ox agent ID\nRun 'ox agent prime' to get your Ox<4-char> agent ID", id)
+	}
+	return "", errkind.WithDetail(errkind.Usage, "invalid --agent-id", errors.New(msg))
+}
+
+// reinjectBoolFlags appends "--name" for each named bool flag the caller set
+// true. Counterpart of reinjectFlags for presence flags such as --stdin.
+func reinjectBoolFlags(cmd *cobra.Command, args []string, flagNames ...string) []string {
+	if cmd == nil {
+		return args
+	}
+	flags := cmd.Flags()
+	for _, name := range flagNames {
+		if set, err := flags.GetBool(name); err == nil && set {
+			args = append(args, "--"+name)
+		}
+	}
+	return args
+}
+
 // reinjectFlags appends cobra-parsed values for the named string flags back
 // onto args as "--name value" pairs, for flags left non-empty.
 //
@@ -604,7 +710,8 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 		// parseSessionID/parseAdapter helpers expect them as positional
 		// tokens. This preserves the manual-parser call pattern without a
 		// wider refactor of every session handler signature.
-		sessionArgs = reinjectFlags(cmd, sessionArgs, "title", "file", "session-id", "adapter")
+		sessionArgs = reinjectFlags(cmd, sessionArgs, agentSessionStringFlags...)
+		sessionArgs = reinjectBoolFlags(cmd, sessionArgs, agentSessionBoolFlags...)
 		// --no-optimize on session stop is plumbed via env var so the deep
 		// writeOptimizedJSONLForSummary call site can read it without a
 		// signature refactor. Same variable serves as a raw env override.
@@ -659,9 +766,12 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 		// parseTaskIDAndNote expects --result/--reason/--note as positional
 		// tokens, but cobra already stripped them from subargs while parsing
 		// agentCmd's registered flags.
-		subargs = reinjectFlags(cmd, subargs, "result", "reason", "note")
+		subargs = reinjectFlags(cmd, subargs, agentTasksStringFlags...)
 		return runAgentTasks(cmd.OutOrStdout(), inst, subargs)
 	case "query":
+		// same reinjection as above for parseQueryArgs' manual flags
+		subargs = reinjectFlags(cmd, subargs, agentQueryStringFlags...)
+		subargs = reinjectBoolFlags(cmd, subargs, agentQueryBoolFlags...)
 		return runAgentQuery(inst, subargs)
 	case "distill":
 		if !auth.IsMemoryEnabled() {

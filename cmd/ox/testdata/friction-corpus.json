@@ -1,0 +1,1673 @@
+{
+ "_comment": "Anonymized invocation shapes from failed ox commands (friction telemetry, 2026-09-22 to 2026-10-22). Every value is a placeholder; only command words, flag names and shape survive. expect is the intended outcome: resolves (runs as typed), auto (ox corrects and runs target), suggest (ox shows target, does not run it), error (stays an error, never auto-runs, never suggests a destructive command). runtime_error is what the agent dispatcher raises at run time, which cobra cannot predict.",
+ "cases": [
+  {
+   "argv": [
+    "session",
+    "list",
+    "--limit",
+    "50",
+    "--json",
+    "--window",
+    "365d"
+   ],
+   "events": 1,
+   "expect": "resolves"
+  },
+  {
+   "argv": [
+    "agent",
+    "heartbeat",
+    "--agent-id",
+    "OxAbCd"
+   ],
+   "events": 2,
+   "expect": "resolves"
+  },
+  {
+   "argv": [
+    "repo",
+    "--help"
+   ],
+   "events": 2,
+   "expect": "error"
+  },
+  {
+   "argv": [
+    "agent",
+    "skills",
+    "list"
+   ],
+   "events": 1,
+   "expect": "auto",
+   "target": "skills list",
+   "runtime_error": "unknown command or invalid agent_id: skills"
+  },
+  {
+   "argv": [
+    "bulletin",
+    "--help"
+   ],
+   "events": 4,
+   "expect": "error"
+  },
+  {
+   "argv": [
+    "plan",
+    "save",
+    "--file",
+    "x.html",
+    "--kind",
+    "x",
+    "--title",
+    "X"
+   ],
+   "events": 3,
+   "expect": "error"
+  },
+  {
+   "argv": [
+    "plan",
+    "list",
+    "--all"
+   ],
+   "events": 4,
+   "expect": "resolves"
+  },
+  {
+   "argv": [
+    "plan",
+    "show",
+    "some-slug"
+   ],
+   "events": 12,
+   "expect": "auto",
+   "target": "plan view some-slug"
+  },
+  {
+   "argv": [
+    "plan",
+    "show",
+    "some-slug",
+    "--json"
+   ],
+   "events": 3,
+   "expect": "auto",
+   "target": "plan view some-slug --json"
+  },
+  {
+   "argv": [
+    "plan",
+    "list",
+    "--limit",
+    "400"
+   ],
+   "events": 3,
+   "expect": "resolves"
+  },
+  {
+   "argv": [
+    "auth",
+    "--help"
+   ],
+   "events": 6,
+   "expect": "auto",
+   "target": "login --help"
+  },
+  {
+   "argv": [
+    "murmur",
+    "list",
+    "--since",
+    "72h",
+    "--limit",
+    "100"
+   ],
+   "events": 1,
+   "expect": "resolves"
+  },
+  {
+   "argv": [
+    "token",
+    "--help"
+   ],
+   "events": 1,
+   "expect": "error"
+  },
+  {
+   "argv": [
+    "pat",
+    "--help"
+   ],
+   "events": 1,
+   "expect": "error"
+  },
+  {
+   "argv": [
+    "auth token",
+    "--help"
+   ],
+   "events": 1,
+   "expect": "error"
+  },
+  {
+   "argv": [
+    "murmur",
+    "list",
+    "--limit",
+    "10"
+   ],
+   "events": 1,
+   "expect": "resolves"
+  },
+  {
+   "argv": [
+    "murmur",
+    "list",
+    "--limit",
+    "15"
+   ],
+   "events": 1,
+   "expect": "resolves"
+  },
+  {
+   "argv": [
+    "agent",
+    "session-list"
+   ],
+   "events": 1,
+   "expect": "auto",
+   "target": "session list",
+   "runtime_error": "unknown command or invalid agent_id: session-list"
+  },
+  {
+   "argv": [
+    "distill",
+    "--help"
+   ],
+   "events": 3,
+   "expect": "error"
+  },
+  {
+   "argv": [
+    "plan",
+    "view",
+    "some-slug",
+    "--text"
+   ],
+   "events": 3,
+   "expect": "resolves"
+  },
+  {
+   "argv": [
+    "murmur",
+    "list",
+    "--limit",
+    "20"
+   ],
+   "events": 1,
+   "expect": "resolves"
+  },
+  {
+   "argv": [
+    "code",
+    "search",
+    "X",
+    "--repo",
+    "x"
+   ],
+   "events": 2,
+   "expect": "error"
+  },
+  {
+   "argv": [
+    "code",
+    "search",
+    "X",
+    "--repo",
+    "x",
+    "--path",
+    "x"
+   ],
+   "events": 1,
+   "expect": "error"
+  },
+  {
+   "argv": [
+    "plan list",
+    "--help"
+   ],
+   "events": 1,
+   "expect": "auto",
+   "target": "plan list --help"
+  },
+  {
+   "argv": [
+    "code search",
+    "X",
+    "--help"
+   ],
+   "events": 2,
+   "expect": "auto",
+   "target": "code search X --help"
+  },
+  {
+   "argv": [
+    "session list",
+    "--help"
+   ],
+   "events": 1,
+   "expect": "auto",
+   "target": "session list --help"
+  },
+  {
+   "argv": [
+    "skills publish",
+    "--help"
+   ],
+   "events": 1,
+   "expect": "auto",
+   "target": "skills publish --help"
+  },
+  {
+   "argv": [
+    "team list",
+    "--help"
+   ],
+   "events": 1,
+   "expect": "auto",
+   "target": "team list --help"
+  },
+  {
+   "argv": [
+    "attest publish",
+    "--help"
+   ],
+   "events": 1,
+   "expect": "auto",
+   "target": "attest publish --help"
+  },
+  {
+   "argv": [
+    "agent redact",
+    "--help"
+   ],
+   "events": 1,
+   "expect": "auto",
+   "target": "agent redact --help"
+  },
+  {
+   "argv": [
+    "record",
+    "--help"
+   ],
+   "events": 2,
+   "expect": "error"
+  },
+  {
+   "argv": [
+    "plan enrich",
+    "--help"
+   ],
+   "events": 2,
+   "expect": "auto",
+   "target": "plan enrich --help"
+  },
+  {
+   "argv": [
+    "plan review",
+    "--help"
+   ],
+   "events": 2,
+   "expect": "auto",
+   "target": "plan review --help"
+  },
+  {
+   "argv": [
+    "plan approve",
+    "--help"
+   ],
+   "events": 2,
+   "expect": "auto",
+   "target": "plan approve --help"
+  },
+  {
+   "argv": [
+    "conversation search",
+    "--help"
+   ],
+   "events": 1,
+   "expect": "auto",
+   "target": "conversation search --help"
+  },
+  {
+   "argv": [
+    "conversation walkthrough",
+    "--help"
+   ],
+   "events": 1,
+   "expect": "auto",
+   "target": "conversation walkthrough --help"
+  },
+  {
+   "argv": [
+    "code insights",
+    "--help"
+   ],
+   "events": 1,
+   "expect": "auto",
+   "target": "code insights --help"
+  },
+  {
+   "argv": [
+    "code prs",
+    "--help"
+   ],
+   "events": 1,
+   "expect": "auto",
+   "target": "code prs --help"
+  },
+  {
+   "argv": [
+    "pr header",
+    "--help"
+   ],
+   "events": 1,
+   "expect": "auto",
+   "target": "pr header --help"
+  },
+  {
+   "argv": [
+    "session score",
+    "--help"
+   ],
+   "events": 2,
+   "expect": "auto",
+   "target": "session score --help"
+  },
+  {
+   "argv": [
+    "session redaction",
+    "--help"
+   ],
+   "events": 1,
+   "expect": "auto",
+   "target": "session redaction --help"
+  },
+  {
+   "argv": [
+    "session audit",
+    "--help"
+   ],
+   "events": 1,
+   "expect": "auto",
+   "target": "session audit --help"
+  },
+  {
+   "argv": [
+    "session import",
+    "--help"
+   ],
+   "events": 1,
+   "expect": "auto",
+   "target": "session import --help"
+  },
+  {
+   "argv": [
+    "agent team-ctx",
+    "--help"
+   ],
+   "events": 1,
+   "expect": "auto",
+   "target": "agent team-ctx --help"
+  },
+  {
+   "argv": [
+    "agent prime",
+    "--help"
+   ],
+   "events": 1,
+   "expect": "auto",
+   "target": "agent prime --help"
+  },
+  {
+   "argv": [
+    "session",
+    "redaction",
+    "list"
+   ],
+   "events": 1,
+   "expect": "error"
+  },
+  {
+   "argv": [
+    "agent",
+    "OxAbCd",
+    "session",
+    "summarize",
+    "--nonexistent-flag"
+   ],
+   "events": 2,
+   "expect": "error"
+  },
+  {
+   "argv": [
+    "plan",
+    "list",
+    "--limit",
+    "200"
+   ],
+   "events": 1,
+   "expect": "resolves"
+  },
+  {
+   "argv": [
+    "viz",
+    "device-mockup",
+    "--device",
+    "mac",
+    "--title",
+    "X",
+    "--src",
+    "X"
+   ],
+   "events": 1,
+   "expect": "error"
+  },
+  {
+   "argv": [
+    "repo"
+   ],
+   "events": 1,
+   "expect": "error"
+  },
+  {
+   "argv": [
+    "viz",
+    "wordmark",
+    "--raw"
+   ],
+   "events": 1,
+   "expect": "error"
+  },
+  {
+   "argv": [
+    "cart",
+    "--help"
+   ],
+   "events": 4,
+   "expect": "error"
+  },
+  {
+   "argv": [
+    "auth",
+    "status"
+   ],
+   "events": 1,
+   "expect": "auto",
+   "target": "status"
+  },
+  {
+   "argv": [
+    "whoami"
+   ],
+   "events": 2,
+   "expect": "auto",
+   "target": "status"
+  },
+  {
+   "argv": [
+    "status",
+    "--text"
+   ],
+   "events": 1,
+   "expect": "resolves"
+  },
+  {
+   "argv": [
+    "session",
+    "list",
+    "--limit",
+    "60",
+    "--since",
+    "30d",
+    "--json"
+   ],
+   "events": 1,
+   "expect": "resolves"
+  },
+  {
+   "argv": [
+    "skill",
+    "--help"
+   ],
+   "events": 3,
+   "expect": "auto",
+   "target": "skills --help"
+  },
+  {
+   "argv": [
+    "plan",
+    "list",
+    "--limit",
+    "2000"
+   ],
+   "events": 1,
+   "expect": "resolves"
+  },
+  {
+   "argv": [
+    "env",
+    "--help"
+   ],
+   "events": 1,
+   "expect": "error"
+  },
+  {
+   "argv": [
+    "conversation",
+    "transcript",
+    "cnv_01a00000-0000-7000-8000-000000000000",
+    "--limit",
+    "1500"
+   ],
+   "events": 2,
+   "expect": "resolves"
+  },
+  {
+   "argv": [
+    "conversation",
+    "transcript",
+    "cnv_01a00000-0000-7000-8000-000000000000",
+    "--limit",
+    "3"
+   ],
+   "events": 1,
+   "expect": "resolves"
+  },
+  {
+   "argv": [
+    "session",
+    "statu"
+   ],
+   "events": 1,
+   "expect": "suggest",
+   "target": "status"
+  },
+  {
+   "argv": [
+    "plan",
+    "list",
+    "--limit",
+    "10"
+   ],
+   "events": 2,
+   "expect": "resolves"
+  },
+  {
+   "argv": [
+    "pet",
+    "enable"
+   ],
+   "events": 1,
+   "expect": "resolves"
+  },
+  {
+   "argv": [
+    "agent",
+    "OxAbCd",
+    "status"
+   ],
+   "events": 2,
+   "expect": "auto",
+   "target": "session status",
+   "runtime_error": "unknown command: status"
+  },
+  {
+   "argv": [
+    "plan",
+    "help"
+   ],
+   "events": 1,
+   "expect": "auto",
+   "target": "plan --help"
+  },
+  {
+   "argv": [
+    "agent",
+    "OxAbCd",
+    "session",
+    "score",
+    "--score",
+    "significant",
+    "--reason",
+    "X"
+   ],
+   "events": 1,
+   "expect": "auto",
+   "target": "session score --score significant --reason X"
+  },
+  {
+   "argv": [
+    "conversation",
+    "list",
+    "--since",
+    "2026-10-07",
+    "--until",
+    "2026-10-08",
+    "--json"
+   ],
+   "events": 1,
+   "expect": "resolves"
+  },
+  {
+   "argv": [
+    "session",
+    "status",
+    "--current",
+    "--short"
+   ],
+   "events": 3,
+   "expect": "error"
+  },
+  {
+   "argv": [
+    "session",
+    "hydrate",
+    "some-slug"
+   ],
+   "events": 1,
+   "expect": "error"
+  },
+  {
+   "argv": [
+    "memory",
+    "put",
+    "--help"
+   ],
+   "events": 1,
+   "expect": "error"
+  },
+  {
+   "argv": [
+    "guide",
+    "--list"
+   ],
+   "events": 2,
+   "expect": "error"
+  },
+  {
+   "argv": [
+    "plan",
+    "list",
+    "--limit",
+    "1000"
+   ],
+   "events": 1,
+   "expect": "resolves"
+  },
+  {
+   "argv": [
+    "plan",
+    "list",
+    "--limit",
+    "500"
+   ],
+   "events": 1,
+   "expect": "resolves"
+  },
+  {
+   "argv": [
+    "pet",
+    "disable"
+   ],
+   "events": 1,
+   "expect": "resolves"
+  },
+  {
+   "argv": [
+    "plan",
+    "list",
+    "--limit",
+    "5"
+   ],
+   "events": 2,
+   "expect": "resolves"
+  },
+  {
+   "argv": [
+    "team invite",
+    "--help"
+   ],
+   "events": 1,
+   "expect": "auto",
+   "target": "team invite --help"
+  },
+  {
+   "argv": [
+    "agent list",
+    "--help"
+   ],
+   "events": 1,
+   "expect": "auto",
+   "target": "agent list --help"
+  },
+  {
+   "argv": [
+    "agent hooks",
+    "--help"
+   ],
+   "events": 1,
+   "expect": "auto",
+   "target": "agent hooks --help"
+  },
+  {
+   "argv": [
+    "conversation",
+    "list",
+    "--since",
+    "2026-09-18",
+    "--until",
+    "2026-09-19",
+    "--limit",
+    "50"
+   ],
+   "events": 1,
+   "expect": "resolves"
+  },
+  {
+   "argv": [
+    "plan",
+    "list",
+    "--limit",
+    "40"
+   ],
+   "events": 1,
+   "expect": "resolves"
+  },
+  {
+   "argv": [
+    "plan view",
+    "--help"
+   ],
+   "events": 1,
+   "expect": "auto",
+   "target": "plan view --help"
+  },
+  {
+   "argv": [
+    "glance",
+    "--team",
+    "team_abc123",
+    "--no-interactive"
+   ],
+   "events": 1,
+   "expect": "error"
+  },
+  {
+   "argv": [
+    "doc",
+    "--help"
+   ],
+   "events": 1,
+   "expect": "error"
+  },
+  {
+   "argv": [
+    "plan",
+    "list",
+    "--json",
+    "--all"
+   ],
+   "events": 1,
+   "expect": "resolves"
+  },
+  {
+   "argv": [
+    "ledger"
+   ],
+   "events": 1,
+   "expect": "auto",
+   "target": "status"
+  },
+  {
+   "argv": [
+    "ledger",
+    "--help"
+   ],
+   "events": 3,
+   "expect": "auto",
+   "target": "status --help"
+  },
+  {
+   "argv": [
+    "mcp",
+    "serve",
+    "--help"
+   ],
+   "events": 1,
+   "expect": "error"
+  },
+  {
+   "argv": [
+    "code",
+    "search",
+    "X",
+    "--repo",
+    "x",
+    "--json"
+   ],
+   "events": 1,
+   "expect": "error"
+  },
+  {
+   "argv": [
+    "plan",
+    "list",
+    "--limit",
+    "30"
+   ],
+   "events": 1,
+   "expect": "resolves"
+  },
+  {
+   "argv": [
+    "agent",
+    "OxAbCd",
+    "session",
+    "log",
+    "--role",
+    "assistant",
+    "--content",
+    "X"
+   ],
+   "events": 23,
+   "expect": "resolves"
+  },
+  {
+   "argv": [
+    "ledger",
+    "status"
+   ],
+   "events": 1,
+   "expect": "auto",
+   "target": "status"
+  },
+  {
+   "argv": [
+    "agent",
+    "status"
+   ],
+   "events": 1,
+   "expect": "auto",
+   "target": "session status",
+   "runtime_error": "unknown command or invalid agent_id: status"
+  },
+  {
+   "argv": [
+    "agent",
+    "OxAbCd",
+    "session",
+    "log",
+    "--stdin"
+   ],
+   "events": 8,
+   "expect": "resolves"
+  },
+  {
+   "argv": [
+    "plan",
+    "lint",
+    "--file",
+    "x.html"
+   ],
+   "events": 7,
+   "expect": "resolves"
+  },
+  {
+   "argv": [
+    "plan",
+    "view",
+    "some-slug",
+    "--path"
+   ],
+   "events": 1,
+   "expect": "error"
+  },
+  {
+   "argv": [
+    "docker",
+    "--help"
+   ],
+   "events": 1,
+   "expect": "suggest",
+   "target": "doctor"
+  },
+  {
+   "argv": [
+    "walkthrough",
+    "--help"
+   ],
+   "events": 1,
+   "expect": "resolves"
+  },
+  {
+   "argv": [
+    "command",
+    "run"
+   ],
+   "events": 1,
+   "expect": "error"
+  },
+  {
+   "argv": [
+    "rounds",
+    "--help"
+   ],
+   "events": 1,
+   "expect": "error"
+  },
+  {
+   "argv": [
+    "docker",
+    "--fix"
+   ],
+   "events": 1,
+   "expect": "suggest",
+   "target": "doctor"
+  },
+  {
+   "argv": [
+    "query",
+    "X",
+    "--source",
+    "team",
+    "--text"
+   ],
+   "events": 1,
+   "expect": "resolves"
+  },
+  {
+   "argv": [
+    "plan",
+    "list",
+    "--limit",
+    "100",
+    "--json"
+   ],
+   "events": 1,
+   "expect": "resolves"
+  },
+  {
+   "argv": [
+    "conversation",
+    "list",
+    "--since",
+    "2026-09-30",
+    "--until",
+    "2026-10-01",
+    "--json"
+   ],
+   "events": 1,
+   "expect": "resolves"
+  },
+  {
+   "argv": [
+    "session",
+    "import",
+    "--session",
+    "x",
+    "--dry-run",
+    "--json",
+    "--no-input"
+   ],
+   "events": 1,
+   "expect": "resolves"
+  },
+  {
+   "argv": [
+    "plan",
+    "list",
+    "--limit",
+    "3"
+   ],
+   "events": 2,
+   "expect": "resolves"
+  },
+  {
+   "argv": [
+    "conversation",
+    "list",
+    "--since",
+    "2026-09-30",
+    "--until",
+    "2026-10-01"
+   ],
+   "events": 1,
+   "expect": "resolves"
+  },
+  {
+   "argv": [
+    "session",
+    "list",
+    "--limit",
+    "300",
+    "--window",
+    "30d",
+    "--json"
+   ],
+   "events": 1,
+   "expect": "resolves"
+  },
+  {
+   "argv": [
+    "plan",
+    "show",
+    "some-slug",
+    "--path"
+   ],
+   "events": 1,
+   "expect": "suggest",
+   "target": "plan view"
+  },
+  {
+   "argv": [
+    "agent",
+    "OxAbCd",
+    "status",
+    "--json"
+   ],
+   "events": 1,
+   "expect": "auto",
+   "target": "session status --json",
+   "runtime_error": "unknown command: status"
+  },
+  {
+   "argv": [
+    "carts",
+    "--help"
+   ],
+   "events": 3,
+   "expect": "error"
+  },
+  {
+   "argv": [
+    "carts",
+    "ready",
+    "--help"
+   ],
+   "events": 1,
+   "expect": "error"
+  },
+  {
+   "argv": [
+    "conventions",
+    "--help"
+   ],
+   "events": 2,
+   "expect": "auto",
+   "target": "agent team-ctx --help"
+  },
+  {
+   "argv": [
+    "update",
+    "--help"
+   ],
+   "events": 2,
+   "expect": "suggest",
+   "target": "upgrade"
+  },
+  {
+   "argv": [
+    "plan",
+    "list",
+    "--json",
+    "--limit",
+    "500"
+   ],
+   "events": 2,
+   "expect": "resolves"
+  },
+  {
+   "argv": [
+    "plan",
+    "show",
+    "some-slug",
+    "--text"
+   ],
+   "events": 1,
+   "expect": "auto",
+   "target": "plan view some-slug --json=false"
+  },
+  {
+   "argv": [
+    "query",
+    "X",
+    "--team",
+    "team_abc123",
+    "--limit",
+    "8"
+   ],
+   "events": 2,
+   "expect": "resolves"
+  },
+  {
+   "argv": [
+    "report_observation",
+    "--help"
+   ],
+   "events": 1,
+   "expect": "error"
+  },
+  {
+   "argv": [
+    "memory",
+    "distill",
+    "--help"
+   ],
+   "events": 1,
+   "expect": "error"
+  },
+  {
+   "argv": [
+    "session",
+    "start"
+   ],
+   "events": 1,
+   "expect": "auto",
+   "target": "agent session start"
+  },
+  {
+   "argv": [
+    "consult",
+    "--help"
+   ],
+   "events": 1,
+   "expect": "error"
+  },
+  {
+   "argv": [
+    "update"
+   ],
+   "events": 2,
+   "expect": "suggest",
+   "target": "upgrade"
+  },
+  {
+   "argv": [
+    "plan",
+    "list",
+    "--limit",
+    "20"
+   ],
+   "events": 1,
+   "expect": "resolves"
+  },
+  {
+   "argv": [
+    "status",
+    "--short"
+   ],
+   "events": 2,
+   "expect": "error"
+  },
+  {
+   "argv": [
+    "da0"
+   ],
+   "events": 1,
+   "expect": "error"
+  },
+  {
+   "argv": [
+    "agent",
+    "OxAbCd",
+    "doctor",
+    "--fix"
+   ],
+   "events": 1,
+   "expect": "error"
+  },
+  {
+   "argv": [
+    "agent",
+    "OxAbCd",
+    "session",
+    "score",
+    "--score",
+    "none",
+    "--reason",
+    "X"
+   ],
+   "events": 1,
+   "expect": "auto",
+   "target": "session score --score none --reason X"
+  },
+  {
+   "argv": [
+    "doctor",
+    "--check",
+    "--json"
+   ],
+   "events": 1,
+   "expect": "error"
+  },
+  {
+   "argv": [
+    "skill",
+    "list"
+   ],
+   "events": 1,
+   "expect": "auto",
+   "target": "skills list"
+  },
+  {
+   "argv": [
+    "agent",
+    "OxAbCd",
+    "murmur",
+    "x"
+   ],
+   "events": 1,
+   "expect": "error",
+   "runtime_error": "unknown command: murmur"
+  },
+  {
+   "argv": [
+    "session",
+    "trace",
+    "status"
+   ],
+   "events": 2,
+   "expect": "error"
+  },
+  {
+   "argv": [
+    "daemon",
+    "--list"
+   ],
+   "events": 1,
+   "expect": "auto",
+   "target": "daemon list"
+  },
+  {
+   "argv": [
+    "plan",
+    "enrich",
+    "--json",
+    "--title",
+    "X",
+    "--summary",
+    "X"
+   ],
+   "events": 1,
+   "expect": "error"
+  },
+  {
+   "argv": [
+    "plan",
+    "--list"
+   ],
+   "events": 1,
+   "expect": "auto",
+   "target": "plan list"
+  },
+  {
+   "argv": [
+    "whoami",
+    "--help"
+   ],
+   "events": 1,
+   "expect": "auto",
+   "target": "status --help"
+  },
+  {
+   "argv": [
+    "plan",
+    "show",
+    "some-slug",
+    "--md"
+   ],
+   "events": 1,
+   "expect": "suggest",
+   "target": "plan view"
+  },
+  {
+   "argv": [
+    "agent session abort",
+    "--help"
+   ],
+   "events": 1,
+   "expect": "auto",
+   "target": "agent session abort --help"
+  },
+  {
+   "argv": [
+    "agent session stop",
+    "--help"
+   ],
+   "events": 1,
+   "expect": "auto",
+   "target": "agent session stop --help"
+  },
+  {
+   "argv": [
+    "agent",
+    "OxAbCd",
+    "tasks",
+    "list",
+    "--all"
+   ],
+   "events": 1,
+   "expect": "error"
+  },
+  {
+   "argv": [
+    "plan",
+    "enrich",
+    "--json",
+    "--title",
+    "X",
+    "--description",
+    "X"
+   ],
+   "events": 1,
+   "expect": "error"
+  },
+  {
+   "argv": [
+    "mcp",
+    "--help"
+   ],
+   "events": 1,
+   "expect": "error"
+  },
+  {
+   "argv": [
+    "agent",
+    "score",
+    "minor",
+    "--reason",
+    "X",
+    "--json"
+   ],
+   "events": 1,
+   "expect": "auto",
+   "target": "session score minor --reason X --json",
+   "runtime_error": "unknown command or invalid agent_id: score"
+  },
+  {
+   "argv": [
+    "session",
+    "list",
+    "--limit",
+    "1000",
+    "--since",
+    "30d",
+    "--json"
+   ],
+   "events": 1,
+   "expect": "resolves"
+  },
+  {
+   "argv": [
+    "agent",
+    "OxAbCd",
+    "query",
+    "X",
+    "--limit",
+    "5"
+   ],
+   "events": 1,
+   "expect": "resolves"
+  },
+  {
+   "argv": [
+    "stauts"
+   ],
+   "events": 1,
+   "expect": "suggest",
+   "target": "status"
+  },
+  {
+   "argv": [
+    "statis"
+   ],
+   "events": 1,
+   "expect": "suggest",
+   "target": "status"
+  },
+  {
+   "argv": [
+    "satus"
+   ],
+   "events": 1,
+   "expect": "suggest",
+   "target": "status"
+  },
+  {
+   "argv": [
+    "check"
+   ],
+   "events": 1,
+   "expect": "auto",
+   "target": "doctor"
+  },
+  {
+   "argv": [
+    "stgatus"
+   ],
+   "events": 1,
+   "expect": "suggest",
+   "target": "status"
+  },
+  {
+   "argv": [
+    "agent",
+    "OxAbCd",
+    "session",
+    "summarize",
+    "--session",
+    "x"
+   ],
+   "events": 1,
+   "expect": "error"
+  },
+  {
+   "argv": [
+    "agent",
+    "OxAbCd",
+    "session",
+    "score",
+    "--score",
+    "minor",
+    "--reason",
+    "X"
+   ],
+   "events": 1,
+   "expect": "auto",
+   "target": "session score --score minor --reason X"
+  },
+  {
+   "argv": [
+    "discussion",
+    "show",
+    "rec_01a00000-0000-7000-8000-000000000000"
+   ],
+   "events": 1,
+   "expect": "auto",
+   "target": "conversation show rec_01a00000-0000-7000-8000-000000000000"
+  },
+  {
+   "argv": [
+    "session",
+    "trace",
+    "--helpo"
+   ],
+   "events": 1,
+   "expect": "error"
+  },
+  {
+   "argv": [
+    "conversation",
+    "show",
+    "cnv_01a00000-0000-7000-8000-000000000000"
+   ],
+   "events": 1,
+   "expect": "resolves"
+  },
+  {
+   "argv": [
+    "conversation",
+    "topics",
+    "cnv_01a00000-0000-7000-8000-000000000000"
+   ],
+   "events": 1,
+   "expect": "resolves"
+  },
+  {
+   "argv": [
+    "query",
+    "X",
+    "--limit",
+    "10",
+    "--full-json"
+   ],
+   "events": 1,
+   "expect": "resolves"
+  },
+  {
+   "argv": [
+    "murmur",
+    "list",
+    "--limit",
+    "30"
+   ],
+   "events": 1,
+   "expect": "resolves"
+  },
+  {
+   "argv": [
+    "mural",
+    "--help"
+   ],
+   "events": 1,
+   "expect": "suggest",
+   "target": "murmur"
+  },
+  {
+   "argv": [
+    "session",
+    "list",
+    "--json",
+    "--since",
+    "2d"
+   ],
+   "events": 1,
+   "expect": "resolves"
+  },
+  {
+   "argv": [
+    "session",
+    "token-optimize",
+    "--input",
+    "x.html",
+    "--output",
+    "x.html"
+   ],
+   "events": 4,
+   "expect": "error"
+  },
+  {
+   "argv": [
+    "api",
+    "--help"
+   ],
+   "events": 2,
+   "expect": "error"
+  },
+  {
+   "argv": [
+    "agent",
+    "OxAbCd",
+    "session",
+    "summarize",
+    "--file",
+    "x.html",
+    "--output",
+    "json"
+   ],
+   "events": 1,
+   "expect": "error"
+  },
+  {
+   "argv": [
+    "carts"
+   ],
+   "events": 1,
+   "expect": "error"
+  },
+  {
+   "argv": [
+    "dev",
+    "catalog",
+    "--list"
+   ],
+   "events": 1,
+   "expect": "error"
+  },
+  {
+   "argv": [
+    "addos"
+   ],
+   "events": 1,
+   "expect": "suggest",
+   "target": "addons"
+  },
+  {
+   "argv": [
+    "addon"
+   ],
+   "events": 1,
+   "expect": "resolves"
+  },
+  {
+   "argv": [
+    "addons",
+    "--help"
+   ],
+   "events": 2,
+   "expect": "resolves"
+  },
+  {
+   "argv": [
+    "plan bogus"
+   ],
+   "events": 1,
+   "expect": "error"
+  },
+  {
+   "argv": [
+    "code bogus"
+   ],
+   "events": 1,
+   "expect": "error"
+  },
+  {
+   "argv": [
+    "addons bogus"
+   ],
+   "events": 1,
+   "expect": "auto",
+   "target": "addons bogus"
+  },
+  {
+   "argv": [
+    "team bogus"
+   ],
+   "events": 1,
+   "expect": "auto",
+   "target": "team bogus"
+  }
+ ]
+}

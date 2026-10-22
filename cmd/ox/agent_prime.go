@@ -2164,7 +2164,7 @@ func outputAgentPrimeText(cmd *cobra.Command, output agentPrimeOutput) error {
 				"Ledger Required for Sessions",
 				fmt.Sprintf("Session recording is set to %q (from %s) but the ledger has not been provisioned by cloud.\nRun 'ox doctor --fix' to clone repos from cloud.",
 					output.Session.Mode, output.Session.Source),
-				"ox ledger sync",
+				"ox doctor --fix",
 			)
 		} else if output.Session.Recording {
 			fmt.Fprintln(cmd.OutOrStdout())

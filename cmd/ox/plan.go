@@ -1203,8 +1203,8 @@ func writePlanHuman(cmd *cobra.Command, result plan.Result, savedDir string) err
 }
 
 // openSavedPlanHTML backs `ox plan render --open`: it opens the render of the plan the
-// porcelain path just saved, mirroring `ox plan view --open` but off the saved
-// directory. Best-effort — enrichment already succeeded, so a missing render or
+// porcelain path just saved, resolved from the saved directory rather than a
+// slug argument. Best-effort — enrichment already succeeded, so a missing render or
 // a headless shell prints a hint instead of erroring.
 func openSavedPlanHTML(cmd *cobra.Command, savedDir string) {
 	if savedDir == "" {

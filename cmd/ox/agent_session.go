@@ -526,9 +526,11 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 			Type:          "session_stop_retry",
 			AgentID:       inst.AgentID,
 			SessionFile:   state.SessionFile,
-			RetryGuidance: fmt.Sprintf("No session data captured. Use 'ox agent %s session log --stdin' to write your conversation, then re-run this command.", inst.AgentID),
+			RetryGuidance: fmt.Sprintf("No session data captured. Record your conversation with 'ox agent %s session log --role user --content \"...\"' (one entry per call) or pipe a JSON array of entries to 'ox agent %s session record', then re-run this command.", inst.AgentID, inst.AgentID),
 			NextActions: []string{
-				fmt.Sprintf("Dump conversation as JSONL: ox agent %s session log --role user --stdin", inst.AgentID),
+				// session log requires --role and writes ONE entry per call; the
+				// batch form is session record, which takes a JSON array.
+				fmt.Sprintf("Record many entries at once: echo '[{\"type\":\"user\",\"content\":\"...\"}]' | ox agent %s session record", inst.AgentID),
 				fmt.Sprintf("Re-run: ox agent %s session stop", inst.AgentID),
 			},
 		}

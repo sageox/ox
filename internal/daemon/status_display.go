@@ -1199,7 +1199,7 @@ func getErrorHint(err string) string {
 	case strings.Contains(lower, "permission denied"):
 		return "Check SSH key: ssh -T git@github.com"
 	case strings.Contains(lower, "push failed"):
-		return "Pull may be needed. Run: ox ledger sync"
+		return "Pull may be needed. Run: ox sync"
 	case strings.Contains(lower, "timed out") || strings.Contains(lower, "no such host") || strings.Contains(lower, "connection refused"):
 		return "Will retry automatically. Check network connectivity if this persists."
 	case strings.Contains(lower, "repository does not exist") || strings.Contains(lower, "no longer exists"):
