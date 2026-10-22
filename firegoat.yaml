@@ -1,0 +1,105 @@
+# firegoat.yaml: evals for how well coding agents use ox.
+# Each test runs your agent (claude by default) in an empty folder
+# (~/.firegoat/runs/...) with `prompt` as the first message, then runs `checks`
+# there. Reference: npx firegoat init --help
+#
+# Run: npx -y firegoat@latest eval
+# The two configured tests need a SageOx team token in the shell that runs eval:
+#   export SAGEOX_TOKEN=...   (never commit it here)
+
+# How many times to run each test.
+runs: 1
+
+# Local build under test. $FIREGOAT_OUT is first on the agent's PATH, so this
+# ox shadows any ox already installed on the machine.
+build:
+  - go build -o "$FIREGOAT_OUT/ox" ./cmd/ox
+  - go build -o "$FIREGOAT_OUT/ox-adapter-claude-code" ./cmd/ox-adapter-claude-code
+  - cp -R fixtures/. "$FIREGOAT_OUT"
+
+# Every test starts in a small, already-committed project repo.
+install: seed-repo.sh
+
+# The ox daemon detaches; stop it so it doesn't outlive the run.
+cleanup: ox daemon stop >/dev/null 2>&1 || true
+
+tests:
+  # Zero-start: the user's problem only. No token, no product name.
+  - name: zero-start
+    env:
+      SAGEOX_TOKEN: ""
+    prompt: >-
+      My team is three people each using our own AI coding agent on this repo,
+      and the agents keep forgetting what we already decided. Every new session
+      someone re-explains our conventions, and nobody's agent knows what a
+      teammate's agent did yesterday. Set this repo up so our agents share that
+      context. Keep it minimal.
+    end_goal: >-
+      The agent finds SageOx/ox, runs it in this repo, and either initializes the
+      repo with no human step, or stops at the first real blocker (ox login /
+      SAGEOX_TOKEN) and tells the user that one step, instead of inventing a
+      homegrown notes file or claiming success.
+    checks:
+      - run: >-
+          grep -Eq '^\[[0-9]+\] \$ (.*[ /])?ox +(init|login|status|doctor)' "$FIREGOAT_TRANSCRIPT"
+      - run: >-
+          test -d "$FIREGOAT_WORKDIR/.sageox" ||
+          grep -Eiq '^agent: .*(ox login|SAGEOX_TOKEN)' "$FIREGOAT_TRANSCRIPT"
+      - run: |
+          test -s "$FIREGOAT_TRANSCRIPT" && ! grep -E '^\[[0-9]+\] ' "$FIREGOAT_TRANSCRIPT" | grep -qF "$FIREGOAT_REPO"
+    timeout: 900
+
+  # Configured: local build on PATH, token in the env. The agent does the setup.
+  - name: connect-repo
+    prompt: >-
+      My team is three people each using our own AI coding agent on this repo,
+      and the agents keep forgetting what we already decided. Hook this repo up
+      so every agent session starts with our team's shared context and its work
+      is shared back. Credentials are in the env. Show me it works. Keep it
+      minimal. What's installed on PATH is the build under test; don't reinstall
+      or upgrade it.
+    end_goal: >-
+      `ox init` initializes the repo (.sageox/config.json exists), the agent
+      instruction file carries the ox prime marker so Claude Code sessions load
+      team context, and `ox status` or `ox doctor` output in the transcript shows
+      the repo connected to the team. The local build was used, not a fresh
+      install.
+    checks:
+      - run: >-
+          grep -Eq '^\[[0-9]+\] \$ (.*[ /])?ox +init' "$FIREGOAT_TRANSCRIPT"
+      - run: test -f "$FIREGOAT_WORKDIR/.sageox/config.json"
+      - run: >-
+          grep -rqs 'ox agent prime' "$FIREGOAT_WORKDIR/AGENTS.md" "$FIREGOAT_WORKDIR/CLAUDE.md" "$FIREGOAT_WORKDIR/.claude"
+      - run: >-
+          grep -Eq '^\[[0-9]+\] \$ (.*[ /])?ox +(status|doctor)' "$FIREGOAT_TRANSCRIPT"
+      - run: >-
+          test -s "$FIREGOAT_TRANSCRIPT" &&
+          ! grep -Eq '^\[[0-9]+\] \$ .*(brew (install|upgrade) .*ox|install\.sh|go install .*sageox|ox upgrade)' "$FIREGOAT_TRANSCRIPT"
+      - run: |
+          test -s "$FIREGOAT_TRANSCRIPT" && ! grep -E '^\[[0-9]+\] ' "$FIREGOAT_TRANSCRIPT" | grep -qF "$FIREGOAT_REPO"
+    timeout: 900
+
+  # Configured: repo already connected (seeded with the public CLI); the user
+  # wants prior team knowledge before starting work.
+  - name: team-recall
+    install: ox init --no-input --yes >/dev/null
+    prompt: >-
+      Before I touch anything: what has my team already decided about how we
+      version and ship releases, and who decided it? I don't want to redo a
+      discussion we already had. Credentials are in the env. Answer briefly and
+      tell me where each point came from. What's installed on PATH is the build
+      under test; don't reinstall or upgrade it.
+    end_goal: >-
+      The answer comes from the team's SageOx context (ox query, ox conversation,
+      or ox session list output in the transcript), names at least one specific
+      release decision and the coworker or session it came from, and does not
+      invent decisions from the README or general knowledge.
+    checks:
+      - run: >-
+          grep -Eq '^\[[0-9]+\] \$ (.*[ /])?ox +(query|conversation|session +list|agent +prime)' "$FIREGOAT_TRANSCRIPT"
+      - run: >-
+          test -s "$FIREGOAT_TRANSCRIPT" &&
+          ! grep -Eq '^\[[0-9]+\] \$ .*(brew (install|upgrade) .*ox|install\.sh|go install .*sageox|ox upgrade)' "$FIREGOAT_TRANSCRIPT"
+      - run: |
+          test -s "$FIREGOAT_TRANSCRIPT" && ! grep -E '^\[[0-9]+\] ' "$FIREGOAT_TRANSCRIPT" | grep -qF "$FIREGOAT_REPO"
+    timeout: 900
