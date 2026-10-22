@@ -246,14 +246,7 @@ func commitPlanPathsLocked(ctx context.Context, ledgerPath, msg, rel string, fil
 // resolved with its conflict markers inside, erasing the conflict the daemon
 // and `ox doctor` look for. The caller holds the repo lock.
 func ledgerSafeForPlanWrite(ctx context.Context, ledgerPath string) error {
-	err := gitutil.IsSafeForGitOps(ledgerPath)
-	if err == nil {
-		var unmerged bool
-		if unmerged, err = gitutil.HasUnmergedEntries(ctx, ledgerPath); err == nil && unmerged {
-			err = errors.New("the index holds unresolved conflicts")
-		}
-	}
-	if err != nil {
+	if err := gitutil.IsSafeForIndexWrite(ctx, ledgerPath); err != nil {
 		return fmt.Errorf("%w: %w", errLedgerNotSafe, err)
 	}
 	return nil
@@ -692,9 +685,12 @@ func commitPlanDirLocked(ctx context.Context, ledgerPath, planDir, msgPrefix str
 // plan edit, and session produced_plans fix into ONE commit and pushes it —
 // the batch counterpart to commitAndPushPlanDir (which commits a single plan
 // dir). A repair run can touch hundreds of plans; landing that as one
-// reviewable commit beats one commit per directory. Mirrors
-// commitAndPushPlanDir's pattern (--sparse, --no-verify, pushLedger with
-// pull-rebase retry) rather than hand-rolling new git plumbing.
+// reviewable commit beats one commit per directory. Staging and the immutable
+// snapshot share the repo lock; pushing runs outside it.
+//
+// Before moving a changed plan file, its HEAD blob is preserved in the local
+// cache. The canonical guard verifies those bytes before allowing its old
+// sacred path to disappear; byte-identical relocations retain their content.
 //
 // Only the final push is best-effort. Every git op at or before `git
 // commit` (mv, add, commit itself) returns an error wrapped in
@@ -718,42 +714,100 @@ func commitPlanDirLocked(ctx context.Context, ledgerPath, planDir, msgPrefix str
 // rename, when the source was dirty. The follow-up `git add` stages the
 // current working-tree content at the new path in the same pass.
 func commitPlanBackfillToLedger(ledgerPath string, renames [][2]string, touchedPlanDirs, touchedSessionDirs []string) error {
-	gitserver.EnsureGitignoreBeforeCommit(ledgerPath)
-
-	for _, pair := range renames {
-		oldRel, err := filepath.Rel(ledgerPath, pair[0])
-		if err != nil {
-			return fmt.Errorf("relativize %q: %w", pair[0], err)
+	ctx := context.Background()
+	err := gitutil.WithRepoLock(ctx, ledgerPath, func() error {
+		ctx, cancel := context.WithTimeout(ctx, lockedCommitTimeout)
+		defer cancel()
+		if err := ledgerSafeForPlanWrite(ctx, ledgerPath); err != nil {
+			return err
 		}
-		newRel, err := filepath.Rel(ledgerPath, pair[1])
-		if err != nil {
-			return fmt.Errorf("relativize %q: %w", pair[1], err)
+		var moves [][2]string
+		var preserved, commitPaths, addPaths []string
+		for _, pair := range renames {
+			oldRel, err := ledgerRelPath(ledgerPath, pair[0])
+			if err != nil {
+				return err
+			}
+			// The destination does not exist yet. Resolve its existing parent
+			// so macOS /var and /private/var aliases normalize consistently.
+			newParent, err := filepath.EvalSymlinks(filepath.Dir(pair[1]))
+			if err != nil {
+				return fmt.Errorf("resolve rename destination: %w", err)
+			}
+			newRel, err := ledgerRelPath(ledgerPath, filepath.Join(newParent, filepath.Base(pair[1])))
+			if err != nil {
+				return err
+			}
+			// ApplyBackfillMeta already edited the worktree: preserve HEAD,
+			// not that edited copy, for the guard's parent-blob proof.
+			tracked, err := gitStdout(ctx, ledgerPath, nil, "ls-tree", "-r", "--name-only", "-z", "HEAD", "--", oldRel)
+			if err != nil {
+				return fmt.Errorf("list original plan files: %w", err)
+			}
+			for _, path := range strings.Split(strings.TrimSuffix(string(tracked), "\x00"), "\x00") {
+				if path == "" {
+					continue
+				}
+				blob, err := gitStdout(ctx, ledgerPath, nil, "cat-file", "blob", "HEAD:"+path)
+				if err != nil {
+					return fmt.Errorf("read original plan %s: %w", path, err)
+				}
+				current, err := os.ReadFile(filepath.Join(pair[0], filepath.FromSlash(strings.TrimPrefix(path, oldRel+"/"))))
+				if err != nil {
+					return fmt.Errorf("read updated plan %s: %w", path, err)
+				}
+				if bytes.Equal(blob, current) {
+					continue // the exact blob moves with the file; no cache copy needed
+				}
+				if err := lfs.PreserveInCache(filepath.Join(ledgerPath, ".sageox", "cache", filepath.FromSlash(path)), blob); err != nil {
+					return fmt.Errorf("preserve original plan %s: %w", path, err)
+				}
+				preserved = append(preserved, path)
+			}
+			moves = append(moves, [2]string{oldRel, newRel})
+			commitPaths = append(commitPaths, oldRel, newRel)
+			addPaths = append(addPaths, newRel)
 		}
-		mvArgs := []string{"-C", ledgerPath, "mv", "--sparse", oldRel, newRel}
-		if out, err := exec.Command("git", mvArgs...).CombinedOutput(); err != nil {
-			return fmt.Errorf("%w: git mv %s -> %s failed: %s: %w", errBackfillCommitFailed, oldRel, newRel, string(out), err)
+		for _, dir := range touchedPlanDirs {
+			rel, err := ledgerRelPath(ledgerPath, dir)
+			if err != nil {
+				return err
+			}
+			for _, file := range []string{"meta.json", "events.jsonl", planHTMLFileName} {
+				if _, err := os.Lstat(filepath.Join(dir, file)); err == nil {
+					addPaths = append(addPaths, rel+"/"+file)
+					commitPaths = append(commitPaths, rel+"/"+file)
+				}
+			}
 		}
-		addArgs := []string{"-C", ledgerPath, "add", "--sparse", newRel}
-		if out, err := exec.Command("git", addArgs...).CombinedOutput(); err != nil {
-			return fmt.Errorf("%w: git add %s (post-mv content) failed: %s: %w", errBackfillCommitFailed, newRel, string(out), err)
+		for _, dir := range touchedSessionDirs {
+			rel, err := ledgerRelPath(ledgerPath, dir)
+			if err != nil {
+				return err
+			}
+			addPaths = append(addPaths, rel+"/meta.json")
+			commitPaths = append(commitPaths, rel+"/meta.json")
 		}
-	}
-
-	addPaths := slices.Concat(touchedPlanDirs, touchedSessionDirs)
-	if len(addPaths) > 0 {
-		addArgs := append([]string{"-C", ledgerPath, "add", "--sparse"}, addPaths...)
-		if out, err := exec.Command("git", addArgs...).CombinedOutput(); err != nil {
-			return fmt.Errorf("%w: git add failed: %s: %w", errBackfillCommitFailed, string(out), err)
+		commitPaths = append(commitPaths, gitserver.EnsureGitignoreBeforeCommitCtx(ctx, ledgerPath)...)
+		for _, pair := range moves {
+			if out, err := gitutil.RunGit(ctx, ledgerPath, "mv", "--sparse", "--", pair[0], pair[1]); err != nil {
+				return fmt.Errorf("git mv %s -> %s failed: %s: %w", pair[0], pair[1], gitutil.SanitizeOutput(out), err)
+			}
 		}
-	}
-
-	commitMsg := fmt.Sprintf("plan: backfill %d title(s)", len(renames)+len(touchedPlanDirs))
-	commitCmd := exec.Command("git", "-C", ledgerPath, "commit", "--no-verify", "-m", commitMsg)
-	if out, err := commitCmd.CombinedOutput(); err != nil {
-		if strings.Contains(string(out), "nothing to commit") {
-			return nil // idempotent: re-run with nothing left to change
+		if len(addPaths) > 0 {
+			if out, err := gitutil.RunGit(ctx, ledgerPath, append([]string{"add", "--sparse", "--"}, addPaths...)...); err != nil {
+				return fmt.Errorf("git add failed: %s: %w", gitutil.SanitizeOutput(out), err)
+			}
 		}
-		return fmt.Errorf("%w: %s: %w", errBackfillCommitFailed, wrapCommitError(string(out), err), err)
+		if len(commitPaths) == 0 {
+			return nil
+		}
+		commitMsg := fmt.Sprintf("plan: backfill %d title(s)", len(renames)+len(touchedPlanDirs))
+		_, err := gitutil.CommitLedgerSnapshotPreserving(ctx, ledgerPath, commitMsg, preserved, commitPaths...)
+		return err
+	})
+	if err != nil {
+		return fmt.Errorf("%w: %w", errBackfillCommitFailed, err)
 	}
 
 	// Everything from here down is push-only: the commit above already

@@ -78,13 +78,28 @@ func assertRemoteObjectsCleanOf(t *testing.T, barePath, secret string) {
 		"a credential reached a git object in the shared Ledger remote — every teammate who pulls can read it")
 }
 
-// commitSession stages and commits a session dir as a local holding commit,
-// exactly as the finalize path does, WITHOUT pushing — so the pre-push gate sees
-// the secret in the push range on the next push.
+// commitSession records these direct Git artifacts in their manifest, then
+// creates a local holding commit for the pre-push gate to repair. Existing LFS
+// pointers retain their original storage references.
 func commitSession(t *testing.T, ledgerPath string, sessionNames ...string) {
 	t.Helper()
 	args := []string{"add", "--sparse", "--", "sessions/.gitignore"}
 	for _, n := range sessionNames {
+		dir := filepath.Join(ledgerPath, "sessions", n)
+		meta, err := lfs.ReadSessionMeta(dir)
+		require.NoError(t, err)
+		for _, artifact := range lfs.ContentFiles {
+			path := filepath.Join(dir, artifact)
+			info, err := os.Stat(path)
+			if os.IsNotExist(err) {
+				continue
+			}
+			require.NoError(t, err)
+			if !lfs.IsPointerFile(path) {
+				meta.Files[artifact] = lfs.NewGitFileRef(info.Size())
+			}
+		}
+		require.NoError(t, lfs.WriteSessionMetaOnly(dir, meta))
 		args = append(args, "sessions/"+n)
 	}
 	runGit(t, ledgerPath, args...)
@@ -196,6 +211,7 @@ func TestRedactE2E_AllowSecretsOverrideCannotShipRawSecret(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "raw.jsonl"), []byte(rawLine), 0644))
 	commitSession(t, f.ledgerPath, sessionName)
 	require.NoError(t, pushLedger(context.Background(), f.ledgerPath))
+	assertRemoteObjectsCleanOf(t, f.barePath, canary)
 	assert.NotContains(t, runGit(t, f.barePath, "show", "HEAD:sessions/"+sessionName+"/raw.jsonl"), canary,
 		"legacy environment override must not ship a raw secret")
 }

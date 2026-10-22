@@ -7,10 +7,113 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/ledger"
 	"github.com/spf13/cobra"
 )
+
+// Deleting one murmur must leave another operation's staged work unpublished.
+func TestMurmurDeleteLeavesUnrelatedChangesStaged(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: commits real Ledger and Team Context repositories")
+	}
+	for _, tc := range []struct{ scope, state, wantErr string }{
+		{"ledger", "ready", ""}, {"team", "ready", ""},
+		{"ledger", "rebase", "rebase"}, {"ledger", "untracked", "git rm"},
+		{"ledger", "missing committer", "git commit"},
+	} {
+		t.Run(tc.scope+"/"+tc.state, func(t *testing.T) {
+			targetDir := t.TempDir()
+			projectDir, _ := setupCoworkerProject(t, "test-team", []config.TeamContext{{TeamID: "test-team", Path: targetDir}})
+			if err := config.SaveLocalConfig(projectDir, &config.LocalConfig{
+				TeamContexts: []config.TeamContext{{TeamID: "test-team", Path: targetDir}},
+				Ledger:       &config.LedgerConfig{Path: targetDir},
+			}); err != nil {
+				t.Fatal(err)
+			}
+			runGitInDir(t, projectDir, "init", "-q")
+			initGitLedger(t, targetDir)
+			relPath, err := ledger.WriteMurmur(targetDir, ledger.MurmurFile{
+				ID: "delete-me", Timestamp: time.Now().UTC(), AgentID: "OxTest", Topic: "wip", Content: "finished work", Scope: tc.scope,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.state != "untracked" {
+				runGitInDir(t, targetDir, "add", "--", relPath)
+				runGitInDir(t, targetDir, "commit", "-m", "seed murmur")
+			}
+			if err := os.WriteFile(filepath.Join(targetDir, "unrelated.md"), []byte("another operation\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			runGitInDir(t, targetDir, "add", "--", "unrelated.md")
+			head := runGitInDir(t, targetDir, "rev-parse", "HEAD")
+			staged := runGitInDir(t, targetDir, "rev-parse", ":unrelated.md")
+			index := runGitInDir(t, targetDir, "write-tree")
+			if tc.state == "rebase" {
+				if err := os.Mkdir(filepath.Join(targetDir, ".git", "rebase-merge"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			} else if tc.state == "missing committer" {
+				t.Setenv("GIT_COMMITTER_NAME", "")
+				t.Setenv("GIT_COMMITTER_EMAIL", "")
+			}
+			t.Setenv(config.EnvProjectRoot, projectDir)
+			t.Chdir(projectDir)
+			cmd := &cobra.Command{}
+			cmd.Flags().String("scope", tc.scope, "")
+			cmd.SetOut(&bytes.Buffer{})
+			err = runMurmurDelete(cmd, []string{"delete-me"})
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("expected %s failure, got %v", tc.state, err)
+				}
+				if got := runGitInDir(t, targetDir, "rev-parse", "HEAD"); got != head {
+					t.Error("failed murmur deletion changed HEAD")
+				}
+				if got := runGitInDir(t, targetDir, "rev-parse", ":unrelated.md"); got != staged {
+					t.Error("failed murmur deletion changed unrelated staged bytes")
+				}
+				if tc.state != "missing committer" {
+					if got := runGitInDir(t, targetDir, "write-tree"); got != index {
+						t.Error("refused murmur deletion changed the index")
+					}
+					if _, err := os.Stat(filepath.Join(targetDir, relPath)); err != nil {
+						t.Errorf("refused murmur deletion removed the source: %v", err)
+					}
+				} else if got := runGitInDir(t, targetDir, "diff", "--cached", "--name-only", "--diff-filter=D"); got != filepath.ToSlash(relPath) {
+					t.Errorf("identity failure must leave only the requested deletion staged, got %q", got)
+				}
+				switch tc.state {
+				case "rebase":
+					if err := os.Remove(filepath.Join(targetDir, ".git", "rebase-merge")); err != nil {
+						t.Fatal(err)
+					}
+				case "untracked":
+					runGitInDir(t, targetDir, "add", "--", relPath)
+					runGitInDir(t, targetDir, "commit", "-m", "track murmur for retry", "--", relPath)
+				case "missing committer":
+					runGitInDir(t, targetDir, "cat-file", "-e", "HEAD:"+filepath.ToSlash(relPath))
+					t.Setenv("GIT_COMMITTER_NAME", "Test")
+					t.Setenv("GIT_COMMITTER_EMAIL", "test@example.com")
+					runGitInDir(t, targetDir, "restore", "--source=HEAD", "--staged", "--worktree", "--", relPath)
+				}
+				err = runMurmurDelete(cmd, []string{"delete-me"})
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.TrimSpace(runGitInDir(t, targetDir, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD")); got != filepath.ToSlash(relPath) {
+				t.Errorf("murmur delete committed %q, want only %q", got, relPath)
+			}
+			if got := strings.TrimSpace(runGitInDir(t, targetDir, "diff", "--cached", "--name-only")); got != "unrelated.md" {
+				t.Errorf("remaining staged changes = %q, want unrelated.md", got)
+			}
+		})
+	}
+}
 
 func TestMurmurFlagDefaults(t *testing.T) {
 	cmd := &cobra.Command{Use: "test"}

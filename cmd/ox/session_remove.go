@@ -7,8 +7,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/sageox/ox/internal/cli"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/session"
 	"github.com/spf13/cobra"
 )
@@ -337,40 +339,52 @@ func removedLocationLabel(local, ledger bool) string {
 }
 
 // batchDeleteSessionsFromLedger removes multiple sessions from the ledger in a
-// single git commit + push. Returns the count of successfully staged removals.
+// single git commit + push. Returns the count of successfully published removals.
 // Uses pushLedger() for push with pull --rebase retry on conflict.
 func batchDeleteSessionsFromLedger(ledgerPath string, sessionNames []string) (int, error) {
-	var staged int
-	var lastStaged string
 	for _, name := range sessionNames {
-		gitRm := exec.Command("git", "rm", "-r", "--force", filepath.Join("sessions", name))
-		gitRm.Dir = ledgerPath
-		if out, err := gitRm.CombinedOutput(); err != nil {
-			slog.Warn("git_rm_session", "session", name, "err", fmt.Sprintf("%s: %v", string(out), err))
-			continue
+		if err := session.ValidateDraftSessionName(name); err != nil {
+			return 0, err
 		}
-		staged++
-		lastStaged = name
 	}
 
-	if staged == 0 {
-		return 0, fmt.Errorf("no sessions could be staged for removal")
-	}
+	ctx := context.Background()
+	var selected []string
+	err := gitutil.WithRepoLock(ctx, ledgerPath, func() error {
+		opCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		if err := gitutil.IsSafeForGitOps(ledgerPath); err != nil {
+			return err
+		}
+		for _, name := range sessionNames {
+			// HEAD is authoritative even when a sparse checkout omits the folder.
+			out, err := exec.CommandContext(opCtx, "git", "-C", ledgerPath, "--literal-pathspecs", "ls-tree", "-d", "-z", "--name-only", "HEAD", "--", filepath.Join("sessions", name)).Output()
+			if err != nil {
+				return fmt.Errorf("find ledger session %s: %w", name, err)
+			}
+			if len(out) > 0 {
+				selected = append(selected, name)
+			}
+		}
+		if len(selected) == 0 {
+			return fmt.Errorf("no sessions could be staged for removal")
+		}
 
-	// single commit for all removals
-	commitMsg := fmt.Sprintf("session: delete %d session(s)", staged)
-	if staged == 1 {
-		commitMsg = fmt.Sprintf("session: delete %s", lastStaged)
-	}
-	gitCommit := exec.Command("git", "-C", ledgerPath, "commit", "--no-verify", "-m", commitMsg)
-	if out, err := gitCommit.CombinedOutput(); err != nil {
-		return 0, fmt.Errorf("git commit: %s: %w", string(out), err)
+		commitMsg := fmt.Sprintf("session: delete %d session(s)", len(selected))
+		if len(selected) == 1 {
+			commitMsg = fmt.Sprintf("session: delete %s", selected[0])
+		}
+		_, err := gitutil.CommitLedgerSessionDeletion(opCtx, ledgerPath, commitMsg, selected...)
+		return err
+	})
+	if err != nil {
+		return 0, err
 	}
 
 	// push with retry (pull --rebase --autostash on conflict)
-	if err := pushLedger(context.Background(), ledgerPath); err != nil {
+	if err := pushLedger(ctx, ledgerPath); err != nil {
 		return 0, fmt.Errorf("push: %w", err)
 	}
 
-	return staged, nil
+	return len(selected), nil
 }

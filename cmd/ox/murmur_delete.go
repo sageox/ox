@@ -47,18 +47,25 @@ func runMurmurDelete(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	relPath = ":(literal)" + relPath
 
-	// git rm handles both disk deletion and staging
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if _, err := gitutil.RunGit(ctx, targetDir, "rm", "-f", relPath); err != nil {
-		return fmt.Errorf("git rm: %w", err)
-	}
-
-	commitMsg := fmt.Sprintf("murmur: delete %s", murmurID)
-	if _, err := gitutil.RunGit(ctx, targetDir, "commit", "-m", commitMsg); err != nil {
-		return fmt.Errorf("git commit: %w", err)
+	err = gitutil.WithRepoLock(ctx, targetDir, func() error {
+		if err := gitutil.IsSafeForIndexWrite(ctx, targetDir); err != nil {
+			return err
+		}
+		if _, err := gitutil.RunGit(ctx, targetDir, "rm", "--sparse", "-f", "--", relPath); err != nil {
+			return fmt.Errorf("git rm: %w", err)
+		}
+		if _, err := gitutil.CommitLedgerSnapshot(ctx, targetDir, fmt.Sprintf("murmur: delete %s", murmurID), relPath); err != nil {
+			return fmt.Errorf("git commit: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
 	}
 
 	fmt.Fprintf(cmd.OutOrStdout(), "Murmur deleted: %s\n", murmurID)

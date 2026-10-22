@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Session summaries and maintenance leave other staged work alone** — sharing a summary, regenerating or redacting sessions, deleting a session or murmur, adding or removing a coworker, and backfilling plan titles commit only their own changes. Unrelated staged work stays pending. Confirmed session deletion still works for large sessions.
 - **AI coworkers can follow ox's own instructions again** — `ox agent <id> session log --role/--content/--stdin`, which ox suggests to coworkers that record by hand, was rejected before it ran; it now writes the entry. `--agent-id` names the coworker for `ox agent heartbeat` and the other agent commands, and hints that pointed at commands ox doesn't have (`ox ledger sync`, `ox conventions`, `ox redaction verify`) now name the real ones.
 - **Usage reports no longer carry what you typed** — when a command fails to parse, ox reports only its command and flag names. Paths, IDs, names and free text are removed on your machine before the report is sent, and the daemon removes them again.
 

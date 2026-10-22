@@ -64,6 +64,118 @@ func CommitLedgerSnapshot(ctx context.Context, repoPath, message string, pathspe
 	return CommitLedgerSnapshotPreserving(ctx, repoPath, message, nil, pathspecs...)
 }
 
+// CommitLedgerSessionDeletion deletes only the named sessions after the caller
+// has obtained explicit deletion confirmation. Unlike an automatic snapshot,
+// this operation constructs its tree from HEAD minus those exact roots, so it
+// cannot carry an accidental wipe or another writer's staged changes. The
+// automatic mass-deletion guard remains unchanged. The caller holds WithRepoLock;
+// network operations must run after releasing it.
+func CommitLedgerSessionDeletion(ctx context.Context, repoPath, message string, sessionNames ...string) (bool, error) {
+	if len(sessionNames) == 0 {
+		return false, errors.New("session deletion requires explicit session names")
+	}
+	paths := make([]string, 0, len(sessionNames))
+	for _, name := range sessionNames {
+		if name == "" || name == "." || name == ".." || strings.ContainsAny(name, "/\\\x00") {
+			return false, fmt.Errorf("invalid session name %q", name)
+		}
+		paths = append(paths, ":(top,literal)sessions/"+name)
+	}
+	_, tip, err := ledgerIndexSnapshot(ctx, repoPath)
+	if err != nil {
+		return false, err
+	}
+	if tip == "" {
+		return false, nil
+	}
+	args := append([]string{"ls-tree", "-r", "-z", "--name-only", tip, "--"}, paths...)
+	tracked, err := cleanGitOutput(ctx, repoPath, args...)
+	if err != nil {
+		return false, err
+	}
+	if len(tracked) == 0 {
+		return false, nil
+	}
+	args = append([]string{"rm", "-r", "--force", "--sparse", "--ignore-unmatch", "--"}, paths...)
+	if _, err := cleanGitOutput(ctx, repoPath, args...); err != nil {
+		return false, err
+	}
+	tree, err := writeScopedIndexTree(ctx, repoPath, tip, paths)
+	if err != nil {
+		return false, err
+	}
+	// The scoped snapshot preserves everything outside the selected roots;
+	// requiring those roots to be empty proves the entire delta is exactly
+	// the requested deletion, even if raw Git changed the index during rm.
+	args = append([]string{"ls-tree", "-r", "-z", "--name-only", tree, "--"}, paths...)
+	remaining, err := cleanGitOutput(ctx, repoPath, args...)
+	if err != nil {
+		return false, err
+	}
+	if len(remaining) != 0 {
+		return false, errors.New("session deletion changed while preparing the commit")
+	}
+	if err := commitTreeToBranch(ctx, repoPath, tree, []string{tip}, tip, message, nil); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// AmendLedgerSnapshot replaces HEAD with its tree plus only the staged paths
+// named by the caller. It preserves every parent, the message and the original
+// author, and leaves unrelated index entries alone. The caller must hold
+// WithRepoLock from before staging. This is for the redaction gate's scoped
+// repairs; it never converts an amendment into a new child commit.
+func AmendLedgerSnapshot(ctx context.Context, repoPath string, pathspecs ...string) (bool, error) {
+	if len(pathspecs) == 0 {
+		return false, errors.New("amending Ledger requires explicit paths")
+	}
+	_, tip, err := ledgerIndexSnapshot(ctx, repoPath)
+	if err != nil {
+		return false, err
+	}
+	if tip == "" {
+		return false, errors.New("cannot amend an unborn Ledger branch")
+	}
+	tree, err := writeScopedIndexTree(ctx, repoPath, tip, pathspecs)
+	if err != nil {
+		return false, err
+	}
+	oldTree, err := cleanGitOutput(ctx, repoPath, "rev-parse", tip+"^{tree}")
+	if err != nil {
+		return false, err
+	}
+	if tree == strings.TrimSpace(string(oldTree)) {
+		return false, nil
+	}
+	metadata, err := cleanGitOutput(ctx, repoPath, "show", "-s", "--format=%P%x00%an%x00%ae%x00%aI%x00%B", tip)
+	if err != nil {
+		return false, err
+	}
+	fields := strings.SplitN(string(metadata), "\x00", 5)
+	if len(fields) != 5 {
+		return false, errors.New("invalid Ledger commit metadata")
+	}
+	parents := strings.Fields(fields[0])
+	parent := ""
+	if len(parents) > 0 {
+		parent = parents[0]
+	}
+	if err := validateLedgerTree(ctx, repoPath, tip, tree); err != nil {
+		return false, err
+	}
+	// Compare with the original parent: quarantining a new file removes it
+	// from the holding commit, rather than deleting earlier session content.
+	if err := assertNoSacredMassDeletion(ctx, repoPath, parent, tree, nil); err != nil {
+		return false, err
+	}
+	authorEnv := []string{"GIT_AUTHOR_NAME=" + fields[1], "GIT_AUTHOR_EMAIL=" + fields[2], "GIT_AUTHOR_DATE=" + fields[3]}
+	if err := commitTreeToBranch(ctx, repoPath, tree, parents, tip, strings.TrimSuffix(fields[4], "\n"), authorEnv); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // CommitLedgerSnapshotPreserving is CommitLedgerSnapshot for a caller that
 // deletes tracked sacred paths after preserving their full bytes in
 // .sageox/cache. preserved lists those ledger-relative paths. Each one is
@@ -73,20 +185,7 @@ func CommitLedgerSnapshot(ctx context.Context, repoPath, message string, pathspe
 // summary requests the guard never counts (assertNoSacredMassDeletion), no
 // other path is exempt, and there is no switch that disables the guard.
 func CommitLedgerSnapshotPreserving(ctx context.Context, repoPath, message string, preserved []string, pathspecs ...string) (committed bool, err error) {
-	// Never mutate the ledger mid-rebase: moving the branch ref under a rebase
-	// consumes the replay step (see .claude/rules/cache-only-design.md).
-	if err := IsSafeForGitOps(repoPath); err != nil {
-		return false, fmt.Errorf("unsafe Ledger commit: %w", err)
-	}
-
-	// Global fail-closed check on the real index, even for a path-scoped
-	// commit: git refuses every commit while any stage is unresolved, and the
-	// temporary index below would otherwise hide the conflict from write-tree.
-	tree, err := writeIndexTree(ctx, repoPath, nil)
-	if err != nil {
-		return false, err
-	}
-	parent, err := currentBranchTip(ctx, repoPath)
+	tree, parent, err := ledgerIndexSnapshot(ctx, repoPath)
 	if err != nil {
 		return false, err
 	}
@@ -118,6 +217,20 @@ func CommitLedgerSnapshotPreserving(ctx context.Context, repoPath, message strin
 	return true, nil
 }
 
+// ledgerIndexSnapshot checks the real index before any path-scoped tree can
+// hide a conflict, and captures the branch tip shared by all commit modes.
+func ledgerIndexSnapshot(ctx context.Context, repoPath string) (string, string, error) {
+	if err := IsSafeForIndexWrite(ctx, repoPath); err != nil {
+		return "", "", fmt.Errorf("unsafe Ledger commit: %w", err)
+	}
+	tree, err := writeIndexTree(ctx, repoPath, nil)
+	if err != nil {
+		return "", "", err
+	}
+	tip, err := currentBranchTip(ctx, repoPath)
+	return tree, tip, err
+}
+
 // commitLedgerTree validates tree's delta from parent, refuses it if it deletes
 // a mass of sacred files, and commits tree onto parent, moving the branch only
 // while it still points at tip: parent for a snapshot, the replaced commit for
@@ -129,7 +242,11 @@ func commitLedgerTree(ctx context.Context, repoPath, tree, parent, tip, message 
 	if err := assertNoSacredMassDeletion(ctx, repoPath, parent, tree, preserved); err != nil {
 		return err
 	}
-	return commitTreeToBranch(ctx, repoPath, tree, parent, tip, message)
+	var parents []string
+	if parent != "" {
+		parents = []string{parent}
+	}
+	return commitTreeToBranch(ctx, repoPath, tree, parents, tip, message, nil)
 }
 
 // StageLedgerBlob writes data as a blob and stages it at path (slash-separated,
@@ -212,6 +329,8 @@ func writeScopedIndexTree(ctx context.Context, repoPath, parent string, pathspec
 // Patch rejects (*.rej) and summary requests (*.needs-summary) do not count:
 // they are not session or plan content, and gitserver.EnsureGitignoreBeforeCommit
 // untracks them all before commits such as the session upload's (#1443).
+// Byte-identical renames within the same sacred prefix retain the original
+// blob in protected storage; moving it into a cache or another area does not.
 //
 // Fail-closed, matching validateLedgerTree: an unborn branch (parent=="") has
 // no deletions and passes; if the diff itself cannot be computed the caller
@@ -221,12 +340,33 @@ func assertNoSacredMassDeletion(ctx context.Context, repoPath, parent, tree stri
 		return nil // first commit: nothing pre-existing to delete
 	}
 	out, err := cleanGitOutput(ctx, repoPath,
-		"diff-tree", "--no-commit-id", "--name-only", "-r", "--diff-filter=D", parent, tree)
+		"diff-tree", "--no-commit-id", "--name-status", "-z", "-r", "--find-renames=100%", "--diff-filter=DR", parent, tree)
 	if err != nil {
 		return fmt.Errorf("sacred mass-delete guard: git diff-tree %s..%s: %w",
 			shortOID(parent), shortOID(tree), err)
 	}
-	deleted := sacred.Filter(strings.Split(string(out), "\n"))
+	var removed []string
+	entries := splitNUL(out)
+	for i := 0; i < len(entries); {
+		status, oldPath := entries[i], entries[i+1]
+		i += 2
+		if status == "R100" {
+			newPath := entries[i]
+			i++
+			retained := false
+			for _, prefix := range sacred.Prefixes {
+				if strings.HasPrefix(oldPath, prefix) && strings.HasPrefix(newPath, prefix) {
+					retained = true
+					break
+				}
+			}
+			if retained {
+				continue
+			}
+		}
+		removed = append(removed, oldPath)
+	}
+	deleted := sacred.Filter(removed)
 	deleted = slices.DeleteFunc(deleted, func(path string) bool {
 		if strings.HasSuffix(path, ".rej") || strings.HasSuffix(path, ".needs-summary") {
 			return true
@@ -267,12 +407,12 @@ func cacheHoldsBlob(ctx context.Context, repoPath, parent, path string) bool {
 // the current branch ref with a compare-and-swap on tip, the value the ref
 // must still hold, so a concurrent commit fails this update rather than being
 // silently overwritten.
-func commitTreeToBranch(ctx context.Context, repoPath, tree, parent, tip, message string) error {
+func commitTreeToBranch(ctx context.Context, repoPath, tree string, parents []string, tip, message string, authorEnv []string) error {
 	args := []string{"commit-tree", tree, "-m", message}
-	if parent != "" {
+	for _, parent := range parents {
 		args = append(args, "-p", parent)
 	}
-	out, err := cleanGitOutput(ctx, repoPath, args...)
+	out, err := runPlumbing(ctx, repoPath, nil, authorEnv, args...)
 	if err != nil {
 		return fmt.Errorf("git commit-tree: %w", err)
 	}

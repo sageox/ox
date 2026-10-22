@@ -195,10 +195,13 @@ func EnsureGitignoreBeforeCommit(repoPath string) {
 	EnsureGitignoreBeforeCommitCtx(context.Background(), repoPath)
 }
 
-// EnsureGitignoreBeforeCommitCtx is like EnsureGitignoreBeforeCommit but accepts a context.
-func EnsureGitignoreBeforeCommitCtx(ctx context.Context, repoPath string) {
+// EnsureGitignoreBeforeCommitCtx is like EnsureGitignoreBeforeCommit but accepts a
+// context. It returns literal commit pathspecs for the ignore files and staged
+// cleanup deletions, so a scoped caller can commit the cleanup with its own work
+// without including unrelated staged content. The caller holds the repo lock.
+func EnsureGitignoreBeforeCommitCtx(ctx context.Context, repoPath string) []string {
 	if repoPath == "" {
-		return
+		return nil
 	}
 
 	// ensure .gitignore exists with required entries
@@ -278,6 +281,21 @@ func EnsureGitignoreBeforeCommitCtx(ctx context.Context, repoPath string) {
 		slog.Info("removing legacy codedb at repo root", "path", codedbDir)
 		_ = os.RemoveAll(codedbDir)
 	}
+
+	paths := []string{":(literal).gitignore", ":(literal).sageox/.gitignore"}
+	deleted, err := exec.CommandContext(ctx, "git", "-C", repoPath,
+		"diff", "--cached", "--name-only", "--diff-filter=D", "-z", "--",
+		".sageox/cache/", "*.rej", "*.needs-summary", "codedb/").Output()
+	if err != nil {
+		slog.Debug("pre-commit cleanup paths unavailable", "path", repoPath, "error", err)
+		return paths
+	}
+	for _, p := range strings.Split(string(deleted), "\x00") {
+		if p != "" {
+			paths = append(paths, ":(literal)"+p)
+		}
+	}
+	return paths
 }
 
 // CacheFilesTracked returns true if any .sageox/cache/ files are tracked by git.
