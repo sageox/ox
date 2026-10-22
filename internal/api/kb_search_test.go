@@ -143,6 +143,9 @@ func TestSearchFiles_StatusMapping(t *testing.T) {
 	}{
 		{name: "404 feature off", statusCode: http.StatusNotFound, wantErrIs: ErrKBAPIUnavailable},
 		{name: "403 forbidden", statusCode: http.StatusForbidden, wantErrIs: ErrKBAPIUnavailable},
+		// a server that does not serve POST on the search route cannot search;
+		// that is "not enabled", not a raw HTTP failure for the coworker to decode
+		{name: "405 route does not accept POST", statusCode: http.StatusMethodNotAllowed, wantErrIs: ErrKBAPIUnavailable},
 		{name: "401 unauthenticated", statusCode: http.StatusUnauthorized, wantErrIs: ErrUnauthorized},
 		{name: "400 malformed", statusCode: http.StatusBadRequest, body: "both path filters set", wantSubstr: "both path filters set"},
 	}
