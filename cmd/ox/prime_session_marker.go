@@ -82,13 +82,22 @@ func (m *SessionMarker) IsPrimed() bool {
 // background shell hands over a pipe or socket that never reaches EOF.
 const hookStdinWait = 2 * time.Second
 
-// readHookInputBounded is agentx.ReadHookInputFromStdin with a deadline.
+// readHookInputBounded is agentx.ReadHookInput on stdin with a deadline.
 // agentx reads stdin to EOF, so on an inherited stdin that stays open it never
 // returns and the whole prime hangs. On timeout the payload is treated as
 // absent; the abandoned read ends with the process.
+//
+// The stdin handle is captured before the goroutine starts so the abandoned
+// read never touches the os.Stdin global after this function has returned.
 func readHookInputBounded(wait time.Duration) *agentx.HookInput {
+	stdin := os.Stdin
+	stat, err := stdin.Stat()
+	if err != nil || stat.Mode()&os.ModeCharDevice != 0 {
+		return nil // unreadable or a terminal: no hook payload
+	}
+
 	done := make(chan *agentx.HookInput, 1)
-	go func() { done <- agentx.ReadHookInputFromStdin() }()
+	go func() { done <- agentx.ReadHookInput(stdin) }()
 	select {
 	case input := <-done:
 		return input

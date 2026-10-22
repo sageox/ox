@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -1156,7 +1158,29 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	output.ElapsedMs = time.Since(primeStart).Milliseconds()
 	output.Timing = timing
 
+	// A capped hook prime reaches the model as a trimmed preview with sections
+	// deferred to a file, so it must not license a later compact prime. The
+	// marker above optimistically records delivery; revoke it unless the output
+	// path confirms the full prime went out untrimmed.
+	var emitted bytes.Buffer
+	revokeCandidate := agentSessionID != "" && hookInput != nil && output.HookOutputBudget > 0
+	if revokeCandidate {
+		origOut := cmd.OutOrStdout()
+		cmd.SetOut(io.MultiWriter(origOut, &emitted))
+		defer cmd.SetOut(origOut)
+	}
+
 	err = outputAgentPrime(cmd, textMode, reviewMode, output)
+
+	if revokeCandidate && (err != nil || strings.Contains(emitted.String(), hookCapDeferredOpen)) {
+		_, revokeErr := UpdateSessionMarker(agentSessionID, func(m *SessionMarker) error {
+			m.FullPrimeViaHook = false
+			return nil
+		})
+		if revokeErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to update session marker: %v\n", revokeErr)
+		}
+	}
 
 	// Emit PAT expiry warning to stderr (post-output so structured stdout is
 	// never polluted). Internally skipped in ephemeral mode and when stderr
@@ -1190,6 +1214,11 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 
 	return err
 }
+
+// hookCapDeferredOpen is the start of the pointer fitPrimeToHookCap appends when
+// it trims a hook prime; its presence in emitted output means the model got a
+// partial prime.
+const hookCapDeferredOpen = `<deferred path="`
 
 // resolveAgentIDFromStates returns envID if it matches an alive recording, otherwise "".
 // Intentionally does not fall back to a sole active recording: two concurrent Claude Code

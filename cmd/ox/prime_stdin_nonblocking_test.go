@@ -22,9 +22,14 @@ func swapStdinForProbeTest(t *testing.T, r *os.File) {
 // until EOF, which never came. The hook-payload probe must give up and let
 // prime run without a payload.
 func TestReadAgentHookInput_NeverWaitsForAnOpenStdin(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: waits out the hookStdinWait deadline (~2s)")
+	}
 	r, w, err := os.Pipe()
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = w.Close(); _ = r.Close() }) // the writer stays open during the call
+	// the writer stays open during the call; closing both ends afterwards lets
+	// the abandoned reader goroutine exit instead of leaking into later tests
+	t.Cleanup(func() { _ = w.Close(); _ = r.Close() })
 	swapStdinForProbeTest(t, r)
 
 	done := make(chan *AgentHookInput, 1)
