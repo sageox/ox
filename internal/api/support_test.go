@@ -22,6 +22,12 @@ import (
 
 const testSupportCaseID = "sup_0123456789abcdef01"
 
+type supportRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f supportRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
 // TestSupportSubmission_PreservesGuardedBytes prevents sending a different body
 // from the exact JSON bytes approved by the caller's secret guard.
 func TestSupportSubmission_PreservesGuardedBytes(t *testing.T) {
@@ -231,12 +237,18 @@ func TestSupportSubmission_TransportFailuresStayPrivate(t *testing.T) {
 		var calls atomic.Int32
 		release := make(chan struct{})
 		server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
-			calls.Add(1)
 			<-release
 		}))
 		defer server.Close()
 		defer close(release)
-		_, err := NewRepoClientWithEndpoint(server.URL).WithTimeout(30*time.Millisecond).SubmitSupportCase(context.Background(), []byte(`{}`))
+		client := NewRepoClientWithEndpoint(server.URL).WithTimeout(30 * time.Millisecond)
+		// a timeout may happen before the server receives the request; count
+		// transport attempts so the no-retry assertion covers that case too.
+		client.httpClient.Transport = supportRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			calls.Add(1)
+			return http.DefaultTransport.RoundTrip(req)
+		})
+		_, err := client.SubmitSupportCase(context.Background(), []byte(`{}`))
 		require.EqualError(t, err, "support submission timed out")
 		assert.EqualValues(t, 1, calls.Load())
 	})
