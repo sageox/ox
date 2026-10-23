@@ -194,6 +194,7 @@ func TestFindCodexSession_ResumedOldConversation(t *testing.T) {
 		t.Run(fmt.Sprintf("exact_id=%t/symlink_root=%t", tc.exactID, tc.symlinkRoot), func(t *testing.T) {
 			home := t.TempDir()
 			t.Setenv("HOME", home)
+			t.Setenv("USERPROFILE", home) // os.UserHomeDir uses this on Windows.
 			if tc.symlinkRoot {
 				if err := os.MkdirAll(filepath.Join(home, ".codex"), 0o755); err != nil {
 					t.Fatal(err)
