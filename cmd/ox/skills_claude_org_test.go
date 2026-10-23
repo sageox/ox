@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/sageox/ox/extensions/skills"
 	"github.com/sageox/ox/internal/endpoint"
@@ -124,6 +125,18 @@ func TestPublishManifest_ByteOrderMark(t *testing.T) {
 	require.False(t, folded)
 	require.Equal(t, "Verify a release.", description)
 	require.Contains(t, publishRuntimeWarning("release-check", manifest), "runs `ox sync`")
+}
+
+// TestPublishRuntimeWarning_StripsControlBytes: the evidence quoted in the
+// warning comes from the skill body, which a teammate wrote. Printed raw, an
+// escape sequence in it would repaint the publisher's terminal.
+func TestPublishRuntimeWarning_StripsControlBytes(t *testing.T) {
+	manifest := []byte("---\nname: s\ndescription: d\n---\nRun `ox sync \x1b[2J\x1b[31mnow`.\n\n```bash\x1b]0;title\x07\nox status\n```\n")
+	got := publishRuntimeWarning("s", manifest)
+	require.NotEmpty(t, got)
+	for _, r := range got {
+		require.Truef(t, unicode.IsPrint(r), "warning carries non-printable %U: %q", r, got)
+	}
 }
 
 // --- B. `ox skills status` and `ox doctor` report sources -----------------

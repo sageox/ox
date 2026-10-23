@@ -334,14 +334,16 @@ func publishRuntimeWarning(name string, manifest []byte) string {
 	if len(signals) == 0 {
 		return ""
 	}
+	// Evidence is quoted from a teammate's skill body: strip control bytes so an
+	// escape sequence in it cannot repaint the publisher's terminal.
 	var found, needs []string
 	for _, signal := range signals {
 		switch signal.Code {
 		case teamskills.SignalRunsOxCommands:
-			found = append(found, "runs `"+signal.Evidence+"`")
+			found = append(found, "runs `"+sanitizeCell(signal.Evidence)+"`")
 			needs = append(needs, teamdocs.RequiresOxCLI)
 		case teamskills.SignalShellFence:
-			found = append(found, "has a shell code block ("+signal.Evidence+")")
+			found = append(found, "has a shell code block ("+sanitizeCell(signal.Evidence)+")")
 			needs = append(needs, teamdocs.RequiresShell)
 		}
 	}
