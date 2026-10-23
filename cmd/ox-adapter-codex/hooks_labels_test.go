@@ -161,6 +161,8 @@ func TestHookLabels_DoctorDistinguishesMalformedFromMissing(t *testing.T) {
 			{name: "empty"},
 			{name: "unconfigured", data: `{}`},
 			{name: "malformed-json", data: `{`, invalid: true},
+			{name: "null-document", data: `null`, invalid: true},
+			{name: "null-hooks", data: `{"hooks":null}`, invalid: true},
 			{name: "malformed-hooks", data: `{"hooks":[]}`, invalid: true},
 		} {
 			t.Run(scope+"/"+tc.name, func(t *testing.T) {
@@ -185,6 +187,8 @@ func TestHookLabels_DoctorDistinguishesMalformedFromMissing(t *testing.T) {
 					assert.False(t, result.Issues[0].FixSafe)
 					assert.Empty(t, result.Issues[0].FixArgv, "reinstall cannot safely repair malformed user-owned JSON")
 					assert.False(t, result.OK)
+					_, err := handleInstallHooks(adapterprotocol.HookParams{RepoRoot: params.RepoRoot, Scope: scope})
+					assert.Error(t, err, "install must refuse malformed files without panicking or replacing them")
 				case scope == "project":
 					require.Len(t, result.Issues, 1)
 					assert.Equal(t, "codex:hooks-missing", result.Issues[0].Slug)

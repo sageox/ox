@@ -263,11 +263,17 @@ func readHooksFile(path string) (map[string][]codexHookEntry, map[string]json.Ra
 	if err := json.Unmarshal(data, &rawMap); err != nil {
 		return nil, nil, fmt.Errorf("failed to parse hooks file: %w", err)
 	}
+	if rawMap == nil {
+		return nil, nil, fmt.Errorf("failed to parse hooks file: expected an object")
+	}
 
 	hooksMap := make(map[string][]codexHookEntry)
 	if hooksRaw, ok := rawMap["hooks"]; ok {
 		if err := json.Unmarshal(hooksRaw, &hooksMap); err != nil {
 			return nil, nil, fmt.Errorf("failed to parse hooks section: %w", err)
+		}
+		if hooksMap == nil {
+			return nil, nil, fmt.Errorf("failed to parse hooks section: expected an object")
 		}
 		delete(rawMap, "hooks")
 	}
