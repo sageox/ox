@@ -258,6 +258,10 @@ var (
 	jsOutbox   = fmt.Sprintf(jsStored, ":op:")
 	jsMarks    = fmt.Sprintf(jsStored, ":draft:")
 	jsCount    = `document.querySelector('.rev-count').textContent`
+	// jsSyncWrapped names each button of the status line that starts below
+	// its message: wrapped onto a line of its own.
+	jsSyncWrapped = `(function(){var m=document.querySelector('.rev-sync .rev-sync-msg').getBoundingClientRect();` +
+		`return [].filter.call(document.querySelectorAll('.rev-sync button'),function(b){return b.getBoundingClientRect().top>=m.bottom;}).map(function(b){return b.textContent;}).join(',');})()`
 )
 
 // TestBrowser_SubmitResendsSameRoundAfterReloadMidFlight: the reviewer
@@ -398,8 +402,9 @@ func TestBrowser_LiveReloadWaitsForTheNote(t *testing.T) {
 // TestBrowser_SyncStatusTellsTheTruth: each server outcome reads as what it
 // is, and only an answer naming the round clears it. Failure prevented: the
 // page says "sent" when the feedback only sits on the author's laptop, an
-// answer for another round clears this one, or an error alert() that the web
-// app's iframe swallows leaves the reviewer believing it went through.
+// answer for another round clears this one, an error alert() that the web
+// app's iframe swallows leaves the reviewer believing it went through, or a
+// short status wraps its dismiss × onto a line of its own.
 func TestBrowser_SyncStatusTellsTheTruth(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -427,6 +432,9 @@ func TestBrowser_SyncStatusTellsTheTruth(t *testing.T) {
 			}
 			if k := evalString(t, ctx, `document.querySelector('.rev-sync').classList.contains(`+jsString(c.wantKind)+`)`); k != "true" {
 				t.Fatalf("status must be styled %s", c.wantKind)
+			}
+			if w := evalString(t, ctx, jsSyncWrapped); w != "" {
+				t.Fatalf("the status's buttons must sit beside its message, wrapped below it: %q", w)
 			}
 			ob, marks := evalString(t, ctx, jsOutbox), evalString(t, ctx, jsMarks)
 			if c.wantClear && (ob != "" || strings.Contains(marks, "note for")) {
