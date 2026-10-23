@@ -2071,6 +2071,30 @@
     bar.className = "rev-bar";
     bar.innerHTML = (live ? '<span class="rev-conn"></span>' : "") + '<button class="rev-toggle" title="Toggle review mode">Review</button>' + (revision ? '<button class="rev-draw" aria-pressed="false" title="Drag to draw an oval around part of the plan to comment on it">Draw</button>' : "") + '<span class="rev-count"></span>' + (live && !opts.reviewer ? '<button class="rev-who" title="Set the name teammates see on your comments"></button>' : "") + '<button class="rev-submit" title="Send feedback to the agent">' + (live ? "Submit" : "Export") + "</button>" + (opts.approve ? '<button class="rev-approve" title="Approve and close the loop">Approve</button>' : "");
     body.appendChild(bar);
+    let drag = null;
+    bar.addEventListener("pointerdown", (e) => {
+      if (drag || !e.isPrimary || e.button !== 0 || e.target.closest("button")) return;
+      const r = bar.getBoundingClientRect();
+      drag = { x: e.clientX - r.left, y: e.clientY - r.top };
+      bar.setPointerCapture(e.pointerId);
+      bar.classList.add("rev-dragging");
+      if (hintBubble) {
+        hintBubble.remove();
+        hintBubble = null;
+      }
+      e.preventDefault();
+    }, { signal });
+    bar.addEventListener("pointermove", (e) => {
+      if (!drag || !e.isPrimary) return;
+      const b = box2();
+      bar.style.left = Math.max(0, b.left, Math.min(e.clientX - drag.x, Math.min(b.right, window.innerWidth) - bar.offsetWidth)) + "px";
+      bar.style.top = Math.max(0, b.top, Math.min(e.clientY - drag.y, Math.min(b.bottom, window.innerHeight) - bar.offsetHeight)) + "px";
+      bar.style.bottom = "auto";
+    }, { signal });
+    bar.addEventListener("lostpointercapture", () => {
+      drag = null;
+      bar.classList.remove("rev-dragging");
+    }, { signal });
     const countEl = bar.querySelector(".rev-count");
     connEl = bar.querySelector(".rev-conn");
     paintConn();
