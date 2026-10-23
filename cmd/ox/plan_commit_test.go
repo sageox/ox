@@ -227,10 +227,12 @@ func TestPlanBackfillLeavesLargePlainHTMLLocal(t *testing.T) {
 					}
 					initGitLedger(t, ledger)
 					pending := strings.Repeat("pending HTML\n", 100000)
-					require.NoError(t, os.WriteFile(filepath.Join(old, planHTMLFileName), []byte(pending), 0o644))
+					stagedHTML := "a separate staged HTML draft\n"
 					if staged {
+						require.NoError(t, os.WriteFile(filepath.Join(old, planHTMLFileName), []byte(stagedHTML), 0o644))
 						runGitInDir(t, ledger, "add", "--", "data/plans/2026-05-01-old/plan.html")
 					}
+					require.NoError(t, os.WriteFile(filepath.Join(old, planHTMLFileName), []byte(pending), 0o644))
 					// Hydration caches need not contain the pointer's literal bytes.
 					cache := filepath.Join(ledger, ".sageox", "cache", "data", "plans", filepath.Base(old), planHTMLFileName)
 					require.NoError(t, os.MkdirAll(filepath.Dir(cache), 0o700))
@@ -244,14 +246,31 @@ func TestPlanBackfillLeavesLargePlainHTMLLocal(t *testing.T) {
 						renames = [][2]string{{old, dest}}
 						touched = nil
 					}
-					err := commitPlanBackfillToLedger(ledger, renames, touched, nil)
-					require.NotErrorIs(t, err, errBackfillCommitFailed, "only the missing remote may fail")
-					rel := "data/plans/" + filepath.Base(dest)
-					require.Contains(t, runGitInDir(t, ledger, "show", "HEAD:"+rel+"/meta.json"), "Corrected title")
-					if tracked {
-						require.Equal(t, strings.TrimSpace(pointer), runGitInDir(t, ledger, "show", "HEAD:"+rel+"/plan.html"))
+					head := runGitInDir(t, ledger, "rev-parse", "HEAD")
+					indexBefore, err := os.ReadFile(filepath.Join(ledger, ".git", "index"))
+					require.NoError(t, err)
+					err = commitPlanBackfillToLedger(ledger, renames, touched, nil)
+					if rename && staged {
+						require.ErrorIs(t, err, errBackfillCommitFailed)
+						require.ErrorContains(t, err, "staged plan.html")
+						require.Equal(t, head, runGitInDir(t, ledger, "rev-parse", "HEAD"))
+						indexAfter, err := os.ReadFile(filepath.Join(ledger, ".git", "index"))
+						require.NoError(t, err)
+						require.Equal(t, indexBefore, indexAfter)
+						require.NoDirExists(t, dest)
+						dest = old
 					} else {
-						require.Empty(t, runGitInDir(t, ledger, "ls-tree", "--name-only", "HEAD", "--", rel+"/plan.html"))
+						require.NotErrorIs(t, err, errBackfillCommitFailed, "only the missing remote may fail")
+						rel := "data/plans/" + filepath.Base(dest)
+						require.Contains(t, runGitInDir(t, ledger, "show", "HEAD:"+rel+"/meta.json"), "Corrected title")
+						if tracked {
+							require.Equal(t, strings.TrimSpace(pointer), runGitInDir(t, ledger, "show", "HEAD:"+rel+"/plan.html"))
+						} else {
+							require.Empty(t, runGitInDir(t, ledger, "ls-tree", "--name-only", "HEAD", "--", rel+"/plan.html"))
+						}
+					}
+					if staged {
+						require.Equal(t, strings.TrimSpace(stagedHTML), runGitInDir(t, ledger, "show", ":data/plans/2026-05-01-old/plan.html"))
 					}
 					working, err := os.ReadFile(filepath.Join(dest, planHTMLFileName))
 					require.NoError(t, err)

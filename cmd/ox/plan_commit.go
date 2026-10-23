@@ -745,6 +745,11 @@ func commitPlanBackfillToLedger(ledgerPath string, renames [][2]string, touchedP
 				return fmt.Errorf("list original plan files: %w", err)
 			}
 			pendingHTML := plan.HasLargePlainHTML(pair[0])
+			if pendingHTML {
+				if _, err := gitutil.RunGit(ctx, ledgerPath, "diff", "--cached", "--quiet", "--", ":(literal)"+oldRel+"/"+planHTMLFileName); err != nil {
+					return fmt.Errorf("cannot rename a plan with staged plan.html: save the staged HTML before retrying backfill: %w", err)
+				}
+			}
 			for _, path := range strings.Split(strings.TrimSuffix(string(tracked), "\x00"), "\x00") {
 				if path == "" {
 					continue
@@ -799,11 +804,7 @@ func commitPlanBackfillToLedger(ledgerPath string, renames [][2]string, touchedP
 		var excludes []string
 		for _, pair := range moves {
 			if plan.HasLargePlainHTML(filepath.Join(ledgerPath, pair[0])) {
-				// Reset only the index: git mv carries the committed HTML to the
-				// new path while the pending page stays as a local working edit.
-				if out, err := gitutil.RunGit(ctx, ledgerPath, "reset", "-q", "--", pair[0]+"/"+planHTMLFileName); err != nil {
-					return fmt.Errorf("unstage pending %s: %s: %w", planHTMLFileName, gitutil.SanitizeOutput(out), err)
-				}
+				// git mv retains HEAD's HTML; the newer page stays a local edit.
 				excludes = append(excludes, ":(exclude,literal)"+pair[1]+"/"+planHTMLFileName)
 			}
 			if out, err := gitutil.RunGit(ctx, ledgerPath, "mv", "--sparse", "--", pair[0], pair[1]); err != nil {
