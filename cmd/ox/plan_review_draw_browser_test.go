@@ -14,7 +14,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -56,6 +55,13 @@ window.addEventListener('message',function(e){
  if(d.open)document.querySelector('details').open=true;
  if(d.check)document.getElementById(d.check).checked=true;
  if(d.which)parent.postMessage({which:document.querySelector('input[name=rollout]:checked').id},'*');
+ if(d.ink){
+  var root=document.querySelector('.rev-ink'),live=root.querySelector('.rev-ink-live'),hit=root.querySelector('.rev-ink-hit');
+  function box(el){if(!el)return null;var r=el.getBoundingClientRect();return {x:r.left,y:r.top,w:r.width,h:r.height}}
+  parent.postMessage({ink:{live:box(live),oval:box(hit),anchor:hit&&hit.getAttribute('data-edit'),cursor:hit&&getComputedStyle(hit).cursor,
+   handles:[].map.call(root.querySelectorAll('.rev-ink-handle'),function(h){return {hx:+h.getAttribute('data-hx'),hy:+h.getAttribute('data-hy'),box:box(h)}}),
+   polylines:root.querySelectorAll('polyline').length}},'*');
+ }
  if(!d.want)return;
  var els=named[d.want]();els[0].scrollIntoView({block:'center'});
  requestAnimationFrame(function(){requestAnimationFrame(function(){
@@ -78,7 +84,7 @@ const drawTools = `<!doctype html><html><body style="margin:0">` +
 	` const inst = 'draw-test-' + String(++loads).padStart(4, '0'); port = connectFrame(frame, inst); port.listen((m) => window.got.push(m));` +
 	` frame.style.width = w + 'px'; frame.style.height = h + 'px'; frame.src = '/doc/' + rev + '?load=' + loads + '#i=' + inst; };` +
 	`window.send = (m) => port.send(m); window.ask = (m) => frame.contentWindow.postMessage(m, '*');` +
-	`window.addEventListener('message', (e) => { const d = e.data || {}; if (d.rect) window.rect = d.rect; if (d.input) window.input = true; if (d.which) window.which = d.which; });` +
+	`window.addEventListener('message', (e) => { const d = e.data || {}; if (d.rect) window.rect = d.rect; if (d.input) window.input = true; if (d.which) window.which = d.which; if (d.ink) window.ink = d.ink; });` +
 	`window.ready = true;</script></body></html>`
 
 var mermaidCDNTag = regexp.MustCompile(`<script[^>]+src="https://cdn\.jsdelivr\.net/npm/mermaid@[^"]+"[^>]*></script>`)
@@ -230,25 +236,19 @@ func reachFrame(t *testing.T, ctx context.Context) {
 	}
 }
 
-// stroke draws a loop around b by hand: from its upper left, once around and
-// a little past where it began, through every corner of b's box.
+// stroke drags out an oval around b, enclosing most of its area.
 func stroke(t *testing.T, ctx context.Context, b box) {
 	t.Helper()
 	cx, cy := b.X+b.W/2, b.Y+b.H/2
-	rx, ry := b.W/2*math.Sqrt2+6, b.H/2*math.Sqrt2+6
-	var acts []chromedp.Action
-	const n = 72
-	for i := 0; i <= n+8; i++ {
-		a := (-150 + 360*float64(i)/n) * math.Pi / 180
-		x, y := cx+rx*math.Cos(a), cy+ry*math.Sin(a)
-		switch i {
-		case 0:
-			acts = append(acts, chromedp.MouseEvent("mouseMoved", x, y), chromedp.MouseEvent("mousePressed", x, y, chromedp.ButtonLeft, chromedp.ClickCount(1)))
-		case n + 8:
-			acts = append(acts, chromedp.MouseEvent("mouseReleased", x, y, chromedp.ButtonLeft, chromedp.ClickCount(1)))
-		default:
-			acts = append(acts, chromedp.MouseEvent("mouseMoved", x, y, chromedp.ButtonLeft))
-		}
+	rx, ry := b.W/2+6, b.H/2+6
+	// Deselect the previous oval before creating another over the same area.
+	acts := []chromedp.Action{
+		chromedp.MouseClickXY(5, 5),
+		chromedp.MouseEvent("mouseMoved", cx-rx, cy-ry),
+		chromedp.MouseEvent("mousePressed", cx-rx, cy-ry, chromedp.ButtonLeft, chromedp.ClickCount(1)),
+		chromedp.MouseEvent("mouseMoved", cx-rx+2, cy-ry+2, chromedp.ButtonLeft),
+		chromedp.MouseEvent("mouseMoved", cx+rx, cy+ry, chromedp.ButtonLeft),
+		chromedp.MouseEvent("mouseReleased", cx+rx, cy+ry, chromedp.ButtonLeft, chromedp.ClickCount(1)),
 	}
 	if err := chromedp.Run(ctx, acts...); err != nil {
 		t.Fatalf("draw around %s: %v", b.Name, err)
@@ -492,7 +492,7 @@ func drawHost(doc, revision, committed, extra string) string {
 		`<iframe id="doc" sandbox="allow-scripts" style="position:absolute;left:0;top:0;width:1280px;height:800px;border:0"></iframe>` +
 		`<script type="module">import { connectFrame, mountHostControls } from '/index.js';` +
 		`const frame = document.getElementById('doc'); window.sent = [];` +
-		`window.addEventListener('message', (e) => { const d = e.data || {}; if (d.rect) window.rect = d.rect; if (d.input) window.input = true; if (d.connected) window.connected = true; });` +
+		`window.addEventListener('message', (e) => { const d = e.data || {}; if (d.rect) window.rect = d.rect; if (d.input) window.input = true; if (d.connected) window.connected = true; if (d.ink) window.ink = d.ink; });` +
 		`window.ask = (m) => frame.contentWindow.postMessage(m, '*');` +
 		`mountHostControls(connectFrame(frame, 'draw-host-0001'), { account: 'acct-devon', plan: 'pln_draw', slug: 'retry-budget-rollout', reviewer: 'Devon',` +
 		` frame, reviewing: true, revision: '` + revision + `', committed: ` + committed + `,` + extra +
@@ -995,11 +995,11 @@ func TestBrowser_DrawingNeverEnclosesTheReviewControls(t *testing.T) {
 		t.Fatal(err)
 	}
 	var b box
-	if err := json.Unmarshal([]byte(evalString(t, ctx, `(function(){var r=document.querySelector('.rev-rail').getBoundingClientRect();return JSON.stringify({name:'rail',x:r.left+12,y:r.top+12,w:r.width-24,h:r.height-24})})()`)), &b); err != nil {
+	if err := json.Unmarshal([]byte(evalString(t, ctx, `(function(){var r=document.querySelector('.rev-rail').getBoundingClientRect();return JSON.stringify({name:'rail',x:r.left-8,y:r.top-8,w:r.width+16,h:r.height+16})})()`)), &b); err != nil {
 		t.Fatal(err)
 	}
 	stroke(t, ctx, b)
-	if !waitJS(ctx, `(document.querySelector('.rev-toast')||{}).textContent.indexOf('Nothing in that loop')===0`, 5*time.Second) {
+	if !waitJS(ctx, `(document.querySelector('.rev-toast')||{}).textContent.indexOf('Nothing in that oval')===0`, 5*time.Second) {
 		t.Errorf("a loop around the rail did not say nothing can take a comment; note open: %s, toast: %q", evalString(t, ctx, `!!document.querySelector('.rev-pop')`),
 			evalString(t, ctx, `(document.querySelector('.rev-toast')||{}).textContent`))
 	}
