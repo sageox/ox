@@ -30,8 +30,8 @@ The ox CLI does not install this package. It builds the same source into
 
 ## Install
 
-The package is published to GitHub Packages under the `@sageox` scope. It has
-no dependencies.
+The package is published to GitHub Packages under the `@sageox` scope. It is
+public, as is this repository, and has no dependencies.
 
 ```ini
 # .npmrc
@@ -312,6 +312,3 @@ Edit `src/`, never `internal/plan/assets/review.*`.
    job runs none of the build's code: it checks the tarball's SHA-256, attests
    it, publishes it with no lifecycle scripts under the dist-tag `latest`
    (`next` for a prerelease), and writes its integrity to the run summary.
-4. After the first publish only, set the package's visibility to *internal*
-   in its GitHub settings, and grant read access to each repository that
-   installs it.
