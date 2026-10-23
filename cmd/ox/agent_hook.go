@@ -644,6 +644,8 @@ func handleAfterTool(ctx *HookContext) error {
 		return nil
 	}
 
+	recordStatuslineAction(ctx.ProjectRoot, agentID, ctx.Input)
+
 	// Plan-exit nudge (Gold tier): the closest plan-exit signal Claude Code
 	// exposes is this PostToolUse firing after ExitPlanMode. Strictly gated on
 	// the tool name so it is a no-op for every other tool — NOT a noisy hook.

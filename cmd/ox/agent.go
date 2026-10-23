@@ -1341,6 +1341,7 @@ func emitWhispers(w io.Writer, agentID string) {
 	}
 
 	formatWhispersWithEdits(w, entries, checkoutEditedFiles(projectRoot))
+	recordStatuslineWhisper(projectRoot, agentID, entries)
 
 	// best-effort context-trace for whisper delivery observability
 	traceWhisperDelivery(projectRoot, agentID, entries)
