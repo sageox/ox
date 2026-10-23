@@ -126,6 +126,9 @@
   function checkRegion(v) {
     return problem(v, true);
   }
+  function runsOf(c) {
+    return Array.isArray(c.runs) ? c.runs.filter((x) => obj(x) && str(x.text) && box(x.box)) : null;
+  }
   function drawingLabel(r) {
     const first = r.targets[0];
     const item = r.context.items.filter((it) => it.anchor === first.anchor)[0];
@@ -133,6 +136,7 @@
     const label = "Drawing: " + text2;
     return label.length > 70 ? label.slice(0, 69) + "…" : label;
   }
+  var overlaps = (a, b) => a[0] < b[0] + b[2] && b[0] < a[0] + a[2] && a[1] < b[1] + b[3] && b[1] < a[1] + a[3];
   var r1 = (n) => Math.round(n * 10) / 10;
   function bboxOf(pts) {
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
@@ -288,7 +292,6 @@
       }
       return false;
     }
-    const overlaps = (a, b) => a[0] < b[0] + b[2] && b[0] < a[0] + a[2] && a[1] < b[1] + b[3] && b[1] < a[1] + a[3];
     function inside(pt, poly) {
       let w = 0;
       for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
@@ -355,15 +358,24 @@
       const cx = bb[0] + bb[2] / 2, cy = bb[1] + bb[3] / 2;
       const dist = (b) => Math.abs(b[0] + b[2] / 2 - cx) + Math.abs(b[1] + b[3] / 2 - cy);
       const near = leafMost(shown.filter((c) => overlaps(c.box, zone))).sort((a, b) => dist(a.box) - dist(b.box));
-      const ctx = { items: [], truncated: near.length > LIMITS.contextItems };
+      const kept = [];
+      const ctx = { items: [], truncated: near.length > LIMITS.contextItems, runs: kept };
       const cut = (s, n) => {
         if (s.length <= n) return s;
         ctx.truncated = true;
         return s.slice(0, n - 1) + "…";
       };
+      const band = [...zone];
+      near.forEach((c) => {
+        const x1 = Math.max(band[0] + band[2], c.box[0] + c.box[2]);
+        band[0] = Math.min(band[0], c.box[0]);
+        band[2] = x1 - band[0];
+      });
+      let runs = [];
       const root = document.documentElement;
       root.classList.add("rev-reading");
       try {
+        runs = runsIn(band).sort((a, b) => dist(a.box) - dist(b.box));
         near.slice(0, LIMITS.contextItems).forEach((c) => {
           const h = c.el;
           let text2 = collapse(h.innerText === void 0 ? h.textContent : h.innerText);
@@ -390,7 +402,57 @@
         ctx.items.pop();
         ctx.truncated = true;
       }
+      let room = LIMITS.contextBytes - utf8Bytes(ctx);
+      for (const r of runs) {
+        const n = utf8Bytes(r) + 1;
+        if (n > room) ctx.truncated = true;
+        else {
+          kept.push(r);
+          room -= n;
+        }
+      }
       return ctx;
+    }
+    function runsIn(band) {
+      const out = [];
+      const range = document.createRange();
+      const walk = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
+        acceptNode(n) {
+          if (n.nodeType === Node.TEXT_NODE) return NodeFilter.FILTER_ACCEPT;
+          const el = n;
+          if (el.matches(exclude + ", script, style, noscript, template, textarea, select")) return NodeFilter.FILTER_REJECT;
+          const r = el.getBoundingClientRect();
+          if ((r.width || r.height) && !overlaps(rectOf(r), band)) return NodeFilter.FILTER_REJECT;
+          if (el.checkVisibility && !el.checkVisibility({ visibilityProperty: true, opacityProperty: true })) return NodeFilter.FILTER_REJECT;
+          return NodeFilter.FILTER_SKIP;
+        }
+      });
+      for (let t = walk.nextNode(); t; t = walk.nextNode()) {
+        let run = null;
+        const keep = () => {
+          if (run && overlaps(run.box, band)) out.push(run);
+        };
+        const words = /\S+/g;
+        for (let w = words.exec(t.data); w; w = words.exec(t.data)) {
+          range.setStart(t, w.index);
+          range.setEnd(t, w.index + w[0].length);
+          const r = range.getClientRects()[0];
+          if (!r || r.width < 1) continue;
+          const b = rectOf(r);
+          if (run && Math.abs(b[1] - run.box[1]) < 1 && b[0] - (run.box[0] + run.box[2]) < b[3]) {
+            const x1 = Math.max(run.box[0] + run.box[2], b[0] + b[2]);
+            run.box[0] = Math.min(run.box[0], b[0]);
+            run.box[2] = r1(x1 - run.box[0]);
+            run.box[3] = Math.max(run.box[3], b[3]);
+            run.text += " " + w[0];
+          } else {
+            keep();
+            run = { text: w[0], box: b };
+          }
+        }
+        keep();
+      }
+      return out;
     }
     function labelsIn(el, zone) {
       const out = [];
@@ -1042,34 +1104,30 @@
       if (text2) n.textContent = text2;
       return n;
     };
-    const b = r.bbox, pad = 24, vb = [b[0] - pad, b[1] - pad, b[2] + 2 * pad, b[3] + 2 * pad];
+    const items = r.context.items, recorded = runsOf(r.context);
+    const runs = recorded && recorded.length ? recorded : null;
+    const labels = runs ? [] : items.reduce((all2, it) => all2.concat(it.labels || []), []);
+    const placed = runs || labels;
+    const b = r.bbox, pad = 24;
+    let x0 = b[0] - pad, y0 = b[1] - pad, x1 = b[0] + b[2] + pad, y1 = b[1] + b[3] + pad;
+    placed.forEach((t) => {
+      x0 = Math.min(x0, t.box[0] - 4);
+      y0 = Math.min(y0, t.box[1] - 4);
+      x1 = Math.max(x1, t.box[0] + t.box[2] + 4);
+      y1 = Math.max(y1, t.box[1] + t.box[3] + 4);
+    });
+    if (r.context.truncated) y1 += 18;
+    const vb = [x0, y0, x1 - x0, y1 - y0];
     const out = mk("svg", { viewBox: vb.join(" "), width: vb[2], height: vb[3], class: "rev-original-svg", role: "img" });
     out.appendChild(mk("title", {}, "What lay under this drawing on revision " + r.plan_revision));
-    r.context.items.forEach((it) => {
-      const [x, y, w, h] = it.box;
-      out.appendChild(mk("rect", { x, y, width: w, height: h, class: "rev-orig-box" }));
-      if (it.labels) {
-        it.labels.forEach((l) => {
-          out.appendChild(mk("rect", { x: l.box[0], y: l.box[1], width: l.box[2], height: l.box[3], class: "rev-orig-label-box" }));
-          out.appendChild(mk("text", { x: l.box[0] + 2, y: l.box[1] + Math.min(l.box[3], 14) - 3, class: "rev-orig-label" }, l.text));
-        });
-        const rest = it.labels.reduce((t, l) => t.replace(l.text, " "), it.text).replace(/\s+/g, " ").trim();
-        if (rest) out.appendChild(mk("text", { x: x + 2, y: y + h - 4, class: "rev-orig-text" }, rest));
-        return;
-      }
-      const per = Math.max(8, Math.floor(w / 7)), rows = Math.max(1, Math.floor(h / 15)), text2 = mk("text", { class: "rev-orig-text" });
-      let line = "", n = 0;
-      const flush = () => {
-        if (n < rows && line) text2.appendChild(mk("tspan", { x: x + 2, y: y + 13 + n * 15 }, line));
-        n++;
-        line = "";
-      };
-      it.text.split(" ").forEach((wd) => {
-        if (line && (line + " " + wd).length > per) flush();
-        line = line ? line + " " + wd : wd;
-      });
-      flush();
-      out.appendChild(text2);
+    items.forEach((it) => out.appendChild(mk("rect", { x: it.box[0], y: it.box[1], width: it.box[2], height: it.box[3], class: "rev-orig-box" })));
+    (runs || []).forEach((t) => {
+      const [x, y, w, h] = t.box;
+      out.appendChild(mk("text", { x, y: r1(y + 0.8 * h), "font-size": r1(h / 1.2), textLength: w, lengthAdjust: "spacingAndGlyphs", class: "rev-orig-run" }, t.text));
+    });
+    labels.forEach((l) => {
+      out.appendChild(mk("rect", { x: l.box[0], y: l.box[1], width: l.box[2], height: l.box[3], class: "rev-orig-label-box" }));
+      out.appendChild(mk("text", { x: l.box[0] + 2, y: l.box[1] + Math.min(l.box[3], 14) - 3, class: "rev-orig-label" }, l.text));
     });
     const p = inkPaths(inkLine(r.ellipse), [0, 0]);
     const g = mk("g", { class: "rev-orig-ink" });
@@ -1077,7 +1135,25 @@
     g.appendChild(mk("path", { d: p.hair, fill: "none", stroke: "currentColor", "stroke-width": 1, "stroke-linecap": "round", "stroke-linejoin": "round" }));
     out.appendChild(g);
     if (r.context.truncated) out.appendChild(mk("text", { x: vb[0] + 4, y: vb[1] + vb[3] - 6, class: "rev-orig-cut" }, "Context truncated: some of what lay here was not kept."));
-    return out;
+    const view = doc.createDocumentFragment();
+    view.appendChild(out);
+    const enclosed = r.targets.map((t) => t.anchor);
+    const unplaced = items.filter((it) => it.text && enclosed.indexOf(it.anchor) >= 0 && !placed.some((t) => overlaps(t.box, it.box)));
+    if (unplaced.length) {
+      const list = doc.createElement("div");
+      list.className = "rev-orig-unplaced";
+      const head = doc.createElement("div");
+      head.className = "rev-orig-unplaced-h";
+      head.textContent = "Drawn around (where these words sat was not recorded):";
+      list.appendChild(head);
+      unplaced.forEach((it) => {
+        const q = doc.createElement("blockquote");
+        q.textContent = it.text;
+        list.appendChild(q);
+      });
+      view.appendChild(list);
+    }
+    return view;
   }
 
   // src/state.ts
