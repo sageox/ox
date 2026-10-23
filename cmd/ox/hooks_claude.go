@@ -311,6 +311,14 @@ func InstallProjectClaudeHooks(gitRoot string) error {
 		settings.Hooks[event] = mergeHookEntries(existing, []ClaudeHookEntry{newEntry})
 	}
 
+	// The ox status line ships with the hooks: it is the one Claude Code
+	// surface that renders color. A coworker's own statusLine in this file is
+	// never replaced (doctor reports it); `ox statusline` chains the user-level
+	// one, which this project setting would otherwise hide.
+	if _, err := claude.EnsureOxStatusLine(rawMap); err != nil {
+		return fmt.Errorf("set status line: %w", err)
+	}
+
 	if err := writeSharedClaudeSettings(gitRoot, settings, rawMap); err != nil {
 		return err
 	}
@@ -375,13 +383,16 @@ func cleanupLocalSettingsOxHooks(gitRoot string) error {
 		return err
 	}
 
-	// if no hooks at all, nothing to clean
-	if len(settings.Hooks) == 0 {
+	// ox only ever installs its status line in settings.json; one here is a
+	// leftover that would shadow the shared one, so it goes with the hooks.
+	changed := claude.RemoveOxStatusLine(rawMap)
+
+	// if no hooks at all, nothing more to clean
+	if len(settings.Hooks) == 0 && !changed {
 		return nil
 	}
 
 	// strip ox hooks from all events
-	changed := false
 	for eventName, entries := range settings.Hooks {
 		var filtered []ClaudeHookEntry
 		for _, entry := range entries {
