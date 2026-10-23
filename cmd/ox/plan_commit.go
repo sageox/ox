@@ -765,7 +765,7 @@ func commitPlanBackfillToLedger(ledgerPath string, renames [][2]string, touchedP
 				preserved = append(preserved, path)
 			}
 			moves = append(moves, [2]string{oldRel, newRel})
-			commitPaths = append(commitPaths, oldRel, newRel)
+			commitPaths = append(commitPaths, oldRel)
 			addPaths = append(addPaths, newRel)
 		}
 		for _, dir := range touchedPlanDirs {
@@ -776,7 +776,6 @@ func commitPlanBackfillToLedger(ledgerPath string, renames [][2]string, touchedP
 			for _, file := range []string{"meta.json", "events.jsonl", planHTMLFileName} {
 				if _, err := os.Lstat(filepath.Join(dir, file)); err == nil {
 					addPaths = append(addPaths, rel+"/"+file)
-					commitPaths = append(commitPaths, rel+"/"+file)
 				}
 			}
 		}
@@ -786,8 +785,8 @@ func commitPlanBackfillToLedger(ledgerPath string, renames [][2]string, touchedP
 				return err
 			}
 			addPaths = append(addPaths, rel+"/meta.json")
-			commitPaths = append(commitPaths, rel+"/meta.json")
 		}
+		commitPaths = append(commitPaths, addPaths...)
 		commitPaths = append(commitPaths, gitserver.EnsureGitignoreBeforeCommitCtx(ctx, ledgerPath)...)
 		for _, pair := range moves {
 			if out, err := gitutil.RunGit(ctx, ledgerPath, "mv", "--sparse", "--", pair[0], pair[1]); err != nil {
@@ -798,9 +797,6 @@ func commitPlanBackfillToLedger(ledgerPath string, renames [][2]string, touchedP
 			if out, err := gitutil.RunGit(ctx, ledgerPath, append([]string{"add", "--sparse", "--"}, addPaths...)...); err != nil {
 				return fmt.Errorf("git add failed: %s: %w", gitutil.SanitizeOutput(out), err)
 			}
-		}
-		if len(commitPaths) == 0 {
-			return nil
 		}
 		commitMsg := fmt.Sprintf("plan: backfill %d title(s)", len(renames)+len(touchedPlanDirs))
 		_, err := gitutil.CommitLedgerSnapshotPreserving(ctx, ledgerPath, commitMsg, preserved, commitPaths...)

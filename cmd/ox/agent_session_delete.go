@@ -120,7 +120,7 @@ func runAgentSessionDelete(inst *agentinstance.Instance, cmd *cobra.Command, arg
 
 	// delete from ledger (git rm, commit, push)
 	if ledgerExists {
-		if deleteErr := deleteSessionFromLedger(ledgerPath, sessionName, ledgerSessionDir); deleteErr != nil {
+		if deleteErr := deleteSessionFromLedger(ledgerPath, sessionName); deleteErr != nil {
 			slog.Warn("failed to delete session from ledger", "session", sessionName, "error", deleteErr)
 			if warning != "" {
 				warning += "; "
@@ -164,7 +164,7 @@ func runAgentSessionDelete(inst *agentinstance.Instance, cmd *cobra.Command, arg
 
 // deleteSessionFromLedger removes the session folder from the ledger git repo,
 // commits the removal, and pushes. NEVER uses --force push.
-func deleteSessionFromLedger(ledgerPath, sessionName, _ string) error {
+func deleteSessionFromLedger(ledgerPath, sessionName string) error {
 	if err := session.ValidateDraftSessionName(sessionName); err != nil {
 		return err
 	}

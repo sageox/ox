@@ -517,7 +517,7 @@ func killFinalizedSession(inst *agentinstance.Instance, cmd *cobra.Command, proj
 	// Remove the git-tracked ledger directory: git rm -r + commit + push. A
 	// failure that leaves the directory in place killed nothing, so take the
 	// record back; once git rm ran, a later push still carries the kill.
-	if err := deleteSessionFromLedger(ledgerPath, sessionName, ledgerSessionDir); err != nil {
+	if err := deleteSessionFromLedger(ledgerPath, sessionName); err != nil {
 		if _, statErr := os.Stat(ledgerSessionDir); statErr == nil {
 			undoAbortRecord()
 		}

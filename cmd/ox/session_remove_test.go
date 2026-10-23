@@ -23,9 +23,7 @@ func TestSessionLedgerDeletion_LeavesUnrelatedStagedWorkAndNextPublishUsable(t *
 			}
 			return err
 		}},
-		{"agent session delete", func(ledgerPath, sessionName string) error {
-			return deleteSessionFromLedger(ledgerPath, sessionName, filepath.Join(ledgerPath, "sessions", sessionName))
-		}},
+		{"agent session delete", deleteSessionFromLedger},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			barePath, clonePath := createBareAndClone(t)
@@ -83,9 +81,7 @@ func TestSessionLedgerDeletion_RefusesRebaseBeforeMutation(t *testing.T) {
 			_, err := batchDeleteSessionsFromLedger(ledgerPath, []string{name})
 			return err
 		}},
-		{"agent session delete", func(ledgerPath, name string) error {
-			return deleteSessionFromLedger(ledgerPath, name, filepath.Join(ledgerPath, "sessions", name))
-		}},
+		{"agent session delete", deleteSessionFromLedger},
 	} {
 		t.Run(remove.name, func(t *testing.T) {
 			_, clonePath := createBareAndClone(t)
@@ -113,7 +109,7 @@ func TestDeleteSessionFromLedger_UntrackedSessionIsNotReportedAsRemoved(t *testi
 	sessionDir := writeSessionFiles(t, clonePath, name)
 	head := runGit(t, clonePath, "rev-parse", "HEAD")
 
-	err := deleteSessionFromLedger(clonePath, name, sessionDir)
+	err := deleteSessionFromLedger(clonePath, name)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not tracked")
 	assert.DirExists(t, sessionDir)
