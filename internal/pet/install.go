@@ -23,7 +23,7 @@ import (
 // The mod's identity in Claude Code: plugin `ox-cli-oxy` from the local folder
 // marketplace `ox-cli-pets`, which is the mod folder itself. The `ox-cli-`
 // prefix marks it as owned by the ox binary (ADR-031): ox rewrites it freely.
-// Coworkers still see "Oxy" and type /hatch-pet.
+// Coworkers still see "Oxy" and type /oxy.
 const (
 	PluginName      = "ox-cli-oxy"
 	MarketplaceName = "ox-cli-pets"
