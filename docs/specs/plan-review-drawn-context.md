@@ -204,10 +204,10 @@ The host redraws a drawing from the record alone, in the record's frame:
 - and, when the context was cut, a "context truncated" note.
 
 The view is the drawing's box with a 24 px margin, widened to whole runs, so
-no word is cut at its edge. A record with no runs (captured before 0.7.0, or
-whose items left no room for them) draws diagram labels at their own boxes
-instead. An enclosed element none of whose words are placed has its text
-listed under the picture. 0.6.0 drew that text from the element's left edge at
+no word is cut at its edge. A diagram label no run covers (in a record
+captured before 0.7.0, or whose run did not fit) is drawn at its own box. An
+enclosed element none of whose words are placed has its text listed under the
+picture. 0.6.0 drew that text from the element's left edge at
 about 7 px a character, which flowed a table row's cells into one paragraph
 and put the loop on other words.
 

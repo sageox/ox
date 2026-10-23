@@ -1104,10 +1104,9 @@
       if (text2) n.textContent = text2;
       return n;
     };
-    const items = r.context.items, recorded = runsOf(r.context);
-    const runs = recorded && recorded.length ? recorded : null;
-    const labels = runs ? [] : items.reduce((all2, it) => all2.concat(it.labels || []), []);
-    const placed = runs || labels;
+    const items = r.context.items, runs = runsOf(r.context) || [];
+    const labels = items.reduce((all2, it) => all2.concat(it.labels || []), []).filter((l) => !runs.some((t) => overlaps(t.box, l.box)));
+    const placed = runs.concat(labels);
     const b = r.bbox, pad = 24;
     let x0 = b[0] - pad, y0 = b[1] - pad, x1 = b[0] + b[2] + pad, y1 = b[1] + b[3] + pad;
     placed.forEach((t) => {
@@ -1121,7 +1120,7 @@
     const out = mk("svg", { viewBox: vb.join(" "), width: vb[2], height: vb[3], class: "rev-original-svg", role: "img" });
     out.appendChild(mk("title", {}, "What lay under this drawing on revision " + r.plan_revision));
     items.forEach((it) => out.appendChild(mk("rect", { x: it.box[0], y: it.box[1], width: it.box[2], height: it.box[3], class: "rev-orig-box" })));
-    (runs || []).forEach((t) => {
+    runs.forEach((t) => {
       const [x, y, w, h] = t.box;
       out.appendChild(mk("text", { x, y: r1(y + 0.8 * h), "font-size": r1(h / 1.2), textLength: w, lengthAdjust: "spacingAndGlyphs", class: "rev-orig-run" }, t.text));
     });

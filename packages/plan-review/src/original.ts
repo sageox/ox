@@ -1,7 +1,7 @@
 // View original: a drawing redrawn in the host from its record alone (spec
 // section 4): the words that lay across it where the page drew them, each
 // context item as a box, the inked ellipse, and a note when the context was
-// cut. A record with no runs places only a diagram's labels. An enclosed
+// cut. A diagram's labels are drawn where no run covers them. An enclosed
 // element none of whose words are placed has its text listed below the
 // picture rather than drawn where it may not have been. Text goes in as text
 // nodes, never markup.
@@ -18,13 +18,11 @@ export function originalView(r: Region, doc: Document): DocumentFragment {
     if (text) n.textContent = text;
     return n;
   };
-  // the runs, else a diagram's labels: a record has no runs when it was
-  // captured before them, when the items left no room, or when no words lay
-  // across the drawing
-  const items = r.context.items, recorded = runsOf(r.context);
-  const runs = recorded && recorded.length ? recorded : null;
-  const labels = runs ? [] : items.reduce((all: ContextLabel[], it) => all.concat(it.labels || []), []);
-  const placed = runs || labels;
+  // the runs, and each diagram label no run covers: one whose run did not
+  // fit, or any in a record captured before runs
+  const items = r.context.items, runs = runsOf(r.context) || [];
+  const labels = items.reduce((all: ContextLabel[], it) => all.concat(it.labels || []), []).filter((l) => !runs.some((t) => overlaps(t.box, l.box)));
+  const placed = runs.concat(labels);
   // the drawing with a margin, widened to the whole of each text placed
   // beside it, with room below for the truncation note
   const b = r.bbox, pad = 24;
@@ -42,7 +40,7 @@ export function originalView(r: Region, doc: Document): DocumentFragment {
   items.forEach((it) => out.appendChild(mk('rect', { x: it.box[0], y: it.box[1], width: it.box[2], height: it.box[3], class: 'rev-orig-box' })));
   // a run's box is about 1.2 em tall with its baseline 0.8 of the way down;
   // stretched to the box's width, each word lands where the page drew it
-  (runs || []).forEach((t) => {
+  runs.forEach((t) => {
     const [x, y, w, h] = t.box;
     out.appendChild(mk('text', { x, y: r1(y + 0.8 * h), 'font-size': r1(h / 1.2), textLength: w, lengthAdjust: 'spacingAndGlyphs', class: 'rev-orig-run' }, t.text));
   });

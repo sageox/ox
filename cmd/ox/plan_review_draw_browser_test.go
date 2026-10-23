@@ -691,12 +691,17 @@ func TestBrowser_ViewOriginalAfterAnEdit(t *testing.T) {
 	r9["context"].(map[string]any)["runs"] = []any{}
 	nodeItem := committedDrawing(r9, "open", "Rename it?")
 	nodeItem["section"], nodeItem["label"] = "Flow", "Drawing: Retry budget"
-	committed, _ := json.Marshal([]any{addressed, nodeItem, committedDrawing(bounded, "open", "Keep the bounded original.")})
+	// a figure whose text has since changed, and whose caption alone kept a
+	// run: the labels no run covers are still drawn
+	fig := recs["r7-figure"]
+	fig["targets"].([]any)[0].(map[string]any)["anchor"] = "h00000000"
+	fig["context"].(map[string]any)["runs"] = []any{map[string]any{"text": "Retries per minute in the load test.", "box": []any{284, 1136, 230, 17}}}
+	committed, _ := json.Marshal([]any{addressed, nodeItem, committedDrawing(fig, "open", "Per minute?"), committedDrawing(bounded, "open", "Keep the bounded original.")})
 	base = serveDrawFixture(t, drawHost("c", revisionDigest(t, "c"), string(committed), ""))
 	if err := chromedp.Run(ctx, chromedp.Navigate(base), chromedp.WaitVisible(".rev-rail-orig", chromedp.ByQuery)); err != nil {
 		t.Fatalf("open the host: %v", err)
 	}
-	if !waitJS(ctx, `document.querySelectorAll('.rev-rail-item').length===3&&[].every.call(document.querySelectorAll('.rev-rail-item'),function(li){return li.textContent.indexOf('text changed')>=0})`, 10*time.Second) {
+	if !waitJS(ctx, `document.querySelectorAll('.rev-rail-item').length===4&&[].every.call(document.querySelectorAll('.rev-rail-item'),function(li){return li.textContent.indexOf('text changed')>=0})`, 10*time.Second) {
 		t.Fatalf("the rail does not list all drawings with their text changed: %s", evalString(t, ctx, `document.querySelector('.rev-rail').textContent`))
 	}
 	// a long name, "addressed" and "text changed" share one row's header:
@@ -742,6 +747,9 @@ func TestBrowser_ViewOriginalAfterAnEdit(t *testing.T) {
 	}
 	if got := evalString(t, ctx, `document.querySelectorAll('.rev-original .rev-orig-cut').length`); got != "0" {
 		t.Errorf("complete context has a truncation notice: %s", got)
+	}
+	if got := open("Per minute?"); !strings.Contains(got, "Retries per minute in the load test.") || !strings.Contains(got, "before: 2,800/min") {
+		t.Errorf("View original of the figure: %q lacks its kept run or a label no run covers", got)
 	}
 	if err := chromedp.Run(ctx, chromedp.KeyEvent(kb.Escape)); err != nil {
 		t.Fatal(err)
