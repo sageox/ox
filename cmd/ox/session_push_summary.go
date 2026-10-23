@@ -50,6 +50,7 @@ import (
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/gitserver"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/telemetry"
@@ -350,51 +351,40 @@ func pushSummaryToLedger(filePath, sessionDir string) *pushSummaryOutput {
 		}
 	}
 
-	// disposition == QualityUpload — commit and push to ledger
-	// ensure .gitignore is in place before any commit to prevent cache file leakage
-	gitserver.EnsureGitignoreBeforeCommit(ledgerPath)
+	// Serialize index mutations with the other Ledger writers, including the
+	// cleanup guard's staging. Scope the immutable snapshot to our files and
+	// those owned cleanup paths, leaving another writer's staged work pending.
+	ctx, cancel := context.WithTimeout(context.Background(), lockedCommitTimeout)
+	defer cancel()
+	err = gitutil.WithRepoLock(ctx, ledgerPath, func() error {
+		if err := gitutil.IsSafeForIndexWrite(ctx, ledgerPath); err != nil {
+			return err
+		}
 
-	// git add the summary file (and meta.json if updated)
-	// --sparse: ledger repos use sparse-checkout
-	addArgs := []string{"-C", ledgerPath, "add", "--sparse", summaryDst}
-	if metaUpdated {
-		addArgs = append(addArgs, filepath.Join(sessionDir, "meta.json"))
-	}
-	addCmd := exec.Command("git", addArgs...)
-	if output, err := addCmd.CombinedOutput(); err != nil {
+		cleanupPaths := gitserver.EnsureGitignoreBeforeCommitCtx(ctx, ledgerPath)
+		files := []string{summaryDst}
+		if metaUpdated {
+			files = append(files, filepath.Join(sessionDir, "meta.json"))
+		}
+		addArgs := append([]string{"-C", ledgerPath, "add", "--sparse", "--"}, files...)
+		if output, err := exec.CommandContext(ctx, "git", addArgs...).CombinedOutput(); err != nil {
+			return fmt.Errorf("git add: %s: %w", strings.TrimSpace(string(output)), err)
+		}
+		_, err := gitutil.CommitLedgerSnapshot(ctx, ledgerPath, fmt.Sprintf("summary: %s", sessionName), append(files, cleanupPaths...)...)
+		return err
+	})
+	if err != nil {
 		return &pushSummaryOutput{
 			Success: false,
 			Type:    "push_summary",
-			Error:   fmt.Sprintf("git add: %s: %v", strings.TrimSpace(string(output)), err),
+			Error:   wrapCommitError(err.Error(), err),
 		}
 	}
 
-	// git commit
-	commitMsg := fmt.Sprintf("summary: %s", sessionName)
-	commitCmd := exec.Command("git", "-C", ledgerPath, "commit", "--no-verify", "-m", commitMsg)
-	if output, err := commitCmd.CombinedOutput(); err != nil {
-		outStr := string(output)
-		if strings.Contains(outStr, "nothing to commit") {
-			clearNeedsSummaryMarkerForSession(sessionName)
-			return &pushSummaryOutput{
-				Success:      true,
-				Type:         "push_summary",
-				SummaryPath:  summaryDst,
-				Message:      "summary already committed",
-				Disposition:  string(session.QualityUpload),
-				QualityScore: summaryParsed.QualityScore,
-			}
-		}
-		return &pushSummaryOutput{
-			Success: false,
-			Type:    "push_summary",
-			Error:   wrapCommitError(outStr, err),
-		}
-	}
-
-	// push using existing retry logic
+	// Push outside the repo lock: retry may acquire it for a pull/rebase.
+	// An identical retry still owes publication if its earlier push failed.
 	slog.Info("pushing summary to ledger", "session", sessionName)
-	if err := pushLedger(context.Background(), ledgerPath); err != nil {
+	if err := pushLedgerWithRetryPolicy(context.Background(), ledgerPath, true); err != nil {
 		return &pushSummaryOutput{
 			Success: false,
 			Type:    "push_summary",
@@ -578,6 +568,9 @@ func wrapCommitError(stderr string, err error) string {
 				"(raw git: %s)",
 			trimmed,
 		)
+	}
+	if err != nil && trimmed == strings.TrimSpace(err.Error()) {
+		return trimmed
 	}
 	return fmt.Sprintf("git commit: %s: %v", trimmed, err)
 }

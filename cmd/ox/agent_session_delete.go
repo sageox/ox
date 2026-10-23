@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"time"
 
 	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/cli"
@@ -120,7 +120,7 @@ func runAgentSessionDelete(inst *agentinstance.Instance, cmd *cobra.Command, arg
 
 	// delete from ledger (git rm, commit, push)
 	if ledgerExists {
-		if deleteErr := deleteSessionFromLedger(ledgerPath, sessionName, ledgerSessionDir); deleteErr != nil {
+		if deleteErr := deleteSessionFromLedger(ledgerPath, sessionName); deleteErr != nil {
 			slog.Warn("failed to delete session from ledger", "session", sessionName, "error", deleteErr)
 			if warning != "" {
 				warning += "; "
@@ -164,26 +164,29 @@ func runAgentSessionDelete(inst *agentinstance.Instance, cmd *cobra.Command, arg
 
 // deleteSessionFromLedger removes the session folder from the ledger git repo,
 // commits the removal, and pushes. NEVER uses --force push.
-func deleteSessionFromLedger(ledgerPath, sessionName, sessionDir string) error {
-	// git rm -r the session folder
-	gitRm := exec.Command("git", "rm", "-r", "--force", filepath.Join("sessions", sessionName))
-	gitRm.Dir = ledgerPath
-	if out, err := gitRm.CombinedOutput(); err != nil {
-		return fmt.Errorf("git rm: %s: %w", string(out), err)
+func deleteSessionFromLedger(ledgerPath, sessionName string) error {
+	if err := session.ValidateDraftSessionName(sessionName); err != nil {
+		return err
 	}
 
-	// commit
-	commitMsg := fmt.Sprintf("session: delete %s", sessionName)
-	gitCommit := exec.Command("git", "commit", "-m", commitMsg)
-	gitCommit.Dir = ledgerPath
-	if out, err := gitCommit.CombinedOutput(); err != nil {
-		return fmt.Errorf("git commit: %s: %w", string(out), err)
+	ctx := context.Background()
+	if err := gitutil.WithRepoLock(ctx, ledgerPath, func() error {
+		opCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		committed, err := gitutil.CommitLedgerSessionDeletion(opCtx, ledgerPath, "session: delete "+sessionName, sessionName)
+		if err == nil && !committed {
+			return fmt.Errorf("session %q is not tracked in the ledger", sessionName)
+		}
+		return err
+	}); err != nil {
+		return err
 	}
 
 	// push with retry — no --force: ledger history must never be rewritten
-	if err := gitutil.PushWithRetry(context.Background(), ledgerPath, gitutil.PushOpts{
-		ImmutablePaths:      true, // the Ledger never renames paths
-		AutoResolvePrefixes: ledger.AutoResolvePrefixes,
+	if err := gitutil.PushWithRetry(ctx, ledgerPath, gitutil.PushOpts{
+		RequireCleanIndexForRebase: true,
+		ImmutablePaths:             true, // the Ledger never renames paths
+		AutoResolvePrefixes:        ledger.AutoResolvePrefixes,
 	}); err != nil {
 		return fmt.Errorf("git push: %w", err)
 	}

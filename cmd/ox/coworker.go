@@ -376,38 +376,39 @@ func runCoworkerAdd(cmd *cobra.Command, args []string) error {
 	// derive coworker name from filename (strip .md extension)
 	name := strings.TrimSuffix(filepath.Base(srcPath), ".md")
 
-	// ensure coworkers/agents/ directory exists
 	agentsDir := filepath.Join(tc.Path, claude.AgentsDir)
-	if err := os.MkdirAll(agentsDir, 0755); err != nil {
-		return fmt.Errorf("create agents directory: %w", err)
-	}
-
-	// copy file to team context
 	destPath := filepath.Join(agentsDir, name+".md")
-	if _, err := os.Stat(destPath); err == nil {
-		return fmt.Errorf("coworker %q already exists; remove it first with: ox coworker remove %s", name, name)
-	}
-
 	data, err := os.ReadFile(srcPath)
 	if err != nil {
 		return fmt.Errorf("read source file: %w", err)
 	}
-	if err := os.WriteFile(destPath, data, 0644); err != nil {
-		return fmt.Errorf("write coworker file: %w", err)
-	}
 
-	// git add + commit in team context repo
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-
-	relPath := filepath.Join(claude.AgentsDir, name+".md")
-	if _, err := gitutil.RunGit(ctx, tc.Path, "add", relPath); err != nil {
-		return fmt.Errorf("git add: %w", err)
-	}
-
-	commitMsg := fmt.Sprintf("add coworker: %s", name)
-	if _, err := gitutil.RunGit(ctx, tc.Path, "commit", "-m", commitMsg); err != nil {
-		return fmt.Errorf("git commit: %w", err)
+	err = gitutil.WithRepoLock(ctx, tc.Path, func() error {
+		if err := gitutil.IsSafeForIndexWrite(ctx, tc.Path); err != nil {
+			return err
+		}
+		if _, err := os.Stat(destPath); err == nil {
+			return fmt.Errorf("coworker %q already exists; remove it first with: ox coworker remove %s", name, name)
+		}
+		if err := os.MkdirAll(agentsDir, 0o755); err != nil {
+			return fmt.Errorf("create agents directory: %w", err)
+		}
+		if err := os.WriteFile(destPath, data, 0o644); err != nil {
+			return fmt.Errorf("write coworker file: %w", err)
+		}
+		relPath := ":(literal)" + filepath.ToSlash(filepath.Join(claude.AgentsDir, name+".md"))
+		if _, err := gitutil.RunGit(ctx, tc.Path, "add", "--sparse", "--", relPath); err != nil {
+			return fmt.Errorf("git add: %w", err)
+		}
+		if _, err := gitutil.CommitLedgerSnapshot(ctx, tc.Path, fmt.Sprintf("add coworker: %s", name), relPath); err != nil {
+			return fmt.Errorf("git commit: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
 	}
 
 	modelInfo := model
@@ -451,18 +452,23 @@ func runCoworkerRemove(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// git rm + commit in team context repo
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-
-	relPath := filepath.Join(claude.AgentsDir, name+".md")
-	if _, err := gitutil.RunGit(ctx, tc.Path, "rm", relPath); err != nil {
-		return fmt.Errorf("git rm: %w", err)
-	}
-
-	commitMsg := fmt.Sprintf("remove coworker: %s", name)
-	if _, err := gitutil.RunGit(ctx, tc.Path, "commit", "-m", commitMsg); err != nil {
-		return fmt.Errorf("git commit: %w", err)
+	err = gitutil.WithRepoLock(ctx, tc.Path, func() error {
+		if err := gitutil.IsSafeForIndexWrite(ctx, tc.Path); err != nil {
+			return err
+		}
+		relPath := ":(literal)" + filepath.ToSlash(filepath.Join(claude.AgentsDir, name+".md"))
+		if _, err := gitutil.RunGit(ctx, tc.Path, "rm", "--sparse", "--", relPath); err != nil {
+			return fmt.Errorf("git rm: %w", err)
+		}
+		if _, err := gitutil.CommitLedgerSnapshot(ctx, tc.Path, fmt.Sprintf("remove coworker: %s", name), relPath); err != nil {
+			return fmt.Errorf("git commit: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
 	}
 
 	fmt.Fprintf(cmd.OutOrStdout(), "Removed coworker %q\n", name)

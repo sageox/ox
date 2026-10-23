@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -9,6 +10,111 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestSessionLedgerDeletion_LeavesUnrelatedStagedWorkAndNextPublishUsable(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		remove func(ledgerPath, sessionName string) error
+	}{
+		{"session remove", func(ledgerPath, sessionName string) error {
+			removed, err := batchDeleteSessionsFromLedger(ledgerPath, []string{sessionName})
+			if err == nil && removed != 1 {
+				return fmt.Errorf("removed %d sessions, want 1", removed)
+			}
+			return err
+		}},
+		{"agent session delete", deleteSessionFromLedger},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			barePath, clonePath := createBareAndClone(t)
+			isolatePushEnv(t, clonePath)
+			const selected = "2026-01-01T00-00-testuser-OxDel1"
+			const peer = "2026-01-01T00-00-testuser-OxPeer"
+			selectedDir := writeSessionFiles(t, clonePath, selected)
+			writeSessionFiles(t, clonePath, peer)
+			// A real session can exceed the sacred mass-delete file threshold.
+			for i := range 6 {
+				require.NoError(t, os.WriteFile(filepath.Join(selectedDir, fmt.Sprintf("artifact-%d.txt", i)), []byte("session artifact\n"), 0o644))
+			}
+			runGit(t, clonePath, "add", "--sparse", "--", "sessions")
+			runGit(t, clonePath, "commit", "--no-verify", "-m", "seed sessions")
+			runGit(t, clonePath, "push")
+			// An existing hydration cache may hold different bytes from HEAD.
+			// Explicit deletion must not overwrite it to satisfy the auto-delete guard.
+			cached := filepath.Join(clonePath, ".sageox", "cache", "sessions", selected, "meta.json")
+			require.NoError(t, os.MkdirAll(filepath.Dir(cached), 0o700))
+			require.NoError(t, os.WriteFile(cached, []byte("local cache bytes\n"), 0o600))
+
+			const plan = "data/plans/p/plan.md"
+			require.NoError(t, os.MkdirAll(filepath.Dir(filepath.Join(clonePath, plan)), 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(clonePath, plan), []byte("# pending plan\n"), 0o644))
+			runGit(t, clonePath, "add", "--sparse", "--", plan)
+
+			require.NoError(t, tc.remove(clonePath, selected))
+			assert.NoDirExists(t, selectedDir)
+			cachedBytes, err := os.ReadFile(cached)
+			require.NoError(t, err)
+			assert.Equal(t, "local cache bytes\n", string(cachedBytes))
+			assert.Equal(t, plan, runGit(t, clonePath, "diff", "--cached", "--name-only"), "the plan must remain staged for its owner")
+			verify := cloneBare(t, barePath)
+			assert.NoDirExists(t, filepath.Join(verify, "sessions", selected))
+			assert.FileExists(t, filepath.Join(verify, "sessions", peer, "meta.json"))
+			assert.NoFileExists(t, filepath.Join(verify, plan), "deleting a session must not publish the staged plan")
+
+			const next = "2026-01-01T00-01-testuser-OxNext"
+			writeSessionFiles(t, clonePath, next)
+			require.NoError(t, commitAndPushLedger(clonePath, next), "deletion must leave the next publication usable")
+			assert.Equal(t, plan, runGit(t, clonePath, "diff", "--cached", "--name-only"))
+			verify = cloneBare(t, barePath)
+			assert.FileExists(t, filepath.Join(verify, "sessions", next, "meta.json"))
+			assert.NoFileExists(t, filepath.Join(verify, plan))
+		})
+	}
+}
+
+func TestSessionLedgerDeletion_RefusesRebaseBeforeMutation(t *testing.T) {
+	for _, remove := range []struct {
+		name string
+		run  func(string, string) error
+	}{
+		{"session remove", func(ledgerPath, name string) error {
+			_, err := batchDeleteSessionsFromLedger(ledgerPath, []string{name})
+			return err
+		}},
+		{"agent session delete", deleteSessionFromLedger},
+	} {
+		t.Run(remove.name, func(t *testing.T) {
+			_, clonePath := createBareAndClone(t)
+			isolatePushEnv(t, clonePath)
+			const name = "2026-01-01T00-00-testuser-OxSafe"
+			writeSessionFiles(t, clonePath, name)
+			require.NoError(t, commitAndPushLedger(clonePath, name))
+			head := runGit(t, clonePath, "rev-parse", "HEAD")
+			require.NoError(t, os.Mkdir(filepath.Join(clonePath, ".git", "rebase-merge"), 0o755))
+
+			err := remove.run(clonePath, name)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "rebase")
+			assert.FileExists(t, filepath.Join(clonePath, "sessions", name, "meta.json"))
+			assert.Equal(t, head, runGit(t, clonePath, "rev-parse", "HEAD"))
+			assert.Empty(t, runGit(t, clonePath, "diff", "--cached", "--name-only"))
+		})
+	}
+}
+
+func TestDeleteSessionFromLedger_UntrackedSessionIsNotReportedAsRemoved(t *testing.T) {
+	_, clonePath := createBareAndClone(t)
+	isolatePushEnv(t, clonePath)
+	const name = "2026-01-01T00-00-testuser-OxNew"
+	sessionDir := writeSessionFiles(t, clonePath, name)
+	head := runGit(t, clonePath, "rev-parse", "HEAD")
+
+	err := deleteSessionFromLedger(clonePath, name)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not tracked")
+	assert.DirExists(t, sessionDir)
+	assert.Equal(t, head, runGit(t, clonePath, "rev-parse", "HEAD"))
+}
 
 func TestBatchDeleteSessionsFromLedger_SingleSession(t *testing.T) {
 	barePath, clonePath := createBareAndClone(t)
@@ -25,7 +131,7 @@ func TestBatchDeleteSessionsFromLedger_SingleSession(t *testing.T) {
 	require.NoError(t, err, "session should exist on remote before deletion")
 
 	// delete it
-	removed, err := batchDeleteSessionsFromLedger(clonePath, []string{sessionName})
+	removed, err := batchDeleteSessionsFromLedger(clonePath, []string{"nonexistent-OxGone", sessionName})
 	require.NoError(t, err)
 	assert.Equal(t, 1, removed)
 

@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/cli"
+	"github.com/sageox/ox/internal/gitserver"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/pkg/sessionsummary"
@@ -1029,32 +1031,39 @@ func redactSummaryJSON(path string, redactor *session.Redactor) (bool, error) {
 // glob as fallback for legacy sessions or torn writes. summary.json is
 // staged automatically when meta.Files records it (Storage=git).
 func commitAndPushLedgerBatch(ledgerPath string, sessionNames []string) error {
-	sessionsDir := filepath.Join(ledgerPath, "sessions")
-
-	var filesToAdd []string
-	for _, name := range sessionNames {
-		sessionDir := filepath.Join(sessionsDir, name)
-		filesToAdd = append(filesToAdd, filepath.Join(sessionDir, "meta.json"))
-		filesToAdd = append(filesToAdd, sessionArtifactsToStage(sessionDir)...)
-	}
-	filesToAdd = append(filesToAdd, filepath.Join(sessionsDir, ".gitignore"))
-
-	// git add
-	addArgs := append([]string{"-C", ledgerPath, "add"}, filesToAdd...)
-	addCmd := exec.Command("git", addArgs...)
-	if output, err := addCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("git add failed: %s: %w", string(output), err)
+	if len(sessionNames) == 0 {
+		return nil
 	}
 
-	// git commit
-	commitMsg := fmt.Sprintf("session: re-redact %d sessions", len(sessionNames))
-	commitCmd := exec.Command("git", "-C", ledgerPath, "commit", "--no-verify", "-m", commitMsg)
-	if output, err := commitCmd.CombinedOutput(); err != nil {
-		if strings.Contains(string(output), "nothing to commit") {
-			return nil
+	ctx, cancel := context.WithTimeout(context.Background(), lockedCommitTimeout)
+	defer cancel()
+	err := gitutil.WithRepoLock(ctx, ledgerPath, func() error {
+		if err := gitutil.IsSafeForIndexWrite(ctx, ledgerPath); err != nil {
+			return err
 		}
-		return fmt.Errorf("git commit failed: %s: %w", string(output), err)
+
+		cleanupPaths := gitserver.EnsureGitignoreBeforeCommitCtx(ctx, ledgerPath)
+		sessionsDir := filepath.Join(ledgerPath, "sessions")
+		var filesToAdd []string
+		for _, name := range sessionNames {
+			sessionDir := filepath.Join(sessionsDir, name)
+			filesToAdd = append(filesToAdd, filepath.Join(sessionDir, "meta.json"))
+			filesToAdd = append(filesToAdd, sessionArtifactsToStage(sessionDir)...)
+		}
+		filesToAdd = append(filesToAdd, filepath.Join(sessionsDir, ".gitignore"))
+		addArgs := append([]string{"-C", ledgerPath, "add", "--sparse", "--"}, filesToAdd...)
+		if output, err := exec.CommandContext(ctx, "git", addArgs...).CombinedOutput(); err != nil {
+			return fmt.Errorf("git add failed: %s: %w", string(output), err)
+		}
+		message := fmt.Sprintf("session: re-redact %d sessions", len(sessionNames))
+		_, err := gitutil.CommitLedgerSnapshot(ctx, ledgerPath, message, append(filesToAdd, cleanupPaths...)...)
+		return err
+	})
+	if err != nil {
+		return fmt.Errorf("committing Ledger batch: %w", err)
 	}
 
-	return pushLedger(context.Background(), ledgerPath)
+	// A no-op snapshot can still owe the remote a prior commit. Push outside
+	// the lock so the retry path can acquire it to reconcile divergent history.
+	return pushLedgerWithRetryPolicy(context.Background(), ledgerPath, true)
 }

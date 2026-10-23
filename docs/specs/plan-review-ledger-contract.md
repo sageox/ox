@@ -197,6 +197,19 @@ The CLI reads and writes review records only through `pkg/planreview`.
   squash commits the tree of the commits it collapses, so neither carries a
   staged plan file (#1442). The mass-deletion guard does not count removed
   `*.rej` and `*.needs-summary` files (#1443).
+- **Other writers** (#1355): summary publication, batch session regeneration,
+  murmur deletion, coworker add/remove and plan backfill stage and commit only
+  their own paths under the repo lock. Ignore cleanup returns its owned paths
+  so it can land in the same scoped commit. Redaction amends HEAD plus only
+  its paths, keeping the original parents, author and message. Confirmed
+  session deletion constructs HEAD minus the exact selected session roots;
+  it cannot include another staged deletion. Automatic snapshots still refuse
+  mass deletion. Backfill preserves changed source blobs in the existing cache;
+  byte-identical relocations within the same protected prefix do not count as
+  lost content. These scoped publishers require a clean index before a retry
+  fetches or restores autostash, retaining any staged draft's separate working
+  copy until its owner saves it. Legacy metadata recovery keeps its existing
+  autostash policy; publication-history validation does not select either policy.
 - **Plan changes no retry owns** (`ox doctor`, just before
   `plan-pending-writes`): a plan dir with uncommitted changes, no plan retry
   marker, and changes outside the review records an entry lands. If its

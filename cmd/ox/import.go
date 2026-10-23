@@ -600,6 +600,7 @@ func resumeDocImport(ctx context.Context, tcPath, ep, metaPath string, source lf
 	}
 	// revalidate under the push lock after every sync; another writer may have added private history
 	opts := teamContextPushOpts(ep)
+	opts.RequireCleanIndexForRebase = true
 	opts.ValidatePush = func(ctx context.Context, repoPath string) (bool, error) {
 		tracked, err := docImportTracked(ctx, repoPath, files)
 		if err != nil {

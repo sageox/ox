@@ -292,11 +292,12 @@ func runSessionSecretGate(ctx context.Context, ledgerPath string, scan func() (*
 		return nil
 	}
 
-	// Recovery may repair a failed redact pass by preserving sensitive files
-	// outside publication, but only an actual final clean scan authorizes it.
+	// Per-file rewrite failures remain findings for quarantine. A metadata or
+	// amend failure must hold publication even if the working bytes are clean:
+	// the original commit may still contain the unredacted content.
 	auto, redactErr := autoRedactSessionFindings(ctx, ledgerPath, result, amendCommit)
 	if redactErr != nil {
-		slog.Warn("pre-push secret gate: auto-redact failed; will quarantine remainder", "error", redactErr)
+		return fmt.Errorf("auto-redact session content: %w", redactErr)
 	}
 	rescan, err := scan()
 	if err != nil {

@@ -106,6 +106,27 @@ func autoRedactSessionFindings(ctx context.Context, ledgerPath string, result *P
 	if result == nil || len(result.Findings) == 0 {
 		return &autoRedactResult{}, nil
 	}
+	// Upload preparation redacts local content before there is a holding
+	// commit. It does not touch Git and also runs on directories not yet in a
+	// checkout; only the amendment needs the repository transaction.
+	if !amendCommit {
+		return autoRedactSessionFindingsInPlace(ctx, ledgerPath, result, false)
+	}
+	var out *autoRedactResult
+	err := gitutil.WithRepoLock(ctx, ledgerPath, func() error {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), lockedCommitTimeout)
+		defer cancel()
+		if err := gitutil.IsSafeForIndexWrite(ctx, ledgerPath); err != nil {
+			return err
+		}
+		var err error
+		out, err = autoRedactSessionFindingsInPlace(ctx, ledgerPath, result, true)
+		return err
+	})
+	return out, err
+}
+
+func autoRedactSessionFindingsInPlace(ctx context.Context, ledgerPath string, result *PrePushScanResult, amendCommit bool) (*autoRedactResult, error) {
 
 	redactor := session.NewRedactor()
 	out := &autoRedactResult{
@@ -188,7 +209,7 @@ func autoRedactSessionFindings(ctx context.Context, ledgerPath string, result *P
 		for _, mp := range metaPaths {
 			byPath[mp] = nil
 		}
-		if err := stageAndAmendRedactedFiles(ledgerPath, byPath); err != nil {
+		if err := stageAndAmendRedactedFilesLocked(ctx, ledgerPath, byPath); err != nil {
 			return out, fmt.Errorf("stage/amend redacted files: %w", err)
 		}
 	}
@@ -233,14 +254,24 @@ type quarantineResult struct {
 // quarantine is better than full block. Before upload, index or rename
 // failures stop the operation after recording any completed quarantines.
 func quarantineUnredactableFindings(ledgerPath string, findings []PrePushFinding, amendCommit bool) (*quarantineResult, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), lockedCommitTimeout)
+	defer cancel()
+	out := &quarantineResult{}
+	err := gitutil.WithRepoLock(ctx, ledgerPath, func() error {
+		if err := gitutil.IsSafeForIndexWrite(ctx, ledgerPath); err != nil {
+			return err
+		}
+		var err error
+		out, err = quarantineUnredactableFindingsLocked(ctx, ledgerPath, findings, amendCommit)
+		return err
+	})
+	return out, err
+}
+
+func quarantineUnredactableFindingsLocked(ctx context.Context, ledgerPath string, findings []PrePushFinding, amendCommit bool) (*quarantineResult, error) {
 	out := &quarantineResult{}
 	if len(findings) == 0 {
 		return out, nil
-	}
-	if !amendCommit {
-		if err := gitutil.IsSafeForGitOps(ledgerPath); err != nil {
-			return out, fmt.Errorf("prepare quarantine index: %w", err)
-		}
 	}
 
 	// Group findings by session for the marker write.
@@ -340,9 +371,7 @@ quarantineFiles:
 				if err := unstagePath(ledgerPath, fromRel); err != nil {
 					slog.Warn("pre-push quarantine: unstage failed; bytes are quarantined but path may remain in commit",
 						"path", fromRel, "error", err)
-					// Don't return — best-effort. The push will still likely
-					// succeed because the moved-aside file no longer exists
-					// at the staged path; git may auto-detect the deletion.
+					quarantineErr = errors.Join(quarantineErr, err)
 				}
 			}
 			g.quarantineLocs = append(g.quarantineLocs, redactionDebtLocation{
@@ -356,9 +385,12 @@ quarantineFiles:
 	// If we unstaged anything, amend the holding commit once so its
 	// tree matches the now-quarantined working state.
 	if amendCommit && len(out.QuarantinedRels) > 0 {
-		if err := amendDroppingPaths(ledgerPath); err != nil {
-			slog.Warn("pre-push quarantine: amend failed; push may still surface the bad paths",
-				"error", err)
+		paths := make([]string, 0, len(out.QuarantinedRels))
+		for _, p := range out.QuarantinedRels {
+			paths = append(paths, ":(literal)"+p)
+		}
+		if _, err := gitutil.AmendLedgerSnapshot(ctx, ledgerPath, paths...); err != nil {
+			quarantineErr = errors.Join(quarantineErr, fmt.Errorf("amend quarantined paths: %w", err))
 		}
 	}
 
@@ -426,24 +458,6 @@ func unstagePath(ledgerPath, rel string) error {
 	}
 	if out, err := exec.Command("git", "-C", ledgerPath, "rm", "--cached", "--ignore-unmatch", "--", rel).CombinedOutput(); err != nil {
 		return fmt.Errorf("git rm --cached %s: %s: %w", rel, strings.TrimSpace(string(out)), err)
-	}
-	return nil
-}
-
-// amendDroppingPaths runs `git commit --amend --no-edit --no-verify`
-// after the caller has already mutated the index (via unstagePath calls).
-// `--no-verify` matches stageAndAmendRedactedFiles' behavior; the secret
-// gate is the verifier and it's the one driving this flow.
-func amendDroppingPaths(ledgerPath string) error {
-	out, err := exec.Command("git", "-C", ledgerPath, "commit", "--amend", "--no-edit", "--no-verify").CombinedOutput()
-	if err != nil {
-		// "nothing to commit" can happen if the amend would produce an
-		// empty commit (we dropped every staged path). Tolerate it —
-		// the push will simply carry nothing new, which is correct.
-		if strings.Contains(string(out), "nothing to commit") {
-			return nil
-		}
-		return fmt.Errorf("git commit --amend: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 	return nil
 }
