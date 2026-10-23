@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/oxactivity"
 	whisperstore "github.com/sageox/ox/internal/whisper/store"
 )
@@ -128,17 +127,6 @@ func codexWhisperNotice(ctx *HookContext, selfAgentID string, delivered []whispe
 // codexNoticeWidth caps a whisper notice so a long murmur stays one tidy
 // transcript line; the whisper text itself is shortened first.
 const codexNoticeWidth = 120
-
-// statuslineEnabled reads the coworker's statusline setting. An unreadable
-// config shows nothing: the notice is cosmetic and must never guess.
-func statuslineEnabled() bool {
-	cfg, err := config.LoadUserConfig()
-	if err != nil {
-		slog.Debug("hook: statusline setting unreadable", "error", err)
-		return false
-	}
-	return cfg.IsStatuslineEnabled()
-}
 
 // codexPromptStdout collects handlePrompt's output for Codex so a teammate
 // whisper notice can ride along with the model context in one JSON document.

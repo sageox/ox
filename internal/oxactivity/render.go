@@ -3,7 +3,6 @@ package oxactivity
 import (
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -197,14 +196,7 @@ func FormatAge(d time.Duration) string {
 // the coworker's explicit opt-outs: NO_COLOR (sacred) and an
 // OX_COLOR_PROFILE of ascii/none/notty.
 func ColorAllowed() bool {
-	if noColor, _ := strconv.ParseBool(os.Getenv("NO_COLOR")); noColor {
-		return false
-	}
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("OX_COLOR_PROFILE"))) {
-	case "ascii", "none", "notty":
-		return false
-	}
-	return true
+	return ColorAllowedFor(os.Getenv("NO_COLOR"))
 }
 
 // Colors are fixed at 256-color depth rather than adapted to theme.Profile:
