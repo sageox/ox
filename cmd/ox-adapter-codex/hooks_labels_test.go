@@ -146,3 +146,61 @@ func TestHookLabels_DoctorOffersScopedRefresh(t *testing.T) {
 		}
 	}
 }
+
+// Malformed user files must not pass diagnosis, and malformed project files
+// must produce one parse issue rather than a misleading missing-hooks repair.
+func TestHookLabels_DoctorDistinguishesMalformedFromMissing(t *testing.T) {
+	for _, scope := range []string{"project", "user"} {
+		for _, tc := range []struct {
+			name    string
+			data    string
+			missing bool
+			invalid bool
+		}{
+			{name: "absent", missing: true},
+			{name: "empty"},
+			{name: "unconfigured", data: `{}`},
+			{name: "malformed-json", data: `{`, invalid: true},
+			{name: "malformed-hooks", data: `{"hooks":[]}`, invalid: true},
+		} {
+			t.Run(scope+"/"+tc.name, func(t *testing.T) {
+				fakeCodexOnPath(t)
+				params := adapterprotocol.DiagnoseParams{RepoRoot: t.TempDir(), Scope: scope}
+				path := resolveHooksPath(params.RepoRoot, scope)
+				require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+				if !tc.missing {
+					require.NoError(t, os.WriteFile(path, []byte(tc.data), 0o600))
+				}
+				result, err := handleDiagnose(params)
+				require.NoError(t, err)
+				switch {
+				case tc.invalid:
+					require.Len(t, result.Issues, 1)
+					want := "codex:hooks-invalid"
+					if scope == "user" {
+						want += "-user"
+					}
+					assert.Equal(t, want, result.Issues[0].Slug)
+					assert.Contains(t, result.Issues[0].Detail, path)
+					assert.False(t, result.Issues[0].FixSafe)
+					assert.Empty(t, result.Issues[0].FixArgv, "reinstall cannot safely repair malformed user-owned JSON")
+					assert.False(t, result.OK)
+				case scope == "project":
+					require.Len(t, result.Issues, 1)
+					assert.Equal(t, "codex:hooks-missing", result.Issues[0].Slug)
+					assert.False(t, result.OK)
+				default:
+					assert.True(t, result.OK)
+					assert.Empty(t, result.Issues)
+				}
+				if tc.missing {
+					assert.NoFileExists(t, path)
+				} else {
+					data, err := os.ReadFile(path)
+					require.NoError(t, err)
+					assert.Equal(t, tc.data, string(data), "diagnosis must not rewrite malformed or empty files")
+				}
+			})
+		}
+	}
+}

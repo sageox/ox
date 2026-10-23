@@ -55,8 +55,43 @@ func handleDiagnose(p adapterprotocol.DiagnoseParams) (*adapterprotocol.Diagnose
 		if scope == "project" && p.RepoRoot == "" {
 			continue
 		}
-		hooks, _, err := readHooksFile(resolveHooksPath(p.RepoRoot, scope))
-		if err != nil || !hookLabelsOutdated(hooks) {
+		hooksPath := resolveHooksPath(p.RepoRoot, scope)
+		hooks, _, err := readHooksFile(hooksPath)
+		if err != nil {
+			slug := "codex:hooks-invalid"
+			if scope == "user" {
+				slug += "-user"
+			}
+			issues = append(issues, adapterprotocol.DiagnoseIssue{
+				Slug:     slug,
+				Severity: "warning",
+				Title:    "Codex hook file could not be parsed (" + scope + ")",
+				Detail:   fmt.Sprintf("Repair %s before refreshing SageOx hooks: %v", hooksPath, err),
+			})
+			continue
+		}
+		// A CLI on PATH is not consent to create project configuration.
+		if scope == "project" && projectUsesCodex(p.RepoRoot) {
+			hooksOK := true
+			for _, event := range codexHookEvents {
+				if !eventHasOxHook(hooks[event]) {
+					hooksOK = false
+					break
+				}
+			}
+			if !hooksOK {
+				issues = append(issues, adapterprotocol.DiagnoseIssue{
+					Slug:     "codex:hooks-missing",
+					Severity: "warning",
+					Title:    "ox hooks not installed for Codex CLI",
+					Detail:   "Codex CLI hooks are not configured for this project.",
+					Fix:      "ox integrate install --codex",
+					FixArgv:  []string{"ox", "integrate", "install", "--codex"},
+					FixSafe:  true,
+				})
+			}
+		}
+		if !hookLabelsOutdated(hooks) {
 			continue
 		}
 		slug := "codex:hook-labels-outdated"
@@ -78,39 +113,6 @@ func handleDiagnose(p adapterprotocol.DiagnoseParams) (*adapterprotocol.Diagnose
 		})
 	}
 	if p.RepoRoot != "" {
-		// Only report missing hooks for a project that actually uses Codex.
-		// Detection is deliberately broad (a `codex` on PATH is enough) so
-		// `ox init` can offer to set Codex up, but the CLI merely being
-		// installed is not consent to create project config: without this
-		// gate every repo on the machine warns, and `ox doctor --fix` writes
-		// .codex/ into repos that never touch Codex. ox doctor's core check
-		// draws the same line — see checkAgentHooks, which returns a silent
-		// skip for "CLI detected, no project config".
-		if projectUsesCodex(p.RepoRoot) {
-			hooksPath := filepath.Join(p.RepoRoot, codexProjectPath, codexHooksFileName)
-			hooksMap, _, err := readHooksFile(hooksPath)
-			hooksOK := err == nil
-			if hooksOK {
-				for _, event := range codexHookEvents {
-					if !eventHasOxHook(hooksMap[event]) {
-						hooksOK = false
-						break
-					}
-				}
-			}
-			if !hooksOK {
-				issues = append(issues, adapterprotocol.DiagnoseIssue{
-					Slug:     "codex:hooks-missing",
-					Severity: "warning",
-					Title:    "ox hooks not installed for Codex CLI",
-					Detail:   "Codex CLI hooks are not configured for this project.",
-					Fix:      "ox integrate install --codex",
-					FixArgv:  []string{"ox", "integrate", "install", "--codex"},
-					FixSafe:  true,
-				})
-			}
-		}
-
 		legacyFeatureFlag, err := hasLegacyFeatureFlag(p.RepoRoot, p.Scope)
 		if err != nil {
 			issues = append(issues, adapterprotocol.DiagnoseIssue{
