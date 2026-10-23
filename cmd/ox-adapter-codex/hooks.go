@@ -50,6 +50,7 @@ func hookCommand(event string) string {
 type codexHookEntry struct {
 	Matcher string      `json:"matcher"`
 	Hooks   []codexHook `json:"hooks"`
+	raw     map[string]json.RawMessage
 }
 
 type codexHook struct {
@@ -57,6 +58,50 @@ type codexHook struct {
 	Command       string `json:"command"`
 	StatusMessage string `json:"statusMessage,omitempty"`
 	Timeout       int    `json:"timeout,omitempty"`
+	raw           json.RawMessage
+}
+
+// Retain fields owned by other integrations, including MCP tool handlers and
+// matcher-group options, when refreshing SageOx's entries in a shared file.
+func (h *codexHook) UnmarshalJSON(data []byte) error {
+	type plain codexHook
+	if err := json.Unmarshal(data, (*plain)(h)); err != nil {
+		return err
+	}
+	h.raw = append(json.RawMessage(nil), data...)
+	return nil
+}
+
+func (h codexHook) MarshalJSON() ([]byte, error) {
+	if len(h.raw) > 0 && !isOxCommand(h.Command) {
+		return h.raw, nil
+	}
+	type plain codexHook
+	return json.Marshal(plain(h))
+}
+
+func (e *codexHookEntry) UnmarshalJSON(data []byte) error {
+	type plain codexHookEntry
+	if err := json.Unmarshal(data, (*plain)(e)); err != nil {
+		return err
+	}
+	return json.Unmarshal(data, &e.raw)
+}
+
+func (e codexHookEntry) MarshalJSON() ([]byte, error) {
+	if e.raw == nil {
+		return json.Marshal(map[string]any{"matcher": e.Matcher, "hooks": e.Hooks})
+	}
+	fields := make(map[string]json.RawMessage, len(e.raw))
+	for key, value := range e.raw {
+		fields[key] = value
+	}
+	hooks, err := json.Marshal(e.Hooks)
+	if err != nil {
+		return nil, err
+	}
+	fields["hooks"] = hooks
+	return json.Marshal(fields)
 }
 
 // --- install ---
@@ -301,10 +346,34 @@ func mergeHookEntries(existing []codexHookEntry, oxCmd string, event string) []c
 func statusMessageForEvent(event string) string {
 	switch event {
 	case "SessionStart":
-		return "Loading SageOx context"
+		return "SageOx: loading context; auto-recording if configured"
+	case "PreToolUse":
+		// phaseBeforeTool is deliberately absent from activePhaseBehavior.
+		return "SageOx: pre-tool hook (currently inactive)"
+	case "PostToolUse":
+		return "SageOx: capturing activity for session recording"
+	case "UserPromptSubmit":
+		return "SageOx: recalling context and delivering team updates"
+	case "Stop":
+		return "SageOx: saving turns and plans; publishing drafts if configured"
+	case "SessionEnd":
+		return "SageOx: finalizing recordings; publishing if configured"
 	default:
 		return ""
 	}
+}
+
+func hookLabelsOutdated(hooks map[string][]codexHookEntry) bool {
+	for _, event := range codexHookEvents {
+		for _, entry := range hooks[event] {
+			for _, hook := range entry.Hooks {
+				if isOxCommand(hook.Command) && hook.StatusMessage != statusMessageForEvent(event) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func eventHasOxHook(entries []codexHookEntry) bool {

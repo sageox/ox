@@ -344,7 +344,7 @@ func TestHandleInstallHooks_AddsSessionEndToExistingInstall(t *testing.T) {
 	require.Len(t, hooksMap["SessionEnd"][0].Hooks, 1)
 	assert.Equal(t, hookCommand("SessionEnd"), hooksMap["SessionEnd"][0].Hooks[0].Command)
 	assert.Contains(t, hooksMap["SessionEnd"][0].Hooks[0].Command, "ox agent hook SessionEnd")
-	assert.Empty(t, hooksMap["SessionEnd"][0].Hooks[0].StatusMessage, "only SessionStart shows a status message")
+	assert.Equal(t, "SageOx: finalizing recordings; publishing if configured", hooksMap["SessionEnd"][0].Hooks[0].StatusMessage)
 	require.Len(t, hooksMap["Stop"], 2, "the user's own Stop hook must survive the re-install")
 	assert.Equal(t, "echo user-hook", hooksMap["Stop"][1].Hooks[0].Command)
 

@@ -51,6 +51,32 @@ func handleDiagnose(p adapterprotocol.DiagnoseParams) (*adapterprotocol.Diagnose
 	}
 
 	var issues []adapterprotocol.DiagnoseIssue
+	for _, scope := range []string{"project", "user"} {
+		if scope == "project" && p.RepoRoot == "" {
+			continue
+		}
+		hooks, _, err := readHooksFile(resolveHooksPath(p.RepoRoot, scope))
+		if err != nil || !hookLabelsOutdated(hooks) {
+			continue
+		}
+		slug := "codex:hook-labels-outdated"
+		fix := "ox integrate install --codex"
+		argv := []string{"ox", "integrate", "install", "--codex"}
+		if scope == "user" {
+			slug += "-user"
+			fix += " --user"
+			argv = append(argv, "--user")
+		}
+		issues = append(issues, adapterprotocol.DiagnoseIssue{
+			Slug:     slug,
+			Severity: "warning",
+			Title:    "SageOx hook labels need updating (" + scope + ")",
+			Detail:   "Refresh the labels so Codex explains each SageOx hook. Updated definitions require review and trust in Codex again.",
+			Fix:      fix,
+			FixArgv:  argv,
+			FixSafe:  true,
+		})
+	}
 	if p.RepoRoot != "" {
 		// Only report missing hooks for a project that actually uses Codex.
 		// Detection is deliberately broad (a `codex` on PATH is enough) so
