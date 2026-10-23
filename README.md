@@ -80,6 +80,7 @@ ox login                # authenticate with sageox.ai
 ox init                 # one-time per repo: creates .sageox/
 git add .sageox/ && git commit -m "initialize SageOx"
 ox doctor               # diagnose (ox doctor --fix auto-repairs)
+ox feedback --file report.txt  # send private feedback to SageOx Support
 ox status               # auth, project, sync state, and daemon health
 ```
 

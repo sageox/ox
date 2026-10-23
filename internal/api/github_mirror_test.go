@@ -379,8 +379,7 @@ func TestRelayGitHubMirrorItems_UndecodableResponseIsAnError(t *testing.T) {
 // without its Retry-After hint, would send the daemon down the wrong recovery
 // path and show the user the wrong reason in `ox doctor`.
 func TestRelayGitHubMirrorItems_StatusMapping(t *testing.T) {
-	t.Parallel()
-
+	// Server cleanup closes the shared default transport; keep these requests serial.
 	tests := []struct {
 		name    string
 		status  int
@@ -674,7 +673,6 @@ func TestRelayGitHubMirrorItems_StatusMapping(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			srv, _ := gitHubMirrorStaticServer(t, tt.status, tt.body, tt.headers)
 
 			result, err := relayGitHubMirror(t, srv.URL)

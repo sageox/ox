@@ -1,4 +1,4 @@
-// Draw around, in the plan document: a stroke becomes a capture, and the
+// Draw around, in the plan document: a dragged oval becomes a capture, and the
 // drawings the host paints are placed and inked. A capture is a proposal: the
 // host checks it, mints its id and stamps its revision. The format is
 // docs/specs/plan-review-drawn-context.md; this follows the prototype in
@@ -6,7 +6,7 @@
 
 import { anchorFor, fnv1a, headingOf, norm } from './anchor.js';
 import type { DrawRefusal, DrawingPaint, Outcome } from './protocol.js';
-import { bboxOf, ellipsePoints, fitEllipse, inkLine, inkPaths, LIMITS, r1, thin, utf8Bytes, type Box, type Capture, type ContextItem, type ContextLabel, type Layout, type Point, type RegionTarget } from './region.js';
+import { bboxOf, ellipsePoints, inkLine, inkPaths, LIMITS, overlaps, r1, thin, utf8Bytes, type Box, type Capture, type ContextItem, type ContextLabel, type Ellipse, type Layout, type Point, type RegionTarget } from './region.js';
 
 const SVGNS = 'http://www.w3.org/2000/svg';
 const TOL = 1; // css px: geometry within this of the capture is unchanged
@@ -50,15 +50,16 @@ export function markables(selector: string, exclude: string): Markable[] {
  * why a stroke made none; changed hears that the layout moved after a paint,
  * which is placed again then.
  */
-export function drawLayer(selector: string, exclude: string, capture: (c: Capture, rect: { left: number; bottom: number }) => void, refuse: (r: DrawRefusal) => void, changed: () => void): DrawLayer {
-  const layer = svg('svg', { class: 'rev-ink', 'aria-hidden': 'true' }) as SVGSVGElement;
+export function drawLayer(selector: string, exclude: string, capture: (c: Capture, rect: { left: number; bottom: number }, anchor?: string) => void, refuse: (r: DrawRefusal) => void, changed: () => void): DrawLayer {
+  const layer = svg('svg', { class: 'rev-ink', 'aria-hidden': 'true', tabindex: -1 }) as SVGSVGElement;
   const ink = svg('g', {}); // translated so the layer's coordinates are the document's
   layer.appendChild(ink);
   document.documentElement.appendChild(layer);
   let tool = false;
-  // the stroke being drawn: the pointer drawing it (a second finger is
-  // ignored), its points, and the faint line that shows them
-  let stroke: { pointer: number; pts: Point[]; line: SVGPolylineElement } | null = null;
+  // One pointer creates, moves, or resizes an oval. A second finger is ignored.
+  let gesture: { pointer: number; start: Point; original: Ellipse; ellipse: Ellipse; anchor?: string; handle?: Point; preview: SVGGElement; moved: boolean } | null = null;
+  let selected: string | null = null;
+  const editable = new Map<string, Ellipse>();
   let lastClient: Point | null = null;
 
   function svg(tag: string, attrs: Record<string, string | number>): SVGElement {
@@ -73,6 +74,22 @@ export function drawLayer(selector: string, exclude: string, capture: (c: Captur
     g.appendChild(svg('path', { d: p.sweep, fill: 'currentColor', stroke: 'none' }));
     g.appendChild(svg('path', { d: p.hair, fill: 'none', stroke: 'currentColor', 'stroke-width': 1, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }));
     ink.appendChild(g);
+    return g;
+  }
+  function oval(e: Ellipse, tint: string, anchor?: string): SVGGElement {
+    const g = inkInto(inkLine(e), [0, 0], tint, anchor ? 'rev-ink-unsent' : 'rev-ink-live');
+    if (!anchor) return g;
+    g.setAttribute('data-anchor', anchor);
+    const [cx, cy] = e.center, [rx, ry] = e.radii;
+    const controls = svg('g', { transform: `translate(${cx} ${cy}) rotate(${e.rotation})` });
+    controls.appendChild(svg('ellipse', { class: 'rev-ink-hit', 'data-edit': anchor, cx: 0, cy: 0, rx, ry }));
+    if (selected === anchor) {
+      controls.appendChild(svg('rect', { class: 'rev-ink-bounds', x: -rx, y: -ry, width: rx * 2, height: ry * 2 }));
+      for (const [hx, hy, cursor] of [[-1, -1, 'nwse'], [0, -1, 'ns'], [1, -1, 'nesw'], [1, 0, 'ew'], [1, 1, 'nwse'], [0, 1, 'ns'], [-1, 1, 'nesw'], [-1, 0, 'ew']] as const) {
+        controls.appendChild(svg('rect', { class: 'rev-ink-handle', 'data-edit': anchor, 'data-hx': hx, 'data-hy': hy, x: hx * rx - 5, y: hy * ry - 5, width: 10, height: 10, style: `cursor:${cursor}-resize` }));
+      }
+    }
+    g.appendChild(controls);
     return g;
   }
   // fitLayer sizes the layer to the page. It zeroes the layer first: an
@@ -122,7 +139,6 @@ export function drawLayer(selector: string, exclude: string, capture: (c: Captur
   }
 
   // --- capture: geometry plus the bounded context a later reader needs ---
-  const overlaps = (a: Box, b: Box) => a[0] < b[0] + b[2] && b[0] < a[0] + a[2] && a[1] < b[1] + b[3] && b[1] < a[1] + a[3];
   // inside: the closed polygon winds around pt (nonzero winding).
   function inside(pt: Point, poly: Point[]): boolean {
     let w = 0;
@@ -142,11 +158,10 @@ export function drawLayer(selector: string, exclude: string, capture: (c: Captur
   const leafMost = <T extends Markable>(l: T[]) => l.filter((c) => !l.some((d) => d !== c && c.el.contains(d.el)));
   const outerMost = <T extends Markable>(l: T[]) => l.filter((c) => !l.some((d) => d !== c && d.el.contains(c.el)));
 
-  // capturePath turns a stroke into a capture, or the reason it makes none.
-  // What it encloses is decided by the fitted ellipse: the shape the reviewer
-  // sees once the pen lifts.
-  function capturePath(pts: Point[]): Capture | DrawRefusal {
-    const ellipse = fitEllipse(pts), poly = ellipsePoints(ellipse, 0), bb = bboxOf(poly);
+  // Capture the same ellipse shown throughout the drag, with fresh targets
+  // and context after every move or resize.
+  function captureEllipse(ellipse: Ellipse): Capture | DrawRefusal {
+    const poly = ellipsePoints(ellipse, 0), bb = bboxOf(poly);
     const all = markables(selector, exclude), index = byAnchor(all);
     const shown: Shown[] = [];
     all.forEach((c) => { const b = shownBox(c.el); if (b) shown.push({ ...c, box: b, cover: coverage(b, poly, bb) }); });
@@ -170,7 +185,7 @@ export function drawLayer(selector: string, exclude: string, capture: (c: Captur
     if (targets.length > LIMITS.targets) return 'too-large';
     const cap: Capture = {
       v: 1, kind: 'region', frame: 'document',
-      path: pts, ellipse, bbox: bb, layout: layoutContext(),
+      path: thin(poly.map((p) => [r1(p[0]), r1(p[1])])), ellipse, bbox: bb, layout: layoutContext(),
       targets: targets.map((c) => {
         const same = index[c.anchor];
         const t: RegionTarget = { anchor: c.anchor, tag: c.el.tagName.toLowerCase(), section: collapse(headingOf(c.el)), box: c.box, cover: c.cover };
@@ -186,23 +201,36 @@ export function drawLayer(selector: string, exclude: string, capture: (c: Captur
   // contextOf keeps what lay under and around the drawing: the innermost
   // markable elements meeting its box (plus a 16 px margin), nearest first,
   // with the text the reader saw and any diagram labels, bounded by LIMITS;
-  // truncated says when anything was cut.
+  // then, in the room those leave, the runs of text across the drawing,
+  // nearest first. truncated says when anything was cut.
   function contextOf(shown: Shown[], bb: Box, targets: Shown[]): Capture['context'] {
     const m = 16, zone: Box = [bb[0] - m, bb[1] - m, bb[2] + 2 * m, bb[3] + 2 * m];
     const cx = bb[0] + bb[2] / 2, cy = bb[1] + bb[3] / 2;
     const dist = (b: Box) => Math.abs(b[0] + b[2] / 2 - cx) + Math.abs(b[1] + b[3] / 2 - cy);
     const near = leafMost(shown.filter((c) => overlaps(c.box, zone))).sort((a, b) => dist(a.box) - dist(b.box));
-    const ctx: Capture['context'] = { items: [], truncated: near.length > LIMITS.contextItems };
+    // runs is in place before the items are trimmed, so the trim counts its key
+    const kept: ContextLabel[] = [];
+    const ctx: Capture['context'] = { items: [], truncated: near.length > LIMITS.contextItems, runs: kept };
     const cut = (s: string, n: number) => {
       if (s.length <= n) return s;
       ctx.truncated = true;
       return s.slice(0, n - 1) + '…';
     };
+    // the band the runs come from: the zone, as wide as the elements in it,
+    // so a row or a line is kept whole rather than cut at the drawing's edge
+    const band: Box = [...zone];
+    near.forEach((c) => {
+      const x1 = Math.max(band[0] + band[2], c.box[0] + c.box[2]);
+      band[0] = Math.min(band[0], c.box[0]);
+      band[2] = x1 - band[0];
+    });
+    let runs: ContextLabel[] = [];
     // innerText is the text the reader saw, cells and lines apart; the
     // glyphs review marks paint into elements are hidden while it is read
     const root = document.documentElement;
     root.classList.add('rev-reading');
     try {
+      runs = runsIn(band).sort((a, b) => dist(a.box) - dist(b.box));
       near.slice(0, LIMITS.contextItems).forEach((c) => {
         const h = c.el as HTMLElement;
         let text = collapse(h.innerText === undefined ? h.textContent : h.innerText);
@@ -219,7 +247,61 @@ export function drawLayer(selector: string, exclude: string, capture: (c: Captur
       root.classList.remove('rev-reading');
     }
     while (utf8Bytes(ctx) > LIMITS.contextBytes && ctx.items.length > 1) { ctx.items.pop(); ctx.truncated = true; }
+    let room = LIMITS.contextBytes - utf8Bytes(ctx);
+    for (const r of runs) {
+      const n = utf8Bytes(r) + 1; // and its comma
+      if (n > room) ctx.truncated = true;
+      else { kept.push(r); room -= n; }
+    }
     return ctx;
+  }
+  // runsIn: the words the reader saw in band, where the page drew them, so
+  // View original can draw them there again: one run per line of each text
+  // node, with its box. A diagram's SVG text counts, as it has boxes too.
+  function runsIn(band: Box): ContextLabel[] {
+    const out: ContextLabel[] = [];
+    const range = document.createRange();
+    const walk = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
+      acceptNode(n) {
+        if (n.nodeType === Node.TEXT_NODE) return NodeFilter.FILTER_ACCEPT;
+        const el = n as Element & { checkVisibility?: (o: object) => boolean };
+        if (el.matches(exclude + ', script, style, noscript, template, textarea, select')) return NodeFilter.FILTER_REJECT;
+        // most of the page lies outside the band: an element boxed outside it
+        // is skipped whole, missing only words that overflow it there; one
+        // with no box of its own (display: contents) still holds boxed words
+        const r = el.getBoundingClientRect();
+        if ((r.width || r.height) && !overlaps(rectOf(r), band)) return NodeFilter.FILTER_REJECT;
+        if (el.checkVisibility && !el.checkVisibility({ visibilityProperty: true, opacityProperty: true })) return NodeFilter.FILTER_REJECT;
+        return NodeFilter.FILTER_SKIP;
+      },
+    });
+    for (let t = walk.nextNode() as Text | null; t; t = walk.nextNode() as Text | null) {
+      // a word's box says which line it is on; a word broken over two lines
+      // counts on its first. A gap wider than the line is tall (aligned columns
+      // in a <pre>) starts a new run, so each side keeps its place
+      let run: ContextLabel | null = null;
+      const keep = () => { if (run && overlaps(run.box, band)) out.push(run); };
+      const words = /\S+/g;
+      for (let w = words.exec(t.data); w; w = words.exec(t.data)) {
+        range.setStart(t, w.index);
+        range.setEnd(t, w.index + w[0].length);
+        const r = range.getClientRects()[0];
+        if (!r || r.width < 1) continue;
+        const b = rectOf(r);
+        if (run && Math.abs(b[1] - run.box[1]) < 1 && b[0] - (run.box[0] + run.box[2]) < b[3]) {
+          const x1 = Math.max(run.box[0] + run.box[2], b[0] + b[2]);
+          run.box[0] = Math.min(run.box[0], b[0]);
+          run.box[2] = r1(x1 - run.box[0]);
+          run.box[3] = Math.max(run.box[3], b[3]);
+          run.text += ' ' + w[0];
+        } else {
+          keep();
+          run = { text: w[0], box: b };
+        }
+      }
+      keep();
+    }
+    return out;
   }
   // labelsIn: the text a diagram draws inside el (Mermaid node, edge and
   // cluster labels, or any SVG <text>), each with its own box.
@@ -284,11 +366,17 @@ export function drawLayer(selector: string, exclude: string, capture: (c: Captur
   function placeAll(): Placement[] {
     fitLayer();
     while (ink.firstChild) ink.removeChild(ink.firstChild);
+    editable.clear();
     const out = drawings.map((d) => {
       const o = place(d, index);
       const cls = d.kind === 'unsent' ? 'rev-ink-unsent' : '';
-      if (o.offset) inkInto(inkLine(d.ellipse), o.offset, d.tint, cls).setAttribute('data-anchor', d.anchor);
-      else if (o.boxes) {
+      if (o.offset) {
+        if (tool && d.kind === 'unsent') {
+          const e: Ellipse = { ...d.ellipse, center: [r1(d.ellipse.center[0] + o.offset[0]), r1(d.ellipse.center[1] + o.offset[1])] };
+          editable.set(d.anchor, e);
+          if (gesture?.anchor !== d.anchor) oval(e, d.tint, d.anchor);
+        } else inkInto(inkLine(d.ellipse), o.offset, d.tint, cls).setAttribute('data-anchor', d.anchor);
+      } else if (o.boxes) {
         // a thin dashed ellipse around the targets as they now are, never the drawing
         const u = o.boxes.reduce((m, b) => [Math.min(m[0], b[0]), Math.min(m[1], b[1]), Math.max(m[2], b[0] + b[2]), Math.max(m[3], b[1] + b[3])], [Infinity, Infinity, -Infinity, -Infinity]);
         ink.appendChild(svg('ellipse', {
@@ -298,7 +386,7 @@ export function drawLayer(selector: string, exclude: string, capture: (c: Captur
       }
       return { anchor: d.anchor, outcome: o.outcome, el: o.el || null };
     });
-    if (stroke) ink.appendChild(stroke.line);
+    if (gesture) ink.appendChild(gesture.preview);
     last = out.map((p) => p.outcome).join();
     return out;
   }
@@ -314,74 +402,101 @@ export function drawLayer(selector: string, exclude: string, capture: (c: Captur
     }, 100);
   }
 
-  // --- the gesture ---
-  // addPoint records where the pointer is in the document, as thin() would
-  // keep it, and extends the faint line by that one point: a long stroke
-  // never re-draws its whole length on each move.
-  function addPoint(cx: number, cy: number) {
-    if (!stroke) return;
+  // --- direct oval creation and editing ---
+  function drag(cx: number, cy: number) {
+    if (!gesture) return;
     lastClient = [cx, cy];
-    const p: Point = [r1(cx + scrollX), r1(cy + scrollY)], q = stroke.pts[stroke.pts.length - 1];
-    if (q && Math.abs(p[0] - q[0]) + Math.abs(p[1] - q[1]) < 2) return;
-    stroke.pts.push(p);
-    const sp = layer.createSVGPoint();
-    sp.x = p[0];
-    sp.y = p[1];
-    stroke.line.points.appendItem(sp);
+    const p: Point = [r1(cx + scrollX), r1(cy + scrollY)], s = gesture.start, e = gesture.original;
+    const dx = p[0] - s[0], dy = p[1] - s[1];
+    if (Math.abs(dx) + Math.abs(dy) >= 2) gesture.moved = true;
+    if (!gesture.anchor) {
+      gesture.ellipse = { center: [r1((s[0] + p[0]) / 2), r1((s[1] + p[1]) / 2)], radii: [r1(Math.abs(dx) / 2), r1(Math.abs(dy) / 2)], rotation: 0, start: 0, dir: 1 };
+    } else if (!gesture.handle) {
+      gesture.ellipse = { ...e, center: [r1(e.center[0] + dx), r1(e.center[1] + dy)] };
+    } else {
+      // Resize in the ellipse's own axes, keeping the opposite edge fixed.
+      const a = e.rotation * Math.PI / 180, cos = Math.cos(a), sin = Math.sin(a);
+      const delta = [dx * cos + dy * sin, -dx * sin + dy * cos];
+      const radii: Point = [...e.radii], shift: Point = [0, 0];
+      gesture.handle.forEach((h, i) => {
+        if (!h) return;
+        radii[i] = r1(Math.max(4, e.radii[i] + h * delta[i] / 2));
+        shift[i] = h * (radii[i] - e.radii[i]);
+      });
+      gesture.ellipse = { ...e, radii, center: [r1(e.center[0] + shift[0] * cos - shift[1] * sin), r1(e.center[1] + shift[0] * sin + shift[1] * cos)] };
+    }
+    gesture.preview.remove();
+    gesture.preview = oval(gesture.ellipse, 'gold', gesture.anchor);
   }
-  function abort(reason: DrawRefusal) {
-    if (!stroke) return;
-    stroke.line.remove();
-    stroke = null;
-    refuse(reason);
+  function endGesture(reason?: DrawRefusal) {
+    if (!gesture) return;
+    const pointer = gesture.pointer;
+    gesture = null;
+    layer.classList.remove('rev-dragging');
+    if (layer.hasPointerCapture(pointer)) layer.releasePointerCapture(pointer);
+    placeAll();
+    if (reason) refuse(reason);
   }
   layer.addEventListener('pointerdown', (e) => {
-    if (!tool || e.button !== 0 || stroke) return;
+    if (!tool || e.button !== 0 || gesture) return;
     e.preventDefault();
+    layer.focus({ preventScroll: true });
     fitLayer();
-    stroke = { pointer: e.pointerId, pts: [], line: svg('polyline', { class: 'rev-ink-live' }) as SVGPolylineElement };
-    ink.appendChild(stroke.line);
+    const hit = (e.target as Element).closest('[data-edit]'), anchor = hit?.getAttribute('data-edit') || undefined;
+    const original = anchor ? editable.get(anchor) : undefined;
+    if (anchor && !original) return;
+    selected = anchor || null;
+    const start: Point = [r1(e.clientX + scrollX), r1(e.clientY + scrollY)];
+    const ellipse: Ellipse = original || { center: start, radii: [0, 0], rotation: 0, start: 0, dir: 1 };
+    const handle: Point | undefined = hit?.hasAttribute('data-hx') ? [Number(hit.getAttribute('data-hx')), Number(hit.getAttribute('data-hy'))] : undefined;
+    gesture = { pointer: e.pointerId, start, original: ellipse, ellipse, anchor, handle, preview: oval(ellipse, 'gold', anchor), moved: false };
+    lastClient = [e.clientX, e.clientY];
+    layer.classList.toggle('rev-dragging', !!anchor && !handle);
+    placeAll();
     layer.setPointerCapture(e.pointerId);
-    addPoint(e.clientX, e.clientY);
   });
-  layer.addEventListener('pointermove', (e) => { if (stroke && e.pointerId === stroke.pointer) addPoint(e.clientX, e.clientY); });
+  layer.addEventListener('pointermove', (e) => { if (gesture && e.pointerId === gesture.pointer) drag(e.clientX, e.clientY); });
   layer.addEventListener('pointerup', (e) => {
-    if (!stroke || e.pointerId !== stroke.pointer) return;
-    stroke.line.remove();
-    const pts = thin(stroke.pts), bb = bboxOf(pts);
-    stroke = null;
-    if (pts.length < 3 || bb[2] < 8 || bb[3] < 8) { refuse('too-small'); return; }
-    const c = capturePath(pts);
+    if (!gesture || e.pointerId !== gesture.pointer) return;
+    drag(e.clientX, e.clientY);
+    const g = gesture;
+    endGesture();
+    if (g.anchor && !g.moved) return;
+    if (g.ellipse.radii.some((r) => r < 4)) { refuse('too-small'); return; }
+    const c = captureEllipse(g.ellipse);
     if (typeof c === 'string') { refuse(c); return; }
     // the composer opens below the drawing, in viewport pixels
-    capture(c, { left: c.bbox[0] - scrollX, bottom: c.bbox[1] + c.bbox[3] - scrollY });
+    capture(c, { left: c.bbox[0] - scrollX, bottom: c.bbox[1] + c.bbox[3] - scrollY }, g.anchor);
   });
-  layer.addEventListener('pointercancel', (e) => { if (stroke && e.pointerId === stroke.pointer) abort('cancelled'); });
-  // Scrolling mid-stroke moves the page under a still pointer: record where
-  // the pointer now is in the document, so the stroke follows the content.
-  window.addEventListener('scroll', () => { if (stroke && lastClient) addPoint(lastClient[0], lastClient[1]); });
+  layer.addEventListener('pointercancel', (e) => { if (gesture && e.pointerId === gesture.pointer) endGesture('cancelled'); });
+  layer.addEventListener('lostpointercapture', (e) => { if (gesture && e.pointerId === gesture.pointer && !layer.hasPointerCapture(e.pointerId)) endGesture('cancelled'); });
+  // Scrolling moves the page under a still pointer; keep document coordinates.
+  window.addEventListener('scroll', () => { if (gesture && lastClient) drag(lastClient[0], lastClient[1]); });
   document.addEventListener('scroll', (e) => { if (e.target !== document) relayout(); }, true);
   // A resize mid-stroke reflows what it was drawn over, so the stroke is
   // abandoned rather than captured against a layout that is gone.
-  window.addEventListener('resize', () => { abort('layout-changed'); relayout(); });
+  window.addEventListener('resize', () => { endGesture('layout-changed'); relayout(); });
   document.addEventListener('toggle', relayout, true);
   document.addEventListener('change', relayout, true);
   if (window.ResizeObserver) new ResizeObserver(relayout).observe(document.documentElement);
   // Esc ends a stroke in progress, before the host's own Esc (an open note,
   // then the tool, then review mode) sees it.
   window.addEventListener('keydown', (e) => {
-    if (e.key !== 'Escape' || !stroke || e.defaultPrevented) return;
+    if (e.key !== 'Escape' || !gesture || e.defaultPrevented) return;
     e.preventDefault();
-    abort('cancelled');
+    endGesture('cancelled');
   }, true);
 
   return {
     setTool(on) {
+      if (tool === on) return;
       tool = on;
       layer.classList.toggle('rev-drawing', on);
-      if (!on) abort('cancelled');
+      if (!on) endGesture('cancelled');
+      placeAll();
     },
     paint(next, all) {
+      for (const d of next) if (d.kind === 'unsent' && !drawings.some((old) => old.anchor === d.anchor)) selected = d.anchor;
       drawings = next;
       index = byAnchor(all);
       return placeAll();

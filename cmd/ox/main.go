@@ -269,7 +269,9 @@ func executeWithFrictionRecovery(ctx context.Context, args []string, attempt int
 			// Cobra rejected the invocation before ox built its context. Give
 			// usage telemetry one, so the mistake is counted like any failure.
 			err = errkind.WithDetail(errkind.Usage, cobraRejection(err), err)
-			cliCtx = &cli.Context{Cmd: cmd, CommandStartTime: start, Ctx: context.Background()}
+			if !isFeedbackCommand(cmd) {
+				cliCtx = &cli.Context{Cmd: cmd, CommandStartTime: start, Ctx: context.Background()}
+			}
 		case cobraFlagValidation(err):
 			// Required flags and flag groups are checked after
 			// PersistentPreRunE, so the context exists; only the kind is missing.
@@ -295,6 +297,11 @@ func executeWithFrictionRecovery(ctx context.Context, args []string, attempt int
 	if errors.Is(err, tea.ErrInterrupted) || ctx.Err() != nil {
 		fmt.Fprintln(os.Stderr, "Interrupted.")
 		return 130
+	}
+	if isFeedbackCommand(cmd) {
+		// Feedback failures must not trigger analytics or automatic resubmission.
+		printError(err)
+		return 1
 	}
 	if headlessLedgerReadRequested(args) {
 		// Cobra flag parsing can fail before RunE. Keep even that path out

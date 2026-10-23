@@ -2,10 +2,11 @@
 
 **Status:** implemented (#1293). `@sageox/plan-review` 0.6.0 (protocol 3)
 draws, places and shows drawings, and `pkg/planreview` v0.4.0 checks and
-stores them (section 7). The format was proved by the #1292 prototype and
-qualified by a consuming host (section 8). Builds on the Ledger contract
-(`plan-review-ledger-contract.md`, frozen in #1288), which `pkg/planreview`
-implements.
+stores them (section 7). 0.7.0 records where the words lay (`context.runs`),
+so View original draws them there (section 4). The format was proved by the
+#1292 prototype and qualified by a consuming host (section 8). Builds on the
+Ledger contract (`plan-review-ledger-contract.md`, frozen in #1288), which
+`pkg/planreview` implements.
 
 **Goal:** a reviewer circles part of a plan, the plan changes, and everyone can
 still see what was circled. Coordinates alone cannot do this: the page reflows
@@ -44,7 +45,7 @@ and fonts as `expect.json`'s `environment`.
   "plan_revision": "sha256:95eb8bed…", // SHA-256 of the plan-of-record bytes the page displayed
   "created_at": "2026-10-10T20:00:02Z",
   "frame": "document",                // coordinate frame of every point, box and the ellipse
-  "path": [[478.7, 339.9], …],        // the stroke as drawn, in order
+  "path": [[478.7, 339.9], …],        // sampled oval outline, or a legacy freehand stroke
   "ellipse": {"center": [597.6, 373.4], "radii": [155.5, 67.1],
               "rotation": 0, "start": -146.9, "dir": 1},  // what the reviewer sees (degrees)
   "bbox": [442.1, 306.3, 311, 134.2], // of the ellipse
@@ -59,7 +60,8 @@ and fonts as `expect.json`'s `environment`.
   ],
   "context": {                        // what lay under and around it (section 5)
     "items": [{"anchor": "h4d3dcf2e", "tag": "p", "box": [496.9, 379.4, 45.8, 24], "text": "Queue"}, …],
-    "truncated": false
+    "truncated": false,
+    "runs": [{"text": "Queue", "box": [496.9, 381.4, 45.8, 19]}, …]  // the words, where they lay
   }
 }
 ```
@@ -77,13 +79,15 @@ and fonts as `expect.json`'s `environment`.
   stub still knows which revision a drawing names. A framed
   document is untrusted, so the host stamps the revision of the instance it
   framed and ignores any claim from the document (section 6).
-- **Shape:** a reviewer draws freehand and sees a perfect ellipse: the one
-  with the stroke's area, centre and second moments (the stroke closed back to
-  its start), squared to the page when within 10° of it, starting where the pen
-  landed (`start`) and running the way it moved (`dir`). A stroke that encloses
-  almost nothing, such as a line, gets the ellipse inscribed in its bounding
-  box. The record keeps both: `ellipse` is what the reviewer saw and what
-  decides the targets; `path` is the evidence it was fitted from.
+- **Shape:** dragging between opposite corners shows the oval immediately.
+  Before submitting, a reviewer can drag a draft's outline to move it or use
+  its eight corner and edge handles to resize it. Each completed edit keeps
+  the drawing's identity and note, and recaptures its targets, context and
+  layout. `ellipse` is what the reviewer sees and what decides the targets;
+  `path` samples that outline. Older records keep their freehand stroke and
+  fitted ellipse and render unchanged.
+  Geometry freezes when a submission enters the outbox and stays frozen once
+  the host owns it. A refusal unlocks the draft; newer note edits are retained.
 - **Identity:** `id` is minted once by whoever freezes the drawing — the
   trusted host when framed, the local review chrome when top-level — never
   derived from the targets. Two drawings around one paragraph are two
@@ -96,6 +100,14 @@ and fonts as `expect.json`'s `environment`.
   outermost covered elements instead (a section rather than its every row).
   Still more than 16 is refused `too-large`, and nothing enclosed is
   `no-target`. `nth` and `of` record which occurrence when an anchor repeats.
+- **Runs** (0.7.0) keep the words across the drawing as the page laid them
+  out: one run per line of each text node, `{text, box}`, from a band as tall
+  as the drawing's box plus 16 px and as wide as the context items in it, so a
+  table row or a line of a paragraph is kept whole. SVG text counts. Runs are
+  sorted nearest the drawing first and take the room the items leave in the
+  context (section 5). Neither `checkRegion` nor `pkg/planreview` checks them:
+  a reader keeps only well-formed runs (`runsOf`), and a record without
+  `runs` was captured before 0.7.0.
 - **Anchors** are review.js's content hash, `h` + FNV-1a over the normalized
   section heading and element text, with one difference: the text excludes
   `<style>` and `<script>`. Mermaid names each diagram `mermaid-<Date.now()>`
@@ -113,8 +125,8 @@ and fonts as `expect.json`'s `environment`.
   a 12 px broad nib held at −12° (a hairline along the top and bottom,
   swelling where the ellipse turns through the vertical), tapered where the
   pen lands and lifts, and run 17° past its start so it closes like a pen-drawn
-  O. While the pen is down the raw stroke shows faintly, then settles into the
-  ellipse. Painting changes no record: retuning the nib left the regenerated
+  O. The live oval uses the same ink while the pointer is down. Painting
+  changes no record: retuning the nib left the regenerated
   `captures.json` byte-identical.
 
 ## 2. Scroll, zoom, resize, expanded sections
@@ -185,17 +197,27 @@ real Chrome) checks all six with the shipped document tools.
 
 The host redraws a drawing from the record alone, in the record's frame:
 
-- each context item as a box with its text;
-- diagram labels at their own boxes, with any text the labels don't account
-  for (a figure's caption) along the bottom of the item;
+- each run at its box: its font sized from the box's height and stretched to
+  the box's width, so each word lands where the page drew it;
+- each context item as a box;
 - then the inked ellipse;
 - and, when the context was cut, a "context truncated" note.
+
+The view is the drawing's box with a 24 px margin, widened to whole runs, so
+no word is cut at its edge. A diagram label no run covers (in a record
+captured before 0.7.0, or whose run did not fit) is drawn at its own box. An
+enclosed element none of whose words are placed has its text listed under the
+picture. 0.6.0 drew that text from the element's left edge at
+about 7 px a character, which flowed a table row's cells into one paragraph
+and put the loop on other words.
 
 It names the revision and layout, says when that revision is not the one on
 screen, and inserts text as text nodes, never markup. It needs neither the
 framed document nor the revision's bytes. On revision c the harness shows the
-original sentence and the "Retry budget" node inside their ellipses, and so do
-the host controls (`TestBrowser_ViewOriginalAfterAnEdit`).
+original sentence and the "Retry budget" node inside their ellipses; the host
+controls list them under their pictures (`TestBrowser_ViewOriginalAfterAnEdit`).
+A drawing with runs is drawn with each word where the page drew it
+(`TestBrowser_ViewOriginalDrawsWordsWhereTheyWere`).
 
 ## 5. Inline context, not an attachment
 
@@ -248,15 +270,17 @@ Why inline:
 | path | 512 points, thinned beyond that |
 | targets | 16 |
 | context items | 48; an enclosed element's text ≤ 2,000 characters, a neighbour's ≤ 600; ≤ 32 labels of ≤ 80 characters |
-| serialized context | 16 KiB of UTF-8; observed max 12,249 bytes |
-| whole record (host refuses larger) | 64 KiB of UTF-8; observed max 13,379 bytes |
+| runs | the room the items leave in the serialized context, nearest the drawing first |
+| serialized context | 16 KiB of UTF-8; observed max 12,249 bytes, before runs |
+| whole record (host refuses larger) | 64 KiB of UTF-8; observed max 13,379 bytes, before runs |
 
-Every cut (an item, a label, a clipped text) sets `context.truncated`, and View
-original says so. Text lengths are UTF-16 code units, as the browser counts
-them. Sizes are UTF-8 bytes of the value as JavaScript's `JSON.stringify`
-writes it, whatever whitespace, escapes or number spellings a request uses:
-Go's encoder, for one, writes each `<` as six bytes. `regions.json` holds a
-case at and one past every limit.
+Runs never displace an item: the items are kept as before, and a run that does
+not fit is dropped. Every cut (an item, a label, a clipped text, a dropped run)
+sets `context.truncated`, and View original says so. Text lengths are UTF-16
+code units, as the browser counts them. Sizes are UTF-8 bytes of the value as
+JavaScript's `JSON.stringify` writes it, whatever whitespace, escapes or number
+spellings a request uses: Go's encoder, for one, writes each `<` as six bytes.
+`regions.json` holds a case at and one past every limit.
 
 Every host accepts a round request of up to 1 MiB, the CLI's
 `reviewBodyLimit`, so that a round one host accepts is not refused by another.
@@ -310,7 +334,9 @@ style was needed.
   path, ellipse, targets, layout, and each context item and label. It must
   also be at most 64 KiB of UTF-8. Keep only the fields section 1 names.
   `parseDocumentMessage` (through `captureOf`) and `checkRegion` do; the
-  server's `ParseRoundRequest` applies the same rules (`regions.json`).
+  server's `ParseRoundRequest` applies the same rules (`regions.json`). Runs
+  are the exception: no rule refuses them, and `captureOf` keeps only the
+  well-formed ones.
 - Mint `id` and stamp `created_at`. Stamp the `plan_revision` the frame was
   served: a host never reads the bytes its frame loads, so it frames the plan
   at a named revision and its server refuses any other bytes.

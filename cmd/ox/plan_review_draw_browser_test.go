@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -33,9 +34,11 @@ import (
 // drawProbe is the fixture page's own script, the test's and not the
 // package's. It reports when pointer input first reaches the frame, scrolls a
 // named part of the plan into view and reports its box in the frame's
-// viewport, and opens the notes or checks a tab when told to. "table" is the
+// viewport, opens the notes or checks a tab when told to, and says where it
+// drew the first letter of each word it is asked about. "table" is the
 // rows under its header: a loop around the whole table bulges far enough
-// above it to enclose the sentence there, which revision c rewords.
+// above it to enclose the sentence there, which revision c rewords. "cell" is
+// the last cell of the first of those rows.
 const drawProbe = `<script>
 document.addEventListener('mousemove',function m(){document.removeEventListener('mousemove',m,true);parent.postMessage({input:true},'*')},true);
 function node(t){return [].filter.call(document.querySelectorAll('svg g.node'),function(g){return g.textContent.trim()===t})}
@@ -48,7 +51,8 @@ var named={
  notes:function(){return li('Add the budget counter beside the queue depth gauge.')},
  'full-tab':function(){return [document.querySelector('#panel-full p')]},
  figure:function(){return [document.querySelector('figure')]},
- table:function(){return [].slice.call(document.querySelectorAll('table tr'),1)}
+ table:function(){return [].slice.call(document.querySelectorAll('table tr'),1)},
+ cell:function(){return [document.querySelectorAll('table tr')[1].cells[2]]}
 };
 window.addEventListener('message',function(e){
  var d=e.data||{};if(e.source!==parent)return;
@@ -56,6 +60,16 @@ window.addEventListener('message',function(e){
  if(d.open)document.querySelector('details').open=true;
  if(d.check)document.getElementById(d.check).checked=true;
  if(d.which)parent.postMessage({which:document.querySelector('input[name=rollout]:checked').id},'*');
+ if(d.ink){
+  var root=document.querySelector('.rev-ink'),live=root.querySelector('.rev-ink-live'),hit=root.querySelector('.rev-ink-hit');
+  function box(el){if(!el)return null;var r=el.getBoundingClientRect();return {x:r.left,y:r.top,w:r.width,h:r.height}}
+  parent.postMessage({ink:{live:box(live),oval:box(hit),anchor:hit&&hit.getAttribute('data-edit'),cursor:hit&&getComputedStyle(hit).cursor,
+   handles:[].map.call(root.querySelectorAll('.rev-ink-handle'),function(h){return {hx:+h.getAttribute('data-hx'),hy:+h.getAttribute('data-hy'),box:box(h)}}),
+   polylines:root.querySelectorAll('polyline').length}},'*');
+ }
+ if(d.where){var at={};d.where.forEach(function(w){var it=document.createNodeIterator(document.body,NodeFilter.SHOW_TEXT),n;
+  while((n=it.nextNode())&&n.data.indexOf(w)<0);if(!n)return;var r=document.createRange();r.setStart(n,n.data.indexOf(w));r.setEnd(n,n.data.indexOf(w)+1);
+  var b=r.getBoundingClientRect();at[w]=[b.left+scrollX,b.top+scrollY,b.width,b.height]});parent.postMessage({where:at},'*')}
  if(!d.want)return;
  var els=named[d.want]();els[0].scrollIntoView({block:'center'});
  requestAnimationFrame(function(){requestAnimationFrame(function(){
@@ -78,7 +92,7 @@ const drawTools = `<!doctype html><html><body style="margin:0">` +
 	` const inst = 'draw-test-' + String(++loads).padStart(4, '0'); port = connectFrame(frame, inst); port.listen((m) => window.got.push(m));` +
 	` frame.style.width = w + 'px'; frame.style.height = h + 'px'; frame.src = '/doc/' + rev + '?load=' + loads + '#i=' + inst; };` +
 	`window.send = (m) => port.send(m); window.ask = (m) => frame.contentWindow.postMessage(m, '*');` +
-	`window.addEventListener('message', (e) => { const d = e.data || {}; if (d.rect) window.rect = d.rect; if (d.input) window.input = true; if (d.which) window.which = d.which; });` +
+	`window.addEventListener('message', (e) => { const d = e.data || {}; if (d.rect) window.rect = d.rect; if (d.input) window.input = true; if (d.which) window.which = d.which; if (d.ink) window.ink = d.ink; });` +
 	`window.ready = true;</script></body></html>`
 
 var mermaidCDNTag = regexp.MustCompile(`<script[^>]+src="https://cdn\.jsdelivr\.net/npm/mermaid@[^"]+"[^>]*></script>`)
@@ -230,25 +244,19 @@ func reachFrame(t *testing.T, ctx context.Context) {
 	}
 }
 
-// stroke draws a loop around b by hand: from its upper left, once around and
-// a little past where it began, through every corner of b's box.
+// stroke drags out an oval around b, enclosing most of its area.
 func stroke(t *testing.T, ctx context.Context, b box) {
 	t.Helper()
 	cx, cy := b.X+b.W/2, b.Y+b.H/2
-	rx, ry := b.W/2*math.Sqrt2+6, b.H/2*math.Sqrt2+6
-	var acts []chromedp.Action
-	const n = 72
-	for i := 0; i <= n+8; i++ {
-		a := (-150 + 360*float64(i)/n) * math.Pi / 180
-		x, y := cx+rx*math.Cos(a), cy+ry*math.Sin(a)
-		switch i {
-		case 0:
-			acts = append(acts, chromedp.MouseEvent("mouseMoved", x, y), chromedp.MouseEvent("mousePressed", x, y, chromedp.ButtonLeft, chromedp.ClickCount(1)))
-		case n + 8:
-			acts = append(acts, chromedp.MouseEvent("mouseReleased", x, y, chromedp.ButtonLeft, chromedp.ClickCount(1)))
-		default:
-			acts = append(acts, chromedp.MouseEvent("mouseMoved", x, y, chromedp.ButtonLeft))
-		}
+	rx, ry := b.W/2+6, b.H/2+6
+	// Deselect the previous oval before creating another over the same area.
+	acts := []chromedp.Action{
+		chromedp.MouseClickXY(5, 5),
+		chromedp.MouseEvent("mouseMoved", cx-rx, cy-ry),
+		chromedp.MouseEvent("mousePressed", cx-rx, cy-ry, chromedp.ButtonLeft, chromedp.ClickCount(1)),
+		chromedp.MouseEvent("mouseMoved", cx-rx+2, cy-ry+2, chromedp.ButtonLeft),
+		chromedp.MouseEvent("mouseMoved", cx+rx, cy+ry, chromedp.ButtonLeft),
+		chromedp.MouseEvent("mouseReleased", cx+rx, cy+ry, chromedp.ButtonLeft, chromedp.ClickCount(1)),
 	}
 	if err := chromedp.Run(ctx, acts...); err != nil {
 		t.Fatalf("draw around %s: %v", b.Name, err)
@@ -492,11 +500,12 @@ func drawHost(doc, revision, committed, extra string) string {
 		`<iframe id="doc" sandbox="allow-scripts" style="position:absolute;left:0;top:0;width:1280px;height:800px;border:0"></iframe>` +
 		`<script type="module">import { connectFrame, mountHostControls } from '/index.js';` +
 		`const frame = document.getElementById('doc'); window.sent = [];` +
-		`window.addEventListener('message', (e) => { const d = e.data || {}; if (d.rect) window.rect = d.rect; if (d.input) window.input = true; if (d.connected) window.connected = true; });` +
+		`window.addEventListener('message', (e) => { const d = e.data || {}; if (d.rect) window.rect = d.rect; if (d.input) window.input = true; if (d.connected) window.connected = true; if (d.ink) window.ink = d.ink; if (d.where) window.where = d.where; });` +
 		`window.ask = (m) => frame.contentWindow.postMessage(m, '*');` +
-		`mountHostControls(connectFrame(frame, 'draw-host-0001'), { account: 'acct-devon', plan: 'pln_draw', slug: 'retry-budget-rollout', reviewer: 'Devon',` +
-		` frame, reviewing: true, revision: '` + revision + `', committed: ` + committed + `,` + extra +
-		` transport: { send: (op) => { window.sent.push(op); return Promise.resolve({ state: 'owned', id: op.id, synced: true }); } } });` +
+		`const port = connectFrame(frame, 'draw-host-0001'); window.got = [];` +
+		`mountHostControls({ send: port.send, listen: (fn) => port.listen((m) => { window.got.push(m); fn(m); }) }, { account: 'acct-devon', plan: 'pln_draw', slug: 'retry-budget-rollout', reviewer: 'Devon',` +
+		` frame, reviewing: true, revision: '` + revision + `', committed: ` + committed + `,` +
+		` transport: { send: (op) => { window.sent.push(op); return Promise.resolve({ state: 'owned', id: op.id, synced: true }); } },` + extra + ` });` +
 		`frame.src = '/doc/` + doc + `#i=draw-host-0001';</script></body></html>`
 }
 
@@ -616,6 +625,7 @@ func committedDrawing(region map[string]any, state, note string) map[string]any 
 
 // View original must reconstruct drawings from their records after an edit,
 // show when context was truncated, and render record text without running it.
+// Each drawing's row says its text changed, with every tag inside the row.
 func TestBrowser_ViewOriginalAfterAnEdit(t *testing.T) {
 	ctx := drawBrowser(t)
 	base := serveDrawFixture(t, drawHost("a", revisionDigest(t, "a"), "[]", ""))
@@ -624,7 +634,9 @@ func TestBrowser_ViewOriginalAfterAnEdit(t *testing.T) {
 	}
 	reachFrame(t, ctx)
 	const markup = `<img src=x onerror="window.pwned=1">`
-	longText := markup + " " + strings.Repeat("Retained context ", 160) + "UNRETAINED TAIL"
+	// markup on every line, so the lines kept across the oval hold some; more
+	// text would push the oval drawn below off the top of the frame
+	longText := strings.Repeat("Retained context "+markup+" ", 50) + "UNRETAINED TAIL"
 	if err := chromedp.Run(ctx, chromedp.Evaluate(`window.ask({text:`+jsString(longText)+`})`, nil), chromedp.Click(".rev-draw", chromedp.ByQuery)); err != nil {
 		t.Fatal(err)
 	}
@@ -670,17 +682,33 @@ func TestBrowser_ViewOriginalAfterAnEdit(t *testing.T) {
 	}
 	recs := fixtureDrawings(t)
 	r1, r9 := recs["r1-double-fire"], recs["r9-mermaid-renamed-node"]
-	// a neighbour's text that looks like markup
-	r1["context"].(map[string]any)["items"].([]any)[1].(map[string]any)["text"] = `<img src=x onerror="window.pwned=1">`
+	// the enclosed sentence's text, followed by text that looks like markup
+	sentence := r1["context"].(map[string]any)["items"].([]any)[0].(map[string]any)
+	sentence["text"] = sentence["text"].(string) + " " + markup
+	addressed := committedDrawing(r1, "addressed", "Both retries fire here.")
+	addressed["reviewer"] = "Avery Montgomery"
+	// captured with no room left for runs: its node is listed, not lost
+	r9["context"].(map[string]any)["runs"] = []any{}
 	nodeItem := committedDrawing(r9, "open", "Rename it?")
 	nodeItem["section"], nodeItem["label"] = "Flow", "Drawing: Retry budget"
-	committed, _ := json.Marshal([]any{committedDrawing(r1, "open", "Both retries fire here."), nodeItem, committedDrawing(bounded, "open", "Keep the bounded original.")})
+	// a figure whose text has since changed, and whose caption alone kept a
+	// run: the labels no run covers are still drawn
+	fig := recs["r7-figure"]
+	fig["targets"].([]any)[0].(map[string]any)["anchor"] = "h00000000"
+	fig["context"].(map[string]any)["runs"] = []any{map[string]any{"text": "Retries per minute in the load test.", "box": []any{284, 1136, 230, 17}}}
+	committed, _ := json.Marshal([]any{addressed, nodeItem, committedDrawing(fig, "open", "Per minute?"), committedDrawing(bounded, "open", "Keep the bounded original.")})
 	base = serveDrawFixture(t, drawHost("c", revisionDigest(t, "c"), string(committed), ""))
 	if err := chromedp.Run(ctx, chromedp.Navigate(base), chromedp.WaitVisible(".rev-rail-orig", chromedp.ByQuery)); err != nil {
 		t.Fatalf("open the host: %v", err)
 	}
-	if !waitJS(ctx, `document.querySelectorAll('.rev-rail-item').length===3&&[].every.call(document.querySelectorAll('.rev-rail-item'),function(li){return li.textContent.indexOf('text changed')>=0})`, 10*time.Second) {
+	if !waitJS(ctx, `document.querySelectorAll('.rev-rail-item').length===4&&[].every.call(document.querySelectorAll('.rev-rail-item'),function(li){return li.textContent.indexOf('text changed')>=0})`, 10*time.Second) {
 		t.Fatalf("the rail does not list all drawings with their text changed: %s", evalString(t, ctx, `document.querySelector('.rev-rail').textContent`))
+	}
+	// a long name, "addressed" and "text changed" share one row's header:
+	// none is squeezed to nothing or runs out of the row
+	if got := evalString(t, ctx, `[].map.call(document.querySelectorAll('.rev-rail-item'),function(li){var r=li.getBoundingClientRect();`+
+		`return [].filter.call(li.querySelectorAll('.rev-rail-sec > *'),function(e){var b=e.getBoundingClientRect();return b.width<1||b.right>r.right}).map(function(e){return e.textContent}).join('|')}).join('')`); got != "" {
+		t.Errorf("rail rows squeeze or spill their header: %q", got)
 	}
 	if err := chromedp.Run(ctx, chromedp.Evaluate(`document.querySelector('#doc').remove()`, nil)); err != nil {
 		t.Fatal(err)
@@ -706,8 +734,9 @@ func TestBrowser_ViewOriginalAfterAnEdit(t *testing.T) {
 	if err := chromedp.Run(ctx, chromedp.WaitVisible(".rev-original .rev-orig-cut", chromedp.ByQuery)); err != nil {
 		t.Fatalf("truncation notice is not visible: %v", err)
 	}
+	// the lines across the oval, as text: a line may split the markup, never "<img"
 	if !strings.Contains(got, "Context truncated: some of what lay here was not kept.") ||
-		!strings.Contains(got, markup) || !strings.Contains(got, "Retained context") || strings.Contains(got, "UNRETAINED TAIL") {
+		!strings.Contains(got, "<img") || !strings.Contains(got, "Retained context") || strings.Contains(got, "UNRETAINED TAIL") {
 		t.Errorf("View original lost the retained context or its truncation notice: %q", got)
 	}
 	if got := evalString(t, ctx, `document.querySelectorAll('.rev-original .rev-orig-box').length+':'+document.querySelectorAll('.rev-original .rev-orig-ink path').length+':'+document.querySelectorAll('.rev-original img').length+':'+window.pwned`); got != "1:2:0:undefined" {
@@ -719,6 +748,9 @@ func TestBrowser_ViewOriginalAfterAnEdit(t *testing.T) {
 	if got := evalString(t, ctx, `document.querySelectorAll('.rev-original .rev-orig-cut').length`); got != "0" {
 		t.Errorf("complete context has a truncation notice: %s", got)
 	}
+	if got := open("Per minute?"); !strings.Contains(got, "Retries per minute in the load test.") || !strings.Contains(got, "before: 2,800/min") {
+		t.Errorf("View original of the figure: %q lacks its kept run or a label no run covers", got)
+	}
 	if err := chromedp.Run(ctx, chromedp.KeyEvent(kb.Escape)); err != nil {
 		t.Fatal(err)
 	}
@@ -727,19 +759,75 @@ func TestBrowser_ViewOriginalAfterAnEdit(t *testing.T) {
 	}
 }
 
+// TestBrowser_ViewOriginalDrawsWordsWhereTheyWere: Devon drags an oval around
+// the last cell of a table row. View original draws the first word of each of
+// the row's cells where the page drew it, so the oval encloses the same words.
+// Failure prevented: View original flows a row's cells into one paragraph at
+// a guessed letter width, and the oval lands on other words.
+func TestBrowser_ViewOriginalDrawsWordsWhereTheyWere(t *testing.T) {
+	ctx := drawBrowser(t)
+	base := serveDrawFixture(t, drawHost("a", revisionDigest(t, "a"), "[]", ""))
+	if err := chromedp.Run(ctx, chromedp.Navigate(base), chromedp.WaitVisible(".rev-draw", chromedp.ByQuery)); err != nil {
+		t.Fatalf("open the host: %v", err)
+	}
+	reachFrame(t, ctx)
+	if err := chromedp.Run(ctx, chromedp.Click(".rev-draw", chromedp.ByQuery)); err != nil {
+		t.Fatal(err)
+	}
+	reachFrame(t, ctx)
+	stroke(t, ctx, partOf(t, ctx, "cell"))
+	if !waitJS(ctx, `document.querySelector('.rev-pop .rev-note')`, 10*time.Second) {
+		t.Fatalf("the oval around the cell opened no note: %s", evalString(t, ctx, `(document.querySelector('.rev-toast')||{}).textContent`))
+	}
+	// each word's first letter as [x, y, width, height]: where the page drew
+	// it, and where View original drew it, both in the document's coordinates
+	words := []string{"Budget", "high", "Per-tenant"}
+	list, _ := json.Marshal(words)
+	var page, drawn map[string]*[4]float64
+	var s string
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`window.where=null;window.ask({where:`+string(list)+`})`, nil),
+		chromedp.Poll(`window.where&&JSON.stringify(window.where)`, &s, chromedp.WithPollingTimeout(10*time.Second))); err != nil {
+		t.Fatalf("find the words on the page: %v", err)
+	}
+	if err := json.Unmarshal([]byte(s), &page); err != nil {
+		t.Fatal(err)
+	}
+	if err := chromedp.Run(ctx, chromedp.SendKeys(".rev-pop .rev-note", "Per tenant, or per queue?", chromedp.ByQuery),
+		chromedp.Click(".rev-pop .rev-save", chromedp.ByQuery), chromedp.Click(".rev-rail-orig", chromedp.ByQuery),
+		chromedp.WaitVisible(".rev-original svg", chromedp.ByQuery)); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(evalString(t, ctx, `JSON.stringify(Object.fromEntries(`+string(list)+`.map(function(w){`+
+		`var el=[].filter.call(document.querySelectorAll('.rev-original text, .rev-original tspan'),function(e){return !e.querySelector('tspan')&&e.textContent.indexOf(w)>=0})[0];`+
+		`if(!el)return [w,null];var e=el.getExtentOfChar(el.textContent.indexOf(w));return [w,[e.x,e.y,e.width,e.height]]})))`)), &drawn); err != nil {
+		t.Fatal(err)
+	}
+	for _, w := range words {
+		p, d := page[w], drawn[w]
+		if p == nil || d == nil {
+			t.Errorf("%q: on the page at %v, in View original at %v; want both", w, p, d)
+			continue
+		}
+		// the same left edge, and the same middle give or take two fonts' metrics
+		if math.Abs(d[0]-p[0]) > 2 || math.Abs(d[1]+d[3]/2-p[1]-p[3]/2) > 4 {
+			t.Errorf("View original draws %q at %v; the page drew it at %v", w, *d, *p)
+		}
+	}
+}
+
 // TestBrowser_DrawingsStayIndependentThroughEditAndReopen: of two stored
 // drawings around one sentence, Devon edits the open one's note from its row
 // and reopens the addressed one; each operation carries only its own drawing,
 // whole, under marks.
 // Failure prevented: editing or reopening one drawing changes the other, or
-// sends the drawing without its region, so it can no longer be placed.
+// changes submitted geometry, or sends a drawing without its region.
 func TestBrowser_DrawingsStayIndependentThroughEditAndReopen(t *testing.T) {
 	ctx := drawBrowser(t)
 	recs := fixtureDrawings(t)
 	addressed := committedDrawing(recs["r1-double-fire"], "addressed", "Both retries fire here.")
 	addressed["resolutionNote"] = "Bounded the retries."
 	committed, _ := json.Marshal([]any{addressed, committedDrawing(recs["r2-double-fire-again"], "open", "And again on requeue.")})
-	base := serveDrawFixture(t, drawHost("a", revisionDigest(t, "a"), string(committed), " resolve: true,"))
+	base := serveDrawFixture(t, drawHost("a?forge=1", revisionDigest(t, "a"), string(committed), " resolve: true,"))
 	if err := chromedp.Run(ctx, chromedp.Navigate(base), chromedp.WaitVisible(".rev-rail-orig", chromedp.ByQuery)); err != nil {
 		t.Fatalf("open the host: %v", err)
 	}
@@ -755,6 +843,19 @@ func TestBrowser_DrawingsStayIndependentThroughEditAndReopen(t *testing.T) {
 	if err := chromedp.Run(ctx, chromedp.SendKeys(".rev-pop .rev-note", "Still fires twice.", chromedp.ByQuery), chromedp.Click(".rev-pop .rev-save", chromedp.ByQuery)); err != nil {
 		t.Fatal(err)
 	}
+	// A new note on a submitted drawing must not unlock its geometry, even
+	// when the framed plan proposes an edit directly on the tools' channel.
+	forged := map[string]any{}
+	for k, v := range recs["r2-double-fire-again"] {
+		forged[k] = v
+	}
+	forged["ellipse"] = map[string]any{"center": []int{10, 10}, "radii": []int{111, 111}, "rotation": 0, "start": 0, "dir": 1}
+	msg, _ := json.Marshal(map[string]any{"type": "capture", "anchor": "q-r2-double-fire-again", "capture": forged, "rect": map[string]any{"left": 10, "bottom": 121}})
+	if err := chromedp.Run(ctx, chromedp.Click(".rev-draw", chromedp.ByQuery), chromedp.Evaluate(`window.ask({forge:`+string(msg)+`})`, nil)); err != nil {
+		t.Fatal(err)
+	}
+	var ignored struct{}
+	gotMessage(t, ctx, 0, "capture", &ignored)
 	row("Bounded the retries.")
 	if err := chromedp.Run(ctx, chromedp.SendKeys(".rev-pop .rev-note", "Not bounded yet.", chromedp.ByQuery), chromedp.Click(".rev-pop .rev-reopen", chromedp.ByQuery)); err != nil {
 		t.Fatalf("Reopen: %v", err)
@@ -770,7 +871,10 @@ func TestBrowser_DrawingsStayIndependentThroughEditAndReopen(t *testing.T) {
 	}
 	type mark struct {
 		Anchor, Status, Note string
-		Region               struct{ ID string }
+		Region               struct {
+			ID      string
+			Ellipse json.RawMessage
+		}
 	}
 	var sent []struct{ Items, Marks []mark }
 	for i := range 2 {
@@ -791,6 +895,13 @@ func TestBrowser_DrawingsStayIndependentThroughEditAndReopen(t *testing.T) {
 		got := sent[i].Marks[0]
 		if got.Anchor != w.Anchor || got.Status != w.Status || got.Note != w.Note || "q-"+got.Region.ID != w.Anchor {
 			t.Errorf("operation %d sent %+v, want %+v with its own region", i, got, w)
+		}
+		var ellipse any
+		if err := json.Unmarshal(got.Region.Ellipse, &ellipse); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(ellipse, recs[got.Region.ID]["ellipse"]) {
+			t.Errorf("operation %d changed submitted drawing geometry: %s", i, got.Region.Ellipse)
 		}
 	}
 }
@@ -995,11 +1106,11 @@ func TestBrowser_DrawingNeverEnclosesTheReviewControls(t *testing.T) {
 		t.Fatal(err)
 	}
 	var b box
-	if err := json.Unmarshal([]byte(evalString(t, ctx, `(function(){var r=document.querySelector('.rev-rail').getBoundingClientRect();return JSON.stringify({name:'rail',x:r.left+12,y:r.top+12,w:r.width-24,h:r.height-24})})()`)), &b); err != nil {
+	if err := json.Unmarshal([]byte(evalString(t, ctx, `(function(){var r=document.querySelector('.rev-rail').getBoundingClientRect();return JSON.stringify({name:'rail',x:r.left-8,y:r.top-8,w:r.width+16,h:r.height+16})})()`)), &b); err != nil {
 		t.Fatal(err)
 	}
 	stroke(t, ctx, b)
-	if !waitJS(ctx, `(document.querySelector('.rev-toast')||{}).textContent.indexOf('Nothing in that loop')===0`, 5*time.Second) {
+	if !waitJS(ctx, `(document.querySelector('.rev-toast')||{}).textContent.indexOf('Nothing in that oval')===0`, 5*time.Second) {
 		t.Errorf("a loop around the rail did not say nothing can take a comment; note open: %s, toast: %q", evalString(t, ctx, `!!document.querySelector('.rev-pop')`),
 			evalString(t, ctx, `(document.querySelector('.rev-toast')||{}).textContent`))
 	}

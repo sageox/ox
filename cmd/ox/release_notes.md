@@ -7,14 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### New
+
+- **Send private feedback from the terminal** — `ox feedback --file report.txt` sends a report to SageOx Support and returns a receipt. Preview the exact request with `--dry-run`, use `--anonymous` without login or a reply email, or supply `--email` for replies. Choose `bug`, `feature-request`, or `feedback`. Local secret checks run before sending; no logs or session content are collected automatically.
+
 ### Improved
 
+- **Codex explains each SageOx hook before you approve it** — all six hooks now identify SageOx and describe their purpose, including recording and configured publishing. `ox doctor` detects old labels and offers a refresh for project and user installations; other integrations' hook settings are preserved.
 - **AI coworkers get the command they meant more often** — ox now runs the right command when a coworker passes a whole command as one word (a zsh loop over `"plan list"`), types a subcommand as a flag (`daemon --list`), or adds arguments to a known shortcut (`auth --help`, `plan show <slug>`). A correction that would change what the command does, or that would not parse, stays a suggestion, and short unknown words no longer get guesses that point at unrelated commands.
 - **List commands share one set of flags** — `plan list`, `murmur list`, `session list` and `conversation list` all accept `--limit`, `--since`, `--until` and `--json`, and `conversation transcript` accepts `--limit`. `murmur list --last` and `session list --window` keep working.
 
 ### Fixed
 
 - **Session summaries and maintenance leave other staged work alone** — sharing a summary, regenerating or redacting sessions, deleting a session or murmur, adding or removing a coworker, and backfilling plan titles commit only their own changes. Unrelated staged work stays pending, including when a push needs to retry after a teammate's update. Confirmed session deletion still works for large sessions.
+- **Sessions that made a commit reach the Ledger again** — since 0.24.0, the secret guard read the commit IDs a session records in `meta.json` as Sourcegraph access tokens, so every recording that committed code stayed on your machine and held back any other session waiting in the same Ledger commit. Exact git commit IDs in that list are no longer treated as credentials. Everything else in `meta.json` is still scanned, and held sessions publish on the next sync after you upgrade.
 - **AI coworkers can follow ox's own instructions again** — `ox agent <id> session log --role/--content/--stdin`, which ox suggests to coworkers that record by hand, was rejected before it ran; it now writes the entry. `--agent-id` names the coworker for `ox agent heartbeat` and the other agent commands, and hints that pointed at commands ox doesn't have (`ox ledger sync`, `ox conventions`, `ox redaction verify`) now name the real ones.
 - **Usage reports no longer carry what you typed** — when a command fails to parse, ox reports only its command and flag names. Paths, IDs, names and free text are removed on your machine before the report is sent, and the daemon removes them again.
 
@@ -22,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Leftover `.rej` and `.needs-summary` files no longer block session uploads** — ox's check against mass deletion counted their cleanup as deleted work and refused uploads once a Ledger's sessions held more than five of them. Commits that delete real session or plan content are still refused.
 - **`ox doctor` finishes plan saves that never committed, and names plan edits nobody saved** — a save that wrote the plan but never committed it (ox was interrupted, or an older version left it) is queued and shared by the same `ox doctor` run. Edits nobody saved are listed by plan; `ox doctor --fix-slug=plan-unsaved-edits` shares them as they are once you confirm.
 - **"Access denied" means access denied** — a Ledger push and `ox doctor`'s Ledger check say you lack access only when the server answered HTTP 403. A sign-in failure on a server whose address or port contains 403 is now reported as a sign-in failure.
+- **View original puts your oval around the words you drew it around** — a drawing in a plan review now records where the words under it sat, and View original draws them there. Before, it guessed: a table row's cells ran together as one paragraph, so the oval landed on other words. Drawings made before this keep their diagram labels in place and list the text they enclosed below the picture. The comments rail also keeps a long reviewer name and its tags inside the comment card instead of running off its edge.
 
 ## [0.24.2] - 2026-10-21
 

@@ -1,4 +1,4 @@
-// A drawn region: a reviewer's freehand ellipse around part of a plan, kept
+// A drawn region: a reviewer's ellipse around part of a plan, kept
 // with what it encloses and a bounded copy of what lay under it, so it can be
 // shown again after the plan changes. docs/specs/plan-review-drawn-context.md
 // is the format. pkg/planreview (region.go) checks the same rules on the
@@ -68,14 +68,19 @@ export interface Capture {
   v: 1;
   kind: 'region';
   frame: 'document';
-  /** The stroke as drawn. */
+  /** Sampled oval outline; older captures retain their freehand stroke. */
   path: Point[];
   /** What the reviewer sees, and what decides the targets. */
   ellipse: Ellipse;
   bbox: Box;
   layout: Layout;
   targets: RegionTarget[];
-  context: { items: ContextItem[]; truncated: boolean };
+  /**
+   * runs: the words across the drawing as the page laid them out, one per
+   * line of each text node, nearest the drawing first. A record captured
+   * before runs existed has none, and the server does not check them.
+   */
+  context: { items: ContextItem[]; truncated: boolean; runs?: ContextLabel[] };
 }
 
 /** A drawing's record: a capture with the identity, revision and time its host stamped. */
@@ -180,7 +185,7 @@ export function captureOf(v: unknown): Capture | null {
   const pt = (p: number[]): Point => [p[0], p[1]];
   const bx = (b: number[]): Box => [b[0], b[1], b[2], b[3]];
   const e = c.ellipse, l = c.layout;
-  return {
+  const cap: Capture = {
     v: 1, kind: 'region', frame: 'document',
     path: c.path.map(pt),
     ellipse: { center: pt(e.center), radii: pt(e.radii), rotation: e.rotation, start: e.start, dir: e.dir },
@@ -200,6 +205,18 @@ export function captureOf(v: unknown): Capture | null {
       truncated: c.context.truncated,
     },
   };
+  const runs = runsOf(c.context);
+  if (runs) cap.context.runs = runs.map((x) => ({ text: x.text, box: bx(x.box) }));
+  return cap;
+}
+
+/**
+ * runsOf returns the well-formed runs of a context, or null when it carries no
+ * list of them: it was captured before runs. Neither checkRegion nor the
+ * server checks runs, so a reader takes them through this.
+ */
+export function runsOf(c: { runs?: unknown }): ContextLabel[] | null {
+  return Array.isArray(c.runs) ? c.runs.filter((x): x is ContextLabel => obj(x) && str(x.text) && box(x.box)) : null;
 }
 
 /** drawingLabel is the label a drawing's item carries: "Drawing: " and the text it encloses, within 70 units. */
@@ -213,6 +230,9 @@ export function drawingLabel(r: Capture): string {
 
 // --- a stroke's geometry: what the document tools capture, and what a
 // host can recompute from a record's path ---
+
+/** overlaps says whether two boxes share any area. */
+export const overlaps = (a: Box, b: Box) => a[0] < b[0] + b[2] && b[0] < a[0] + a[2] && a[1] < b[1] + b[3] && b[1] < a[1] + a[3];
 
 /** r1 rounds a coordinate to the tenth of a pixel a capture keeps. */
 export const r1 = (n: number) => Math.round(n * 10) / 10;

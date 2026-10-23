@@ -126,6 +126,9 @@
   function checkRegion(v) {
     return problem(v, true);
   }
+  function runsOf(c) {
+    return Array.isArray(c.runs) ? c.runs.filter((x) => obj(x) && str(x.text) && box(x.box)) : null;
+  }
   function drawingLabel(r) {
     const first = r.targets[0];
     const item = r.context.items.filter((it) => it.anchor === first.anchor)[0];
@@ -133,6 +136,7 @@
     const label = "Drawing: " + text2;
     return label.length > 70 ? label.slice(0, 69) + "…" : label;
   }
+  var overlaps = (a, b) => a[0] < b[0] + b[2] && b[0] < a[0] + a[2] && a[1] < b[1] + b[3] && b[1] < a[1] + a[3];
   var r1 = (n) => Math.round(n * 10) / 10;
   function bboxOf(pts) {
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
@@ -143,45 +147,6 @@
       y1 = Math.max(y1, p[1]);
     });
     return [r1(x0), r1(y0), r1(x1 - x0), r1(y1 - y0)];
-  }
-  function fitEllipse(pts) {
-    let A = 0, sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0;
-    for (let i = 0; i < pts.length; i++) {
-      const p = pts[i], q = pts[(i + 1) % pts.length], c = p[0] * q[1] - q[0] * p[1];
-      A += c / 2;
-      sx += (p[0] + q[0]) * c;
-      sy += (p[1] + q[1]) * c;
-      sxx += (p[0] * p[0] + p[0] * q[0] + q[0] * q[0]) * c;
-      syy += (p[1] * p[1] + p[1] * q[1] + q[1] * q[1]) * c;
-      sxy += (p[0] * q[1] + 2 * p[0] * p[1] + 2 * q[0] * q[1] + q[0] * p[1]) * c;
-    }
-    const bb = bboxOf(pts);
-    let cx, cy, rx, ry, rot = 0;
-    if (Math.abs(A) < 0.05 * bb[2] * bb[3]) {
-      cx = bb[0] + bb[2] / 2;
-      cy = bb[1] + bb[3] / 2;
-      rx = bb[2] / 2;
-      ry = bb[3] / 2;
-    } else {
-      cx = sx / (6 * A);
-      cy = sy / (6 * A);
-      const vxx = sxx / (12 * A) - cx * cx, vyy = syy / (12 * A) - cy * cy, vxy = sxy / (24 * A) - cx * cy;
-      const mid = (vxx + vyy) / 2, d = Math.sqrt((vxx - vyy) * (vxx - vyy) / 4 + vxy * vxy);
-      rot = 0.5 * Math.atan2(2 * vxy, vxx - vyy);
-      rx = 2 * Math.sqrt(Math.max(mid + d, 0));
-      ry = 2 * Math.sqrt(Math.max(mid - d, 0));
-      const snap = 10 * Math.PI / 180;
-      if (Math.abs(rot) < snap) rot = 0;
-      else if (Math.PI / 2 - Math.abs(rot) < snap) {
-        rot = 0;
-        const t = rx;
-        rx = ry;
-        ry = t;
-      }
-    }
-    const dx = pts[0][0] - cx, dy = pts[0][1] - cy, cos = Math.cos(rot), sin = Math.sin(rot);
-    const start = Math.atan2((-dx * sin + dy * cos) / (ry || 1), (dx * cos + dy * sin) / (rx || 1));
-    return { center: [r1(cx), r1(cy)], radii: [r1(rx), r1(ry)], rotation: r1(rot * 180 / Math.PI), start: r1(start * 180 / Math.PI), dir: A < 0 ? -1 : 1 };
   }
   function thin(pts) {
     const out = [];
@@ -252,12 +217,14 @@
     return out;
   }
   function drawLayer(selector, exclude, capture, refuse, changed) {
-    const layer = svg("svg", { class: "rev-ink", "aria-hidden": "true" });
+    const layer = svg("svg", { class: "rev-ink", "aria-hidden": "true", tabindex: -1 });
     const ink = svg("g", {});
     layer.appendChild(ink);
     document.documentElement.appendChild(layer);
     let tool = false;
-    let stroke = null;
+    let gesture = null;
+    let selected = null;
+    const editable = /* @__PURE__ */ new Map();
     let lastClient = null;
     function svg(tag, attrs) {
       const n = document.createElementNS(SVGNS, tag);
@@ -270,6 +237,22 @@
       g.appendChild(svg("path", { d: p.sweep, fill: "currentColor", stroke: "none" }));
       g.appendChild(svg("path", { d: p.hair, fill: "none", stroke: "currentColor", "stroke-width": 1, "stroke-linecap": "round", "stroke-linejoin": "round" }));
       ink.appendChild(g);
+      return g;
+    }
+    function oval(e, tint, anchor) {
+      const g = inkInto(inkLine(e), [0, 0], tint, anchor ? "rev-ink-unsent" : "rev-ink-live");
+      if (!anchor) return g;
+      g.setAttribute("data-anchor", anchor);
+      const [cx, cy] = e.center, [rx, ry] = e.radii;
+      const controls = svg("g", { transform: `translate(${cx} ${cy}) rotate(${e.rotation})` });
+      controls.appendChild(svg("ellipse", { class: "rev-ink-hit", "data-edit": anchor, cx: 0, cy: 0, rx, ry }));
+      if (selected === anchor) {
+        controls.appendChild(svg("rect", { class: "rev-ink-bounds", x: -rx, y: -ry, width: rx * 2, height: ry * 2 }));
+        for (const [hx, hy, cursor] of [[-1, -1, "nwse"], [0, -1, "ns"], [1, -1, "nesw"], [1, 0, "ew"], [1, 1, "nwse"], [0, 1, "ns"], [-1, 1, "nesw"], [-1, 0, "ew"]]) {
+          controls.appendChild(svg("rect", { class: "rev-ink-handle", "data-edit": anchor, "data-hx": hx, "data-hy": hy, x: hx * rx - 5, y: hy * ry - 5, width: 10, height: 10, style: `cursor:${cursor}-resize` }));
+        }
+      }
+      g.appendChild(controls);
       return g;
     }
     function fitLayer() {
@@ -309,7 +292,6 @@
       }
       return false;
     }
-    const overlaps = (a, b) => a[0] < b[0] + b[2] && b[0] < a[0] + a[2] && a[1] < b[1] + b[3] && b[1] < a[1] + a[3];
     function inside(pt, poly) {
       let w = 0;
       for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
@@ -328,8 +310,8 @@
     }
     const leafMost = (l) => l.filter((c) => !l.some((d) => d !== c && c.el.contains(d.el)));
     const outerMost = (l) => l.filter((c) => !l.some((d) => d !== c && d.el.contains(c.el)));
-    function capturePath(pts) {
-      const ellipse = fitEllipse(pts), poly = ellipsePoints(ellipse, 0), bb = bboxOf(poly);
+    function captureEllipse(ellipse) {
+      const poly = ellipsePoints(ellipse, 0), bb = bboxOf(poly);
       const all2 = markables(selector, exclude), index2 = byAnchor(all2);
       const shown = [];
       all2.forEach((c) => {
@@ -354,7 +336,7 @@
         v: 1,
         kind: "region",
         frame: "document",
-        path: pts,
+        path: thin(poly.map((p) => [r1(p[0]), r1(p[1])])),
         ellipse,
         bbox: bb,
         layout: layoutContext(),
@@ -376,15 +358,24 @@
       const cx = bb[0] + bb[2] / 2, cy = bb[1] + bb[3] / 2;
       const dist = (b) => Math.abs(b[0] + b[2] / 2 - cx) + Math.abs(b[1] + b[3] / 2 - cy);
       const near = leafMost(shown.filter((c) => overlaps(c.box, zone))).sort((a, b) => dist(a.box) - dist(b.box));
-      const ctx = { items: [], truncated: near.length > LIMITS.contextItems };
+      const kept = [];
+      const ctx = { items: [], truncated: near.length > LIMITS.contextItems, runs: kept };
       const cut = (s, n) => {
         if (s.length <= n) return s;
         ctx.truncated = true;
         return s.slice(0, n - 1) + "…";
       };
+      const band = [...zone];
+      near.forEach((c) => {
+        const x1 = Math.max(band[0] + band[2], c.box[0] + c.box[2]);
+        band[0] = Math.min(band[0], c.box[0]);
+        band[2] = x1 - band[0];
+      });
+      let runs = [];
       const root = document.documentElement;
       root.classList.add("rev-reading");
       try {
+        runs = runsIn(band).sort((a, b) => dist(a.box) - dist(b.box));
         near.slice(0, LIMITS.contextItems).forEach((c) => {
           const h = c.el;
           let text2 = collapse(h.innerText === void 0 ? h.textContent : h.innerText);
@@ -411,7 +402,57 @@
         ctx.items.pop();
         ctx.truncated = true;
       }
+      let room = LIMITS.contextBytes - utf8Bytes(ctx);
+      for (const r of runs) {
+        const n = utf8Bytes(r) + 1;
+        if (n > room) ctx.truncated = true;
+        else {
+          kept.push(r);
+          room -= n;
+        }
+      }
       return ctx;
+    }
+    function runsIn(band) {
+      const out = [];
+      const range = document.createRange();
+      const walk = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
+        acceptNode(n) {
+          if (n.nodeType === Node.TEXT_NODE) return NodeFilter.FILTER_ACCEPT;
+          const el = n;
+          if (el.matches(exclude + ", script, style, noscript, template, textarea, select")) return NodeFilter.FILTER_REJECT;
+          const r = el.getBoundingClientRect();
+          if ((r.width || r.height) && !overlaps(rectOf(r), band)) return NodeFilter.FILTER_REJECT;
+          if (el.checkVisibility && !el.checkVisibility({ visibilityProperty: true, opacityProperty: true })) return NodeFilter.FILTER_REJECT;
+          return NodeFilter.FILTER_SKIP;
+        }
+      });
+      for (let t = walk.nextNode(); t; t = walk.nextNode()) {
+        let run = null;
+        const keep = () => {
+          if (run && overlaps(run.box, band)) out.push(run);
+        };
+        const words = /\S+/g;
+        for (let w = words.exec(t.data); w; w = words.exec(t.data)) {
+          range.setStart(t, w.index);
+          range.setEnd(t, w.index + w[0].length);
+          const r = range.getClientRects()[0];
+          if (!r || r.width < 1) continue;
+          const b = rectOf(r);
+          if (run && Math.abs(b[1] - run.box[1]) < 1 && b[0] - (run.box[0] + run.box[2]) < b[3]) {
+            const x1 = Math.max(run.box[0] + run.box[2], b[0] + b[2]);
+            run.box[0] = Math.min(run.box[0], b[0]);
+            run.box[2] = r1(x1 - run.box[0]);
+            run.box[3] = Math.max(run.box[3], b[3]);
+            run.text += " " + w[0];
+          } else {
+            keep();
+            run = { text: w[0], box: b };
+          }
+        }
+        keep();
+      }
+      return out;
     }
     function labelsIn(el, zone) {
       const out = [];
@@ -472,11 +513,17 @@
     function placeAll() {
       fitLayer();
       while (ink.firstChild) ink.removeChild(ink.firstChild);
+      editable.clear();
       const out = drawings.map((d) => {
         const o = place(d, index);
         const cls = d.kind === "unsent" ? "rev-ink-unsent" : "";
-        if (o.offset) inkInto(inkLine(d.ellipse), o.offset, d.tint, cls).setAttribute("data-anchor", d.anchor);
-        else if (o.boxes) {
+        if (o.offset) {
+          if (tool && d.kind === "unsent") {
+            const e = { ...d.ellipse, center: [r1(d.ellipse.center[0] + o.offset[0]), r1(d.ellipse.center[1] + o.offset[1])] };
+            editable.set(d.anchor, e);
+            if (gesture?.anchor !== d.anchor) oval(e, d.tint, d.anchor);
+          } else inkInto(inkLine(d.ellipse), o.offset, d.tint, cls).setAttribute("data-anchor", d.anchor);
+        } else if (o.boxes) {
           const u = o.boxes.reduce((m, b) => [Math.min(m[0], b[0]), Math.min(m[1], b[1]), Math.max(m[2], b[0] + b[2]), Math.max(m[3], b[1] + b[3])], [Infinity, Infinity, -Infinity, -Infinity]);
           ink.appendChild(svg("ellipse", {
             class: "rev-ink-" + d.tint + " rev-ink-reflowed",
@@ -489,7 +536,7 @@
         }
         return { anchor: d.anchor, outcome: o.outcome, el: o.el || null };
       });
-      if (stroke) ink.appendChild(stroke.line);
+      if (gesture) ink.appendChild(gesture.preview);
       last = out.map((p) => p.outcome).join();
       return out;
     }
@@ -502,79 +549,111 @@
         if (last !== was) changed();
       }, 100);
     }
-    function addPoint(cx, cy) {
-      if (!stroke) return;
+    function drag(cx, cy) {
+      if (!gesture) return;
       lastClient = [cx, cy];
-      const p = [r1(cx + scrollX), r1(cy + scrollY)], q = stroke.pts[stroke.pts.length - 1];
-      if (q && Math.abs(p[0] - q[0]) + Math.abs(p[1] - q[1]) < 2) return;
-      stroke.pts.push(p);
-      const sp = layer.createSVGPoint();
-      sp.x = p[0];
-      sp.y = p[1];
-      stroke.line.points.appendItem(sp);
+      const p = [r1(cx + scrollX), r1(cy + scrollY)], s = gesture.start, e = gesture.original;
+      const dx = p[0] - s[0], dy = p[1] - s[1];
+      if (Math.abs(dx) + Math.abs(dy) >= 2) gesture.moved = true;
+      if (!gesture.anchor) {
+        gesture.ellipse = { center: [r1((s[0] + p[0]) / 2), r1((s[1] + p[1]) / 2)], radii: [r1(Math.abs(dx) / 2), r1(Math.abs(dy) / 2)], rotation: 0, start: 0, dir: 1 };
+      } else if (!gesture.handle) {
+        gesture.ellipse = { ...e, center: [r1(e.center[0] + dx), r1(e.center[1] + dy)] };
+      } else {
+        const a = e.rotation * Math.PI / 180, cos = Math.cos(a), sin = Math.sin(a);
+        const delta = [dx * cos + dy * sin, -dx * sin + dy * cos];
+        const radii = [...e.radii], shift = [0, 0];
+        gesture.handle.forEach((h, i) => {
+          if (!h) return;
+          radii[i] = r1(Math.max(4, e.radii[i] + h * delta[i] / 2));
+          shift[i] = h * (radii[i] - e.radii[i]);
+        });
+        gesture.ellipse = { ...e, radii, center: [r1(e.center[0] + shift[0] * cos - shift[1] * sin), r1(e.center[1] + shift[0] * sin + shift[1] * cos)] };
+      }
+      gesture.preview.remove();
+      gesture.preview = oval(gesture.ellipse, "gold", gesture.anchor);
     }
-    function abort(reason) {
-      if (!stroke) return;
-      stroke.line.remove();
-      stroke = null;
-      refuse(reason);
+    function endGesture(reason) {
+      if (!gesture) return;
+      const pointer = gesture.pointer;
+      gesture = null;
+      layer.classList.remove("rev-dragging");
+      if (layer.hasPointerCapture(pointer)) layer.releasePointerCapture(pointer);
+      placeAll();
+      if (reason) refuse(reason);
     }
     layer.addEventListener("pointerdown", (e) => {
-      if (!tool || e.button !== 0 || stroke) return;
+      if (!tool || e.button !== 0 || gesture) return;
       e.preventDefault();
+      layer.focus({ preventScroll: true });
       fitLayer();
-      stroke = { pointer: e.pointerId, pts: [], line: svg("polyline", { class: "rev-ink-live" }) };
-      ink.appendChild(stroke.line);
+      const hit = e.target.closest("[data-edit]"), anchor = hit?.getAttribute("data-edit") || void 0;
+      const original = anchor ? editable.get(anchor) : void 0;
+      if (anchor && !original) return;
+      selected = anchor || null;
+      const start = [r1(e.clientX + scrollX), r1(e.clientY + scrollY)];
+      const ellipse = original || { center: start, radii: [0, 0], rotation: 0, start: 0, dir: 1 };
+      const handle = hit?.hasAttribute("data-hx") ? [Number(hit.getAttribute("data-hx")), Number(hit.getAttribute("data-hy"))] : void 0;
+      gesture = { pointer: e.pointerId, start, original: ellipse, ellipse, anchor, handle, preview: oval(ellipse, "gold", anchor), moved: false };
+      lastClient = [e.clientX, e.clientY];
+      layer.classList.toggle("rev-dragging", !!anchor && !handle);
+      placeAll();
       layer.setPointerCapture(e.pointerId);
-      addPoint(e.clientX, e.clientY);
     });
     layer.addEventListener("pointermove", (e) => {
-      if (stroke && e.pointerId === stroke.pointer) addPoint(e.clientX, e.clientY);
+      if (gesture && e.pointerId === gesture.pointer) drag(e.clientX, e.clientY);
     });
     layer.addEventListener("pointerup", (e) => {
-      if (!stroke || e.pointerId !== stroke.pointer) return;
-      stroke.line.remove();
-      const pts = thin(stroke.pts), bb = bboxOf(pts);
-      stroke = null;
-      if (pts.length < 3 || bb[2] < 8 || bb[3] < 8) {
+      if (!gesture || e.pointerId !== gesture.pointer) return;
+      drag(e.clientX, e.clientY);
+      const g = gesture;
+      endGesture();
+      if (g.anchor && !g.moved) return;
+      if (g.ellipse.radii.some((r) => r < 4)) {
         refuse("too-small");
         return;
       }
-      const c = capturePath(pts);
+      const c = captureEllipse(g.ellipse);
       if (typeof c === "string") {
         refuse(c);
         return;
       }
-      capture(c, { left: c.bbox[0] - scrollX, bottom: c.bbox[1] + c.bbox[3] - scrollY });
+      capture(c, { left: c.bbox[0] - scrollX, bottom: c.bbox[1] + c.bbox[3] - scrollY }, g.anchor);
     });
     layer.addEventListener("pointercancel", (e) => {
-      if (stroke && e.pointerId === stroke.pointer) abort("cancelled");
+      if (gesture && e.pointerId === gesture.pointer) endGesture("cancelled");
+    });
+    layer.addEventListener("lostpointercapture", (e) => {
+      if (gesture && e.pointerId === gesture.pointer && !layer.hasPointerCapture(e.pointerId)) endGesture("cancelled");
     });
     window.addEventListener("scroll", () => {
-      if (stroke && lastClient) addPoint(lastClient[0], lastClient[1]);
+      if (gesture && lastClient) drag(lastClient[0], lastClient[1]);
     });
     document.addEventListener("scroll", (e) => {
       if (e.target !== document) relayout();
     }, true);
     window.addEventListener("resize", () => {
-      abort("layout-changed");
+      endGesture("layout-changed");
       relayout();
     });
     document.addEventListener("toggle", relayout, true);
     document.addEventListener("change", relayout, true);
     if (window.ResizeObserver) new ResizeObserver(relayout).observe(document.documentElement);
     window.addEventListener("keydown", (e) => {
-      if (e.key !== "Escape" || !stroke || e.defaultPrevented) return;
+      if (e.key !== "Escape" || !gesture || e.defaultPrevented) return;
       e.preventDefault();
-      abort("cancelled");
+      endGesture("cancelled");
     }, true);
     return {
       setTool(on) {
+        if (tool === on) return;
         tool = on;
         layer.classList.toggle("rev-drawing", on);
-        if (!on) abort("cancelled");
+        if (!on) endGesture("cancelled");
+        placeAll();
       },
       paint(next, all2) {
+        for (const d of next) if (d.kind === "unsent" && !drawings.some((old) => old.anchor === d.anchor)) selected = d.anchor;
         drawings = next;
         index = byAnchor(all2);
         return placeAll();
@@ -709,7 +788,7 @@
     const draw = drawLayer(
       SELECTOR,
       NOT_PLAN,
-      (capture, rect) => port.send({ type: "capture", capture, rect }),
+      (capture, rect, anchor) => port.send({ type: "capture", capture, rect, anchor }),
       (reason) => port.send({ type: "refused", reason }),
       () => paint(items, drawings)
     );
@@ -1025,34 +1104,29 @@
       if (text2) n.textContent = text2;
       return n;
     };
-    const b = r.bbox, pad = 24, vb = [b[0] - pad, b[1] - pad, b[2] + 2 * pad, b[3] + 2 * pad];
+    const items = r.context.items, runs = runsOf(r.context) || [];
+    const labels = items.reduce((all2, it) => all2.concat(it.labels || []), []).filter((l) => !runs.some((t) => overlaps(t.box, l.box)));
+    const placed = runs.concat(labels);
+    const b = r.bbox, pad = 24;
+    let x0 = b[0] - pad, y0 = b[1] - pad, x1 = b[0] + b[2] + pad, y1 = b[1] + b[3] + pad;
+    placed.forEach((t) => {
+      x0 = Math.min(x0, t.box[0] - 4);
+      y0 = Math.min(y0, t.box[1] - 4);
+      x1 = Math.max(x1, t.box[0] + t.box[2] + 4);
+      y1 = Math.max(y1, t.box[1] + t.box[3] + 4);
+    });
+    if (r.context.truncated) y1 += 18;
+    const vb = [x0, y0, x1 - x0, y1 - y0];
     const out = mk("svg", { viewBox: vb.join(" "), width: vb[2], height: vb[3], class: "rev-original-svg", role: "img" });
     out.appendChild(mk("title", {}, "What lay under this drawing on revision " + r.plan_revision));
-    r.context.items.forEach((it) => {
-      const [x, y, w, h] = it.box;
-      out.appendChild(mk("rect", { x, y, width: w, height: h, class: "rev-orig-box" }));
-      if (it.labels) {
-        it.labels.forEach((l) => {
-          out.appendChild(mk("rect", { x: l.box[0], y: l.box[1], width: l.box[2], height: l.box[3], class: "rev-orig-label-box" }));
-          out.appendChild(mk("text", { x: l.box[0] + 2, y: l.box[1] + Math.min(l.box[3], 14) - 3, class: "rev-orig-label" }, l.text));
-        });
-        const rest = it.labels.reduce((t, l) => t.replace(l.text, " "), it.text).replace(/\s+/g, " ").trim();
-        if (rest) out.appendChild(mk("text", { x: x + 2, y: y + h - 4, class: "rev-orig-text" }, rest));
-        return;
-      }
-      const per = Math.max(8, Math.floor(w / 7)), rows = Math.max(1, Math.floor(h / 15)), text2 = mk("text", { class: "rev-orig-text" });
-      let line = "", n = 0;
-      const flush = () => {
-        if (n < rows && line) text2.appendChild(mk("tspan", { x: x + 2, y: y + 13 + n * 15 }, line));
-        n++;
-        line = "";
-      };
-      it.text.split(" ").forEach((wd) => {
-        if (line && (line + " " + wd).length > per) flush();
-        line = line ? line + " " + wd : wd;
-      });
-      flush();
-      out.appendChild(text2);
+    items.forEach((it) => out.appendChild(mk("rect", { x: it.box[0], y: it.box[1], width: it.box[2], height: it.box[3], class: "rev-orig-box" })));
+    runs.forEach((t) => {
+      const [x, y, w, h] = t.box;
+      out.appendChild(mk("text", { x, y: r1(y + 0.8 * h), "font-size": r1(h / 1.2), textLength: w, lengthAdjust: "spacingAndGlyphs", class: "rev-orig-run" }, t.text));
+    });
+    labels.forEach((l) => {
+      out.appendChild(mk("rect", { x: l.box[0], y: l.box[1], width: l.box[2], height: l.box[3], class: "rev-orig-label-box" }));
+      out.appendChild(mk("text", { x: l.box[0] + 2, y: l.box[1] + Math.min(l.box[3], 14) - 3, class: "rev-orig-label" }, l.text));
     });
     const p = inkPaths(inkLine(r.ellipse), [0, 0]);
     const g = mk("g", { class: "rev-orig-ink" });
@@ -1060,7 +1134,25 @@
     g.appendChild(mk("path", { d: p.hair, fill: "none", stroke: "currentColor", "stroke-width": 1, "stroke-linecap": "round", "stroke-linejoin": "round" }));
     out.appendChild(g);
     if (r.context.truncated) out.appendChild(mk("text", { x: vb[0] + 4, y: vb[1] + vb[3] - 6, class: "rev-orig-cut" }, "Context truncated: some of what lay here was not kept."));
-    return out;
+    const view = doc.createDocumentFragment();
+    view.appendChild(out);
+    const enclosed = r.targets.map((t) => t.anchor);
+    const unplaced = items.filter((it) => it.text && enclosed.indexOf(it.anchor) >= 0 && !placed.some((t) => overlaps(t.box, it.box)));
+    if (unplaced.length) {
+      const list = doc.createElement("div");
+      list.className = "rev-orig-unplaced";
+      const head = doc.createElement("div");
+      head.className = "rev-orig-unplaced-h";
+      head.textContent = "Drawn around (where these words sat was not recorded):";
+      list.appendChild(head);
+      unplaced.forEach((it) => {
+        const q = doc.createElement("blockquote");
+        q.textContent = it.text;
+        list.appendChild(q);
+      });
+      view.appendChild(list);
+    }
+    return view;
   }
 
   // src/state.ts
@@ -1314,10 +1406,10 @@
   var HL_TINT = { "approve": "sage", "request-change": "amber", "flag": "red", "comment": "gold" };
   var stateTint = (state) => state === "addressed" || state === "verified" ? "sage" : state === "wontfix" ? "faint" : "amber";
   var DRAW_REFUSED = {
-    "no-target": "Nothing in that loop can take a comment. Draw around a paragraph, an item, a row or part of a diagram.",
-    "too-large": "That loop holds too much of the plan to keep. Draw around less of it.",
-    "too-small": "Draw a loop around what you mean.",
-    "layout-changed": "The page changed while you drew. Draw the loop again."
+    "no-target": "Nothing in that oval can take a comment. Draw around a paragraph, an item, a row or part of a diagram.",
+    "too-large": "That oval holds too much of the plan to keep. Draw around less of it.",
+    "too-small": "Drag to draw a larger oval around what you mean.",
+    "layout-changed": "The page changed while you drew. Draw the oval again."
   };
   var REVISION2 = /^sha256:[0-9a-f]{64}$/;
   var WHOLE = { a: "plan", section: "", label: "Whole plan" };
@@ -1395,6 +1487,7 @@
     const revision = opts.revision && REVISION2.test(opts.revision) ? opts.revision : "";
     let tool = false;
     let pending = null;
+    const ownedDrawings = /* @__PURE__ */ new Set();
     function regionOf(a) {
       if (pending && "q-" + pending.id === a) return pending;
       if (ds[a] && ds[a].region) return ds[a].region;
@@ -1436,13 +1529,14 @@
     }
     function paintDrawings() {
       const out = [];
+      const waiting = store.entries();
       Object.keys(committed).concat(Object.keys(ds), pending ? ["q-" + pending.id] : []).forEach((a, i, all2) => {
         const r = all2.indexOf(a) === i && DRAWING.test(a) ? regionOf(a) : void 0;
         if (!r) return;
         const m = ds[a], carr = committed[a] || [];
         const d = drawingPaint({
           anchor: a,
-          kind: m || !carr.length ? "unsent" : "committed",
+          kind: carr.length || ownedDrawings.has(a) || waiting.some((e) => e.stamps[a] !== void 0) ? "committed" : "unsent",
           tint: m ? HL_TINT[m.status] || "gold" : carr.length ? stateTint(repOf(carr).state) : "gold",
           ellipse: r.ellipse,
           targets: r.targets.map((t) => ({ anchor: t.anchor, box: t.box, nth: t.nth, of: t.of })),
@@ -1637,6 +1731,7 @@
       });
     }
     let pop = null;
+    let popAbout = null;
     let popNote = "";
     let popByHost = false;
     function sendMode() {
@@ -1652,6 +1747,7 @@
         pop.remove();
         pop = null;
         sendMode();
+        popAbout = null;
         if (pending) {
           pending = null;
           paint();
@@ -1662,6 +1758,7 @@
     }
     function openPop(t, rect, fresh) {
       closePop(true);
+      popAbout = t;
       const a = t.a;
       const cstate = committedState(a);
       const p = pop = document.createElement("div");
@@ -1784,6 +1881,7 @@
         return;
       }
       closePop();
+      paint();
       flush();
     }
     function submit() {
@@ -1836,6 +1934,9 @@
     }
     function report(e, r) {
       if (destroyed) return;
+      if (r.state === "owned") Object.keys(e.stamps).forEach((a) => {
+        if (DRAWING.test(a)) ownedDrawings.add(a);
+      });
       paint();
       setOffline(r.state === "offline");
       const verb = e.act === "accept" ? "Accepted" : e.act === "reopen" ? "Reopened" : "Sent";
@@ -2043,8 +2144,32 @@
     if (resized && opts.frame) resized.observe(opts.frame);
     const bar = document.createElement("div");
     bar.className = "rev-bar";
-    bar.innerHTML = (live ? '<span class="rev-conn"></span>' : "") + '<button class="rev-toggle" title="Toggle review mode">Review</button>' + (revision ? '<button class="rev-draw" aria-pressed="false" title="Draw a loop around part of the plan to comment on it">Draw</button>' : "") + '<span class="rev-count"></span>' + (live && !opts.reviewer ? '<button class="rev-who" title="Set the name teammates see on your comments"></button>' : "") + '<button class="rev-submit" title="Send feedback to the agent">' + (live ? "Submit" : "Export") + "</button>" + (opts.approve ? '<button class="rev-approve" title="Approve and close the loop">Approve</button>' : "");
+    bar.innerHTML = (live ? '<span class="rev-conn"></span>' : "") + '<button class="rev-toggle" title="Toggle review mode">Review</button>' + (revision ? '<button class="rev-draw" aria-pressed="false" title="Drag to draw an oval around part of the plan to comment on it">Draw</button>' : "") + '<span class="rev-count"></span>' + (live && !opts.reviewer ? '<button class="rev-who" title="Set the name teammates see on your comments"></button>' : "") + '<button class="rev-submit" title="Send feedback to the agent">' + (live ? "Submit" : "Export") + "</button>" + (opts.approve ? '<button class="rev-approve" title="Approve and close the loop">Approve</button>' : "");
     body.appendChild(bar);
+    let drag = null;
+    bar.addEventListener("pointerdown", (e) => {
+      if (drag || !e.isPrimary || e.button !== 0 || e.target.closest("button")) return;
+      const r = bar.getBoundingClientRect();
+      drag = { x: e.clientX - r.left, y: e.clientY - r.top };
+      bar.setPointerCapture(e.pointerId);
+      bar.classList.add("rev-dragging");
+      if (hintBubble) {
+        hintBubble.remove();
+        hintBubble = null;
+      }
+      e.preventDefault();
+    }, { signal });
+    bar.addEventListener("pointermove", (e) => {
+      if (!drag || !e.isPrimary) return;
+      const b = box2();
+      bar.style.left = Math.max(0, b.left, Math.min(e.clientX - drag.x, Math.min(b.right, window.innerWidth) - bar.offsetWidth)) + "px";
+      bar.style.top = Math.max(0, b.top, Math.min(e.clientY - drag.y, Math.min(b.bottom, window.innerHeight) - bar.offsetHeight)) + "px";
+      bar.style.bottom = "auto";
+    }, { signal });
+    bar.addEventListener("lostpointercapture", () => {
+      drag = null;
+      bar.classList.remove("rev-dragging");
+    }, { signal });
     const countEl = bar.querySelector(".rev-count");
     connEl = bar.querySelector(".rev-conn");
     paintConn();
@@ -2076,7 +2201,7 @@
       sendMode();
       if (tool && !drawTaught) {
         drawTaught = true;
-        toast("Draw a loop around what you mean: a paragraph, rows, part of a diagram. Esc puts the pen down.");
+        toast("Drag to draw an oval. Drag its outline to move it, or its handles to resize it before submitting. Esc puts the pen down.");
       }
     }
     function setReview(next, silent) {
@@ -2200,6 +2325,26 @@
           break;
         case "capture": {
           if (!on || !tool) break;
+          const anchor = m.anchor;
+          if (anchor) {
+            if (committed[anchor]?.length || ownedDrawings.has(anchor) || store.entries().some((e) => e.stamps[anchor] !== void 0)) break;
+            const old = pending && "q-" + pending.id === anchor ? pending : ds[anchor]?.region;
+            if (!old) break;
+            const r2 = { ...m.capture, id: old.id, plan_revision: revision, created_at: old.created_at };
+            if (checkRegion(r2)) break;
+            const label = drawingLabel(r2), section = r2.targets[0].section;
+            if (pending && pending.id === r2.id) pending = r2;
+            else if (!store.save({ ...ds[anchor], region: r2, label, section })) toast("This browser could not save the updated drawing. It is kept in this tab only.");
+            if (pop && popAbout?.a === anchor) {
+              popAbout.label = label;
+              popAbout.section = section;
+              const about = pop.querySelector(".rev-about");
+              if (about) about.textContent = label;
+              placePop(toHost(m.rect));
+            }
+            paint();
+            break;
+          }
           if (held()) {
             toast("Save or delete the open note, then draw again.");
             break;
@@ -2218,7 +2363,7 @@
         }
         case "refused":
           if (m.reason === "cancelled") break;
-          if (!held()) closePop();
+          if (!held() && !pending) closePop();
           if (m.reason === "repeated") toast("“" + clip(m.quote, 40) + "” appears " + m.count + " times in this section — highlight a longer phrase so the comment points at one place.");
           else toast(DRAW_REFUSED[m.reason] || "Highlight text within one section to comment on it.");
           break;

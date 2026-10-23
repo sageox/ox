@@ -47,6 +47,9 @@ var rootCmd = &cobra.Command{
 	Long:  `Shared team context between your AI and human coworkers. Sessions, ledgers, and team knowledge that make agentic engineering multiplayer.`,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		preRunReached = true
+		if isFeedbackCommand(cmd) {
+			return applyConfigFlag(cmd, args)
+		}
 		if isHeadlessLedgerRead(cmd) {
 			// Hosted reads never consult local preferences. Sync rejects this
 			// flag in RunE using its own receipt; the other protocols refuse it here.
@@ -119,6 +122,9 @@ var rootCmd = &cobra.Command{
 		return nil
 	},
 	PersistentPostRunE: func(cmd *cobra.Command, args []string) error {
+		if isFeedbackCommand(cmd) {
+			return nil
+		}
 		if isHeadlessLedgerRead(cmd) {
 			return nil
 		}

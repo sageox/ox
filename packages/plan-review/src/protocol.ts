@@ -93,7 +93,7 @@ export type HostMessage =
 export type DocumentMessage =
   | { type: 'ready' }
   | { type: 'target'; target: Target }
-  | { type: 'capture'; capture: Capture; rect: { left: number; bottom: number } }
+  | { type: 'capture'; capture: Capture; rect: { left: number; bottom: number }; anchor?: string }
   | { type: 'refused'; reason: 'cross-section' }
   | { type: 'refused'; reason: 'repeated'; quote: string; count: number }
   | { type: 'refused'; reason: DrawRefusal }
@@ -184,7 +184,10 @@ export function parseDocumentMessage(data: unknown, instance: string): DocumentM
     }
     case 'capture': {
       const c = captureOf(d.capture), r = rect(d.rect);
-      return c && r ? { type: 'capture', capture: c, rect: r } : null;
+      if (!c || !r || (d.anchor !== undefined && (typeof d.anchor !== 'string' || !DRAWING.test(d.anchor)))) return null;
+      const message: DocumentMessage = { type: 'capture', capture: c, rect: r };
+      if (typeof d.anchor === 'string') message.anchor = d.anchor;
+      return message;
     }
     case 'refused':
       if (d.reason === 'cross-section') return { type: 'refused', reason: 'cross-section' };

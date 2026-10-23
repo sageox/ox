@@ -150,3 +150,25 @@ func TestCommittedSessionScanChecksFilenamesWhenNoBlobIsNew(t *testing.T) {
 	addCommit(t, ledger, "sessions/synthetic/archive.p12", "", "same empty blob, sensitive name")
 	require.ErrorContains(t, ValidateSessionPublication(context.Background(), ledger), "session filename refused")
 }
+
+func TestCommittedSessionScanAcceptsProducedCommits(t *testing.T) {
+	useFreshFixtureRules(t)
+	ledger := publicationLedger(t, "sessions/synthetic/meta.json", `{"produced_commits":["`+syntheticCommitSHA+`"]}`)
+	require.NoError(t, ValidateSessionPublication(context.Background(), ledger))
+
+	leaked := publicationLedger(t, "sessions/synthetic/meta.json", `{"produced_commits":["`+syntheticCommitSHA+`","AKIAIOSFODNN7EXAMPLE"]}`)
+	require.ErrorContains(t, ValidateSessionPublication(context.Background(), leaked), "committed session content refused")
+}
+
+// rev-list names one path per blob; the meta.json exemption must not reach the
+// same bytes published under another session filename.
+func TestCommittedSessionScanSharedBlobKeepsFullScan(t *testing.T) {
+	useFreshFixtureRules(t)
+	ledger, _ := initBareRemoteRepo(t)
+	content := `{"produced_commits":["` + syntheticCommitSHA + `"]}`
+	for _, rel := range []string{"sessions/synthetic/meta.json", "sessions/synthetic/summary.json"} {
+		require.NoError(t, os.MkdirAll(filepath.Dir(filepath.Join(ledger, rel)), 0700))
+		addCommit(t, ledger, rel, content, "synthetic shared blob")
+	}
+	require.ErrorContains(t, ValidateSessionPublication(context.Background(), ledger), "committed session content refused")
+}

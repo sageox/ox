@@ -72,7 +72,7 @@ export function startDocumentTools(port: DocumentPort, opts: DocumentToolsOption
   // A stroke in the Draw tool becomes a capture the host checks and keeps; a
   // layout change that moves a drawing is placed again, and the host told.
   const draw = drawLayer(SELECTOR, NOT_PLAN,
-    (capture, rect) => port.send({ type: 'capture', capture, rect }),
+    (capture, rect, anchor) => port.send({ type: 'capture', capture, rect, anchor }),
     (reason) => port.send({ type: 'refused', reason }),
     () => paint(items, drawings));
 
