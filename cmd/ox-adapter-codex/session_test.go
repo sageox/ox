@@ -3,10 +3,13 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -196,6 +199,10 @@ func TestFindCodexSession_ResumedOldConversation(t *testing.T) {
 					t.Fatal(err)
 				}
 				if err := os.Symlink(t.TempDir(), filepath.Join(home, ".codex", "sessions")); err != nil {
+					// Windows requires a symlink privilege (ERROR_PRIVILEGE_NOT_HELD = 1314).
+					if errors.Is(err, errors.ErrUnsupported) || (runtime.GOOS == "windows" && errors.Is(err, syscall.Errno(1314))) {
+						t.Skipf("symlink creation is unavailable: %v", err)
+					}
 					t.Fatal(err)
 				}
 			}

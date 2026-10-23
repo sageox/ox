@@ -108,6 +108,9 @@ func scriptedSessionUploadEffects(calls *[]string, refs map[string]lfs.FileRef, 
 			_ = mark("finalize_linkage")
 			return nil
 		},
+		notifyUploaded: func(_ string, _ *lfs.SessionMeta, _ string) ([]api.PRLinkMiss, bool) {
+			return nil, mark("notify_uploaded") == nil
+		},
 	}
 }
 
@@ -276,7 +279,7 @@ func TestSessionUploadOrchestration_FailedUploadThenRetryIsIdempotent(t *testing
 	require.NoError(t, retrySessionUploadWithEffects(
 		fixture.projectRoot, fixture.ledgerPath, orphan, retryEffects,
 	))
-	assert.Equal(t, []string{"upload_lfs", "commit_retry", "finalize_linkage"}, retryCalls)
+	assert.Equal(t, []string{"upload_lfs", "commit_retry", "notify_uploaded"}, retryCalls)
 
 	sessionDir := filepath.Join(fixture.ledgerPath, "sessions", fixture.sessionName)
 	firstMeta, err := lfs.ReadSessionMeta(sessionDir)
@@ -294,7 +297,7 @@ func TestSessionUploadOrchestration_FailedUploadThenRetryIsIdempotent(t *testing
 	require.NoError(t, retrySessionUploadWithEffects(
 		fixture.projectRoot, fixture.ledgerPath, orphan, retryEffects,
 	))
-	assert.Equal(t, []string{"upload_lfs", "commit_retry", "finalize_linkage"}, retryCalls)
+	assert.Equal(t, []string{"upload_lfs", "commit_retry", "notify_uploaded"}, retryCalls)
 	secondMeta, err := lfs.ReadSessionMeta(sessionDir)
 	require.NoError(t, err)
 	assert.Equal(t, firstMeta.SessionID, secondMeta.SessionID)
@@ -309,15 +312,15 @@ func TestRetrySessionUpload_RegistersOriginalSessionLinkAfterPush(t *testing.T) 
 			var calls []string
 			effects := scriptedSessionUploadEffects(&calls, fixture.refs, failAt)
 			notified := false
-			effects.finalizeLinkage = func(projectRoot, dir string, meta *lfs.SessionMeta, name string) []api.PRLinkMiss {
+			effects.notifyUploaded = func(projectRoot string, meta *lfs.SessionMeta, name string) ([]api.PRLinkMiss, bool) {
 				notified = true
 				assert.Equal(t, []string{"upload_lfs", "commit_retry"}, calls)
 				assert.Equal(t, fixture.projectRoot, projectRoot)
 				assert.Equal(t, fixture.sessionName, name)
 				assert.Equal(t, fixture.state.SessionID, meta.SessionID)
 				assert.Equal(t, fixture.refs, meta.Files)
-				assert.True(t, lfs.IsPointerFile(filepath.Join(dir, ledgerFileRaw)))
-				return nil
+				assert.True(t, lfs.IsPointerFile(filepath.Join(fixture.ledgerPath, "sessions", name, ledgerFileRaw)))
+				return nil, true
 			}
 			err := retrySessionUploadWithEffects(fixture.projectRoot, fixture.ledgerPath, fixture.orphan(), effects)
 			if failAt == "" {
@@ -329,6 +332,40 @@ func TestRetrySessionUpload_RegistersOriginalSessionLinkAfterPush(t *testing.T) 
 			}
 		})
 	}
+}
+
+// A failed lifecycle notification must remain discoverable even after its
+// content is published, or the original session URL can stay unavailable.
+func TestRetrySessionUpload_NotificationFailureRetainsRecovery(t *testing.T) {
+	fixture := newSessionUploadFixture(t)
+	var calls []string
+	effects := scriptedSessionUploadEffects(&calls, fixture.refs, "")
+	// The fixture has no project registration, so the real notifier cannot send.
+	effects.notifyUploaded = notifySessionUploaded
+	err := retrySessionUploadWithEffects(fixture.projectRoot, fixture.ledgerPath, fixture.orphan(), effects)
+	assert.ErrorContains(t, err, "notification failed")
+	assertSessionBytesPreserved(t, fixture)
+
+	store, err := session.NewStore(fixture.ledgerPath)
+	require.NoError(t, err)
+	recoveryDir := store.CacheSessionPath(fixture.sessionName)
+	recoveryBytes, err := os.ReadFile(filepath.Join(recoveryDir, ledgerFileRaw))
+	require.NoError(t, err)
+	assert.Equal(t, fixture.rawContent, recoveryBytes)
+	orphans, err := findOrphanedSessionsInDir(filepath.Dir(fixture.state.SessionPath), fixture.ledgerPath)
+	require.NoError(t, err)
+	require.Len(t, orphans, 1, "doctor must find the retry despite finalized ledger metadata")
+
+	// Once notification works, the same retry keeps its original identity and
+	// can prune the extra recovery copy.
+	calls = nil
+	effects = scriptedSessionUploadEffects(&calls, fixture.refs, "")
+	require.NoError(t, retrySessionUploadWithEffects(fixture.projectRoot, fixture.ledgerPath, orphans[0], effects))
+	assert.Equal(t, []string{"upload_lfs", "commit_retry", "notify_uploaded"}, calls)
+	assert.NoDirExists(t, recoveryDir)
+	meta, err := lfs.ReadSessionMeta(filepath.Join(fixture.ledgerPath, "sessions", fixture.sessionName))
+	require.NoError(t, err)
+	assert.Equal(t, fixture.state.SessionID, meta.SessionID)
 }
 
 // An identical retry must push the existing pointer commit before its caller
@@ -485,7 +522,7 @@ func testSessionUploadScansLongLines(t *testing.T, lineLength int) {
 			require.NoError(t, err)
 			want := []string{"upload_lfs", "commit_initial", "reconcile_plans", "finalize_linkage"}
 			if mode == "doctor" {
-				want = []string{"upload_lfs", "commit_retry", "finalize_linkage"}
+				want = []string{"upload_lfs", "commit_retry", "notify_uploaded"}
 			}
 			assert.Equal(t, want, calls, "scan and redaction must precede upload, then publication runs normally")
 			meta, err := lfs.ReadSessionMeta(filepath.Join(fixture.ledgerPath, "sessions", fixture.sessionName))
@@ -523,7 +560,7 @@ func TestRetrySessionUpload_PushFailureRemainsIncomplete(t *testing.T) {
 	require.NoError(t, retrySessionUploadWithEffects(
 		fixture.projectRoot, fixture.ledgerPath, orphans[0], successEffects,
 	))
-	assert.Equal(t, []string{"upload_lfs", "commit_retry", "finalize_linkage"}, calls)
+	assert.Equal(t, []string{"upload_lfs", "commit_retry", "notify_uploaded"}, calls)
 	assert.True(t, lfs.IsPointerFile(filepath.Join(
 		fixture.ledgerPath, "sessions", fixture.sessionName, ledgerFileRaw,
 	)))
@@ -635,7 +672,7 @@ func TestRetrySessionUpload_AcceptsLargeValidHeader(t *testing.T) {
 	require.NoError(t, retrySessionUploadWithEffects(
 		fixture.projectRoot, fixture.ledgerPath, fixture.orphan(), effects,
 	))
-	assert.Equal(t, []string{"upload_lfs", "commit_retry", "finalize_linkage"}, calls)
+	assert.Equal(t, []string{"upload_lfs", "commit_retry", "notify_uploaded"}, calls)
 }
 
 func TestWriteSessionUploadRetryPending_RequiresExistingCache(t *testing.T) {

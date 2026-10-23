@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/gitserver"
@@ -52,8 +53,15 @@ func newWaitFixture(t *testing.T) *waitFixture {
 
 	store := newFakeLFSStore(t)
 	t.Setenv("SAGEOX_ENDPOINT", store.url)
+	require.NoError(t, auth.SaveTokenForEndpoint(store.url, &auth.StoredToken{
+		AccessToken: "test-token", ExpiresAt: time.Now().Add(time.Hour),
+	}))
 	require.NoError(t, gitserver.SaveCredentialsForEndpoint(store.url, gitserver.GitCredentials{
-		Username: "coworker", Token: "test-token", ServerURL: store.url, ExpiresAt: time.Now().Add(time.Hour),
+		Username: "coworker", Token: "test-token", ServerURL: store.url,
+		// Keep the cached Git token valid beyond the refresh margin: this fixture
+		// exercises publishing, not the credential-rotation API.
+		ExpiresAt:       time.Now().Add(2 * gitserver.NearExpiryThreshold),
+		BearerTokenHash: gitserver.BearerTokenFingerprint("test-token"),
 	}))
 
 	projectRoot := t.TempDir()
