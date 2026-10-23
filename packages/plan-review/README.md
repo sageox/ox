@@ -46,7 +46,7 @@ settings grant your repository read access.
 Pin the exact version and commit your lockfile:
 
 ```sh
-npm install --save-exact @sageox/plan-review@0.6.0
+npm install --save-exact @sageox/plan-review@0.6.1
 ```
 
 Pinning matters because the host end and the document script must come from
@@ -58,10 +58,10 @@ release workflow, naming the tag it was built from. Check a tarball before you
 pin it:
 
 ```sh
-npm pack @sageox/plan-review@0.6.0
-gh attestation verify sageox-plan-review-0.6.0.tgz -R sageox/ox \
+npm pack @sageox/plan-review@0.6.1
+gh attestation verify sageox-plan-review-0.6.1.tgz -R sageox/ox \
   --signer-workflow sageox/ox/.github/workflows/plan-review-release.yml \
-  --source-ref refs/tags/packages/plan-review/v0.6.0
+  --source-ref refs/tags/packages/plan-review/v0.6.1
 ```
 
 ## Frame a plan

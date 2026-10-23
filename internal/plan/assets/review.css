@@ -179,7 +179,9 @@ body.rev-offline .rev-bar .rev-submit,body.rev-offline .rev-bar .rev-approve{opa
 /* sync status: what happened to the reviewer's feedback; sits above the toast so both read */
 .rev-sync{position:fixed;left:16px;bottom:104px;z-index:calc(var(--rev-z, 2147483000) + 3);max-width:min(560px,calc(100vw - 32px));display:flex;flex-wrap:wrap;align-items:center;gap:8px;background:var(--panel, #111411);border:1px solid var(--hair, #212620);border-left-width:3px;color:var(--ink, #f4f2ef);border-radius:9px;padding:8px 10px 8px 12px;font-size:12.5px;box-shadow:var(--shadow, 0 1px 0 rgba(255,255,255,.02), 0 8px 30px rgba(0,0,0,.35))}
 .rev-sync.ok{border-color:var(--sage, #99c693)}.rev-sync.warn,.rev-sync.ask{border-color:var(--amber, #c6a23c)}.rev-sync.err{border-color:var(--red, #d77e6c)}.rev-sync.pending{border-color:var(--hair, #212620);color:var(--dim, #b7b6a3)}
-.rev-sync-msg{flex:1 1 220px}
+/* Chrome sizes the box from the message's text width, not its 220px basis: a
+   shorter message would wrap the button or × after it onto a second line */
+.rev-sync-msg{flex:1 1 220px}.rev-sync-msg:not(:last-child){min-width:220px}
 .rev-sync button,.rev-sync-input{background:var(--panel2, #171b17);border:1px solid var(--hair, #212620);color:var(--ink, #f4f2ef);border-radius:6px;padding:3px 9px;font-size:12px;font-family:inherit}
 .rev-sync button{cursor:pointer}.rev-sync button:hover{color:var(--ink, #f4f2ef)}.rev-sync .rev-sync-x{border:0;background:none;padding:0 4px;font-size:15px;line-height:1}
 
