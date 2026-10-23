@@ -1412,6 +1412,7 @@
     const revision = opts.revision && REVISION2.test(opts.revision) ? opts.revision : "";
     let tool = false;
     let pending = null;
+    const ownedDrawings = /* @__PURE__ */ new Set();
     function regionOf(a) {
       if (pending && "q-" + pending.id === a) return pending;
       if (ds[a] && ds[a].region) return ds[a].region;
@@ -1453,13 +1454,14 @@
     }
     function paintDrawings() {
       const out = [];
+      const waiting = store.entries();
       Object.keys(committed).concat(Object.keys(ds), pending ? ["q-" + pending.id] : []).forEach((a, i, all2) => {
         const r = all2.indexOf(a) === i && DRAWING.test(a) ? regionOf(a) : void 0;
         if (!r) return;
         const m = ds[a], carr = committed[a] || [];
         const d = drawingPaint({
           anchor: a,
-          kind: carr.length ? "committed" : "unsent",
+          kind: carr.length || ownedDrawings.has(a) || waiting.some((e) => e.stamps[a] !== void 0) ? "committed" : "unsent",
           tint: m ? HL_TINT[m.status] || "gold" : carr.length ? stateTint(repOf(carr).state) : "gold",
           ellipse: r.ellipse,
           targets: r.targets.map((t) => ({ anchor: t.anchor, box: t.box, nth: t.nth, of: t.of })),
@@ -1804,6 +1806,7 @@
         return;
       }
       closePop();
+      paint();
       flush();
     }
     function submit() {
@@ -1856,6 +1859,9 @@
     }
     function report(e, r) {
       if (destroyed) return;
+      if (r.state === "owned") Object.keys(e.stamps).forEach((a) => {
+        if (DRAWING.test(a)) ownedDrawings.add(a);
+      });
       paint();
       setOffline(r.state === "offline");
       const verb = e.act === "accept" ? "Accepted" : e.act === "reopen" ? "Reopened" : "Sent";
@@ -2220,16 +2226,17 @@
           break;
         case "capture": {
           if (!on || !tool) break;
-          if (m.anchor) {
-            if (committed[m.anchor]?.length) break;
-            const old = pending && "q-" + pending.id === m.anchor ? pending : ds[m.anchor]?.region;
+          const anchor = m.anchor;
+          if (anchor) {
+            if (committed[anchor]?.length || ownedDrawings.has(anchor) || store.entries().some((e) => e.stamps[anchor] !== void 0)) break;
+            const old = pending && "q-" + pending.id === anchor ? pending : ds[anchor]?.region;
             if (!old) break;
             const r2 = { ...m.capture, id: old.id, plan_revision: revision, created_at: old.created_at };
             if (checkRegion(r2)) break;
             const label = drawingLabel(r2), section = r2.targets[0].section;
             if (pending && pending.id === r2.id) pending = r2;
-            else if (!store.save({ ...ds[m.anchor], region: r2, label, section })) toast("This browser could not save the updated drawing. It is kept in this tab only.");
-            if (pop && popAbout?.a === m.anchor) {
+            else if (!store.save({ ...ds[anchor], region: r2, label, section })) toast("This browser could not save the updated drawing. It is kept in this tab only.");
+            if (pop && popAbout?.a === anchor) {
               popAbout.label = label;
               popAbout.section = section;
               const about = pop.querySelector(".rev-about");

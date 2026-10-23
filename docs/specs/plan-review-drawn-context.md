@@ -84,6 +84,8 @@ and fonts as `expect.json`'s `environment`.
   layout. `ellipse` is what the reviewer sees and what decides the targets;
   `path` samples that outline. Older records keep their freehand stroke and
   fitted ellipse and render unchanged.
+  Geometry freezes when a submission enters the outbox and stays frozen once
+  the host owns it. A refusal unlocks the draft; newer note edits are retained.
 - **Identity:** `id` is minted once by whoever freezes the drawing — the
   trusted host when framed, the local review chrome when top-level — never
   derived from the targets. Two drawings around one paragraph are two

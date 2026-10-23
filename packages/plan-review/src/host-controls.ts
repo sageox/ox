@@ -203,6 +203,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
   const revision = opts.revision && REVISION.test(opts.revision) ? opts.revision : '';
   let tool = false; // the Draw tool is selected
   let pending: Region | null = null; // a capture whose note is open, kept only on Save
+  const ownedDrawings = new Set<string>(); // receipts may arrive before the host refreshes committed
   // a drawing's record: the capture being noted, else your draft's, else the Ledger's
   function regionOf(a: string): Region | undefined {
     if (pending && 'q-' + pending.id === a) return pending;
@@ -248,13 +249,14 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
   // Its geometry and targets only: who drew it, and their note, stay here.
   function paintDrawings(): DrawingPaint[] {
     const out: DrawingPaint[] = [];
+    const waiting = store.entries();
     Object.keys(committed).concat(Object.keys(ds), pending ? ['q-' + pending.id] : []).forEach((a, i, all) => {
       const r = all.indexOf(a) === i && DRAWING.test(a) ? regionOf(a) : undefined;
       if (!r) return;
       const m = ds[a], carr = committed[a] || [];
       const d = drawingPaint({
         anchor: a,
-        kind: carr.length ? 'committed' : 'unsent',
+        kind: carr.length || ownedDrawings.has(a) || waiting.some((e) => e.stamps[a] !== undefined) ? 'committed' : 'unsent',
         tint: m ? HL_TINT[m.status] || 'gold' : carr.length ? stateTint(repOf(carr).state) : 'gold',
         ellipse: r.ellipse,
         targets: r.targets.map((t) => ({ anchor: t.anchor, box: t.box, nth: t.nth, of: t.of })),
@@ -590,6 +592,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
       return;
     }
     closePop();
+    paint();
     flush();
   }
   // Submit freezes the marks no entry carries yet as one round and sends
@@ -633,6 +636,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
   }
   function report(e: Entry, r: Receipt) {
     if (destroyed) return;
+    if (r.state === 'owned') Object.keys(e.stamps).forEach((a) => { if (DRAWING.test(a)) ownedDrawings.add(a); });
     paint();
     // any answer but offline came from the host, so it is reachable
     setOffline(r.state === 'offline');
@@ -930,18 +934,19 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
         // Only the reviewer's stroke in the Draw tool makes a capture; any
         // other came from the plan's own scripts.
         if (!on || !tool) break;
-        if (m.anchor) {
+        const anchor = m.anchor;
+        if (anchor) {
           // A document may propose geometry for an existing draft, never
           // rewrite a submitted drawing or mint its own identity.
-          if (committed[m.anchor]?.length) break;
-          const old = pending && 'q-' + pending.id === m.anchor ? pending : ds[m.anchor]?.region;
+          if (committed[anchor]?.length || ownedDrawings.has(anchor) || store.entries().some((e) => e.stamps[anchor] !== undefined)) break;
+          const old = pending && 'q-' + pending.id === anchor ? pending : ds[anchor]?.region;
           if (!old) break;
           const r: Region = { ...m.capture, id: old.id, plan_revision: revision, created_at: old.created_at };
           if (checkRegion(r)) break;
           const label = drawingLabel(r), section = r.targets[0].section;
           if (pending && pending.id === r.id) pending = r;
-          else if (!store.save({ ...ds[m.anchor], region: r, label, section })) toast('This browser could not save the updated drawing. It is kept in this tab only.');
-          if (pop && popAbout?.a === m.anchor) {
+          else if (!store.save({ ...ds[anchor], region: r, label, section })) toast('This browser could not save the updated drawing. It is kept in this tab only.');
+          if (pop && popAbout?.a === anchor) {
             popAbout.label = label;
             popAbout.section = section;
             const about = pop.querySelector('.rev-about');

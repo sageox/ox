@@ -497,8 +497,8 @@ func drawHost(doc, revision, committed, extra string) string {
 		`window.ask = (m) => frame.contentWindow.postMessage(m, '*');` +
 		`const port = connectFrame(frame, 'draw-host-0001'); window.got = [];` +
 		`mountHostControls({ send: port.send, listen: (fn) => port.listen((m) => { window.got.push(m); fn(m); }) }, { account: 'acct-devon', plan: 'pln_draw', slug: 'retry-budget-rollout', reviewer: 'Devon',` +
-		` frame, reviewing: true, revision: '` + revision + `', committed: ` + committed + `,` + extra +
-		` transport: { send: (op) => { window.sent.push(op); return Promise.resolve({ state: 'owned', id: op.id, synced: true }); } } });` +
+		` frame, reviewing: true, revision: '` + revision + `', committed: ` + committed + `,` +
+		` transport: { send: (op) => { window.sent.push(op); return Promise.resolve({ state: 'owned', id: op.id, synced: true }); } },` + extra + ` });` +
 		`frame.src = '/doc/` + doc + `#i=draw-host-0001';</script></body></html>`
 }
 
