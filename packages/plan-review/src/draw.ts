@@ -6,7 +6,7 @@
 
 import { anchorFor, fnv1a, headingOf, norm } from './anchor.js';
 import type { DrawRefusal, DrawingPaint, Outcome } from './protocol.js';
-import { bboxOf, ellipsePoints, inkLine, inkPaths, LIMITS, r1, thin, utf8Bytes, type Box, type Capture, type ContextItem, type ContextLabel, type Ellipse, type Layout, type Point, type RegionTarget } from './region.js';
+import { bboxOf, ellipsePoints, inkLine, inkPaths, LIMITS, overlaps, r1, thin, utf8Bytes, type Box, type Capture, type ContextItem, type ContextLabel, type Ellipse, type Layout, type Point, type RegionTarget } from './region.js';
 
 const SVGNS = 'http://www.w3.org/2000/svg';
 const TOL = 1; // css px: geometry within this of the capture is unchanged
@@ -139,7 +139,6 @@ export function drawLayer(selector: string, exclude: string, capture: (c: Captur
   }
 
   // --- capture: geometry plus the bounded context a later reader needs ---
-  const overlaps = (a: Box, b: Box) => a[0] < b[0] + b[2] && b[0] < a[0] + a[2] && a[1] < b[1] + b[3] && b[1] < a[1] + a[3];
   // inside: the closed polygon winds around pt (nonzero winding).
   function inside(pt: Point, poly: Point[]): boolean {
     let w = 0;
@@ -202,23 +201,36 @@ export function drawLayer(selector: string, exclude: string, capture: (c: Captur
   // contextOf keeps what lay under and around the drawing: the innermost
   // markable elements meeting its box (plus a 16 px margin), nearest first,
   // with the text the reader saw and any diagram labels, bounded by LIMITS;
-  // truncated says when anything was cut.
+  // then, in the room those leave, the runs of text across the drawing,
+  // nearest first. truncated says when anything was cut.
   function contextOf(shown: Shown[], bb: Box, targets: Shown[]): Capture['context'] {
     const m = 16, zone: Box = [bb[0] - m, bb[1] - m, bb[2] + 2 * m, bb[3] + 2 * m];
     const cx = bb[0] + bb[2] / 2, cy = bb[1] + bb[3] / 2;
     const dist = (b: Box) => Math.abs(b[0] + b[2] / 2 - cx) + Math.abs(b[1] + b[3] / 2 - cy);
     const near = leafMost(shown.filter((c) => overlaps(c.box, zone))).sort((a, b) => dist(a.box) - dist(b.box));
-    const ctx: Capture['context'] = { items: [], truncated: near.length > LIMITS.contextItems };
+    // runs is in place before the items are trimmed, so the trim counts its key
+    const kept: ContextLabel[] = [];
+    const ctx: Capture['context'] = { items: [], truncated: near.length > LIMITS.contextItems, runs: kept };
     const cut = (s: string, n: number) => {
       if (s.length <= n) return s;
       ctx.truncated = true;
       return s.slice(0, n - 1) + '…';
     };
+    // the band the runs come from: the zone, as wide as the elements in it,
+    // so a row or a line is kept whole rather than cut at the drawing's edge
+    const band: Box = [...zone];
+    near.forEach((c) => {
+      const x1 = Math.max(band[0] + band[2], c.box[0] + c.box[2]);
+      band[0] = Math.min(band[0], c.box[0]);
+      band[2] = x1 - band[0];
+    });
+    let runs: ContextLabel[] = [];
     // innerText is the text the reader saw, cells and lines apart; the
     // glyphs review marks paint into elements are hidden while it is read
     const root = document.documentElement;
     root.classList.add('rev-reading');
     try {
+      runs = runsIn(band).sort((a, b) => dist(a.box) - dist(b.box));
       near.slice(0, LIMITS.contextItems).forEach((c) => {
         const h = c.el as HTMLElement;
         let text = collapse(h.innerText === undefined ? h.textContent : h.innerText);
@@ -235,7 +247,61 @@ export function drawLayer(selector: string, exclude: string, capture: (c: Captur
       root.classList.remove('rev-reading');
     }
     while (utf8Bytes(ctx) > LIMITS.contextBytes && ctx.items.length > 1) { ctx.items.pop(); ctx.truncated = true; }
+    let room = LIMITS.contextBytes - utf8Bytes(ctx);
+    for (const r of runs) {
+      const n = utf8Bytes(r) + 1; // and its comma
+      if (n > room) ctx.truncated = true;
+      else { kept.push(r); room -= n; }
+    }
     return ctx;
+  }
+  // runsIn: the words the reader saw in band, where the page drew them, so
+  // View original can draw them there again: one run per line of each text
+  // node, with its box. A diagram's SVG text counts, as it has boxes too.
+  function runsIn(band: Box): ContextLabel[] {
+    const out: ContextLabel[] = [];
+    const range = document.createRange();
+    const walk = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
+      acceptNode(n) {
+        if (n.nodeType === Node.TEXT_NODE) return NodeFilter.FILTER_ACCEPT;
+        const el = n as Element & { checkVisibility?: (o: object) => boolean };
+        if (el.matches(exclude + ', script, style, noscript, template, textarea, select')) return NodeFilter.FILTER_REJECT;
+        // most of the page lies outside the band: an element boxed outside it
+        // is skipped whole, missing only words that overflow it there; one
+        // with no box of its own (display: contents) still holds boxed words
+        const r = el.getBoundingClientRect();
+        if ((r.width || r.height) && !overlaps(rectOf(r), band)) return NodeFilter.FILTER_REJECT;
+        if (el.checkVisibility && !el.checkVisibility({ visibilityProperty: true, opacityProperty: true })) return NodeFilter.FILTER_REJECT;
+        return NodeFilter.FILTER_SKIP;
+      },
+    });
+    for (let t = walk.nextNode() as Text | null; t; t = walk.nextNode() as Text | null) {
+      // a word's box says which line it is on; a word broken over two lines
+      // counts on its first. A gap wider than the line is tall (aligned columns
+      // in a <pre>) starts a new run, so each side keeps its place
+      let run: ContextLabel | null = null;
+      const keep = () => { if (run && overlaps(run.box, band)) out.push(run); };
+      const words = /\S+/g;
+      for (let w = words.exec(t.data); w; w = words.exec(t.data)) {
+        range.setStart(t, w.index);
+        range.setEnd(t, w.index + w[0].length);
+        const r = range.getClientRects()[0];
+        if (!r || r.width < 1) continue;
+        const b = rectOf(r);
+        if (run && Math.abs(b[1] - run.box[1]) < 1 && b[0] - (run.box[0] + run.box[2]) < b[3]) {
+          const x1 = Math.max(run.box[0] + run.box[2], b[0] + b[2]);
+          run.box[0] = Math.min(run.box[0], b[0]);
+          run.box[2] = r1(x1 - run.box[0]);
+          run.box[3] = Math.max(run.box[3], b[3]);
+          run.text += ' ' + w[0];
+        } else {
+          keep();
+          run = { text: w[0], box: b };
+        }
+      }
+      keep();
+    }
+    return out;
   }
   // labelsIn: the text a diagram draws inside el (Mermaid node, edge and
   // cluster labels, or any SVG <text>), each with its own box.
