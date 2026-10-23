@@ -23,3 +23,9 @@ func IsOxHookCommand(cmd string) bool {
 func IsAnyOxCommand(cmd string) bool {
 	return IsOxPrimeCommand(cmd) || IsOxHookCommand(cmd)
 }
+
+// IsOxStatuslineCommand reports whether a statusLine command runs ox's status
+// line (any version of the installed command, or a hand-written one).
+func IsOxStatuslineCommand(cmd string) bool {
+	return strings.Contains(cmd, "ox statusline")
+}

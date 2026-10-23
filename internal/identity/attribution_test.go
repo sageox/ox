@@ -205,3 +205,15 @@ func TestResolveAttribution_PersonalTokenInAnOrb(t *testing.T) {
 		})
 	}
 }
+
+// TestLocalAttributionUsername_MatchesAttributionUsername keeps the status
+// line's network-free principal in step with the one murmurs are written
+// under. Failure prevented: the status line shows a coworker their own murmur
+// as a teammate's whisper because the two derivations drifted apart.
+func TestLocalAttributionUsername_MatchesAttributionUsername(t *testing.T) {
+	t.Setenv("SAGEOX_TOKEN", "")
+	for _, user := range []string{"Devon", "avery"} {
+		t.Setenv("USER", user)
+		assert.Equal(t, AttributionUsername("", ""), LocalAttributionUsername(), "USER=%s", user)
+	}
+}

@@ -199,6 +199,24 @@ func AttributionUsername(ep, configDisplayName string) string {
 	return ResolveAttribution(ep, configDisplayName).Username
 }
 
+// LocalAttributionUsername is the Username AttributionUsername gives a person
+// on an ordinary machine, computed from local sources only: git's identity,
+// then $USER. It never consults a token and so never reaches the network,
+// which makes it safe for per-keystroke surfaces like the status line. It
+// differs from AttributionUsername only where that one is decided by a
+// token: a team token's AI coworker, and an Amp orb's verified identity.
+func LocalAttributionUsername() string {
+	if gitIdent, err := repotools.DetectGitIdentity(); err == nil && gitIdent != nil {
+		if slug := gitIdent.Slug(); slug != "" {
+			return slug
+		}
+	}
+	if u := osUsername(); u != "" {
+		return strings.ToLower(u)
+	}
+	return "anonymous"
+}
+
 // AttributionEmail returns the user's email address. May be "".
 // Use for: git commit author field.
 func AttributionEmail(ep, configDisplayName string) string {

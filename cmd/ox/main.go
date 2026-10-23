@@ -139,6 +139,13 @@ func main() {
 		_ = godotenv.Load(".env")
 	}
 
+	// The Claude Code status line runs on every refresh and must stay local
+	// and fast, so it skips cobra's pre-run (daemon ping, feature flags).
+	if isStatuslineFastPath(os.Args[1:]) {
+		runStatuslineFastPath()
+		return
+	}
+
 	exitCode := executeWithSignalContext(os.Args[1:])
 	// Flush the result before deciding success, while stderr can still report
 	// a failed destination. Preserve an existing command failure's exit code.

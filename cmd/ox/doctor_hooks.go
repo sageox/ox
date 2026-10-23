@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/sageox/ox/internal/config"
+	claude "github.com/sageox/ox/internal/hooks/claude"
 )
 
 func init() {
@@ -493,6 +494,61 @@ func checkSharedHookValues(fix bool) checkResult {
 	return FailedCheck("Shared hook values",
 		fmt.Sprintf("%d stale hook(s)", len(stale)),
 		strings.Join(stale, ", ")+"\n       Run `ox doctor` to update")
+}
+
+// checkClaudeStatusLine verifies .claude/settings.json runs the ox status
+// line wherever ox's Claude Code hooks are installed. Missing or stale is
+// repaired by the installer; a coworker's own statusLine is kept and reported.
+func checkClaudeStatusLine(fix bool) checkResult {
+	gitRoot := findGitRoot()
+	if gitRoot == "" {
+		return SkippedCheck(claudeStatusLineCheckName, "not in git repo", "")
+	}
+	return checkClaudeStatusLineAt(gitRoot, fix)
+}
+
+const claudeStatusLineCheckName = "Claude status line"
+
+func checkClaudeStatusLineAt(gitRoot string, fix bool) checkResult {
+	settingsPath := getSharedClaudeSettingsPath(gitRoot)
+	if _, err := os.Stat(settingsPath); os.IsNotExist(err) {
+		return SkippedCheck(claudeStatusLineCheckName, "no settings.json", "")
+	}
+	settings, rawMap, err := readSharedClaudeSettings(gitRoot)
+	if err != nil {
+		return WarningCheck(claudeStatusLineCheckName, "read error", err.Error())
+	}
+	hasOx := false
+	for _, entries := range settings.Hooks {
+		for _, entry := range entries {
+			if hasAnyOxHook(entry) {
+				hasOx = true
+			}
+		}
+	}
+	if !hasOx {
+		// the status line ships with the hooks; the hook checks install both
+		return SkippedCheck(claudeStatusLineCheckName, "no ox hooks in settings.json", "")
+	}
+
+	state := claude.ClassifyStatusLine(rawMap)
+	switch state {
+	case claude.StatusLineCurrent:
+		return PassedCheck(claudeStatusLineCheckName, "ox status line installed")
+	case claude.StatusLineForeign:
+		return PassedCheck(claudeStatusLineCheckName,
+			"custom statusLine kept; ox activity is not shown in the status bar")
+	}
+
+	if fix {
+		if err := InstallProjectClaudeHooks(gitRoot); err != nil {
+			return FailedCheck(claudeStatusLineCheckName, "repair failed", err.Error())
+		}
+		return PassedCheck(claudeStatusLineCheckName, "installed ox status line")
+	}
+	return FailedCheck(claudeStatusLineCheckName,
+		fmt.Sprintf("status line %s", state),
+		"ox's live activity line is not in "+settingsPath+"\n       Run `ox doctor` to install it")
 }
 
 // checkStaleLocalHooks detects ox hooks still present in settings.local.json

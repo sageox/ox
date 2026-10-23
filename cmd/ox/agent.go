@@ -1320,15 +1320,19 @@ func deliverPendingWhispers(cmd *cobra.Command, agentID string) {
 // but not ambient ones, to avoid flooding agent context.
 // Timeout is 100ms (vs 500ms for runAgentWhisper) because this runs in the
 // hot path of every hook invocation and must not add perceptible latency.
-func emitWhispers(w io.Writer, agentID string) {
+func emitWhispers(w io.Writer, agentID string) { writeWhispers(w, agentID) }
+
+// writeWhispers is emitWhispers, returning the entries it wrote (nil when none)
+// so a hook can tell coworkers who whispered.
+func writeWhispers(w io.Writer, agentID string) []whisperstore.WhisperEntry {
 	// best-effort delivery — 100ms allows for daemon startup/load
 	client := daemon.NewClientForCurrentRepoWithTimeout(100 * time.Millisecond)
 	resp, err := client.Whispers(agentID, "normal", nil)
 	if err != nil {
-		return
+		return nil
 	}
 	if resp == nil || len(resp.Entries) == 0 {
-		return
+		return nil
 	}
 
 	entries := capMurmurWhispers(resp.Entries)
@@ -1337,13 +1341,15 @@ func emitWhispers(w io.Writer, agentID string) {
 	// cursor was already advanced by daemon — these are discarded, not deferred
 	entries = filterMurmurReceive(entries, projectRoot)
 	if len(entries) == 0 {
-		return
+		return nil
 	}
 
 	formatWhispersWithEdits(w, entries, checkoutEditedFiles(projectRoot))
+	recordStatuslineWhisper(projectRoot, agentID, entries)
 
 	// best-effort context-trace for whisper delivery observability
 	traceWhisperDelivery(projectRoot, agentID, entries)
+	return entries
 }
 
 // traceWhisperDelivery emits context-trace "provided" events for delivered murmur entries.

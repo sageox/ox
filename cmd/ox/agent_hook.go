@@ -508,12 +508,16 @@ func handleEnd(ctx *HookContext) error {
 // whispers are delivered exactly once across all channels. If handlePrompt delivers
 // a whisper, the PostToolUse fallback and active pull get 0 entries — no duplication.
 func handlePrompt(ctx *HookContext) error {
+	// Codex: buffered so a teammate-whisper notice can join the context in one JSON document.
+	stdout := newCodexPromptStdout(ctx, os.Stdout)
+	defer stdout.flush()
+
 	// Local-recall preamble runs BEFORE whispers so the model sees prior
 	// ledger context first. Strictly additive: any failure / timeout /
 	// no-match leaves the existing whisper path completely untouched.
 	if ctx.Input != nil {
 		if prompt := extractPromptText(ctx.Input.RawBytes); prompt != "" {
-			emitLocalRecallPreamble(os.Stdout, prompt)
+			emitLocalRecallPreamble(stdout, prompt)
 
 			// Cloud-query gate (opt-in only; default off). Wired here so the
 			// policy + redaction layer is exercised on every prompt — even
@@ -549,23 +553,23 @@ func handlePrompt(ctx *HookContext) error {
 	// recording is paused. Scoped to the current agent's suspended session
 	// only — other agents' paused sessions in this repo do not bleed into
 	// this terminal's nudge.
-	emitSuspendedNudge(os.Stdout, ctx.ProjectRoot, agentID)
+	emitSuspendedNudge(stdout, ctx.ProjectRoot, agentID)
 
 	// Deliver a pending plan-exit enrichment nudge (stashed by handleAfterTool
 	// on ExitPlanMode). UserPromptSubmit is the only Claude Code channel whose
 	// stdout reaches the model, so delivery happens here — on the turn that
 	// begins right after the plan was approved.
-	emitPlanNudge(os.Stdout, ctx.ProjectRoot, agentID)
+	emitPlanNudge(stdout, ctx.ProjectRoot, agentID)
 
 	// Tell the agent, once, when a plan was enriched this session and never
 	// saved. Covers every route the ExitPlanMode nudge above cannot see: Codex
 	// plan mode (which leaves no artifact ox can find) and any session where
 	// plan mode was never entered. Fail-open.
-	emitUnsavedPlanNudge(os.Stdout, ctx.ProjectRoot, agentID)
+	emitUnsavedPlanNudge(stdout, ctx.ProjectRoot, agentID)
 	// The plan nudge above only fires when `ox plan enrich` armed it. An agent
 	// that authored a page without ever running enrich arms nothing, so the
 	// artifact itself is the second, independent signal.
-	emitUnsavedArtifactNudge(os.Stdout, ctx.ProjectRoot, agentID, ctx.Marker.PrimedAt)
+	emitUnsavedArtifactNudge(stdout, ctx.ProjectRoot, agentID, ctx.Marker.PrimedAt)
 
 	// Steer the agent toward `ox plan enrich`/`ox plan render` at the planning
 	// moment — fired when the agent is in plan mode (permission_mode == "plan")
@@ -575,7 +579,7 @@ func handlePrompt(ctx *HookContext) error {
 	if ctx.Input != nil {
 		rawPrompt = ctx.Input.RawBytes
 	}
-	emitPlanHint(os.Stdout, ctx.ProjectRoot, agentID, rawPrompt)
+	emitPlanHint(stdout, ctx.ProjectRoot, agentID, rawPrompt)
 	// Codex never runs `ox plan enrich` on its own and has no ExitPlanMode, so
 	// the enrich-armed unsaved-plan stamp is never set for it. Arm it from the
 	// planning prompt itself; the Stop-hook capture clears it if the plan is
@@ -585,13 +589,13 @@ func handlePrompt(ctx *HookContext) error {
 		armUnsavedPlanFromPrompt(ctx.ProjectRoot, agentID, rawPrompt)
 	}
 
-	emitWhispers(os.Stdout, agentID)
+	stdout.whispers = writeWhispers(stdout, agentID)
 
 	// Surface any scheduled agent tasks (throttled). This is the sole channel
 	// into the model's context for the task queue — see agent_tasks_surface.go.
 	// Pass the resolved agent type (ctx.AgentType is defaulted to claude-code
 	// when AGENT_ENV is unset) so target-scoped tasks still surface.
-	emitAgentTasks(os.Stdout, ctx.ProjectRoot, agentID, ctx.AgentType)
+	emitAgentTasks(stdout, ctx.ProjectRoot, agentID, ctx.AgentType)
 	return nil
 }
 
@@ -644,6 +648,8 @@ func handleAfterTool(ctx *HookContext) error {
 		return nil
 	}
 
+	recordStatuslineAction(ctx.ProjectRoot, agentID, ctx.Input)
+
 	// Plan-exit nudge (Gold tier): the closest plan-exit signal Claude Code
 	// exposes is this PostToolUse firing after ExitPlanMode. Strictly gated on
 	// the tool name so it is a no-op for every other tool — NOT a noisy hook.
@@ -661,7 +667,9 @@ func handleAfterTool(ctx *HookContext) error {
 	// is discarded anyway, and handlePrompt remains its primary delivery.
 	pageNudged := ctx.AgentType == "claude-code" && ctx.Input != nil &&
 		emitWrittenPageNudge(os.Stdout, ctx.ProjectRoot, agentID, ctx.Input.ToolName, ctx.Input.ToolInput)
-	if !pageNudged {
+	if ctx.AgentType == "codex" {
+		emitCodexAfterTool(os.Stdout, ctx, agentID) // one JSON document: whispers + ox activity notice
+	} else if !pageNudged {
 		// emit pending whispers (fallback — primary delivery is handlePrompt)
 		emitWhispers(os.Stdout, agentID)
 	}
