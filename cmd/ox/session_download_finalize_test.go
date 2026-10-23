@@ -28,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon/agentwork"
@@ -108,8 +109,14 @@ func newDownloadLedgerFixture(t *testing.T) *downloadLedgerFixture {
 	t.Cleanup(server.Close)
 	serverURL = server.URL
 	t.Setenv("SAGEOX_ENDPOINT", server.URL)
+	require.NoError(t, auth.SaveTokenForEndpoint(server.URL, &auth.StoredToken{
+		AccessToken: "test-token", ExpiresAt: time.Now().Add(time.Hour),
+	}))
 	require.NoError(t, gitserver.SaveCredentialsForEndpoint(server.URL, gitserver.GitCredentials{
-		Username: "testuser", Token: "test-token", ServerURL: server.URL, ExpiresAt: time.Now().Add(time.Hour),
+		Username: "testuser", Token: "test-token", ServerURL: server.URL,
+		// Avoid credential refresh against this content-only test server.
+		ExpiresAt:       time.Now().Add(2 * gitserver.NearExpiryThreshold),
+		BearerTokenHash: gitserver.BearerTokenFingerprint("test-token"),
 	}))
 	// the LFS batch URL derives from the fetch remote; pushes land on the bare repo
 	runGit(t, f.ledgerPath, "remote", "set-url", "origin", server.URL+"/ledger.git")
