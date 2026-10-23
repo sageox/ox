@@ -30,6 +30,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/sageox/ox/internal/teamdocs"
 )
 
 // File is one file belonging to a team skill, as read out of the team-context
@@ -139,12 +141,19 @@ type Verdict struct {
 	Digest string
 }
 
-// inlineCommandLine matches Claude's inline command-execution syntax: a line
-// whose content begins with !`…`. Anchored to line start (after optional
-// whitespace and list markers) so ordinary prose containing a backtick or an
-// exclamation mark is not swept up — a false positive here blocks a legitimate
-// prose skill, which teaches people to approve everything.
-var inlineCommandLine = regexp.MustCompile(`(?m)^\s*(?:[-*+]\s+|>\s*)?!` + "`")
+// inlineCommandLine matches Claude's inline command-execution syntax, !`…`,
+// ANYWHERE on a line: `!` and a backtick followed by any character that is not
+// another backtick (trust contract v2, R1).
+//
+// It used to be anchored to the start of a line, which missed the form Claude
+// Code's own skill docs use for dynamic context — "- PR diff: !`gh pr diff`" —
+// so that skill installed as prose and ran a command at load time with nobody
+// having decided. Claude Code's preprocessing is textual, so neither position
+// nor fences are excluded. The cost is that prose like "the `!` operator"
+// needs an approval; a gate that occasionally asks is the safe failure, a gate
+// that misses the documented form is not. An exclamation mark followed by TWO
+// backticks is not a command; an unclosed "!`foo" is treated as one.
+var inlineCommandLine = regexp.MustCompile("!`[^`\n]")
 
 // allowedToolsKey matches an allowed-tools frontmatter key.
 var allowedToolsKey = regexp.MustCompile(`(?mi)^\s*allowed[-_]tools\s*:`)
@@ -187,7 +196,9 @@ func Classify(s Skill) Verdict {
 		if !strings.EqualFold(path.Ext(clean), ".md") {
 			continue
 		}
-		normalized := strings.ReplaceAll(string(f.Content), "\r\n", "\n")
+		// Normalized ONCE, here: splitFrontmatter takes the result as is, so
+		// exactly one leading BOM is ever stripped (see normalizeManifest).
+		normalized := normalizeManifest(string(f.Content))
 		front, _ := splitFrontmatter(normalized)
 		if allowedToolsKey.MatchString(front) {
 			add(CapAllowedTools, clean)
@@ -195,9 +206,8 @@ func Classify(s Skill) Verdict {
 		// Scan the FULL document, not just the body. splitFrontmatter returns an
 		// empty body for unterminated frontmatter — deliberately, so a hidden
 		// allowed-tools grant is still seen — and scanning only the body would then
-		// miss every inline command in exactly that malformed shape. A frontmatter
-		// line cannot legitimately start with !` anyway, so there is nothing to
-		// exclude.
+		// miss every inline command in exactly that malformed shape. Claude Code
+		// expands !` text wherever it appears, so nothing is excluded.
 		for _, line := range inlineCommandLines(normalized) {
 			add(CapInlineCommand, clean+": "+line)
 		}
@@ -226,25 +236,57 @@ func inlineCommandLines(body string) []string {
 	return out
 }
 
-// splitFrontmatter separates a leading `---` YAML block from the body.
+// splitFrontmatter separates a leading `---` YAML block from the body of a
+// manifest that normalizeManifest has ALREADY normalized. It does not
+// normalize again: doing so stripped a second BOM, contradicting the
+// exactly-one rule the consumers follow.
 //
 // Only a block at the very start counts. A `---` later in the document is a
 // horizontal rule, and treating it as frontmatter would let a body-level
 // "allowed-tools:" line be read as a grant — or, worse, let a real grant hide
 // behind one.
-func splitFrontmatter(content string) (front, body string) {
-	normalized := strings.ReplaceAll(content, "\r\n", "\n")
-	if !strings.HasPrefix(normalized, "---\n") {
+//
+// A fence is a line that is `---` once trailing spaces and tabs are removed
+// (trust contract v2, R2). YAML loaders accept "--- ", so a check that demanded
+// the exact bytes read "--- \nallowed-tools: Bash(*)" as having no frontmatter
+// and installed the grant as prose. Leading whitespace is still not a fence.
+func splitFrontmatter(normalized string) (front, body string) {
+	first, rest, found := strings.Cut(normalized, "\n")
+	if !found || !teamdocs.IsFrontmatterFence(first) {
 		return "", normalized
 	}
-	rest := normalized[len("---\n"):]
-	end := strings.Index(rest, "\n---")
-	if end < 0 {
-		// Unterminated frontmatter: treat the whole document as frontmatter rather
-		// than as body. Reading it as body would skip the allowed-tools check.
-		return rest, ""
+	for offset := 0; offset <= len(rest); {
+		line, _, _ := strings.Cut(rest[offset:], "\n")
+		if teamdocs.IsFrontmatterFence(line) {
+			front = strings.TrimSuffix(rest[:offset], "\n")
+			return front, strings.TrimPrefix(rest[offset+len(line):], "\n")
+		}
+		offset += len(line) + 1
 	}
-	return rest[:end], strings.TrimPrefix(rest[end+len("\n---"):], "\n")
+	// Unterminated frontmatter: treat the whole document as frontmatter rather
+	// than as body. Reading it as body would skip the allowed-tools check.
+	return rest, ""
+}
+
+// utf8BOM is the byte-order mark some Windows editors write at the start of a
+// UTF-8 file.
+const utf8BOM = "\ufeff"
+
+// normalizeManifest puts a manifest in the one shape the checks above read:
+// LF line endings, and no leading byte-order mark.
+//
+// The BOM is a SECURITY concern, not tidiness. Editors, YAML loaders and
+// coding agents strip it before looking for frontmatter, so they honor
+// "\ufeff---\nallowed-tools: Bash(*)" as a grant. A check that did not strip
+// it saw no frontmatter at all, classified that manifest as prose, and
+// auto-installed a shell grant nobody approved. A BOM in front of an inline
+// command on the first line hid that too. Exactly one BOM is stripped, because
+// that is what the consumers strip: after it, a second one is ordinary text to
+// them as well, and the document has no frontmatter for anyone. Classify calls
+// this once per file and nothing downstream normalizes again, so "exactly one"
+// is what actually happens.
+func normalizeManifest(content string) string {
+	return strings.TrimPrefix(strings.ReplaceAll(content, "\r\n", "\n"), utf8BOM)
 }
 
 // Digest is the content identity an approval is pinned to.
