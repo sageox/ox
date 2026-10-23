@@ -6,8 +6,11 @@
    above it. A host that frames the plan can set --rev-z to keep its own
    dialogs above the controls. */
 
-.rev-bar{position:fixed;left:16px;bottom:16px;z-index:calc(var(--rev-z, 2147483000) + 2);display:flex;align-items:center;gap:8px;background:var(--panel, #111411);border:1px solid var(--hair, #212620);border-radius:9px;padding:6px 8px;box-shadow:var(--shadow, 0 1px 0 rgba(255,255,255,.02), 0 8px 30px rgba(0,0,0,.35))}
+.rev-bar{position:fixed;left:16px;bottom:16px;z-index:calc(var(--rev-z, 2147483000) + 2);display:flex;align-items:center;gap:8px;background:var(--panel, #111411);border:1px solid var(--hair, #212620);border-radius:9px;padding:6px 8px;box-shadow:var(--shadow, 0 1px 0 rgba(255,255,255,.02), 0 8px 30px rgba(0,0,0,.35));cursor:grab;user-select:none;touch-action:none}
 .rev-bar button{background:var(--panel2, #171b17);border:1px solid var(--hair2, var(--hair, #212620));color:var(--dim, #b7b6a3);border-radius:6px;padding:4px 9px;font-size:12px;cursor:pointer;font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace}
+.rev-bar.rev-dragging,.rev-bar.rev-dragging button{cursor:grabbing}
+/* Keep pointer input in the host while dragging across a sandboxed frame. */
+.rev-bar.rev-dragging::before{content:"";position:fixed;inset:0;z-index:-1}
 .rev-bar button:hover{color:var(--ink, #f4f2ef)}
 .rev-bar .rev-toggle.on{background:var(--sage, #99c693);border-color:var(--sage, #99c693);color:#111411}
 /* the Draw tool, selected: the bar shows which tool a stroke on the plan uses */
@@ -23,7 +26,7 @@
    cursor and get no target outline — clicks there never mark up. The li
    rules outrank the document's generic li:hover target rule. */
 body.rev-on .rev-bar{border-color:var(--sage, #99c693)}
-body.rev-on .rev-bar,body.rev-on .rev-rail,body.rev-on .rev-pop,body.rev-on .rev-orphans,body.rev-on .rev-toast,body.rev-on .rev-sync,body.rev-on .rev-offline-bar,body.rev-on .rev-original{cursor:auto}
+body.rev-on .rev-rail,body.rev-on .rev-pop,body.rev-on .rev-orphans,body.rev-on .rev-toast,body.rev-on .rev-sync,body.rev-on .rev-offline-bar,body.rev-on .rev-original{cursor:auto}
 body.rev-on .rev-rail li:hover{outline:none;cursor:pointer}
 body.rev-on .rev-orphans li:hover{outline:none;cursor:auto}
 
