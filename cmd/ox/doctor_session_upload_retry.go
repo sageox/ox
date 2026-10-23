@@ -565,6 +565,11 @@ func retrySessionUploadWithEffects(projectRoot, ledgerPath string, orphan orphan
 	if err := effects.commitRetry(ledgerPath, orphan.SessionName, hasSummary); err != nil {
 		return fmt.Errorf("commit and push: %w", err)
 	}
+	// Recovery publishes the same stable URL as a normal stop. The lifecycle
+	// alias must be registered only after its content reaches the Ledger.
+	if effects.finalizeLinkage != nil {
+		effects.finalizeLinkage(projectRoot, sessionDir, meta, orphan.SessionName)
+	}
 	if recoveryCacheDir != "" {
 		if err := os.RemoveAll(recoveryCacheDir); err != nil {
 			slog.Debug("prune session recovery copy", "dir", recoveryCacheDir, "error", err)

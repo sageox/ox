@@ -154,7 +154,7 @@ func TestCustomToolResultsPairAcrossReads(t *testing.T) {
 
 // TestFindCodexSession_DirectLookup verifies that providing an agent session ID
 // finds the file by matching the session_meta.id field in the JSONL.
-// Failure prevented: slow scan of all date directories when the session ID is known.
+// A known identity must select its own conversation, regardless of other activity.
 func TestFindCodexSession_DirectLookup(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -183,6 +183,64 @@ func TestFindCodexSession_DirectLookup(t *testing.T) {
 	}
 	if got != sessionFile {
 		t.Errorf("got %q, want %q", got, sessionFile)
+	}
+}
+
+func TestFindCodexSession_ResumedOldConversation(t *testing.T) {
+	for _, tc := range []struct{ exactID, symlinkRoot bool }{{true, false}, {false, false}, {true, true}, {false, true}} {
+		t.Run(fmt.Sprintf("exact_id=%t/symlink_root=%t", tc.exactID, tc.symlinkRoot), func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			if tc.symlinkRoot {
+				if err := os.MkdirAll(filepath.Join(home, ".codex"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(t.TempDir(), filepath.Join(home, ".codex", "sessions")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			now := time.Now()
+			started := now.AddDate(0, 0, -45)
+			repoRoot := t.TempDir()
+			sessionID := "019d2c0d-ac3c-7b72-bb1d-0f246ad1f0d0"
+			dateDir := filepath.Join(home, ".codex", "sessions", started.Format("2006/01/02"))
+			if err := os.MkdirAll(dateDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			sessionFile := filepath.Join(dateDir, "rollout-"+sessionID+".jsonl")
+			content := fmt.Sprintf(`{"type":"session_meta","payload":{"id":%q,"cwd":%q}}`+"\n"+
+				`{"timestamp":%q,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Continue the saved plan"}]}}`+"\n", sessionID, repoRoot, now.Format(time.RFC3339Nano))
+			if err := os.WriteFile(sessionFile, []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			requestedID := ""
+			if tc.exactID {
+				requestedID = sessionID
+				// A newer conversation in the same workspace must not win over
+				// the resumed conversation's explicit native identity.
+				recentDir := filepath.Join(home, ".codex", "sessions", now.Format("2006/01/02"))
+				if err := os.MkdirAll(recentDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				sibling := fmt.Sprintf(`{"type":"session_meta","payload":{"id":"sibling-id","cwd":%q}}`+"\n", repoRoot)
+				if err := os.WriteFile(filepath.Join(recentDir, "sibling.jsonl"), []byte(sibling), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			found, err := handleFindSession(adapterprotocol.FindSessionParams{
+				RepoRoot: repoRoot, AgentSessionID: requestedID, Since: now.Add(-5 * time.Minute).Format(time.RFC3339),
+			})
+			if err != nil {
+				t.Fatalf("find resumed conversation: %v", err)
+			}
+			if found.SessionFile != sessionFile || found.Offset != int64(len(content)) {
+				t.Fatalf("found %+v, want original conversation %q", found, sessionFile)
+			}
+			read, err := handleRead(adapterprotocol.ReadParams{SessionFile: found.SessionFile})
+			if err != nil || len(read.Entries) != 1 || read.Entries[0].Content != "Continue the saved plan" {
+				t.Fatalf("read resumed conversation = %+v, %v", read, err)
+			}
+		})
 	}
 }
 

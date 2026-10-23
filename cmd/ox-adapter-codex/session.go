@@ -16,6 +16,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -374,7 +375,7 @@ func findCodexSession(repoRoot, agentID, since, agentSessionID string) (string, 
 
 	sessionsDir := filepath.Join(home, ".codex", "sessions")
 
-	// direct lookup: scan recent date dirs for a file whose session_meta.id matches
+	// A resumed conversation keeps its original date directory, however old.
 	if agentSessionID != "" {
 		if err := adapterruntime.ValidateSessionID(agentSessionID); err != nil {
 			return "", err
@@ -417,25 +418,12 @@ func findCodexSession(repoRoot, agentID, since, agentSessionID string) (string, 
 	return cwdMatches[0].path, nil
 }
 
-// findCodexBySessionID scans recent date directories for a JSONL file whose
+// findCodexBySessionID scans session directories for a JSONL file whose
 // session_meta entry has a matching id field.
 func findCodexBySessionID(sessionsDir, sessionID string) (string, error) {
-	now := time.Now()
-	for day := 0; day < searchDays; day++ {
-		t := now.AddDate(0, 0, -day)
-		dateDir := filepath.Join(sessionsDir, t.Format("2006"), t.Format("01"), t.Format("02"))
-		entries, err := os.ReadDir(dateDir)
-		if err != nil {
-			continue
-		}
-		for _, entry := range entries {
-			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
-				continue
-			}
-			path := filepath.Join(dateDir, entry.Name())
-			if codexFileHasSessionID(path, sessionID) {
-				return path, nil
-			}
+	for _, c := range collectCodexCandidates(sessionsDir, time.Time{}) {
+		if codexFileHasSessionID(c.path, sessionID) {
+			return c.path, nil
 		}
 	}
 	return "", fmt.Errorf("codex session %s not found", sessionID)
@@ -470,32 +458,20 @@ func codexFileHasSessionID(path, sessionID string) bool {
 
 func collectCodexCandidates(sessionsDir string, since time.Time) []candidate {
 	var candidates []candidate
-	now := time.Now()
-
-	for day := 0; day < searchDays; day++ {
-		t := now.AddDate(0, 0, -day)
-		dateDir := filepath.Join(sessionsDir, t.Format("2006"), t.Format("01"), t.Format("02"))
-		entries, err := os.ReadDir(dateDir)
-		if err != nil {
-			continue
+	// Folder dates record creation, not activity. Filter on file modification
+	// time so resumed conversations remain discoverable after any idle period.
+	// DirFS follows a relocated root while WalkDir skips symlinks inside it.
+	_ = fs.WalkDir(os.DirFS(sessionsDir), ".", func(path string, entry fs.DirEntry, err error) error {
+		if err != nil || !entry.Type().IsRegular() || !strings.HasSuffix(entry.Name(), ".jsonl") {
+			return nil
 		}
-		for _, entry := range entries {
-			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
-				continue
-			}
-			info, err := entry.Info()
-			if err != nil {
-				continue
-			}
-			if !since.IsZero() && !info.ModTime().After(since) {
-				continue
-			}
-			candidates = append(candidates, candidate{
-				path:    filepath.Join(dateDir, entry.Name()),
-				modTime: info.ModTime(),
-			})
+		info, err := entry.Info()
+		if err != nil || !since.IsZero() && !info.ModTime().After(since) {
+			return nil
 		}
-	}
+		candidates = append(candidates, candidate{path: filepath.Join(sessionsDir, path), modTime: info.ModTime()})
+		return nil
+	})
 
 	return candidates
 }
