@@ -868,6 +868,11 @@ func runDoctorChecksWithState(parent context.Context, opts doctorOptions, state 
 		if !sharedValuesCheck.skipped {
 			integrationChecks = append(integrationChecks, sharedValuesCheck)
 		}
+		// ox status line in the shared settings (a custom one is left alone)
+		statusLineCheck := checkClaudeStatusLine(opts.shouldFix(CheckSlugClaudeStatusLine))
+		if !statusLineCheck.skipped {
+			integrationChecks = append(integrationChecks, statusLineCheck)
+		}
 		// detect stale ox hooks in settings.local.json
 		staleLocalCheck := checkStaleLocalHooks(opts.shouldFix(CheckSlugStaleLocalHooks))
 		if !staleLocalCheck.skipped {
