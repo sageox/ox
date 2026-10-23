@@ -187,6 +187,10 @@ func runAgentSessionAbortByName(inst *agentinstance.Instance, cmd *cobra.Command
 	case session.StatusRecording:
 		return fmt.Errorf("session %q is actively recording — use 'ox agent %s session abort' (without a name) to abort your own session", sessionName, inst.AgentID)
 	case session.StatusUploaded:
+		ledgerPath, _ := resolveLedgerPath()
+		if err := refuseLedgerDeleteForTeamToken(projectRoot, ledgerPath, sessionName); err != nil {
+			return err
+		}
 		// Total kill: abort deletes a finalized/persisted session too, along with
 		// all of its summarized data — not just drafts and local recordings.
 		//

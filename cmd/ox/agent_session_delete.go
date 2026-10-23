@@ -9,7 +9,10 @@ import (
 	"path/filepath"
 
 	"github.com/sageox/ox/internal/agentinstance"
+	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/cli"
+	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/lfs"
@@ -91,6 +94,11 @@ func runAgentSessionDelete(inst *agentinstance.Instance, cmd *cobra.Command, arg
 	if !localExists && !ledgerExists {
 		return fmt.Errorf("session not found: %s\nRun 'ox session list' to see available sessions", sessionName)
 	}
+	if ledgerExists {
+		if err := refuseLedgerDeleteForTeamToken(projectRoot, ledgerPath, sessionName); err != nil {
+			return err
+		}
+	}
 
 	// confirmation: interactive terminal prompts, non-interactive requires --force
 	forceFlag := cmd.Flag("force") != nil && cmd.Flag("force").Value.String() == "true"
@@ -160,6 +168,29 @@ func runAgentSessionDelete(inst *agentinstance.Instance, cmd *cobra.Command, arg
 	}
 
 	return cli.PrintJSONTo(os.Stdout, output)
+}
+
+// refuseLedgerDeleteForTeamToken refuses to remove a session from the Ledger
+// under a team token, which only SAGEOX_TOKEN can hold; a person deletes it on
+// the web. The token is read at its own endpoint, so a project on another
+// endpoint cannot skip this. With no ledgerPath the link names the session.
+func refuseLedgerDeleteForTeamToken(projectRoot, ledgerPath, sessionName string) error {
+	if !auth.EnvTokenIsTeamFamily(auth.EnvTokenEndpoint()) {
+		return nil
+	}
+	where := "on the web"
+	if projCfg, err := config.LoadProjectConfig(projectRoot); err == nil {
+		sessionID := ""
+		if ledgerPath != "" {
+			if meta, metaErr := lfs.ReadSessionMeta(filepath.Join(ledgerPath, "sessions", sessionName)); metaErr == nil {
+				sessionID = meta.EffectiveSessionID()
+			}
+		}
+		if url := firstNonEmpty(buildConversationURL(projCfg, sessionID), buildSessionURL(projCfg, sessionName)); url != "" {
+			where += ": " + url
+		}
+	}
+	return errkind.Errorf(errkind.Auth, "session %q is in the Ledger, and a team token cannot delete it\nDelete it %s", sessionName, where)
 }
 
 // deleteSessionFromLedger removes the session folder from the ledger git repo,
