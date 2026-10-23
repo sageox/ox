@@ -142,8 +142,10 @@ body.rev-on .rev-orphans li:hover{outline:none;cursor:auto}
 .rev-rail-item[data-status="comment"]{border-left-color:var(--gold, #d9b654)} .rev-rail-item[data-status="comment"] .rev-rail-glyph{color:var(--gold, #d9b654)}
 .rev-rail-glyph{flex:none;font-size:12px;line-height:1.4;color:var(--dim, #b7b6a3)}
 .rev-rail-body{min-width:0;flex:1}
-.rev-rail-sec{display:flex;align-items:center;gap:6px;margin-bottom:3px}
-.rev-rail-sec-t{flex:1;min-width:0;font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10px;color:var(--faint, #8c8e7e);text-transform:uppercase;letter-spacing:.03em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* the section, then the reviewer and tags, which wrap below it rather than
+   crush it or run out of the row */
+.rev-rail-sec{display:flex;flex-wrap:wrap;align-items:center;gap:3px 6px;margin-bottom:3px}
+.rev-rail-sec-t{flex:1 1 auto;min-width:0;font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10px;color:var(--faint, #8c8e7e);text-transform:uppercase;letter-spacing:.03em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .rev-rail-who{flex:none;font-size:9px;border-radius:6px;padding:0 5px;border:1px solid var(--hair2, var(--hair, #212620));color:var(--sage, #99c693);text-transform:none;letter-spacing:0;max-width:90px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .rev-rail-note{font-size:12.5px;color:var(--ink, #f4f2ef);line-height:1.45;overflow-wrap:anywhere}
 .rev-rail-answer{font-size:12px;color:var(--dim, #b7b6a3);line-height:1.45;margin-top:3px;overflow-wrap:anywhere}
@@ -167,9 +169,15 @@ body.rev-on .rev-orphans li:hover{outline:none;cursor:auto}
 .rev-orig-box{fill:none;stroke:var(--faint, #8c8e7e);stroke-width:.5}
 .rev-orig-label-box{fill:none;stroke:var(--teal, #97aebd);stroke-width:.5}
 .rev-orig-label{fill:var(--teal, #97aebd);font-size:11px}
-.rev-orig-text{fill:var(--dim, #b7b6a3);font-size:12px}
+/* a run's font-size is an attribute, sized from its box: no rule may set one */
+.rev-orig-run{fill:var(--dim, #b7b6a3)}
 .rev-orig-ink{color:var(--gold, #d9b654);opacity:.95}
 .rev-orig-cut{fill:var(--amber, #c6a23c);font-size:11px}
+/* the text View original cannot place, kept about as wide as a small picture
+   rather than stretching the dialog to its widest */
+.rev-orig-unplaced{max-width:420px;margin-top:8px}
+.rev-orig-unplaced-h{font:11px/1.4 "Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--faint, #8c8e7e)}
+.rev-orig-unplaced blockquote{margin:4px 0 0;padding:1px 0 1px 8px;border-left:2px solid var(--gold, #d9b654);font-size:12.5px;line-height:1.45;color:var(--ink, #f4f2ef);overflow-wrap:anywhere}
 /* narrow viewports: the fixed rail would cover the prose, so drop it into flow;
    the bottom margin keeps it above the fixed review bar when scrolled to the end */
 @media(max-width:1400px){.rev-rail{position:static;width:auto;max-height:none;margin:24px 16px 72px;right:auto;top:auto}}
