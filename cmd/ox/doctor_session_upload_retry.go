@@ -565,16 +565,10 @@ func retrySessionUploadWithEffects(projectRoot, ledgerPath string, orphan orphan
 	if err := effects.commitRetry(ledgerPath, orphan.SessionName, hasSummary); err != nil {
 		return fmt.Errorf("commit and push: %w", err)
 	}
-	// Recovery publishes the same stable URL as a normal stop. The lifecycle
-	// alias must be registered only after its content reaches the Ledger.
-	// Post-push metadata edits make session wait report published recordings
-	// as unpushed, so notification retry state stays in the cache marker.
-	if effects.notifyUploaded != nil {
-		if _, notified := effects.notifyUploaded(projectRoot, meta, orphan.SessionName); !notified {
-			// Keep the pending marker and recovery bytes so doctor can retry even
-			// though the ledger metadata already describes a finalized session.
-			return fmt.Errorf("lifecycle notification failed for %s; session uploaded and recovery retained", orphan.SessionName)
-		}
+	// Register the original URL after publication. Keep retry state in the cache:
+	// editing metadata after push makes session wait report an unpushed recording.
+	if _, notified := effects.notifyUploaded(projectRoot, meta, orphan.SessionName); !notified {
+		return fmt.Errorf("lifecycle notification failed for %s; session uploaded and recovery retained", orphan.SessionName)
 	}
 	if recoveryCacheDir != "" {
 		if err := os.RemoveAll(recoveryCacheDir); err != nil {
