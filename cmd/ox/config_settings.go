@@ -233,6 +233,22 @@ once you're familiar with the tool.`,
 		Levels:      []ConfigLevel{ConfigLevelUser},
 	},
 	{
+		Key:         "statusline",
+		Label:       "Activity line",
+		Description: "Show what ox is doing inside your AI coding tool.",
+		LongDescription: `Controls ox's live activity line in Claude Code's status line and ox's
+activity notices in Codex.
+
+When enabled, coworkers see a short green line whenever ox does work for
+an AI coworker — loading team context, posting a murmur, saving a plan,
+searching team memory — plus the latest whisper from a teammate.
+Turn it off to keep those surfaces free of ox output.`,
+		Category:    "Display",
+		ValidValues: []string{"on", "off"},
+		Default:     "on",
+		Levels:      []ConfigLevel{ConfigLevelUser},
+	},
+	{
 		Key:         "context_git.auto_commit",
 		Label:       "Auto-commit sessions (deprecated)",
 		Description: "DEPRECATED — never had any effect; use session_publishing",
@@ -764,6 +780,13 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 			}
 		}
 
+	case "statusline":
+		// Unlike tips, only an explicit value counts as a user layer, so an
+		// unset key reports source "default" rather than a phantom "user".
+		if userCfg != nil && userCfg.StatuslineEnabled != nil {
+			cv.UserVal = boolToOnOff(*userCfg.StatuslineEnabled)
+		}
+
 	case "disposable_machine":
 		if userCfg != nil && userCfg.DisposableMachine != nil {
 			cv.UserVal = boolToOnOff(*userCfg.DisposableMachine)
@@ -1051,6 +1074,10 @@ func setUserConfig(key, value string) error {
 	case "tips":
 		enabled := value == "on"
 		cfg.TipsEnabled = &enabled
+
+	case "statusline":
+		enabled := value == "on"
+		cfg.StatuslineEnabled = &enabled
 
 	case "disposable_machine":
 		enabled := value == "on"
@@ -1368,6 +1395,9 @@ func unsetUserConfig(key string) error {
 
 	case "tips":
 		cfg.TipsEnabled = nil
+
+	case "statusline":
+		cfg.StatuslineEnabled = nil
 
 	case "disposable_machine":
 		cfg.DisposableMachine = nil

@@ -733,3 +733,29 @@ func TestDisposableMachineEnabled(t *testing.T) {
 		})
 	}
 }
+
+// TestIsStatuslineEnabled reads the statusline_enabled key from a real config
+// file. Failure prevented: a coworker who never touched the setting loses the
+// activity line, or one who turned it off still sees it.
+func TestIsStatuslineEnabled(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{"no config file", "", true},
+		{"key absent", "tips_enabled: false\n", true},
+		{"off", "statusline_enabled: false\n", false},
+		{"on", "statusline_enabled: true\n", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if tc.content != "" {
+				require.NoError(t, os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(tc.content), 0o600))
+			}
+			cfg, err := LoadUserConfigFrom(dir)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, cfg.IsStatuslineEnabled())
+		})
+	}
+}
