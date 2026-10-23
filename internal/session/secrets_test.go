@@ -33,17 +33,18 @@ func TestNewRedactorWithPatterns(t *testing.T) {
 		{Name: "custom", Pattern: regexp.MustCompile(`CUSTOM_[A-Z]+`), Redact: "[CUSTOM]"},
 	}
 	r := NewRedactorWithPatterns(customPatterns)
-	assert.Len(t, r.patterns, 1)
+	assert.Len(t, r.patterns, len(customPatterns)+len(DefaultExtraDetectors()))
 }
 
 func TestAddPattern(t *testing.T) {
 	r := NewRedactorWithPatterns(nil)
+	before := len(r.patterns)
 	r.AddPattern(SecretPattern{
 		Name:    "test",
 		Pattern: regexp.MustCompile(`TEST_SECRET`),
 		Redact:  "[TEST]",
 	})
-	assert.Len(t, r.patterns, 1)
+	assert.Len(t, r.patterns, before+1)
 }
 
 func TestRedactString_AWSAccessKey(t *testing.T) {
@@ -818,15 +819,15 @@ func TestScanForSecrets(t *testing.T) {
 func TestRedactWithAllowlist(t *testing.T) {
 	r := NewRedactor()
 
-	t.Run("allowlist preserves known values", func(t *testing.T) {
+	t.Run("allowlist cannot bypass mandatory credential context", func(t *testing.T) {
 		// this looks like a secret pattern but is actually a known-safe value
 		input := "api_key=test_placeholder_value123"
 		allowlist := []string{"test_placeholder_value123"}
 
 		output, _ := r.RedactWithAllowlist(input, allowlist)
 
-		// the allowlisted value should be preserved
-		assert.Contains(t, output, "test_placeholder_value123")
+		// allowlisting an opaque credential cannot disable the publication guard
+		assert.NotContains(t, output, "test_placeholder_value123")
 	})
 
 	t.Run("non-allowlisted secrets still redacted", func(t *testing.T) {

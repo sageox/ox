@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### New
+
+- **Send private feedback from the terminal** — `ox feedback --file report.txt` sends a report to SageOx Support and returns a receipt. Preview the exact request with `--dry-run`, use `--anonymous` without login or a reply email, or supply `--email` for replies. Choose `bug`, `feature-request`, or `feedback`. Local secret checks run before sending; no logs or session content are collected automatically.
+
+### Improved
+
+- **Codex explains each SageOx hook before you approve it** — all six hooks now identify SageOx and describe their purpose, including recording and configured publishing. `ox doctor` detects old labels and offers a refresh for project and user installations; other integrations' hook settings are preserved.
+- **AI coworkers get the command they meant more often** — ox now runs the right command when a coworker passes a whole command as one word (a zsh loop over `"plan list"`), types a subcommand as a flag (`daemon --list`), or adds arguments to a known shortcut (`auth --help`, `plan show <slug>`). A correction that would change what the command does, or that would not parse, stays a suggestion, and short unknown words no longer get guesses that point at unrelated commands.
+- **List commands share one set of flags** — `plan list`, `murmur list`, `session list` and `conversation list` all accept `--limit`, `--since`, `--until` and `--json`, and `conversation transcript` accepts `--limit`. `murmur list --last` and `session list --window` keep working.
+
+### Fixed
+
+- **AI coworkers can follow ox's own instructions again** — `ox agent <id> session log --role/--content/--stdin`, which ox suggests to coworkers that record by hand, was rejected before it ran; it now writes the entry. `--agent-id` names the coworker for `ox agent heartbeat` and the other agent commands, and hints that pointed at commands ox doesn't have (`ox ledger sync`, `ox conventions`, `ox redaction verify`) now name the real ones.
+- **Usage reports no longer carry what you typed** — when a command fails to parse, ox reports only its command and flag names. Paths, IDs, names and free text are removed on your machine before the report is sent, and the daemon removes them again.
+
+- **`ox doctor` no longer publishes plans you have not saved** — the commits its cleanup and repairs make, the commit that uploads a session, and the commit ox squashes unpushed Ledger changes into when a push needs it now leave out plan changes nobody saved. A `plan.md` you are still editing, a plan change someone already staged, and a large `plan.html` whose upload failed stay on your machine until the plan's own save, or its retry, shares them. Before, `ox doctor` could commit and push them, the multi-megabyte page included.
+- **Leftover `.rej` and `.needs-summary` files no longer block session uploads** — ox's check against mass deletion counted their cleanup as deleted work and refused uploads once a Ledger's sessions held more than five of them. Commits that delete real session or plan content are still refused.
+- **`ox doctor` finishes plan saves that never committed, and names plan edits nobody saved** — a save that wrote the plan but never committed it (ox was interrupted, or an older version left it) is queued and shared by the same `ox doctor` run. Edits nobody saved are listed by plan; `ox doctor --fix-slug=plan-unsaved-edits` shares them as they are once you confirm.
+- **"Access denied" means access denied** — a Ledger push and `ox doctor`'s Ledger check say you lack access only when the server answered HTTP 403. A sign-in failure on a server whose address or port contains 403 is now reported as a sign-in failure.
+- **View original puts your oval around the words you drew it around** — a drawing in a plan review now records where the words under it sat, and View original draws them there. Before, it guessed: a table row's cells ran together as one paragraph, so the oval landed on other words. Drawings made before this keep their diagram labels in place and list the text they enclosed below the picture. The comments rail also keeps a long reviewer name and its tags inside the comment card instead of running off its edge.
+
+## [0.24.2] - 2026-10-21
+
+Amp orb sessions now reach your team whole and on their own, Oxy can join you in Claude Code, and plan reviews, approvals and saves reliably reach your team.
+
+### New
+
+- **Amp orb sessions reach your team on their own** — in an Amp orb, ox records each thread and uploads it on its own, credited to the owner of `SAGEOX_TOKEN`. Every Amp session now starts with the prompt that opened its thread, and a reply sent after the orb went idle is recorded as a continued session.
+- **Record Cursor Agents Window sessions (preview)** — `ox integrate install --cursor` captures them and shares them with your team, like Claude Code sessions.
+- **Hatch Oxy in Claude Code** — `ox pet enable` puts Oxy, SageOx's mascot, in Claude Code's thinking line, where he reacts to what Claude is doing: swatting a bug during a test run, launching a rocket when you push, throwing confetti when a turn ends. `/hatch-pet` shows, hides or resizes him.
+- **Draw around part of a plan and comment on exactly that** — in review mode, loop around a paragraph, table rows or diagram nodes, and your comment stays attached to what you circled even after the plan changes.
+- **Comment on a plan as a whole** — in review mode, the comments panel takes a comment on a plan's direction, scope or readiness without pinning it to a section. It reaches the AI coworker like any other comment.
+- **Your AI coworker reads screen walkthroughs moment by moment** — `ox conversation walkthrough` pairs each click, selection and pause with what was said and what the screen did next, shows a close-up of the element on request, and splits long recordings into chapters.
+- **`ox config` knows every setting** — `ox config schema --json` lists each setting with its description, accepted values, levels and current value, even outside a repository, and `ox config --help` now lists exactly the settings `ox config set` accepts.
+
+### Improved
+
+- **New team discussions reach your AI coworker sooner** — they arrive on its next check instead of up to five minutes later.
+- **`ox index github` keeps the whole conversation** — imported issues and pull requests keep every comment and the right draft or closed state, and they're searchable as soon as the command finishes.
+
+### Fixed
+
+- **Plan reviews, approvals and saves reliably reach your team** — each is sent once and retried until your team's Ledger holds it, even through dropped connections, reloads and two people acting on one plan at once.
+- **Approving a plan or ending a session never publishes your unsaved edits** — only the plan's status and history are shared.
+- **Sync keeps going through conflicts and interruptions** — a plan changed on two machines, an interrupted push, or a save during background sync no longer leaves your Ledger stuck. While a repair is needed, ox writes nothing and points you to `ox doctor --fix`.
+- **Team memory notes save while Team Context syncs** — `ox memory put` and the note `ox agent session stop` records wait for the sync instead of failing.
+- **Plan review is more dependable** — Review responds to your first click, a plan's own tabs and checkboxes work, marks on Mermaid diagrams stay where you put them, and the review page and `ox plan` commands flag damaged or conflicting feedback instead of showing a partial review.
+- **`ox logout` reliably signs you out** — a background token refresh can no longer bring the login back, expired logins are cleared too, and a newer login it didn't revoke is never deleted.
+- **Large Ledgers finish their first download** — it's no longer cut off after a minute, so teams with a long history get their Ledger instead of retrying forever.
+- **A session you abort stays private** — `ox session import` no longer offers it, and `ox import` says a file is imported only once the server has accepted it.
+
+### Security
+
+- **Credentials stay out of shared sessions** — every recorded or imported session is checked before it reaches your team, and anything that can't be checked is held back.
+
 ## [0.23.0] - 2026-10-12
 
 Bring past AI coworker sessions into your Ledger, find recorded conversations, and give your AI coworker a screen walkthrough it can read.

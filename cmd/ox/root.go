@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -18,6 +19,7 @@ import (
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/flags"
+	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/version"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -45,6 +47,9 @@ var rootCmd = &cobra.Command{
 	Long:  `Shared team context between your AI and human coworkers. Sessions, ledgers, and team knowledge that make agentic engineering multiplayer.`,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		preRunReached = true
+		if isFeedbackCommand(cmd) {
+			return applyConfigFlag(cmd, args)
+		}
 		if isHeadlessLedgerRead(cmd) {
 			// Hosted reads never consult local preferences. Sync rejects this
 			// flag in RunE using its own receipt; the other protocols refuse it here.
@@ -60,6 +65,11 @@ var rootCmd = &cobra.Command{
 		}
 		if err := applyConfigFlag(cmd, args); err != nil {
 			return err
+		}
+		if config.DisposableMachineEnabled() {
+			if err := gitserver.IsolateManagedClones(); err != nil {
+				slog.Warn("disposable_machine: git in ox's clones still runs their hooks and credential helpers", "error", err)
+			}
 		}
 
 		// initialize CLI context (centralizes config, logger, telemetry)
@@ -112,6 +122,9 @@ var rootCmd = &cobra.Command{
 		return nil
 	},
 	PersistentPostRunE: func(cmd *cobra.Command, args []string) error {
+		if isFeedbackCommand(cmd) {
+			return nil
+		}
 		if isHeadlessLedgerRead(cmd) {
 			return nil
 		}

@@ -16,6 +16,7 @@ import (
 // Committed deletions (e.g. the doctor untracking draft artifacts) are history
 // reconcile will merely push; reconcile itself never deletes anything.
 func TestReconcile_CommittedDeletionsDoNotTripSacredGuard(t *testing.T) {
+	useBundledSessionRules(t)
 	ledger, bare := initLedgerWithRemote(t)
 	drafts := make(map[string]string)
 	for i := 0; i <= sacred.MassDeleteThreshold+1; i++ {
@@ -48,6 +49,7 @@ func TestReconcile_CommittedDeletionsDoNotTripSacredGuard(t *testing.T) {
 // recoverable blobs upload first, then reconcile refuses, names every path and
 // OID, and removes nothing.
 func TestReconcile_UnrecoverableAnyCountStillUploadsRecoverable(t *testing.T) {
+	useBundledSessionRules(t)
 	for _, unrecoverableCount := range []int{1, 2, 7} {
 		t.Run(fmt.Sprintf("%d unrecoverable", unrecoverableCount), func(t *testing.T) {
 			ledger, _ := initLedgerWithRemote(t)

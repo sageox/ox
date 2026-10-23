@@ -16,7 +16,7 @@ func init() {
 		Name:        "Hook completeness",
 		Category:    "Integration",
 		FixLevel:    FixLevelAuto,
-		Description: "Verifies project hooks have ox prime for all required events",
+		Description: "Verifies every required hook event runs an ox hook (prime or lifecycle)",
 		Run: func(fix bool) checkResult {
 			return checkProjectHookCompleteness(fix)
 		},

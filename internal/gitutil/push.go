@@ -237,6 +237,25 @@ var permanentPatterns = []string{
 	"HTTP 403",
 }
 
+// http403Markers are the lowercase forms an HTTP 403 status takes in git and
+// git-lfs output. A bare "403" also matches ports, hashes and URL paths, which
+// turned a 401 from 127.0.0.1:40303 into "access denied".
+var http403Markers = []string{
+	"the requested url returned error: 403",
+	"http 403",
+}
+
+// IsHTTP403 reports whether git or git-lfs output carries an HTTP 403 status.
+func IsHTTP403(output string) bool {
+	lower := strings.ToLower(output)
+	for _, marker := range http403Markers {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // lfsObjectsMissing is the GitLab pre-receive error for orphaned LFS pointers.
 // Handled separately from permanentPatterns because ReconcileLFS can fix it.
 const lfsObjectsMissing = "LFS objects are missing"
@@ -300,26 +319,30 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 		attemptCtx, cancel := context.WithTimeout(ctx, opTimeout)
 		var outStr string
 		var err error
-		if opts.ValidatePush == nil {
-			outStr, err = RunGit(attemptCtx, repoPath, "push", "--quiet")
-		} else {
-			validationErr := WithRepoLock(attemptCtx, repoPath, func() error {
-				if err := IsSafeForGitOps(repoPath); err != nil {
-					return fmt.Errorf("repo blocked: %w", err)
-				}
-				alreadyPublished, validationErr := opts.ValidatePush(attemptCtx, repoPath)
-				if validationErr != nil {
-					return validationErr
-				}
-				if !alreadyPublished {
-					outStr, err = RunGit(attemptCtx, repoPath, "push", "--quiet")
-				}
-				return nil
-			})
-			if validationErr != nil {
-				cancel()
-				return validationErr
+		// Every supported ledger pusher shares this mandatory boundary, including
+		// daemon retries and callers without an optional ValidatePush callback.
+		validationErr := WithRepoLock(attemptCtx, repoPath, func() error {
+			if err := IsSafeForGitOps(repoPath); err != nil {
+				return fmt.Errorf("repo blocked: %w", err)
 			}
+			if opts.ValidatePush != nil {
+				alreadyPublished, err := opts.ValidatePush(attemptCtx, repoPath)
+				if err != nil {
+					return err
+				}
+				if alreadyPublished {
+					return nil
+				}
+			}
+			if err := ValidateSessionPublication(attemptCtx, repoPath); err != nil {
+				return err
+			}
+			outStr, err = RunGit(attemptCtx, repoPath, "push", "--quiet")
+			return nil
+		})
+		if validationErr != nil {
+			cancel()
+			return validationErr
 		}
 		cancel()
 		if err == nil {
@@ -360,7 +383,7 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 		// fail fast on permanent errors
 		for _, pattern := range permanentPatterns {
 			if strings.Contains(outStr, pattern) {
-				if strings.Contains(outStr, "403") {
+				if IsHTTP403(outStr) {
 					return fmt.Errorf("git push failed: access denied (HTTP 403). Try 'ox login' to refresh credentials, or verify you have push access to this repository: %s", outStr)
 				}
 				return fmt.Errorf("git push failed (not retryable): %s", outStr)
@@ -575,6 +598,14 @@ func fetchUpstream(ctx context.Context, repoPath string) (target, out string, er
 			return "", out, ctx.Err()
 		}
 	}
+}
+
+// UpstreamTrackingRef is the remote-tracking ref for HEAD's branch, resolved
+// as PushWithRetry's fetch resolves it: @{u} when the branch tracks one, else
+// refs/remotes/origin/<branch>, which a push to origin updates.
+func UpstreamTrackingRef(ctx context.Context, repoPath string) (string, error) {
+	_, _, target, err := upstreamRefs(ctx, repoPath)
+	return target, err
 }
 
 // upstreamRefs resolves the remote, the remote ref to fetch (branch.<b>.merge)

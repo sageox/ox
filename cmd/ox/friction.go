@@ -4,6 +4,7 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/sageox/agentx"
 	friction "github.com/sageox/frictionax"
 	frictioncobra "github.com/sageox/frictionax/adapters/cobra"
+	"github.com/sageox/frictionax/redactors/secrets"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/spf13/cobra"
@@ -35,6 +37,10 @@ func initFriction(rootCmd *cobra.Command) {
 		friction.WithCatalog("ox"),
 		friction.WithCachePath(getCatalogCachePath()),
 		friction.WithActorDetector(&oxActorDetector{}),
+		// credential patterns run when the event is built, before truncation can
+		// cut a token in half; sendFrictionEventTo then reduces the rest of the
+		// text to command structure (friction_redact.go)
+		friction.WithRedactor(secrets.New()),
 	)
 
 	// load embedded default catalog (baseline patterns for offline/first-run)
@@ -44,6 +50,20 @@ func initFriction(rootCmd *cobra.Command) {
 			_ = frictionEngine.UpdateCatalog(data)
 		}
 	}
+}
+
+// handleFriction asks frictionax for a suggestion on a failed invocation.
+// Suggestions are best-effort: a panic inside frictionax must not replace the
+// coworker's real error with a stack trace, so it is recovered and treated as
+// no suggestion. frictionax v0.1.2 panicked this way in Windows directories.
+func handleFriction(engine *friction.Friction, args []string, err error) (result *friction.Result) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Debug("friction handle panicked", "panic", r)
+			result = nil
+		}
+	}()
+	return engine.Handle(args, err)
 }
 
 // getCatalogCachePath returns the path to the friction catalog cache file.
@@ -123,16 +143,25 @@ func sendFrictionEventTo(event *friction.FrictionEvent, socketPath string) {
 		client = daemon.NewClientForCurrentRepoWithTimeout(5 * time.Millisecond)
 	}
 
+	// the event carries what the coworker typed (paths, names, free text), so
+	// only its command structure is sent. frictionax's default redactor is a
+	// no-op, and the daemon forwards these strings to the cloud verbatim.
+	redacted, ok := redactFrictionEvent(rootCmd, event)
+	if !ok {
+		return
+	}
+
 	payload := daemon.FrictionPayload{
 		Timestamp:  event.Timestamp,
 		Kind:       string(event.Kind),
-		Command:    event.Command,
-		Subcommand: event.Subcommand,
+		Command:    redacted.Command,
+		Subcommand: redacted.Subcommand,
 		Actor:      event.Actor,
 		AgentType:  event.AgentType,
 		PathBucket: event.PathBucket,
-		Input:      event.Input,
-		ErrorMsg:   event.ErrorMsg,
+		Input:      redacted.Input,
+		ErrorMsg:   redacted.ErrorMsg,
+		Suggestion: redacted.Suggestion,
 	}
 
 	data, err := json.Marshal(payload)

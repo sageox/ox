@@ -15,6 +15,10 @@ cue range (--cues N-M), a media-clock time window (--from/--to), or the
 selectors carried by a sageox:// citation URI passed as <id>. With no
 selector, the first 100 cues are served and the window reports truncated.
 
+--limit N caps whatever window was selected at its first N cues; it never
+widens one (add --full for the whole transcript). A capped page reports
+window.truncated and its guidance names the --cues range that continues it.
+
 For a screen walkthrough, --frames adds under each cue the keyframes that
 fall in it (a one-sentence description of what was on screen, plus the
 local image path, ready to open or behind an ox fetch command) and what
@@ -42,6 +46,7 @@ ox conversation transcript <id> [flags]
       --from string     window start on the media clock (hh:mm:ss[.mmm] or a duration like 3m12s)
       --full            serve the entire transcript — intended for humans; agents should request windows (--cues or --from/--to)
   -h, --help            help for transcript
+      --limit int       serve at most N cues of the selected window (0 = no cap beyond the window itself)
       --text            shorthand for --format text
       --to string       window end on the media clock (same forms as --from)
 ```

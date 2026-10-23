@@ -1,8 +1,10 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -27,9 +29,15 @@ var logoutCmd = &cobra.Command{
 	Short: "Log out of SageOx",
 	Long:  "Remove local authentication token and log out of SageOx.",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// get all logged-in endpoints
-		loggedInEndpoints := auth.GetLoggedInEndpoints()
+		// Logout must see expired disk tokens too: they may still have a
+		// refresh token that keeps the login usable, and leaving it on disk
+		// makes a reported logout a false promise. Preserve env-only logins,
+		// which ListEndpoints cannot see because they are not stored in auth.json.
+		loggedInEndpoints, listErr := collectLogoutEndpoints()
 		if len(loggedInEndpoints) == 0 {
+			if listErr != nil {
+				return fmt.Errorf("failed to list stored authentication endpoints: %w", listErr)
+			}
 			fmt.Println("You are not currently logged in to any endpoints.")
 			return nil
 		}
@@ -59,25 +67,19 @@ var logoutCmd = &cobra.Command{
 		}
 
 		// logout from each endpoint
-		var anyServerFailed bool
+		var anyServerFailed, anyLoginChanged bool
 		for _, ep := range endpointsToLogout {
 			client := auth.NewAuthClient().WithEndpoint(ep)
 			status, err := client.RevokeTokenStatus()
-			if err != nil {
+			if err != nil && !errors.Is(err, auth.ErrLocalTokenNotRemoved) {
 				fmt.Printf("Failed to logout from %s: %v\n", ep, err)
 				anyServerFailed = true
 				continue
 			}
-			switch status {
-			case auth.RevocationSuccess, auth.RevocationNoToken:
-				fmt.Printf("Logged out from %s\n", ep)
-			case auth.RevocationNetworkError:
-				anyServerFailed = true
-				fmt.Printf("Logged out locally from %s (could not reach server)\n", ep)
-			case auth.RevocationServerFailed:
-				anyServerFailed = true
-				fmt.Printf("Logged out locally from %s (server did not confirm revocation)\n", ep)
-			}
+			line, serverUnconfirmed := logoutOutcome(ep, status, err)
+			fmt.Println(line)
+			anyServerFailed = anyServerFailed || serverUnconfirmed
+			anyLoginChanged = anyLoginChanged || errors.Is(err, auth.ErrLoginChanged)
 		}
 
 		if anyServerFailed {
@@ -99,8 +101,65 @@ var logoutCmd = &cobra.Command{
 		userCfg, _ := config.LoadUserConfig()
 		tips.MaybeShow("logout", tips.AlwaysShow, false, !userCfg.AreTipsEnabled(), false)
 
+		if listErr != nil {
+			return fmt.Errorf("failed to list stored authentication endpoints: %w", listErr)
+		}
+		// The kept login was never revoked, so it is still live: a script must
+		// not read this logout as done.
+		if anyLoginChanged {
+			return errors.New("login changed during logout; run `ox logout` again")
+		}
 		return nil
 	},
+}
+
+// logoutOutcome words one endpoint's logout from the server's answer. localErr
+// (wrapping auth.ErrLocalTokenNotRemoved, or nil) means the local copy stayed
+// behind; it changes what is said about the local token, never the server's
+// answer, so a revocation the server confirmed is not reported as failed.
+// serverUnconfirmed is true when the server-side session may still be active.
+func logoutOutcome(ep string, status auth.RevocationStatus, localErr error) (line string, serverUnconfirmed bool) {
+	if errors.Is(localErr, auth.ErrLoginChanged) {
+		// Not a failure to remove: a login saved during logout was kept on purpose.
+		localErr = errors.New("the login changed during logout and was kept")
+	}
+	switch status {
+	case auth.RevocationSuccess, auth.RevocationNoToken:
+		if localErr != nil {
+			return fmt.Sprintf("Revoked on the server for %s, but %v", ep, localErr), false
+		}
+		return fmt.Sprintf("Logged out from %s", ep), false
+	case auth.RevocationNetworkError:
+		if localErr != nil {
+			return fmt.Sprintf("Could not reach the server for %s, and %v", ep, localErr), true
+		}
+		return fmt.Sprintf("Logged out locally from %s (could not reach server)", ep), true
+	default: // auth.RevocationServerFailed
+		if localErr != nil {
+			return fmt.Sprintf("Server did not confirm revocation for %s, and %v", ep, localErr), true
+		}
+		return fmt.Sprintf("Logged out locally from %s (server did not confirm revocation)", ep), true
+	}
+}
+
+// collectLogoutEndpoints retains usable environment credentials even if auth.json
+// cannot be read, so a storage error does not prevent revoking credentials we can still identify.
+// The result is sorted: auth.json is a map, and an unsorted list numbered the
+// selection prompt and ordered the logouts differently on every run.
+func collectLogoutEndpoints() ([]string, error) {
+	endpoints, listErr := auth.ListEndpoints()
+	known := make(map[string]struct{}, len(endpoints))
+	for _, ep := range endpoints {
+		known[ep] = struct{}{}
+	}
+	for _, ep := range auth.GetLoggedInEndpoints() {
+		if _, ok := known[ep]; !ok {
+			endpoints = append(endpoints, ep)
+			known[ep] = struct{}{}
+		}
+	}
+	slices.Sort(endpoints)
+	return endpoints, listErr
 }
 
 func init() {

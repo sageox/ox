@@ -36,12 +36,12 @@ See `security/SECURITY.md#hunter-secrets-redaction` for the threat-model anchor.
 
 - **OAuth tokens**: `auth.json` on disk via `internal/auth/storage.go`. NOT in `zalando/go-keyring`. The earlier design assumption that "tokens are in the keyring" is wrong for ox today. Treat `auth.json` as the high-value asset.
 - **Git server (Twin) credentials**: `internal/gitserver/credentials.go` — these *do* use `zalando/go-keyring` (the only `keyring.*` usage in the repo).
-- **Session raw content** (transcripts, command output, agent IO): `raw.jsonl` files under the local cache; redaction stack runs at write time inside `RawWriter`. The redaction stack is three layers (`CommandRedactor`, `Redactor` with default patterns + `.sageox/REDACT.md`, `extras` from gitleaks).
+- **Session raw content** (transcripts, command output, agent IO): `raw.jsonl` files under the local cache; redaction stack runs at write time inside `RawWriter`. The canonical writer applies command-output suppression and `Redactor`, which includes the complete mandatory `internal/secretguard` catalog plus additive legacy/project rules. Independent immutable publication checks use current upstream rules.
 
 ## What to look for
 
 1. **Chokepoint bypass**: any new `*.go` outside `internal/session/raw_writer.go` (and its tests) that opens a `raw.jsonl`-style file for writing. The check-raw-writer-chokepoint target should catch it; treat that as the deterministic signal and your job as confirming severity and proposing the design fix.
-2. **Redaction rule gap**: a credential class introduced by a new dependency / integration (e.g. a new adapter that emits a vendor-specific API key shape) that isn't matched by any existing detector in `redact_rules.go` / `gitleaks_*.go`.
+2. **Redaction rule gap**: a credential class introduced by a new dependency / integration (e.g. a new adapter that emits a vendor-specific API key shape) that isn't matched by any existing detector in `internal/secretguard` and the additive session rules.
 3. **Log leakage**: `slog.*` or `fmt.*` call sites where the *value* (not just the key) contains a token, refresh token, JWT, password, or `auth.StoredToken`. Watch for `slog.Info("auth refreshed", "token", token)` — that's a leak because slog will format the value.
 4. **Env-bleed leakage**: spawning a subprocess with `cmd.Env` containing a secret. Especially adapter spawn paths in `internal/daemon/adapter_supervisor.go` and adjacent.
 5. **Disk persistence outside the chokepoint**: any new disk write whose contents could contain raw, un-redacted user input (clipboard, command output, transcript). Even "we only write the JSON envelope" leaks — JSON envelopes carry user content.

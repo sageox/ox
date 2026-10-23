@@ -20,6 +20,7 @@ import (
 
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/gitserver"
+	"github.com/sageox/ox/internal/secretguard"
 	"github.com/sageox/ox/internal/useragent"
 )
 
@@ -160,16 +161,67 @@ func UploadObject(action *Action, content []byte) error {
 	if err := validateActionHref(action); err != nil {
 		return fmt.Errorf("upload: %w", err)
 	}
+	proof, err := prepareUpload(context.Background(), "blob", content)
+	if err != nil {
+		return err
+	}
+	return uploadGuardedObject(action, proof)
+}
 
-	err := putObject(action, content)
+// guardedUpload owns the immutable bytes that passed both mandatory catalogs.
+// Transport functions accept this proof, never caller-owned raw bytes, so a new
+// upload path cannot accidentally bypass validation or mutate a scanned slice.
+type guardedUpload struct{ content []byte }
+
+func prepareUpload(ctx context.Context, name string, content []byte) (guardedUpload, error) {
+	proofs, err := prepareUploads(ctx, map[string][]byte{name: content})
+	if err != nil {
+		return guardedUpload{}, err
+	}
+	return proofs[name], nil
+}
+func prepareUploads(ctx context.Context, files map[string][]byte) (map[string]guardedUpload, error) {
+	// Copy before validation; hashing, network requests and retries all use these
+	// exact private buffers, independent of subsequent caller slice mutation.
+	proofs := make(map[string]guardedUpload, len(files))
+	for name, data := range files {
+		content := bytes.Clone(data)
+		if pointerShaped(content) {
+			return nil, ErrPointerContent
+		}
+		if err := secretguard.ValidateContent(name, content); err != nil {
+			return nil, fmt.Errorf("LFS publication refused: %w", err)
+		}
+		proofs[name] = guardedUpload{content: content}
+	}
+	rules, err := currentSessionRules(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("LFS publication pending: %w", err)
+	}
+	for name, proof := range proofs {
+		if err := rules.ValidateContent(name, proof.content); err != nil {
+			return nil, fmt.Errorf("LFS publication refused: %w", err)
+		}
+	}
+	return proofs, nil
+}
+func uploadGuardedObject(action *Action, proof guardedUpload) error {
+	if action == nil || action.Href == "" {
+		return fmt.Errorf("no upload action provided")
+	}
+	if err := validateActionHref(action); err != nil {
+		return fmt.Errorf("upload: %w", err)
+	}
+	err := putObject(action, proof)
 	if err != nil && isConnectionReset(err) {
-		err = putObject(action, content)
+		err = putObject(action, proof)
 	}
 	return err
 }
 
 // putObject sends one PUT with an explicit Content-Length.
-func putObject(action *Action, content []byte) error {
+func putObject(action *Action, proof guardedUpload) error {
+	content := proof.content
 	req, err := http.NewRequest(http.MethodPut, action.Href, bytes.NewReader(content))
 	if err != nil {
 		return fmt.Errorf("create upload request: %w", err)
@@ -401,27 +453,64 @@ func DownloadToFileContext(ctx context.Context, action *Action, dst io.Writer, v
 // UploadAll uploads multiple blobs in parallel.
 // files maps OID -> content. Uses objects from the batch response to find upload actions.
 func UploadAll(resp *BatchResponse, files map[string][]byte, maxConcurrent int) []UploadResult {
+	if resp == nil {
+		return []UploadResult{{Error: fmt.Errorf("missing upload batch response")}}
+	}
+	// Preserve independent pointer refusal while scanning all actual content
+	// before any object, including an already-present object, is accepted.
+	var refused []UploadResult
+	safeFiles := make(map[string][]byte, len(files))
+	refusedOIDs := map[string]bool{}
+	for oid, data := range files {
+		if pointerShaped(data) {
+			refused = append(refused, UploadResult{OID: oid, Error: ErrPointerContent})
+			refusedOIDs[oid] = true
+		} else {
+			safeFiles[oid] = data
+		}
+	}
+	filtered := *resp
+	filtered.Objects = nil
+	for _, obj := range resp.Objects {
+		if !refusedOIDs[obj.OID] {
+			filtered.Objects = append(filtered.Objects, obj)
+		}
+	}
+	resp = &filtered
+
+	proofs, err := prepareUploads(context.Background(), safeFiles)
+	if err != nil {
+		results := make([]UploadResult, 0, len(safeFiles)+len(resp.Objects))
+		seen := map[string]bool{}
+		for oid := range safeFiles {
+			results = append(results, UploadResult{OID: oid, Error: err})
+			seen[oid] = true
+		}
+		for _, obj := range resp.Objects {
+			if !seen[obj.OID] {
+				results = append(results, UploadResult{OID: obj.OID, Error: err})
+				seen[obj.OID] = true
+			}
+		}
+		if len(results) == 0 {
+			results = append(results, UploadResult{Error: err})
+		}
+		return append(refused, results...)
+	}
+	return append(refused, uploadAllGuarded(resp, proofs, maxConcurrent)...)
+}
+func uploadAllGuarded(resp *BatchResponse, proofs map[string]guardedUpload, maxConcurrent int) []UploadResult {
+
 	if maxConcurrent <= 0 {
 		maxConcurrent = 4
 	}
 
 	var results []UploadResult
-	// Pointer content is refused whatever the response says about it: the
-	// server may already hold the object — every empty file stored this way is
-	// the same one — or leave it out, and either would read as uploaded.
-	for oid, content := range files {
-		if pointerShaped(content) {
-			results = append(results, UploadResult{OID: oid, Error: ErrPointerContent})
-		}
-	}
 	var mu sync.Mutex
 	sem := make(chan struct{}, maxConcurrent)
 	var wg sync.WaitGroup
 
 	for _, obj := range resp.Objects {
-		if pointerShaped(files[obj.OID]) {
-			continue // refused above
-		}
 		if obj.Error != nil {
 			mu.Lock()
 			results = append(results, UploadResult{
@@ -440,7 +529,7 @@ func UploadAll(resp *BatchResponse, files map[string][]byte, maxConcurrent int) 
 			continue
 		}
 
-		content, ok := files[obj.OID]
+		proof, ok := proofs[obj.OID]
 		if !ok {
 			mu.Lock()
 			results = append(results, UploadResult{
@@ -454,11 +543,11 @@ func UploadAll(resp *BatchResponse, files map[string][]byte, maxConcurrent int) 
 		wg.Add(1)
 		sem <- struct{}{} // acquire semaphore
 
-		go func(obj BatchResponseObject, content []byte) {
+		go func(obj BatchResponseObject, proof guardedUpload) {
 			defer wg.Done()
 			defer func() { <-sem }() // release semaphore
 
-			err := UploadObject(obj.Actions.Upload, content)
+			err := uploadGuardedObject(obj.Actions.Upload, proof)
 			if err == nil && obj.Actions.Verify != nil {
 				err = VerifyObject(obj.Actions.Verify, obj.OID, obj.Size)
 			}
@@ -466,7 +555,7 @@ func UploadAll(resp *BatchResponse, files map[string][]byte, maxConcurrent int) 
 			mu.Lock()
 			results = append(results, UploadResult{OID: obj.OID, Error: err})
 			mu.Unlock()
-		}(obj, content)
+		}(obj, proof)
 	}
 
 	wg.Wait()

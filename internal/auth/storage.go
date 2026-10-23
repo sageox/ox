@@ -411,7 +411,14 @@ func (c *AuthClient) GetTokenForEndpoint(ep string) (*StoredToken, error) {
 	if envTok != nil {
 		return envTok, nil
 	}
+	return c.storedTokenForEndpoint(ep)
+}
 
+// storedTokenForEndpoint loads the token saved in auth.json for ep, ignoring
+// SAGEOX_TOKEN. Only revocation needs it: an env token shadows a stored login
+// on the same endpoint, and that login must still be revoked before it is
+// deleted. ep must already be normalized.
+func (c *AuthClient) storedTokenForEndpoint(ep string) (*StoredToken, error) {
 	authPath, err := c.GetAuthFilePath()
 	if err != nil {
 		return nil, err
@@ -502,6 +509,91 @@ func (c *AuthClient) RemoveTokenForEndpoint(ep string) error {
 		delete(store.Tokens, ep)
 		return h.save(store)
 	}, legacyOpt, trackerOpt)
+}
+
+// removeTokenIfUnchanged deletes ep's stored login only if it is still want,
+// the login the caller revoked (nil if none was stored). Checking and deleting
+// under one write lock keeps a login saved meanwhile, by a concurrent `ox login`
+// or a daemon token refresh, from being deleted without ever being revoked: it
+// is kept and ErrLoginChanged is returned. A login already removed is not a
+// change. ep must already be normalized.
+func (c *AuthClient) removeTokenIfUnchanged(ep string, want *StoredToken) error {
+	authPath, err := c.GetAuthFilePath()
+	if err != nil {
+		return err
+	}
+
+	legacyOpt := withLegacyMigrationEndpoint(c.endpoint)
+	trackerOpt := withEndpointTracker(c)
+	return withAuthFileLocked(authPath, func(h *authFileHandle) error {
+		store, loadErr := h.load()
+		if loadErr != nil {
+			return loadErr
+		}
+		cur, exists := store.Tokens[ep]
+		if !exists {
+			return nil // nothing to remove
+		}
+		if cur != nil && (want == nil || !sameCredential(cur, want)) {
+			return ErrLoginChanged
+		}
+		delete(store.Tokens, ep)
+		return h.save(store)
+	}, legacyOpt, trackerOpt)
+}
+
+// saveTokenIfUnchanged stores to as ep's login only if the entry still holds
+// from, the login a token refresh started from. A refresh waits seconds on the
+// server; saving blindly afterwards would bring back a login `ox logout`
+// deleted meanwhile, or overwrite one a concurrent `ox login` or refresh saved.
+// Checking and saving under one write lock leaves both alone.
+//
+// It returns the login stored for ep when it is done: to if it was saved, the
+// login that replaced from if the entry changed, or nil if the entry is gone.
+// ep must already be normalized.
+func (c *AuthClient) saveTokenIfUnchanged(ep string, from, to *StoredToken) (*StoredToken, error) {
+	authPath, err := c.GetAuthFilePath()
+	if err != nil {
+		return nil, err
+	}
+	return saveTokenIfUnchangedAt(authPath, ep, from, to, withLegacyMigrationEndpoint(c.endpoint), withEndpointTracker(c))
+}
+
+// saveTokenForEndpointIfUnchanged is saveTokenIfUnchanged for the package-level
+// refresh, which has no AuthClient.
+func saveTokenForEndpointIfUnchanged(ep string, from, to *StoredToken) (*StoredToken, error) {
+	authPath, err := GetAuthFilePath()
+	if err != nil {
+		return nil, err
+	}
+	return saveTokenIfUnchangedAt(authPath, endpoint.NormalizeEndpoint(ep), from, to)
+}
+
+// saveTokenIfUnchangedAt implements saveTokenIfUnchanged for the auth file at
+// authPath.
+func saveTokenIfUnchangedAt(authPath, ep string, from, to *StoredToken, opts ...authFileOption) (*StoredToken, error) {
+	var stored *StoredToken
+	err := withAuthFileLocked(authPath, func(h *authFileHandle) error {
+		store, loadErr := h.load()
+		if loadErr != nil {
+			return loadErr
+		}
+		cur := store.Tokens[ep]
+		if cur == nil || !sameCredential(cur, from) {
+			stored = cur
+			return nil
+		}
+		store.Tokens[ep] = to
+		if err := h.save(store); err != nil {
+			return err
+		}
+		stored = to
+		return nil
+	}, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return stored, nil
 }
 
 // IsAuthenticated checks if a locally valid token exists for this client's endpoint.

@@ -1,6 +1,8 @@
 package auth
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -139,8 +141,21 @@ const (
 	RevocationNetworkError
 )
 
+// ErrLocalTokenNotRemoved marks a RevokeTokenStatus error raised after the
+// server was asked: the returned status is still the server's answer, but the
+// local copy could not be removed (e.g. an unreadable auth.json). Callers must
+// not report it as a failed revocation.
+var ErrLocalTokenNotRemoved = errors.New("failed to remove local token")
+
+// ErrLoginChanged marks a RevokeTokenStatus error where the stored login was
+// replaced while logout waited on the server, so the new login was kept
+// rather than deleted unrevoked. It comes wrapped with ErrLocalTokenNotRemoved.
+var ErrLoginChanged = errors.New("the stored login changed during logout and was kept")
+
 // RevokeTokenStatus revokes token and removes from local storage,
-// returning a structured status instead of a boolean.
+// returning a structured status instead of a boolean. An error wrapping
+// ErrLocalTokenNotRemoved comes with the server's real status; it also wraps
+// ErrLoginChanged when a login saved during the revocation was kept.
 func (c *AuthClient) RevokeTokenStatus() (RevocationStatus, error) {
 	token, err := c.GetToken()
 	if err != nil {
@@ -153,11 +168,53 @@ func (c *AuthClient) RevokeTokenStatus() (RevocationStatus, error) {
 
 	status := c.revokeOnServerStatus(token)
 
-	if err := c.RemoveToken(); err != nil {
-		return status, fmt.Errorf("failed to remove local token: %w", err)
+	// SAGEOX_TOKEN shadows a stored login on the same endpoint, but that login
+	// is a separate credential. Revoke it too before deleting it: once its
+	// refresh token is gone from disk, nothing can retry, and it stays live on
+	// the server. A failed lookup must stop removal: the next read may succeed,
+	// and deleting then could discard an unrevoked credential.
+	ep := c.endpoint
+	if ep == "" {
+		ep = endpoint.Get()
+	}
+	ep = endpoint.NormalizeEndpoint(ep)
+	stored, err := c.storedTokenForEndpoint(ep)
+	if err != nil {
+		return status, fmt.Errorf("%w: %w", ErrLocalTokenNotRemoved, err)
+	}
+	if stored != nil && !sameCredential(stored, token) {
+		status = worseRevocation(status, c.revokeOnServerStatus(stored))
+	}
+
+	// Delete only the login just revoked. A login saved while the server was
+	// answering was never revoked; deleting it would leave it live on the
+	// server with no local copy left to revoke.
+	if err := c.removeTokenIfUnchanged(ep, stored); err != nil {
+		return status, fmt.Errorf("%w: %w", ErrLocalTokenNotRemoved, err)
 	}
 
 	return status, nil
+}
+
+// sameCredential reports whether a and b are the same login, so it is revoked
+// once. SessionToken counts: a refresh can keep the other two and return a new
+// one, which EffectiveRefreshToken falls back to.
+func sameCredential(a, b *StoredToken) bool {
+	return a.AccessToken == b.AccessToken &&
+		a.RefreshToken == b.RefreshToken &&
+		a.SessionToken == b.SessionToken
+}
+
+// worseRevocation combines two revocations of one endpoint's credentials. An
+// unconfirmed one wins, so a credential that may still be live is never
+// reported as revoked.
+func worseRevocation(a, b RevocationStatus) RevocationStatus {
+	for _, s := range []RevocationStatus{a, b} {
+		if s == RevocationServerFailed || s == RevocationNetworkError {
+			return s
+		}
+	}
+	return a
 }
 
 // revokeOnServerStatus attempts revocation and returns structured status.
@@ -166,6 +223,12 @@ func (c *AuthClient) revokeOnServerStatus(token *StoredToken) RevocationStatus {
 	if baseURL == "" {
 		baseURL = endpoint.Get()
 	}
+	return revokeOnServerAt(context.Background(), baseURL, token)
+}
+
+// revokeOnServerAt is revokeOnServerStatus against baseURL, for callers with
+// no AuthClient such as the package-level token refresh.
+func revokeOnServerAt(ctx context.Context, baseURL string, token *StoredToken) RevocationStatus {
 	baseURL = strings.TrimSuffix(baseURL, "/")
 	revokeURL := baseURL + RevokeEndpoint
 
@@ -185,14 +248,16 @@ func (c *AuthClient) revokeOnServerStatus(token *StoredToken) RevocationStatus {
 		Timeout: 10 * time.Second,
 	}
 
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, revokeURL, strings.NewReader(data.Encode()))
+	if err != nil {
+		return RevocationNetworkError
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
 	logger.LogHTTPRequest("POST", revokeURL)
 	start := time.Now()
 
-	resp, err := client.Post(
-		revokeURL,
-		"application/x-www-form-urlencoded",
-		strings.NewReader(data.Encode()),
-	)
+	resp, err := client.Do(req)
 	duration := time.Since(start)
 	if err != nil {
 		logger.LogHTTPError("POST", revokeURL, err, duration)

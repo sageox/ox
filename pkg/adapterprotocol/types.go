@@ -150,6 +150,9 @@ type CheckHooksResponse struct {
 	Installed bool     `json:"installed"`
 	Scope     string   `json:"scope"`
 	HookFiles []string `json:"hook_files"`
+	// HasOwnedHooks reports removable adapter-owned entries, including partial
+	// or stale installations that do not satisfy Installed.
+	HasOwnedHooks bool `json:"has_owned_hooks,omitempty"`
 }
 
 // UninstallHooksResponse is returned by `uninstall-hooks`.

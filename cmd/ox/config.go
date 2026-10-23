@@ -24,6 +24,7 @@ Repo and team files are still selected by the current project and --repo/--team.
 Commands:
   ox config                            Interactive config editor (TUI)
   ox config list                       List all settings with values
+  ox config schema --json              Describe every setting (for apps)
   ox config get <key>                  Show setting with override chain
   ox config set <key> <value>          Set at user level (default)
   ox config set <key> <value> --repo   Set at repo level
@@ -31,21 +32,7 @@ Commands:
   ox config unset <key>                Clear override at user level
   ox config unset <key> --repo         Clear override at repo level
 
-Available settings:
-  session_recording        disabled | manual | auto
-  session_publishing       auto | manual
-  github_sync              enabled | disabled
-  github_sync_prs          enabled | disabled
-  github_sync_issues       enabled | disabled
-  murmuring                manual | auto
-  telemetry                on | off
-  tips                     on | off
-  context_git.auto_commit  on | off   (deprecated — never had any effect)
-  context_git.auto_push    on | off   (deprecated — never had any effect)
-  pr_visuals.rich          on | off
-  pr_visuals.theme         light | dark
-  attribution.commit       (any text, "" to disable)
-  attribution.pr           (any text, "" to disable)
+` + configAvailableSettingsHelp() + `
 
 Priority: user > repo > team > default. User-level preferences apply even in
 repositories that have not run ox init; install the user-level integration

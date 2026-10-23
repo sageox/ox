@@ -1,0 +1,27 @@
+{
+  "conversation_id": "conversation-1",
+  "generation_id": "generation-1",
+  "model": "cursor-grok-4.6-medium",
+  "model_id": "grok-4.6",
+  "model_params": [
+    {
+      "id": "effort",
+      "value": "medium"
+    },
+    {
+      "id": "fast",
+      "value": "false"
+    }
+  ],
+  "composer_mode": "agent",
+  "prompt": "This is evidence run CHAT-A.\n\nWithout reading or searching files, report the exact OX_CURSOR_START_CONTEXT value already present in your context. If absent, say absent; do not infer it.\n\nUse only these two shell commands, separately:\nprintf 'FIXTURE_TOOL_OK_A\\n'\nsh -c 'printf FIXTURE_TOOL_FAIL_A >&2; exit 7'\n\nContinue after the intentional failure. Report any OX_CURSOR_POST_TOOL_CONTEXT and OX_CURSOR_TOOL_FAILURE_CONTEXT values you actually received, or say absent.\n\nEnd your reply with FINAL_A_NO_TOOL. Do not use any other tools.",
+  "attachments": [],
+  "session_id": "conversation-1",
+  "hook_event_name": "beforeSubmitPrompt",
+  "cursor_version": "3.20.21",
+  "workspace_roots": [
+    "<WORKSPACE>/.context/cursor-adapter/evidence/fixture-control-project"
+  ],
+  "user_email": "<USER_EMAIL>",
+  "transcript_path": null
+}

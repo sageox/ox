@@ -150,16 +150,19 @@ func TestSavePlanArtifacts_LinksBothDirectionsWithoutAgentID(t *testing.T) {
 		t.Errorf("provenance.session_id = %q, want %q", meta.Provenance.SessionID, rec.SessionID)
 	}
 
-	// events.jsonl is the PERMANENCE vector: BackfillSessionID matches on
-	// SessionName, so an event line written without one can never be repaired.
-	// This is the 4.7% half of the loss, and the half the PR's first regression
-	// test did not cover.
+	// events.jsonl is the PERMANENCE vector: its lines are never edited, so
+	// the session a save does not stamp is never attached. This is the 4.7%
+	// half of the loss, and the half the PR's first regression test did not
+	// cover.
 	events, err := plan.LoadEvents(dir)
 	if err != nil || len(events) == 0 {
 		t.Fatalf("LoadEvents: err=%v n=%d", err, len(events))
 	}
 	if got := events[len(events)-1].SessionName; got != wantSession {
-		t.Errorf("events.jsonl session_name = %q, want %q — unrepairable: BackfillSessionID matches on this field", got, wantSession)
+		t.Errorf("events.jsonl session_name = %q, want %q — unrepairable: event lines are never edited", got, wantSession)
+	}
+	if got := events[len(events)-1].SessionID; got != rec.SessionID {
+		t.Errorf("events.jsonl session_id = %q, want %q — unrepairable: event lines are never edited", got, rec.SessionID)
 	}
 
 	// Reverse link, read back from the file session stop will read.
@@ -257,8 +260,8 @@ func TestAppendProducedPlan_DoesNotResurrectStoppedRecording(t *testing.T) {
 // `if agentID == "" { return nil }` inside loadPlanRecordingState left the whole
 // suite green, because asserting AuthorName alone keeps prov non-nil.
 //
-// This is the permanent half — with SessionName blank, plan.BackfillSessionID
-// (which matches on SessionName) can never attach the ses_ id afterwards.
+// This is the permanent half: event lines are never edited, so a session the
+// save drops is never attached afterwards.
 func TestResolvePlanProvenance_SessionSurvivesMissingAgentID(t *testing.T) {
 	root := newPlanCaptureTestRepo(t)
 	t.Setenv("SAGEOX_AGENT_ID", "")
@@ -284,6 +287,11 @@ func TestResolvePlanProvenance_SessionSurvivesMissingAgentID(t *testing.T) {
 	}
 	if prov.SessionOutcome != plan.SessionOutcomeActive {
 		t.Errorf("SessionOutcome = %q, want %q", prov.SessionOutcome, plan.SessionOutcomeActive)
+	}
+	// lifecycle events and the review page's Approve take their session from
+	// here, and their lines are never edited, so the id must arrive with them
+	if f := planEventFieldsFromProvenance(root); f.SessionID != rec.SessionID || f.SessionName != want {
+		t.Errorf("lifecycle event session = (%q, %q), want (%q, %q)", f.SessionName, f.SessionID, want, rec.SessionID)
 	}
 }
 
@@ -384,11 +392,11 @@ func TestPlanSessionLink_DisabledAttributionExpectsNoLink(t *testing.T) {
 }
 
 // TestSavePlanArtifacts_LargeRenderStaysPlainWhenLFSUnreachable is the #810
-// composition-root fail-safe: driving the REAL savePlanArtifacts path (Save →
-// DehydrateHTML → commit) with a >1MiB render and no reachable LFS client, the
-// committed plan.html must be PLAIN — retrievable and pushable, never a poisoned
-// pointer. This test ledger has no configured remote/credentials, so planLFSClient
-// resolves to nil and dehydration falls back to plain, exactly as an offline save.
+// composition-root fail-safe: driving the REAL savePlanArtifacts path (upload,
+// Save, pointer swap, commit) with a >1MiB render and no reachable LFS client,
+// plan.html must stay PLAIN on disk, never a poisoned pointer. This test ledger
+// has no configured remote/credentials, so planLFSClient resolves to nil and
+// nothing is uploaded, exactly as in an offline save.
 //
 // Failure prevented: a regression where the composition root writes (or leaves) a
 // pointer with no uploaded blob — the wedge #810 was about — at the layer where
@@ -416,9 +424,7 @@ func TestSavePlanArtifacts_LargeRenderStaysPlainWhenLFSUnreachable(t *testing.T)
 		t.Fatalf("read plan.html: %v", err)
 	}
 	// The FULL render must survive, not just a stray marker: the body repeats the
-	// marker 100000 times and every one must be on disk, plain. dehydrate rewrites
-	// plan.html BEFORE commitPlanToLedger stages the working tree, so this on-disk
-	// file is exactly what a commit would carry.
+	// marker 100000 times and every one must be on disk, plain.
 	if n := bytes.Count(got, []byte("PRESERVE-ME")); n != 100000 {
 		t.Fatalf("plan.html retained %d of 100000 markers — the render was truncated or replaced", n)
 	}

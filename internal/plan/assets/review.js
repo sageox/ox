@@ -16,14 +16,14 @@
   function clip(t, n) {
     return t.length > n ? t.slice(0, n - 1) + "…" : t;
   }
-  function contentAnchor(heading, text) {
-    return "h" + fnv1a(norm(heading) + "\0" + norm(text));
+  function contentAnchor(heading, text2) {
+    return "h" + fnv1a(norm(heading) + "\0" + norm(text2));
   }
   function quoteAnchor(section, quote) {
     return "q" + fnv1a(norm(section) + "\0" + norm(quote));
   }
-  function labelOf(text) {
-    return clip((text || "").replace(/\s+/g, " ").trim(), 70);
+  function labelOf(text2) {
+    return clip((text2 || "").replace(/\s+/g, " ").trim(), 70);
   }
   var GENERATED = "section[id], li, tr, .ox-chip, .stat, .bar-row";
   var AUTHORED = "h1,h2,h3,h4,p,li,tr,pre,blockquote,figure,[data-ox-section]";
@@ -42,11 +42,11 @@
     const ds = sec.getAttribute("data-ox-section");
     if (ds) return ds;
     const h = sec.querySelector("h2, h3");
-    return h ? h.textContent || "" : sec.id || "";
+    return h ? anchorText(h) : sec.id || "";
   }
   function anchorText(el) {
     const clone = el.cloneNode(true);
-    clone.querySelectorAll(".rev-glyph").forEach((g) => g.remove());
+    clone.querySelectorAll(".rev-glyph, style, script").forEach((g) => g.remove());
     return clone.textContent || "";
   }
   function anchorFor(el) {
@@ -54,6 +54,693 @@
   }
   function labelFor(el) {
     return labelOf(anchorText(el));
+  }
+
+  // src/region.ts
+  var LIMITS = {
+    regionBytes: 65536,
+    contextBytes: 16384,
+    pathPoints: 512,
+    targets: 16,
+    contextItems: 48,
+    itemLabels: 32,
+    targetText: 2e3,
+    neighborText: 600,
+    labelText: 80,
+    layoutKeys: 128
+  };
+  var DRAWING = /^q-[A-Za-z0-9_-]{8,64}$/;
+  var ID = /^[A-Za-z0-9_-]{8,64}$/;
+  var ELEMENT = /^h[0-9a-f]{8}$/;
+  var REVISION = /^sha256:[0-9a-f]{64}$/;
+  var TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?Z$/;
+  var obj = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
+  var str = (v) => typeof v === "string";
+  var num = (v) => typeof v === "number" && isFinite(v);
+  var all = (a, ok) => {
+    for (let i = 0; i < a.length; i++) if (!ok(a[i])) return false;
+    return true;
+  };
+  var nums = (v, n) => Array.isArray(v) && v.length === n && all(v, num);
+  var box = (v) => nums(v, 4) && v[2] >= 0 && v[3] >= 0;
+  var strs = (v, n) => Array.isArray(v) && v.length <= n && all(v, str);
+  var count = (v) => num(v) && v >= 0 && Math.floor(v) === v;
+  var utf8Bytes = (v) => new TextEncoder().encode(JSON.stringify(v)).length;
+  function problem(v, stamped) {
+    if (!obj(v)) return "not an object";
+    if (stamped) {
+      if (!str(v.id) || !ID.test(v.id)) return "id";
+      if (!str(v.plan_revision) || !REVISION.test(v.plan_revision)) return "plan_revision";
+      if (!str(v.created_at) || !TIME.test(v.created_at)) return "created_at";
+    }
+    if (v.v !== 1 || v.kind !== "region" || v.frame !== "document") return "v, kind or frame";
+    const p = v.path;
+    if (!Array.isArray(p) || p.length < 3 || p.length > LIMITS.pathPoints || !all(p, (x) => nums(x, 2))) return "path";
+    const e = v.ellipse;
+    if (!obj(e) || !nums(e.center, 2) || !nums(e.radii, 2) || !(e.radii[0] > 0 && e.radii[1] > 0) || !num(e.rotation) || !num(e.start) || e.dir !== 1 && e.dir !== -1) return "ellipse";
+    if (!box(v.bbox)) return "bbox";
+    const l = v.layout;
+    if (!obj(l) || !nums(l.viewport, 2) || !nums(l.document, 2) || !nums(l.scroll, 2) || !num(l.dpr) || !num(l.scale) || !str(l.theme) || !str(l.fonts) || !strs(l.open, LIMITS.layoutKeys) || !strs(l.checked, LIMITS.layoutKeys)) return "layout";
+    const ts = v.targets;
+    if (!Array.isArray(ts) || !ts.length || ts.length > LIMITS.targets) return "targets";
+    for (const t of ts) {
+      if (!obj(t) || !str(t.anchor) || !ELEMENT.test(t.anchor) || !str(t.tag) || !str(t.section) || !box(t.box)) return "targets";
+      if (!num(t.cover) || t.cover < 0 || t.cover > 1) return "targets";
+      if ("nth" in t !== "of" in t || "nth" in t && !(count(t.nth) && count(t.of) && t.of >= 2 && t.nth < t.of)) return "targets";
+    }
+    const c = v.context;
+    if (!obj(c) || !Array.isArray(c.items) || c.items.length > LIMITS.contextItems || typeof c.truncated !== "boolean") return "context";
+    const enclosed = ts.map((t) => t.anchor);
+    for (const it of c.items) {
+      if (!obj(it) || !str(it.anchor) || !ELEMENT.test(it.anchor) || !str(it.tag) || !box(it.box) || !str(it.text)) return "context";
+      if (it.text.length > (enclosed.indexOf(it.anchor) >= 0 ? LIMITS.targetText : LIMITS.neighborText)) return "context";
+      if (!("labels" in it)) continue;
+      const ls = it.labels;
+      if (!Array.isArray(ls) || !ls.length || ls.length > LIMITS.itemLabels) return "context";
+      if (!all(ls, (x) => obj(x) && box(x.box) && str(x.text) && x.text.length <= LIMITS.labelText)) return "context";
+    }
+    if (utf8Bytes(c) > LIMITS.contextBytes) return "context size";
+    if (utf8Bytes(v) > LIMITS.regionBytes) return "size";
+    return "";
+  }
+  function checkRegion(v) {
+    return problem(v, true);
+  }
+  function runsOf(c) {
+    return Array.isArray(c.runs) ? c.runs.filter((x) => obj(x) && str(x.text) && box(x.box)) : null;
+  }
+  function drawingLabel(r) {
+    const first = r.targets[0];
+    const item = r.context.items.filter((it) => it.anchor === first.anchor)[0];
+    const text2 = (item && item.text || first.section).replace(/\s+/g, " ").trim();
+    const label = "Drawing: " + text2;
+    return label.length > 70 ? label.slice(0, 69) + "…" : label;
+  }
+  var overlaps = (a, b) => a[0] < b[0] + b[2] && b[0] < a[0] + a[2] && a[1] < b[1] + b[3] && b[1] < a[1] + a[3];
+  var r1 = (n) => Math.round(n * 10) / 10;
+  function bboxOf(pts) {
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    pts.forEach((p) => {
+      x0 = Math.min(x0, p[0]);
+      y0 = Math.min(y0, p[1]);
+      x1 = Math.max(x1, p[0]);
+      y1 = Math.max(y1, p[1]);
+    });
+    return [r1(x0), r1(y0), r1(x1 - x0), r1(y1 - y0)];
+  }
+  function thin(pts) {
+    const out = [];
+    pts.forEach((p) => {
+      const q = out[out.length - 1];
+      if (!q || Math.abs(p[0] - q[0]) + Math.abs(p[1] - q[1]) >= 2) out.push(p);
+    });
+    if (out.length <= LIMITS.pathPoints) return out;
+    const step = out.length / LIMITS.pathPoints, s = [];
+    for (let i = 0; i < LIMITS.pathPoints; i++) s.push(out[Math.floor(i * step)]);
+    return s;
+  }
+  var NIB = { width: 12, angle: -12 * Math.PI / 180 };
+  function ellipsePoints(e, extra) {
+    const rx = e.radii[0], ry = e.radii[1], rot = e.rotation * Math.PI / 180, t0 = e.start * Math.PI / 180;
+    const around = Math.PI * (3 * (rx + ry) - Math.sqrt((3 * rx + ry) * (rx + 3 * ry)));
+    const sweep = 2 * Math.PI + extra;
+    const n = Math.max(48, Math.min(512, Math.ceil(around * sweep / (2 * Math.PI) / 3)));
+    const cos = Math.cos(rot), sin = Math.sin(rot), out = [];
+    for (let i = 0; i <= n; i++) {
+      const t = t0 + e.dir * sweep * i / n, x = rx * Math.cos(t), y = ry * Math.sin(t);
+      out.push([e.center[0] + x * cos - y * sin, e.center[1] + x * sin + y * cos]);
+    }
+    return out;
+  }
+  function smooth(pts) {
+    for (let k = 0; k < 2 && pts.length > 2; k++) {
+      const out = [pts[0]];
+      for (let i = 0; i < pts.length - 1; i++) {
+        const a = pts[i], b = pts[i + 1];
+        out.push([0.75 * a[0] + 0.25 * b[0], 0.75 * a[1] + 0.25 * b[1]], [0.25 * a[0] + 0.75 * b[0], 0.25 * a[1] + 0.75 * b[1]]);
+      }
+      out.push(pts[pts.length - 1]);
+      pts = out;
+    }
+    return pts;
+  }
+  function inkPaths(pts, off) {
+    pts = smooth(pts.map((p) => [p[0] + off[0], p[1] + off[1]]));
+    if (pts.length < 2) return { sweep: "", hair: "" };
+    const at = [0];
+    for (let i = 1; i < pts.length; i++) at.push(at[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]));
+    const total = at[at.length - 1];
+    const width = (d) => Math.max(0.1, Math.min(1, d / 24, (total - d) / 56));
+    const nx = Math.cos(NIB.angle) * NIB.width / 2, ny = Math.sin(NIB.angle) * NIB.width / 2;
+    const xy = (p, s) => r1(p[0] + nx * s) + " " + r1(p[1] + ny * s);
+    let sweep = "", hair = "M" + xy(pts[0], 0);
+    for (let j = 0; j < pts.length - 1; j++) {
+      const a = pts[j], b = pts[j + 1], wa = width(at[j]), wb = width(at[j + 1]);
+      sweep += "M" + xy(a, wa) + "L" + xy(b, wb) + "L" + xy(b, -wb) + "L" + xy(a, -wa) + "Z";
+      hair += "L" + xy(b, 0);
+    }
+    return { sweep, hair };
+  }
+  function inkLine(e) {
+    return ellipsePoints(e, 0.3);
+  }
+
+  // src/draw.ts
+  var SVGNS = "http://www.w3.org/2000/svg";
+  var TOL = 1;
+  var collapse = (s) => (s || "").replace(/\s+/g, " ").trim();
+  function markables(selector, exclude) {
+    const out = [];
+    document.querySelectorAll(selector).forEach((el) => {
+      if (!el.closest(exclude)) out.push({ el, anchor: anchorFor(el) });
+    });
+    return out;
+  }
+  function drawLayer(selector, exclude, capture, refuse, changed) {
+    const layer = svg("svg", { class: "rev-ink", "aria-hidden": "true", tabindex: -1 });
+    const ink = svg("g", {});
+    layer.appendChild(ink);
+    document.documentElement.appendChild(layer);
+    let tool = false;
+    let gesture = null;
+    let selected = null;
+    const editable = /* @__PURE__ */ new Map();
+    let lastClient = null;
+    function svg(tag, attrs) {
+      const n = document.createElementNS(SVGNS, tag);
+      for (const k in attrs) n.setAttribute(k, String(attrs[k]));
+      return n;
+    }
+    function inkInto(pts, off, tint, cls) {
+      const p = inkPaths(pts, off);
+      const g = svg("g", { class: "rev-ink-" + tint + " " + cls });
+      g.appendChild(svg("path", { d: p.sweep, fill: "currentColor", stroke: "none" }));
+      g.appendChild(svg("path", { d: p.hair, fill: "none", stroke: "currentColor", "stroke-width": 1, "stroke-linecap": "round", "stroke-linejoin": "round" }));
+      ink.appendChild(g);
+      return g;
+    }
+    function oval(e, tint, anchor) {
+      const g = inkInto(inkLine(e), [0, 0], tint, anchor ? "rev-ink-unsent" : "rev-ink-live");
+      if (!anchor) return g;
+      g.setAttribute("data-anchor", anchor);
+      const [cx, cy] = e.center, [rx, ry] = e.radii;
+      const controls = svg("g", { transform: `translate(${cx} ${cy}) rotate(${e.rotation})` });
+      controls.appendChild(svg("ellipse", { class: "rev-ink-hit", "data-edit": anchor, cx: 0, cy: 0, rx, ry }));
+      if (selected === anchor) {
+        controls.appendChild(svg("rect", { class: "rev-ink-bounds", x: -rx, y: -ry, width: rx * 2, height: ry * 2 }));
+        for (const [hx, hy, cursor] of [[-1, -1, "nwse"], [0, -1, "ns"], [1, -1, "nesw"], [1, 0, "ew"], [1, 1, "nwse"], [0, 1, "ns"], [-1, 1, "nesw"], [-1, 0, "ew"]]) {
+          controls.appendChild(svg("rect", { class: "rev-ink-handle", "data-edit": anchor, "data-hx": hx, "data-hy": hy, x: hx * rx - 5, y: hy * ry - 5, width: 10, height: 10, style: `cursor:${cursor}-resize` }));
+        }
+      }
+      g.appendChild(controls);
+      return g;
+    }
+    function fitLayer() {
+      const root = document.documentElement;
+      layer.setAttribute("width", "0");
+      layer.setAttribute("height", "0");
+      const o = layer.getBoundingClientRect();
+      layer.setAttribute("width", String(root.scrollWidth));
+      layer.setAttribute("height", String(root.scrollHeight));
+      ink.setAttribute("transform", "translate(" + r1(-(o.left + scrollX)) + " " + r1(-(o.top + scrollY)) + ")");
+    }
+    function byAnchor(all2) {
+      const m = /* @__PURE__ */ Object.create(null);
+      all2.forEach((c) => {
+        (m[c.anchor] = m[c.anchor] || []).push(c);
+      });
+      return m;
+    }
+    const rectOf = (r) => [r1(r.left + scrollX), r1(r.top + scrollY), r1(r.width), r1(r.height)];
+    function shownBox(el) {
+      const e = el;
+      if (e.checkVisibility ? !e.checkVisibility({ visibilityProperty: true }) : !el.getClientRects().length || getComputedStyle(el).visibility === "hidden" || inClosedDetails(el)) return null;
+      const r = el.getBoundingClientRect();
+      if (r.width < 1 || r.height < 1) return null;
+      for (let a = el.parentElement; a && a !== document.body && a !== document.documentElement; a = a.parentElement) {
+        const cs = getComputedStyle(a);
+        if (cs.overflowX === "visible" && cs.overflowY === "visible") continue;
+        const ar = a.getBoundingClientRect();
+        if (r.right <= ar.left || r.left >= ar.right || r.bottom <= ar.top || r.top >= ar.bottom) return null;
+      }
+      return rectOf(r);
+    }
+    function inClosedDetails(el) {
+      for (let d = el.parentElement && el.parentElement.closest("details:not([open])"); d; d = d.parentElement && d.parentElement.closest("details:not([open])")) {
+        const sum = d.querySelector(":scope > summary");
+        if (!sum || !sum.contains(el)) return true;
+      }
+      return false;
+    }
+    function inside(pt, poly) {
+      let w = 0;
+      for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+        const a = poly[j], b = poly[i], cross = (b[0] - a[0]) * (pt[1] - a[1]) - (pt[0] - a[0]) * (b[1] - a[1]);
+        if (a[1] <= pt[1]) {
+          if (b[1] > pt[1] && cross > 0) w++;
+        } else if (b[1] <= pt[1] && cross < 0) w--;
+      }
+      return w !== 0;
+    }
+    function coverage(b, poly, bb) {
+      if (!overlaps(b, bb)) return 0;
+      let n = 0;
+      for (let i = 0; i < 5; i++) for (let j = 0; j < 5; j++) if (inside([b[0] + b[2] * (i + 0.5) / 5, b[1] + b[3] * (j + 0.5) / 5], poly)) n++;
+      return n / 25;
+    }
+    const leafMost = (l) => l.filter((c) => !l.some((d) => d !== c && c.el.contains(d.el)));
+    const outerMost = (l) => l.filter((c) => !l.some((d) => d !== c && d.el.contains(c.el)));
+    function captureEllipse(ellipse) {
+      const poly = ellipsePoints(ellipse, 0), bb = bboxOf(poly);
+      const all2 = markables(selector, exclude), index2 = byAnchor(all2);
+      const shown = [];
+      all2.forEach((c) => {
+        const b = shownBox(c.el);
+        if (b) shown.push({ ...c, box: b, cover: coverage(b, poly, bb) });
+      });
+      const covered = shown.filter((c) => c.cover >= 0.5);
+      let targets = leafMost(covered);
+      if (targets.length > LIMITS.targets) targets = outerMost(covered);
+      if (!targets.length) {
+        const cx = bb[0] + bb[2] / 2, cy = bb[1] + bb[3] / 2;
+        let best = null;
+        shown.forEach((c) => {
+          const b = c.box;
+          if (cx >= b[0] && cx <= b[0] + b[2] && cy >= b[1] && cy <= b[1] + b[3] && (!best || b[2] * b[3] < best.box[2] * best.box[3])) best = c;
+        });
+        if (best) targets = [best];
+      }
+      if (!targets.length) return "no-target";
+      if (targets.length > LIMITS.targets) return "too-large";
+      const cap = {
+        v: 1,
+        kind: "region",
+        frame: "document",
+        path: thin(poly.map((p) => [r1(p[0]), r1(p[1])])),
+        ellipse,
+        bbox: bb,
+        layout: layoutContext(),
+        targets: targets.map((c) => {
+          const same = index2[c.anchor];
+          const t = { anchor: c.anchor, tag: c.el.tagName.toLowerCase(), section: collapse(headingOf(c.el)), box: c.box, cover: c.cover };
+          if (same.length > 1) {
+            t.nth = same.findIndex((s) => s.el === c.el);
+            t.of = same.length;
+          }
+          return t;
+        }),
+        context: contextOf(shown, bb, targets)
+      };
+      return utf8Bytes(cap) > LIMITS.regionBytes - 256 ? "too-large" : cap;
+    }
+    function contextOf(shown, bb, targets) {
+      const m = 16, zone = [bb[0] - m, bb[1] - m, bb[2] + 2 * m, bb[3] + 2 * m];
+      const cx = bb[0] + bb[2] / 2, cy = bb[1] + bb[3] / 2;
+      const dist = (b) => Math.abs(b[0] + b[2] / 2 - cx) + Math.abs(b[1] + b[3] / 2 - cy);
+      const near = leafMost(shown.filter((c) => overlaps(c.box, zone))).sort((a, b) => dist(a.box) - dist(b.box));
+      const kept = [];
+      const ctx = { items: [], truncated: near.length > LIMITS.contextItems, runs: kept };
+      const cut = (s, n) => {
+        if (s.length <= n) return s;
+        ctx.truncated = true;
+        return s.slice(0, n - 1) + "…";
+      };
+      const band = [...zone];
+      near.forEach((c) => {
+        const x1 = Math.max(band[0] + band[2], c.box[0] + c.box[2]);
+        band[0] = Math.min(band[0], c.box[0]);
+        band[2] = x1 - band[0];
+      });
+      let runs = [];
+      const root = document.documentElement;
+      root.classList.add("rev-reading");
+      try {
+        runs = runsIn(band).sort((a, b) => dist(a.box) - dist(b.box));
+        near.slice(0, LIMITS.contextItems).forEach((c) => {
+          const h = c.el;
+          let text2 = collapse(h.innerText === void 0 ? h.textContent : h.innerText);
+          if (!text2) {
+            const img = c.el.querySelector("img[alt]");
+            if (img) text2 = "[image: " + collapse(img.getAttribute("alt")) + "]";
+          }
+          const it = { anchor: c.anchor, tag: c.el.tagName.toLowerCase(), box: c.box, text: cut(text2, targets.indexOf(c) >= 0 ? LIMITS.targetText : LIMITS.neighborText) };
+          let labels = labelsIn(c.el, zone);
+          if (labels.length > LIMITS.itemLabels) {
+            ctx.truncated = true;
+            labels = labels.slice(0, LIMITS.itemLabels);
+          }
+          labels.forEach((l) => {
+            l.text = cut(l.text, LIMITS.labelText);
+          });
+          if (labels.length) it.labels = labels;
+          ctx.items.push(it);
+        });
+      } finally {
+        root.classList.remove("rev-reading");
+      }
+      while (utf8Bytes(ctx) > LIMITS.contextBytes && ctx.items.length > 1) {
+        ctx.items.pop();
+        ctx.truncated = true;
+      }
+      let room = LIMITS.contextBytes - utf8Bytes(ctx);
+      for (const r of runs) {
+        const n = utf8Bytes(r) + 1;
+        if (n > room) ctx.truncated = true;
+        else {
+          kept.push(r);
+          room -= n;
+        }
+      }
+      return ctx;
+    }
+    function runsIn(band) {
+      const out = [];
+      const range = document.createRange();
+      const walk = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
+        acceptNode(n) {
+          if (n.nodeType === Node.TEXT_NODE) return NodeFilter.FILTER_ACCEPT;
+          const el = n;
+          if (el.matches(exclude + ", script, style, noscript, template, textarea, select")) return NodeFilter.FILTER_REJECT;
+          const r = el.getBoundingClientRect();
+          if ((r.width || r.height) && !overlaps(rectOf(r), band)) return NodeFilter.FILTER_REJECT;
+          if (el.checkVisibility && !el.checkVisibility({ visibilityProperty: true, opacityProperty: true })) return NodeFilter.FILTER_REJECT;
+          return NodeFilter.FILTER_SKIP;
+        }
+      });
+      for (let t = walk.nextNode(); t; t = walk.nextNode()) {
+        let run = null;
+        const keep = () => {
+          if (run && overlaps(run.box, band)) out.push(run);
+        };
+        const words = /\S+/g;
+        for (let w = words.exec(t.data); w; w = words.exec(t.data)) {
+          range.setStart(t, w.index);
+          range.setEnd(t, w.index + w[0].length);
+          const r = range.getClientRects()[0];
+          if (!r || r.width < 1) continue;
+          const b = rectOf(r);
+          if (run && Math.abs(b[1] - run.box[1]) < 1 && b[0] - (run.box[0] + run.box[2]) < b[3]) {
+            const x1 = Math.max(run.box[0] + run.box[2], b[0] + b[2]);
+            run.box[0] = Math.min(run.box[0], b[0]);
+            run.box[2] = r1(x1 - run.box[0]);
+            run.box[3] = Math.max(run.box[3], b[3]);
+            run.text += " " + w[0];
+          } else {
+            keep();
+            run = { text: w[0], box: b };
+          }
+        }
+        keep();
+      }
+      return out;
+    }
+    function labelsIn(el, zone) {
+      const out = [];
+      el.querySelectorAll("svg g.node, svg g.edgeLabel, svg g.cluster, svg text").forEach((n) => {
+        if (n.tagName.toLowerCase() === "text" && n.closest("g.node, g.edgeLabel, g.cluster")) return;
+        const t = collapse(n.textContent), b = t ? shownBox(n) : null;
+        if (b && overlaps(b, zone)) out.push({ text: t, box: b });
+      });
+      return out;
+    }
+    const detailsKey = (d) => {
+      const s = d.querySelector("summary");
+      return "d" + fnv1a(norm(s ? s.textContent : ""));
+    };
+    const inputKey = (i) => i.id ? "#" + i.id : i.name + "=" + i.value;
+    function layoutContext() {
+      fitLayer();
+      const open = [], checked = [];
+      document.querySelectorAll("details[open]").forEach((d) => open.push(detailsKey(d)));
+      document.querySelectorAll("input[type=radio]:checked, input[type=checkbox]:checked").forEach((i) => checked.push(inputKey(i)));
+      const root = document.documentElement, vv = window.visualViewport;
+      return {
+        viewport: [innerWidth, innerHeight],
+        document: [root.scrollWidth, root.scrollHeight],
+        dpr: devicePixelRatio,
+        scale: vv ? r1(vv.scale) : 1,
+        scroll: [r1(scrollX), r1(scrollY)],
+        theme: root.getAttribute("data-theme") || (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark"),
+        fonts: document.fonts ? document.fonts.status : "",
+        open: open.slice(0, LIMITS.layoutKeys),
+        checked: checked.slice(0, LIMITS.layoutKeys)
+      };
+    }
+    function place(d, index2) {
+      const found = [];
+      let hidden = null, first;
+      for (const t of d.targets) {
+        const same = index2[t.anchor] || [];
+        if (!same.length) return { outcome: "missing" };
+        if (same.length !== (t.of || 1)) return { outcome: "ambiguous" };
+        const el = same[t.nth || 0].el, b = shownBox(el);
+        first = first || el;
+        if (!b) {
+          hidden = hidden || { outcome: "hidden" };
+          continue;
+        }
+        found.push({ box: b, was: t.box });
+      }
+      if (hidden) return { ...hidden, el: first };
+      const dx = r1(found[0].box[0] - found[0].was[0]), dy = r1(found[0].box[1] - found[0].was[1]);
+      const rigid = found.every((f) => Math.abs(f.box[2] - f.was[2]) <= TOL && Math.abs(f.box[3] - f.was[3]) <= TOL && Math.abs(f.box[0] - f.was[0] - dx) <= TOL && Math.abs(f.box[1] - f.was[1] - dy) <= TOL);
+      if (!rigid) return { outcome: "reflowed", boxes: found.map((f) => f.box), el: first };
+      return { outcome: Math.abs(dx) <= TOL && Math.abs(dy) <= TOL ? "exact" : "moved", offset: [dx, dy], el: first };
+    }
+    let drawings = [];
+    let index = /* @__PURE__ */ Object.create(null);
+    let last = "";
+    function placeAll() {
+      fitLayer();
+      while (ink.firstChild) ink.removeChild(ink.firstChild);
+      editable.clear();
+      const out = drawings.map((d) => {
+        const o = place(d, index);
+        const cls = d.kind === "unsent" ? "rev-ink-unsent" : "";
+        if (o.offset) {
+          if (tool && d.kind === "unsent") {
+            const e = { ...d.ellipse, center: [r1(d.ellipse.center[0] + o.offset[0]), r1(d.ellipse.center[1] + o.offset[1])] };
+            editable.set(d.anchor, e);
+            if (gesture?.anchor !== d.anchor) oval(e, d.tint, d.anchor);
+          } else inkInto(inkLine(d.ellipse), o.offset, d.tint, cls).setAttribute("data-anchor", d.anchor);
+        } else if (o.boxes) {
+          const u = o.boxes.reduce((m, b) => [Math.min(m[0], b[0]), Math.min(m[1], b[1]), Math.max(m[2], b[0] + b[2]), Math.max(m[3], b[1] + b[3])], [Infinity, Infinity, -Infinity, -Infinity]);
+          ink.appendChild(svg("ellipse", {
+            class: "rev-ink-" + d.tint + " rev-ink-reflowed",
+            "data-anchor": d.anchor,
+            cx: (u[0] + u[2]) / 2,
+            cy: (u[1] + u[3]) / 2,
+            rx: (u[2] - u[0]) / Math.SQRT2 + 6,
+            ry: (u[3] - u[1]) / Math.SQRT2 + 6
+          }));
+        }
+        return { anchor: d.anchor, outcome: o.outcome, el: o.el || null };
+      });
+      if (gesture) ink.appendChild(gesture.preview);
+      last = out.map((p) => p.outcome).join();
+      return out;
+    }
+    let timer;
+    function relayout() {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        const was = last;
+        placeAll();
+        if (last !== was) changed();
+      }, 100);
+    }
+    function drag(cx, cy) {
+      if (!gesture) return;
+      lastClient = [cx, cy];
+      const p = [r1(cx + scrollX), r1(cy + scrollY)], s = gesture.start, e = gesture.original;
+      const dx = p[0] - s[0], dy = p[1] - s[1];
+      if (Math.abs(dx) + Math.abs(dy) >= 2) gesture.moved = true;
+      if (!gesture.anchor) {
+        gesture.ellipse = { center: [r1((s[0] + p[0]) / 2), r1((s[1] + p[1]) / 2)], radii: [r1(Math.abs(dx) / 2), r1(Math.abs(dy) / 2)], rotation: 0, start: 0, dir: 1 };
+      } else if (!gesture.handle) {
+        gesture.ellipse = { ...e, center: [r1(e.center[0] + dx), r1(e.center[1] + dy)] };
+      } else {
+        const a = e.rotation * Math.PI / 180, cos = Math.cos(a), sin = Math.sin(a);
+        const delta = [dx * cos + dy * sin, -dx * sin + dy * cos];
+        const radii = [...e.radii], shift = [0, 0];
+        gesture.handle.forEach((h, i) => {
+          if (!h) return;
+          radii[i] = r1(Math.max(4, e.radii[i] + h * delta[i] / 2));
+          shift[i] = h * (radii[i] - e.radii[i]);
+        });
+        gesture.ellipse = { ...e, radii, center: [r1(e.center[0] + shift[0] * cos - shift[1] * sin), r1(e.center[1] + shift[0] * sin + shift[1] * cos)] };
+      }
+      gesture.preview.remove();
+      gesture.preview = oval(gesture.ellipse, "gold", gesture.anchor);
+    }
+    function endGesture(reason) {
+      if (!gesture) return;
+      const pointer = gesture.pointer;
+      gesture = null;
+      layer.classList.remove("rev-dragging");
+      if (layer.hasPointerCapture(pointer)) layer.releasePointerCapture(pointer);
+      placeAll();
+      if (reason) refuse(reason);
+    }
+    layer.addEventListener("pointerdown", (e) => {
+      if (!tool || e.button !== 0 || gesture) return;
+      e.preventDefault();
+      layer.focus({ preventScroll: true });
+      fitLayer();
+      const hit = e.target.closest("[data-edit]"), anchor = hit?.getAttribute("data-edit") || void 0;
+      const original = anchor ? editable.get(anchor) : void 0;
+      if (anchor && !original) return;
+      selected = anchor || null;
+      const start = [r1(e.clientX + scrollX), r1(e.clientY + scrollY)];
+      const ellipse = original || { center: start, radii: [0, 0], rotation: 0, start: 0, dir: 1 };
+      const handle = hit?.hasAttribute("data-hx") ? [Number(hit.getAttribute("data-hx")), Number(hit.getAttribute("data-hy"))] : void 0;
+      gesture = { pointer: e.pointerId, start, original: ellipse, ellipse, anchor, handle, preview: oval(ellipse, "gold", anchor), moved: false };
+      lastClient = [e.clientX, e.clientY];
+      layer.classList.toggle("rev-dragging", !!anchor && !handle);
+      placeAll();
+      layer.setPointerCapture(e.pointerId);
+    });
+    layer.addEventListener("pointermove", (e) => {
+      if (gesture && e.pointerId === gesture.pointer) drag(e.clientX, e.clientY);
+    });
+    layer.addEventListener("pointerup", (e) => {
+      if (!gesture || e.pointerId !== gesture.pointer) return;
+      drag(e.clientX, e.clientY);
+      const g = gesture;
+      endGesture();
+      if (g.anchor && !g.moved) return;
+      if (g.ellipse.radii.some((r) => r < 4)) {
+        refuse("too-small");
+        return;
+      }
+      const c = captureEllipse(g.ellipse);
+      if (typeof c === "string") {
+        refuse(c);
+        return;
+      }
+      capture(c, { left: c.bbox[0] - scrollX, bottom: c.bbox[1] + c.bbox[3] - scrollY }, g.anchor);
+    });
+    layer.addEventListener("pointercancel", (e) => {
+      if (gesture && e.pointerId === gesture.pointer) endGesture("cancelled");
+    });
+    layer.addEventListener("lostpointercapture", (e) => {
+      if (gesture && e.pointerId === gesture.pointer && !layer.hasPointerCapture(e.pointerId)) endGesture("cancelled");
+    });
+    window.addEventListener("scroll", () => {
+      if (gesture && lastClient) drag(lastClient[0], lastClient[1]);
+    });
+    document.addEventListener("scroll", (e) => {
+      if (e.target !== document) relayout();
+    }, true);
+    window.addEventListener("resize", () => {
+      endGesture("layout-changed");
+      relayout();
+    });
+    document.addEventListener("toggle", relayout, true);
+    document.addEventListener("change", relayout, true);
+    if (window.ResizeObserver) new ResizeObserver(relayout).observe(document.documentElement);
+    window.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape" || !gesture || e.defaultPrevented) return;
+      e.preventDefault();
+      endGesture("cancelled");
+    }, true);
+    return {
+      setTool(on) {
+        if (tool === on) return;
+        tool = on;
+        layer.classList.toggle("rev-drawing", on);
+        if (!on) endGesture("cancelled");
+        placeAll();
+      },
+      paint(next, all2) {
+        for (const d of next) if (d.kind === "unsent" && !drawings.some((old) => old.anchor === d.anchor)) selected = d.anchor;
+        drawings = next;
+        index = byAnchor(all2);
+        return placeAll();
+      },
+      show(d) {
+        document.querySelectorAll("details").forEach((x) => {
+          const el = x;
+          if (!el.open && d.open.indexOf(detailsKey(el)) >= 0) el.open = true;
+        });
+        document.querySelectorAll("input[type=radio], input[type=checkbox]").forEach((x) => {
+          const i = x;
+          if (!i.checked && d.checked.indexOf(inputKey(i)) >= 0) {
+            i.checked = true;
+            i.dispatchEvent(new Event("change", { bubbles: true }));
+          }
+        });
+        d.targets.forEach((t) => {
+          const c = (index[t.anchor] || [])[t.nth || 0];
+          for (let a = c && c.el.parentElement; a; a = a.parentElement) if (a.tagName === "DETAILS") a.open = true;
+        });
+      }
+    };
+  }
+
+  // src/protocol.ts
+  var MAX_TEXT = 65536;
+  var ANCHOR = /^[hq][0-9a-f]{8}$/;
+  var STATUSES = ["approve", "request-change", "flag", "comment"];
+  var STATES = ["open", "addressed", "verified", "wontfix"];
+  var TINTS = ["sage", "amber", "red", "gold", "faint"];
+  function obj2(v) {
+    return typeof v === "object" && v !== null && !Array.isArray(v);
+  }
+  function text(v) {
+    return typeof v === "string" && v.length <= MAX_TEXT;
+  }
+  function optText(v) {
+    return v === void 0 || text(v);
+  }
+  function num2(v) {
+    return typeof v === "number" && isFinite(v);
+  }
+  function nums2(v, n) {
+    return Array.isArray(v) && v.length === n && all(v, num2);
+  }
+  function oneOf(v, list) {
+    return typeof v === "string" && list.indexOf(v) >= 0;
+  }
+  function paintItem(it) {
+    if (!obj2(it) || typeof it.anchor !== "string" || !ANCHOR.test(it.anchor)) return null;
+    if (it.kind !== "unsent" && it.kind !== "committed" || !oneOf(it.status, STATUSES) || !oneOf(it.tint, TINTS)) return null;
+    if (it.state !== void 0 && !oneOf(it.state, STATES) || !text(it.glyph)) return null;
+    if (!optText(it.quote) || !optText(it.section) || !optText(it.label)) return null;
+    const p = { anchor: it.anchor, kind: it.kind, status: it.status, glyph: it.glyph, tint: it.tint };
+    if (it.state !== void 0) p.state = it.state;
+    if (it.quote !== void 0) p.quote = it.quote;
+    if (it.section !== void 0) p.section = it.section;
+    if (it.label !== void 0) p.label = it.label;
+    return p;
+  }
+  function drawingPaint(it) {
+    if (!obj2(it) || typeof it.anchor !== "string" || !DRAWING.test(it.anchor)) return null;
+    if (it.kind !== "unsent" && it.kind !== "committed" || !oneOf(it.tint, TINTS)) return null;
+    const e = it.ellipse;
+    if (!obj2(e) || !nums2(e.center, 2) || !nums2(e.radii, 2) || !num2(e.rotation) || !num2(e.start) || e.dir !== 1 && e.dir !== -1) return null;
+    const strs2 = (v) => Array.isArray(v) && v.length <= LIMITS.layoutKeys && all(v, text);
+    if (!Array.isArray(it.targets) || !it.targets.length || it.targets.length > LIMITS.targets || !strs2(it.open) || !strs2(it.checked)) return null;
+    const targets = [];
+    for (const t of it.targets) {
+      if (!obj2(t) || typeof t.anchor !== "string" || !ANCHOR.test(t.anchor) || t.anchor.charAt(0) !== "h" || !nums2(t.box, 4)) return null;
+      const o = { anchor: t.anchor, box: [t.box[0], t.box[1], t.box[2], t.box[3]] };
+      if (t.nth !== void 0 || t.of !== void 0) {
+        if (!num2(t.nth) || !num2(t.of)) return null;
+        o.nth = t.nth;
+        o.of = t.of;
+      }
+      targets.push(o);
+    }
+    return {
+      anchor: it.anchor,
+      kind: it.kind,
+      tint: it.tint,
+      ellipse: { center: [e.center[0], e.center[1]], radii: [e.radii[0], e.radii[1]], rotation: e.rotation, start: e.start, dir: e.dir },
+      targets,
+      open: it.open.slice(),
+      checked: it.checked.slice()
+    };
   }
 
   // src/ports.ts
@@ -71,13 +758,14 @@
   }
 
   // src/document-tools.ts
-  var CHROME = ".rev-bar, .rev-rail, .rev-orphans, .rev-toast, .rev-sync, .rev-offline-bar";
+  var CHROME = ".rev-bar, .rev-rail, .rev-orphans, .rev-toast, .rev-sync, .rev-offline-bar, .rev-original";
   function typing(e) {
     const t = e.target;
     return !!t && (t.tagName === "TEXTAREA" || t.tagName === "INPUT" || t.isContentEditable);
   }
   var INLINE = /^(A|ABBR|B|BDI|BDO|CITE|CODE|DATA|DEL|DFN|EM|I|INS|KBD|MARK|Q|S|SAMP|SMALL|SPAN|STRONG|SUB|SUP|TIME|U|VAR|WBR)$/;
-  var TINTS = ["sage", "amber", "red", "gold", "faint"];
+  var TINTS2 = ["sage", "amber", "red", "gold", "faint"];
+  var OWN = "input, select, textarea, label, summary";
   function startDocumentTools(port, opts = {}) {
     const body = document.body;
     const SELECTOR = markableSelector(document);
@@ -86,15 +774,27 @@
     let on = false;
     let open = false;
     let items = [];
+    let drawings = [];
     let qRanges = /* @__PURE__ */ Object.create(null);
     let spots = [];
     let picked = null;
     let focused = null;
+    let started = false;
+    let tool = false;
     function isRange(at) {
       return "startContainer" in at;
     }
-    function paint(next) {
+    const NOT_PLAN = CHROME + ", .rev-pop";
+    const draw = drawLayer(
+      SELECTOR,
+      NOT_PLAN,
+      (capture, rect, anchor) => port.send({ type: "capture", capture, rect, anchor }),
+      (reason) => port.send({ type: "refused", reason }),
+      () => paint(items, drawings)
+    );
+    function paint(next, nextDrawings) {
       items = next;
+      drawings = nextDrawings;
       document.querySelectorAll(".rev-marked,.rev-committed").forEach((el) => {
         el.classList.remove("rev-marked", "rev-committed");
         el.removeAttribute("data-rev");
@@ -107,8 +807,8 @@
         byAnchor[it.anchor] = it;
       });
       const marked = [];
-      document.querySelectorAll(SELECTOR).forEach((el) => {
-        const a = anchorFor(el);
+      const all2 = markables(SELECTOR, NOT_PLAN);
+      all2.forEach(({ el, anchor: a }) => {
         const it = byAnchor[a];
         if (!it) return;
         const glyph = document.createElement("span");
@@ -126,6 +826,12 @@
       });
       const found = marked.map((m) => ({ p: { anchor: m.a, section: headingOf(m.el), label: labelFor(m.el) }, at: m.el }));
       paintQuotes(found);
+      const lost = [];
+      draw.paint(drawings, all2).forEach((d) => {
+        const p = { anchor: d.anchor, section: "", label: "", outcome: d.outcome };
+        if (d.el && d.outcome !== "missing" && d.outcome !== "ambiguous") found.push({ p, at: d.el });
+        else lost.push(p);
+      });
       const pos = found.map((s) => {
         if (isRange(s.at)) return s.at;
         const r = document.createRange();
@@ -134,7 +840,7 @@
       });
       const order = found.map((_, i) => i).sort((x, y) => pos[x].compareBoundaryPoints(Range.START_TO_START, pos[y]));
       spots = order.map((i) => found[i]);
-      port.send({ type: "placed", items: spots.map((s) => s.p) });
+      port.send({ type: "placed", items: spots.map((s) => s.p).concat(lost) });
     }
     function paintQuotes(found) {
       qRanges = /* @__PURE__ */ Object.create(null);
@@ -153,7 +859,7 @@
         (tints[m.tint] = tints[m.tint] || []).push(h.range);
       });
       if (!HL) return;
-      TINTS.forEach((c) => {
+      TINTS2.forEach((c) => {
         CSS.highlights.delete("rev-q-" + c);
         if (!tints[c]) return;
         const hl = new Highlight();
@@ -183,6 +889,11 @@
       setTimeout(() => el.classList.remove("rev-flash"), 1200);
     }
     function reveal(anchor, nth) {
+      const d = DRAWING.test(anchor) ? drawings.filter((x) => x.anchor === anchor)[0] : null;
+      if (d && spots.some((x) => x.p.anchor === anchor && x.p.outcome === "hidden")) {
+        draw.show(d);
+        paint(items, drawings);
+      }
       const s = spots.filter((x) => x.p.anchor === anchor)[nth];
       if (!s) return;
       const range = isRange(s.at) ? s.at : null;
@@ -194,7 +905,7 @@
     }
     function textIndex() {
       const nodes = [];
-      let text = "", prev = null, brk = false;
+      let text2 = "", prev = null, brk = false;
       const w = document.createTreeWalker(body, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
       for (let n = w.nextNode(); n; n = w.nextNode()) {
         if (n.nodeType === 1) {
@@ -203,13 +914,13 @@
         }
         const t = n;
         if (!t.parentElement || t.parentElement.closest(NOT_TEXT)) continue;
-        if (prev && (brk || !inlineBetween(prev, t))) text += "\n";
+        if (prev && (brk || !inlineBetween(prev, t))) text2 += "\n";
         brk = false;
-        nodes.push({ node: t, start: text.length });
-        text += t.data;
+        nodes.push({ node: t, start: text2.length });
+        text2 += t.data;
         prev = t;
       }
-      return { nodes, text };
+      return { nodes, text: text2 };
     }
     function inlineBetween(a, b) {
       const up = [];
@@ -276,8 +987,8 @@
       const section = headingOf(first);
       const n = quoteHits(idx, section, quote).length;
       if (n > 1) return { refuse: "repeated", quote, count: n };
-      const box = range.getBoundingClientRect();
-      return { anchor: quoteAnchor(section, quote), section, label: clip(quote, 70), quote, range: rangeAt(idx, s, e), rect: { left: box.left, bottom: box.bottom } };
+      const box2 = range.getBoundingClientRect();
+      return { anchor: quoteAnchor(section, quote), section, label: clip(quote, 70), quote, range: rangeAt(idx, s, e), rect: { left: box2.left, bottom: box2.bottom } };
     }
     function highlightAt(ev) {
       for (const a in qRanges) {
@@ -301,8 +1012,9 @@
       return ev.detail === 1 && !!downAt && Math.abs(ev.clientX - downAt.x) + Math.abs(ev.clientY - downAt.y) > 3;
     }
     function onClick(ev) {
+      if (!started) return;
       const el0 = ev.target;
-      if (el0.closest && el0.closest(CHROME + ", .rev-pop")) return;
+      if (el0.closest && el0.closest(CHROME + ", .rev-pop, .rev-ink")) return;
       if (!on) {
         port.send({ type: "dismiss" });
         return;
@@ -314,7 +1026,7 @@
         return;
       }
       if (!t) {
-        const el = el0.closest(SELECTOR);
+        const el = el0.closest(OWN) && !el0.closest("a[href]") ? null : el0.closest(SELECTOR);
         if (!el) {
           port.send({ type: "dismiss" });
           return;
@@ -351,9 +1063,11 @@
           on = m.on;
           open = m.open;
           body.classList.toggle("rev-on", on);
+          tool = on && m.draw;
+          draw.setTool(tool && started);
           break;
         case "paint":
-          paint(m.items);
+          paint(m.items, m.drawings);
           break;
         case "focus": {
           const h = m.anchor === null ? null : picked && picked.a === m.anchor ? picked.range : qRanges[m.anchor] ? qRanges[m.anchor].range : null;
@@ -365,69 +1079,286 @@
           break;
       }
     });
-    port.send({ type: "ready" });
+    whenDiagramsDrawn(() => {
+      started = true;
+      draw.setTool(tool);
+      port.send({ type: "ready" });
+    });
+  }
+  function whenDiagramsDrawn(go) {
+    const deadline = Date.now() + 5e3;
+    const check = () => {
+      const pending = Array.prototype.some.call(document.querySelectorAll(".mermaid"), (el) => !el.querySelector(":scope > svg"));
+      if (!pending || Date.now() >= deadline) go();
+      else setTimeout(check, 100);
+    };
+    check();
+  }
+
+  // src/original.ts
+  var SVGNS2 = "http://www.w3.org/2000/svg";
+  function originalView(r, doc) {
+    const mk = (tag, attrs, text2) => {
+      const n = doc.createElementNS(SVGNS2, tag);
+      for (const k in attrs) n.setAttribute(k, String(attrs[k]));
+      if (text2) n.textContent = text2;
+      return n;
+    };
+    const items = r.context.items, runs = runsOf(r.context) || [];
+    const labels = items.reduce((all2, it) => all2.concat(it.labels || []), []).filter((l) => !runs.some((t) => overlaps(t.box, l.box)));
+    const placed = runs.concat(labels);
+    const b = r.bbox, pad = 24;
+    let x0 = b[0] - pad, y0 = b[1] - pad, x1 = b[0] + b[2] + pad, y1 = b[1] + b[3] + pad;
+    placed.forEach((t) => {
+      x0 = Math.min(x0, t.box[0] - 4);
+      y0 = Math.min(y0, t.box[1] - 4);
+      x1 = Math.max(x1, t.box[0] + t.box[2] + 4);
+      y1 = Math.max(y1, t.box[1] + t.box[3] + 4);
+    });
+    if (r.context.truncated) y1 += 18;
+    const vb = [x0, y0, x1 - x0, y1 - y0];
+    const out = mk("svg", { viewBox: vb.join(" "), width: vb[2], height: vb[3], class: "rev-original-svg", role: "img" });
+    out.appendChild(mk("title", {}, "What lay under this drawing on revision " + r.plan_revision));
+    items.forEach((it) => out.appendChild(mk("rect", { x: it.box[0], y: it.box[1], width: it.box[2], height: it.box[3], class: "rev-orig-box" })));
+    runs.forEach((t) => {
+      const [x, y, w, h] = t.box;
+      out.appendChild(mk("text", { x, y: r1(y + 0.8 * h), "font-size": r1(h / 1.2), textLength: w, lengthAdjust: "spacingAndGlyphs", class: "rev-orig-run" }, t.text));
+    });
+    labels.forEach((l) => {
+      out.appendChild(mk("rect", { x: l.box[0], y: l.box[1], width: l.box[2], height: l.box[3], class: "rev-orig-label-box" }));
+      out.appendChild(mk("text", { x: l.box[0] + 2, y: l.box[1] + Math.min(l.box[3], 14) - 3, class: "rev-orig-label" }, l.text));
+    });
+    const p = inkPaths(inkLine(r.ellipse), [0, 0]);
+    const g = mk("g", { class: "rev-orig-ink" });
+    g.appendChild(mk("path", { d: p.sweep, fill: "currentColor", stroke: "none" }));
+    g.appendChild(mk("path", { d: p.hair, fill: "none", stroke: "currentColor", "stroke-width": 1, "stroke-linecap": "round", "stroke-linejoin": "round" }));
+    out.appendChild(g);
+    if (r.context.truncated) out.appendChild(mk("text", { x: vb[0] + 4, y: vb[1] + vb[3] - 6, class: "rev-orig-cut" }, "Context truncated: some of what lay here was not kept."));
+    const view = doc.createDocumentFragment();
+    view.appendChild(out);
+    const enclosed = r.targets.map((t) => t.anchor);
+    const unplaced = items.filter((it) => it.text && enclosed.indexOf(it.anchor) >= 0 && !placed.some((t) => overlaps(t.box, it.box)));
+    if (unplaced.length) {
+      const list = doc.createElement("div");
+      list.className = "rev-orig-unplaced";
+      const head = doc.createElement("div");
+      head.className = "rev-orig-unplaced-h";
+      head.textContent = "Drawn around (where these words sat was not recorded):";
+      list.appendChild(head);
+      unplaced.forEach((it) => {
+        const q = doc.createElement("blockquote");
+        q.textContent = it.text;
+        list.appendChild(q);
+      });
+      view.appendChild(list);
+    }
+    return view;
   }
 
   // src/state.ts
-  function stampOf(m) {
-    return m && +(m.updated_at || 0) || 0;
+  var ACTS = ["submit", "reopen", "accept"];
+  var DRAFT = "draft:";
+  var OP = "op:";
+  var EXPORT = "export";
+  var enc = encodeURIComponent;
+  var accountPrefix = (account) => "ox-review:" + enc(account) + ":";
+  var has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+  function obj3(v) {
+    return typeof v === "object" && v !== null && !Array.isArray(v);
   }
-  function mergeState(x, y) {
-    const out = { marks: {}, tombs: {} };
-    const keys = {};
-    [x, y].forEach((s) => {
-      Object.keys(s.marks || {}).forEach((k) => {
-        keys[k] = 1;
-      });
-      Object.keys(s.tombs || {}).forEach((k) => {
-        keys[k] = 1;
-      });
-    });
-    Object.keys(keys).forEach((k) => {
-      let best = null;
-      [x, y].forEach((s) => {
-        const m = (s.marks || {})[k];
-        if (m && (!best || stampOf(m) > stampOf(best))) best = m;
-      });
-      const tomb = Math.max(+(x.tombs || {})[k] || 0, +(y.tombs || {})[k] || 0);
-      if (best && (!tomb || stampOf(best) > tomb)) out.marks[k] = best;
-      else if (tomb) out.tombs[k] = tomb;
-    });
+  function read(storage, key) {
+    try {
+      const s = storage.getItem(key);
+      return s === null ? null : JSON.parse(s);
+    } catch (e) {
+      return null;
+    }
+  }
+  function write(storage, key, v) {
+    const s = JSON.stringify(v);
+    try {
+      storage.setItem(key, s);
+      return storage.getItem(key) === s;
+    } catch (e) {
+      return false;
+    }
+  }
+  function unset(storage, key) {
+    try {
+      storage.removeItem(key);
+    } catch (e) {
+    }
+  }
+  function keysUnder(storage, prefix) {
+    const out = [];
+    try {
+      for (let i = 0; i < storage.length; i++) {
+        const k = storage.key(i);
+        if (k !== null && k.indexOf(prefix) === 0) out.push(k);
+      }
+    } catch (e) {
+    }
     return out;
   }
-  function pruneTombs(t, now, ttl) {
-    const out = {};
-    Object.keys(t).forEach((k) => {
-      if (now - t[k] < ttl) out[k] = t[k];
+  function asMark(v) {
+    if (!obj3(v) || typeof v.anchor !== "string" || STATUSES.indexOf(v.status) < 0 || typeof v.at !== "number") return null;
+    const m = { anchor: v.anchor, status: v.status, at: v.at };
+    ["section", "label", "note", "quote"].forEach((k) => {
+      if (typeof v[k] === "string") m[k] = v[k];
     });
-    return out;
-  }
-  function ackState(s, box) {
-    const out = { marks: { ...s.marks }, tombs: { ...s.tombs } };
-    (box.items || []).forEach((it) => {
-      const at = Math.max(+(box.stamps || {})[it.anchor] || 0, 1);
-      if (out.marks[it.anchor] && stampOf(out.marks[it.anchor]) <= at) delete out.marks[it.anchor];
-      if (!out.marks[it.anchor]) out.tombs[it.anchor] = Math.max(out.tombs[it.anchor] || 0, at);
-    });
-    return out;
-  }
-  function roundAcked(box, data) {
-    return !data || data.round_id === void 0 || data.round_id === box.id;
-  }
-  function syncMessage(verb, data) {
-    data = data || {};
-    let m;
-    if (data.saved === void 0) m = { kind: "ok", text: verb + " · received by the author’s machine" };
-    else if (data.saved === false) m = { kind: "err", text: "Not saved — the author’s machine could not store it" };
-    else if (data.pushed) m = { kind: "ok", text: verb + " · synced to your team" };
-    else m = { kind: "warn", text: "Saved on the author’s machine · not yet synced (will retry)" };
-    if (data.notified === false && !data.duplicate) m.text += " · the plan’s authoring coworker was not notified automatically — tell them directly";
+    if (v.region !== void 0 && !checkRegion(v.region) && v.anchor === "q-" + v.region.id) m.region = v.region;
     return m;
   }
-  function sameItems(a, b) {
-    return JSON.stringify(a) === JSON.stringify(b);
+  function asEntry(v) {
+    if (!obj3(v) || typeof v.id !== "string" || ACTS.indexOf(v.act) < 0 || typeof v.body !== "string" || typeof v.at !== "number" || !obj3(v.stamps)) return null;
+    const stamps = /* @__PURE__ */ Object.create(null);
+    Object.keys(v.stamps).forEach((a) => {
+      const s = v.stamps[a];
+      if (typeof s === "number") stamps[a] = s;
+    });
+    return { id: v.id, act: v.act, body: v.body, at: v.at, stamps };
   }
-  function newRoundId() {
+  function openStore(storage, account, plan) {
+    const prefix = accountPrefix(account) + enc(plan) + ":";
+    const memory = /* @__PURE__ */ Object.create(null);
+    let last = 0;
+    function stored(anchor) {
+      const m = asMark(read(storage, prefix + DRAFT + enc(anchor)));
+      return m && m.anchor === anchor ? m : null;
+    }
+    function entries() {
+      const out = [];
+      keysUnder(storage, prefix + OP).forEach((k) => {
+        const e = asEntry(read(storage, k));
+        if (e && prefix + OP + enc(e.id) === k) out.push(e);
+      });
+      return out.sort((x, y) => x.at - y.at || (x.id < y.id ? -1 : x.id > y.id ? 1 : 0));
+    }
+    function now() {
+      last = Math.max(Date.now(), last + 1);
+      return last;
+    }
+    return {
+      account,
+      prefix,
+      drafts() {
+        const out = /* @__PURE__ */ Object.create(null);
+        keysUnder(storage, prefix + DRAFT).forEach((k) => {
+          const m = asMark(read(storage, k));
+          if (m && prefix + DRAFT + enc(m.anchor) === k) out[m.anchor] = m;
+        });
+        Object.keys(memory).forEach((a) => {
+          if (!out[a] || memory[a].at > out[a].at) out[a] = memory[a];
+        });
+        return Object.keys(out).map((a) => out[a]).sort((x, y) => x.at - y.at);
+      },
+      save(m) {
+        let at = now();
+        const prev = stored(m.anchor);
+        if (prev) at = Math.max(at, prev.at + 1);
+        if (memory[m.anchor]) at = Math.max(at, memory[m.anchor].at + 1);
+        entries().forEach((e) => {
+          if (has(e.stamps, m.anchor)) at = Math.max(at, e.stamps[m.anchor] + 1);
+        });
+        last = at;
+        const mark = { anchor: m.anchor, status: m.status, at };
+        ["section", "label", "note", "quote"].forEach((k) => {
+          if (m[k] !== void 0) mark[k] = m[k];
+        });
+        if (m.region) mark.region = m.region;
+        if (write(storage, prefix + DRAFT + enc(m.anchor), mark)) {
+          delete memory[m.anchor];
+          return true;
+        }
+        memory[m.anchor] = mark;
+        return false;
+      },
+      remove(anchor) {
+        unset(storage, prefix + DRAFT + enc(anchor));
+        delete memory[anchor];
+      },
+      unsaved(anchor) {
+        if (!memory[anchor]) return false;
+        const s = stored(anchor);
+        return !s || memory[anchor].at > s.at;
+      },
+      entries,
+      freeze(act, id, body, stamps) {
+        const e = { id, act, body, at: now(), stamps };
+        return write(storage, prefix + OP + enc(id), e) ? e : null;
+      },
+      owned(e) {
+        Object.keys(e.stamps).forEach((a) => {
+          const s = stored(a);
+          if (s && s.at <= e.stamps[a]) unset(storage, prefix + DRAFT + enc(a));
+          if (memory[a] && memory[a].at <= e.stamps[a]) delete memory[a];
+        });
+        unset(storage, prefix + OP + enc(e.id));
+      },
+      drop(e) {
+        unset(storage, prefix + OP + enc(e.id));
+      },
+      exportId(items) {
+        const prev = read(storage, prefix + EXPORT);
+        const id = obj3(prev) && typeof prev.id === "string" && JSON.stringify(prev.items) === JSON.stringify(items) ? prev.id : newId();
+        write(storage, prefix + EXPORT, { id, items });
+        return id;
+      }
+    };
+  }
+  function queued(entries, m) {
+    return entries.some((e) => has(e.stamps, m.anchor) && e.stamps[m.anchor] === m.at);
+  }
+  function wireItem(m) {
+    const o = { anchor: m.anchor, section: m.section || "", label: m.label || "" };
+    if (m.quote) o.quote = m.quote;
+    o.status = m.status;
+    o.note = m.note || "";
+    if (m.region) o.region = m.region;
+    return o;
+  }
+  function roundItems(items) {
+    return items.some((it) => it.region) ? { items: [], marks: items } : { items };
+  }
+  function request(id, reviewer, rest) {
+    const o = { id };
+    if (reviewer) o.reviewer = reviewer;
+    return JSON.stringify(Object.assign(o, rest));
+  }
+  function submitBody(id, reviewer, marks) {
+    return request(id, reviewer, roundItems(marks.map(wireItem)));
+  }
+  function reopenBody(id, reviewer, item, note) {
+    return request(id, reviewer, roundItems([wireItem({ ...item, status: "request-change", note: note || "reopened by reviewer" })]));
+  }
+  function acceptBody(id, reviewer, anchor) {
+    return request(id, reviewer, { anchor, state: "verified", note: "accepted by reviewer" });
+  }
+  async function deliver(store, transport, report, stopped) {
+    const tried = /* @__PURE__ */ Object.create(null);
+    for (; ; ) {
+      const e = store.entries().filter((x) => !tried[x.id])[0];
+      if (!e || stopped()) return;
+      tried[e.id] = true;
+      let r;
+      try {
+        r = await transport.send({ account: store.account, id: e.id, kind: e.act === "accept" ? "resolution" : "round", body: e.body });
+      } catch (err) {
+        r = { state: "failed", message: err instanceof Error ? err.message : String(err) };
+      }
+      if (r.state === "owned" && r.id !== e.id) r = { state: "failed", message: "the server acknowledged a different operation" };
+      if (r.state === "owned") store.owned(e);
+      else if (r.state === "refused") store.drop(e);
+      report(e, r);
+      if (r.state === "failed" || r.state === "offline") return;
+    }
+  }
+  function syncMessage(verb, r) {
+    const m = r.synced ? { kind: "ok", text: verb + " · synced to your team" } : { kind: "warn", text: "Saved on the author’s machine · not yet synced (will retry)" };
+    if (r.warning) m.text += " · " + r.warning;
+    return m;
+  }
+  function newId() {
     const c = typeof crypto !== "undefined" ? crypto : null;
     if (c && c.randomUUID) return c.randomUUID();
     const b = new Uint8Array(16);
@@ -436,6 +1367,33 @@
     else for (let i = 0; i < 16; i++) b[i] = Math.floor(Math.random() * 256);
     for (let j = 0; j < 16; j++) s += ("0" + b[j].toString(16)).slice(-2);
     return s;
+  }
+  function migrateLegacy(storage, slug, store) {
+    const KEY = "ox-plan-fb:" + slug;
+    const marks = read(storage, KEY), box2 = read(storage, KEY + ":outbox"), exp = read(storage, KEY + ":export");
+    if (marks === null && box2 === null && exp === null) return;
+    let ok = true;
+    const current = store.drafts();
+    if (obj3(marks)) {
+      Object.keys(marks).forEach((a) => {
+        const v = marks[a];
+        const m = asMark(obj3(v) ? { ...v, anchor: a, at: Math.max(+v.updated_at || 0, 1) } : null);
+        if (!m || current.some((d) => d.anchor === a && d.at >= m.at)) return;
+        ok = write(storage, store.prefix + DRAFT + enc(a), m) && ok;
+      });
+    }
+    if (obj3(box2) && typeof box2.id === "string" && Array.isArray(box2.items)) {
+      const stamps = /* @__PURE__ */ Object.create(null);
+      const s = obj3(box2.stamps) ? box2.stamps : {};
+      box2.items.forEach((it) => {
+        if (obj3(it) && typeof it.anchor === "string") stamps[it.anchor] = Math.max(+s[it.anchor] || 0, 1);
+      });
+      const body = JSON.stringify({ id: box2.id, slug, reviewer: box2.reviewer, items: box2.items });
+      const e = { id: box2.id, act: "submit", body, at: Date.parse(box2.created_at) || Date.now(), stamps };
+      ok = write(storage, store.prefix + OP + enc(e.id), e) && ok;
+    }
+    if (obj3(exp)) ok = write(storage, store.prefix + EXPORT, exp) && ok;
+    if (ok) ["", ":tombs", ":outbox", ":export"].forEach((k) => unset(storage, KEY + k));
   }
 
   // src/host-controls.ts
@@ -446,11 +1404,21 @@
     { id: "comment", glyph: "◌" }
   ];
   var HL_TINT = { "approve": "sage", "request-change": "amber", "flag": "red", "comment": "gold" };
-  var TOMB_TTL = 7 * 24 * 3600 * 1e3;
+  var stateTint = (state) => state === "addressed" || state === "verified" ? "sage" : state === "wontfix" ? "faint" : "amber";
+  var DRAW_REFUSED = {
+    "no-target": "Nothing in that oval can take a comment. Draw around a paragraph, an item, a row or part of a diagram.",
+    "too-large": "That oval holds too much of the plan to keep. Draw around less of it.",
+    "too-small": "Drag to draw a larger oval around what you mean.",
+    "layout-changed": "The page changed while you drew. Draw the oval again."
+  };
+  var REVISION2 = /^sha256:[0-9a-f]{64}$/;
+  var WHOLE = { a: "plan", section: "", label: "Whole plan" };
   var BUBBLE = '<svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 2.5h10A1.5 1.5 0 0 1 14.5 4v6a1.5 1.5 0 0 1-1.5 1.5H7.5L4 14.5v-3H3A1.5 1.5 0 0 1 1.5 10V4A1.5 1.5 0 0 1 3 2.5z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>';
   function esc(s) {
-    return (s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
+    return (s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
   }
+  var STATE_TAG = { addressed: "addressed", verified: "verified", wontfix: "wontfix" };
+  var TEXT_FIELDS = ["section", "label", "quote", "note", "reviewer", "resolutionNote"];
   function glyphFor(id) {
     for (let i = 0; i < STATUS.length; i++) if (STATUS[i].id === id) return STATUS[i].glyph;
     return "◌";
@@ -470,111 +1438,60 @@
   function mountHostControls(port, opts) {
     const body = document.body;
     const slug = opts.slug;
-    const base = opts.endpoint;
-    const token = opts.token;
-    const live = base !== "";
-    const KEY = "ox-plan-fb:" + slug;
-    const ON_KEY = "ox-plan-rev-on:" + slug;
-    const MIN_KEY = "ox-plan-rail-min:" + slug;
-    const TOMB_KEY = KEY + ":tombs";
-    const OUTBOX_KEY = KEY + ":outbox";
-    const EXPORT_KEY = KEY + ":export";
-    const SYNC_KEY = "ox-plan-fb-sync:" + slug;
-    const stored = readStored();
-    let marks = stored.marks;
-    let tombs = stored.tombs;
-    const committed = /* @__PURE__ */ Object.create(null);
-    opts.committed.forEach((x) => {
-      (committed[x.anchor] = committed[x.anchor] || []).push(x);
-    });
-    let reviewer = (localStorage.getItem("ox-plan-reviewer") || "").trim();
-    let on = false;
-    let pendingReload = false;
-    let offline = false;
-    let probeTimer = null;
-    let posting = 0;
-    let reloadAfterPost = false;
-    let sending = false;
-    let placed = [];
-    let unplaced = [];
-    let lastStamp = 0;
-    function nextStamp() {
-      const n = Date.now();
-      lastStamp = n > lastStamp ? n : lastStamp + 1;
-      return lastStamp;
-    }
-    function readJSON(k) {
-      try {
-        return JSON.parse(localStorage.getItem(k)) || null;
-      } catch (e) {
-        return null;
-      }
-    }
-    function readStored() {
-      return { marks: readJSON(KEY) || {}, tombs: readJSON(TOMB_KEY) || {} };
-    }
-    function save() {
-      const m = mergeState({ marks, tombs }, readStored());
-      marks = m.marks;
-      tombs = pruneTombs(m.tombs, Date.now(), TOMB_TTL);
-      try {
-        localStorage.setItem(KEY, JSON.stringify(marks));
-        localStorage.setItem(TOMB_KEY, JSON.stringify(tombs));
-      } catch (e) {
-      }
-    }
-    function removeMark(a) {
-      delete marks[a];
-      tombs[a] = nextStamp();
-    }
-    function draft(a) {
-      return Object.prototype.hasOwnProperty.call(marks, a) ? marks[a] : void 0;
-    }
-    function readOutbox() {
-      const o = readJSON(OUTBOX_KEY);
-      return o && o.id && o.items ? o : null;
-    }
-    function writeOutbox(o) {
-      try {
-        if (o) localStorage.setItem(OUTBOX_KEY, JSON.stringify(o));
-        else localStorage.removeItem(OUTBOX_KEY);
-        return true;
-      } catch (e) {
-        return false;
-      }
-    }
-    function post(path, payload, ok, fail) {
-      if (offline) {
-        offlineNotice();
-        if (fail) fail("offline", true);
-        return;
-      }
-      posting++;
-      fetch(base + path, { method: "POST", headers: { "Content-Type": "application/json", "X-Review-Token": token }, body: JSON.stringify(payload) }).then((r) => {
-        if (!r.ok) {
-          return r.text().catch(() => "").then((t) => {
-            throw new Error("HTTP " + r.status + (t.trim() ? " — " + clip(t.trim(), 120) : ""));
-          });
-        }
-        return r.json().catch(() => ({}));
-      }).then((data) => {
-        if (ok) ok(data || {});
-      }).catch((e) => {
-        if (e instanceof TypeError) {
-          setOffline(true);
-          offlineNotice();
-          if (fail) fail("offline", true);
+    const transport = opts.transport;
+    const live = !!transport;
+    const store = openStore(window.localStorage, opts.account, opts.plan);
+    const tab = encodeURIComponent(opts.plan);
+    const ON_KEY = "ox-plan-rev-on:" + tab;
+    const MIN_KEY = "ox-plan-rail-min:" + tab;
+    const SYNC_KEY = "ox-plan-fb-sync:" + tab;
+    const off = new AbortController();
+    const signal = off.signal;
+    let problems = opts.problems || 0;
+    let invalid = 0;
+    let committed = /* @__PURE__ */ Object.create(null);
+    function setCommitted(items) {
+      committed = /* @__PURE__ */ Object.create(null);
+      invalid = 0;
+      items.forEach((x) => {
+        if (!x || typeof x.anchor !== "string" || STATUSES.indexOf(x.status) < 0 || STATES.indexOf(x.state) < 0 || TEXT_FIELDS.some((k) => x[k] !== void 0 && typeof x[k] !== "string")) {
+          invalid++;
           return;
         }
-        if (fail) fail(e.message, false);
-        else showSync("err", "Request failed: " + e.message);
-      }).then(() => {
-        posting--;
-        if (!posting && reloadAfterPost) {
-          reloadAfterPost = false;
-          reloadWhenIdle();
+        if (x.region !== void 0 && (checkRegion(x.region) || x.anchor !== "q-" + x.region.id)) {
+          invalid++;
+          x = Object.assign({}, x);
+          delete x.region;
         }
+        (committed[x.anchor] = committed[x.anchor] || []).push(x);
       });
+    }
+    setCommitted(opts.committed);
+    let named = "";
+    if (!opts.reviewer) try {
+      named = (localStorage.getItem("ox-plan-reviewer") || "").trim();
+    } catch (e) {
+    }
+    function who() {
+      return opts.reviewer || named;
+    }
+    let on = false;
+    let offline = false;
+    let destroyed = false;
+    let inflight = 0;
+    let flushing = false, again = false;
+    let waiter = null;
+    let ds = /* @__PURE__ */ Object.create(null);
+    let placed = [];
+    let unplaced = [];
+    const revision = opts.revision && REVISION2.test(opts.revision) ? opts.revision : "";
+    let tool = false;
+    let pending = null;
+    const ownedDrawings = /* @__PURE__ */ new Set();
+    function regionOf(a) {
+      if (pending && "q-" + pending.id === a) return pending;
+      if (ds[a] && ds[a].region) return ds[a].region;
+      return (committed[a] || []).map((x) => x.region).filter((r) => r)[0];
     }
     function committedState(a) {
       const arr = committed[a] || [];
@@ -582,10 +1499,10 @@
     }
     function paintItems() {
       const out = [];
-      Object.keys(committed).concat(Object.keys(marks)).forEach((a, i, all) => {
-        if (all.indexOf(a) !== i || !/^[hq][0-9a-f]{8}$/.test(a)) return;
+      Object.keys(committed).concat(Object.keys(ds)).forEach((a, i, all2) => {
+        if (all2.indexOf(a) !== i || !/^[hq][0-9a-f]{8}$/.test(a)) return;
         const carr = committed[a] || [];
-        const c = carr.length ? repOf(carr) : null, m = draft(a);
+        const c = carr.length ? repOf(carr) : null, m = ds[a];
         let it;
         if (m) {
           it = { anchor: a, kind: "unsent", status: m.status, glyph: glyphFor(m.status), tint: HL_TINT[m.status] || "gold" };
@@ -596,7 +1513,7 @@
             status: c.status,
             state: c.state,
             glyph: c.state === "addressed" || c.state === "verified" ? "✓" : c.state === "wontfix" ? "—" : glyphFor(c.status),
-            tint: c.state === "addressed" || c.state === "verified" ? "sage" : c.state === "wontfix" ? "faint" : "amber"
+            tint: stateTint(c.state)
           };
         } else return;
         const q = m && m.quote ? m : carr.filter((x) => x.quote)[0];
@@ -605,22 +1522,52 @@
           it.section = q.section || "";
           if (q.label) it.label = q.label;
         }
-        out.push(it);
+        const ok = paintItem(it);
+        if (ok) out.push(ok);
+      });
+      return out;
+    }
+    function paintDrawings() {
+      const out = [];
+      const waiting = store.entries();
+      Object.keys(committed).concat(Object.keys(ds), pending ? ["q-" + pending.id] : []).forEach((a, i, all2) => {
+        const r = all2.indexOf(a) === i && DRAWING.test(a) ? regionOf(a) : void 0;
+        if (!r) return;
+        const m = ds[a], carr = committed[a] || [];
+        const d = drawingPaint({
+          anchor: a,
+          kind: carr.length || ownedDrawings.has(a) || waiting.some((e) => e.stamps[a] !== void 0) ? "committed" : "unsent",
+          tint: m ? HL_TINT[m.status] || "gold" : carr.length ? stateTint(repOf(carr).state) : "gold",
+          ellipse: r.ellipse,
+          targets: r.targets.map((t) => ({ anchor: t.anchor, box: t.box, nth: t.nth, of: t.of })),
+          open: r.layout.open,
+          checked: r.layout.checked
+        });
+        if (d) out.push(d);
       });
       return out;
     }
     function paint() {
-      const n = Object.keys(marks).length;
-      countEl.textContent = n ? n + " unsent" : "";
-      port.send({ type: "paint", items: paintItems() });
-    }
-    function onPlaced(items) {
-      placed = items;
-      const seen = /* @__PURE__ */ Object.create(null);
-      placed.forEach((p) => {
-        seen[p.anchor] = true;
+      if (destroyed) return;
+      place();
+      ds = /* @__PURE__ */ Object.create(null);
+      store.drafts().forEach((m) => {
+        ds[m.anchor] = m;
       });
-      unplaced = Object.keys(committed).concat(Object.keys(marks)).filter((a, i, all) => !seen[a] && all.indexOf(a) === i);
+      const n = Object.keys(ds).length;
+      countEl.textContent = n ? n + " unsent" : "";
+      port.send({ type: "paint", items: paintItems(), drawings: paintDrawings() });
+    }
+    let outcome = /* @__PURE__ */ Object.create(null);
+    function onPlaced(items) {
+      outcome = /* @__PURE__ */ Object.create(null);
+      items.forEach((p) => {
+        if (p.outcome) outcome[p.anchor] = p.outcome;
+      });
+      const seen = /* @__PURE__ */ Object.create(null);
+      seen[WHOLE.a] = true;
+      placed = items.filter((p) => p.outcome !== "missing" && p.outcome !== "ambiguous" && !seen[p.anchor] && (seen[p.anchor] = true));
+      unplaced = Object.keys(committed).concat(Object.keys(ds)).filter((a, i, all2) => !seen[a] && all2.indexOf(a) === i);
       const orphans = [];
       Object.keys(committed).forEach((a) => {
         if (!seen[a]) committed[a].forEach((x) => orphans.push(x));
@@ -635,12 +1582,17 @@
         orphanBar = null;
       }
       const open = orphans.filter((o) => o.state === "open");
-      if (!open.length) return;
+      const n = problems + invalid;
+      if (!open.length && !n) return;
       const bar2 = orphanBar = document.createElement("div");
       bar2.className = "rev-orphans";
-      const items = open.map((o) => "<li><strong>" + esc(o.status) + "</strong> " + esc(o.label || o.anchor) + (o.note ? " — " + esc(o.note) : "") + "</li>").join("");
-      bar2.innerHTML = '<div class="rev-orphans-h">⚠ ' + open.length + " review note(s) no longer anchored (the text changed) — still open:</div><ul>" + items + '</ul><button class="rev-orphans-x">dismiss</button>';
-      document.body.appendChild(bar2);
+      let html = n ? '<div class="rev-orphans-h">⚠ This review could not be fully read or holds conflicting copies (' + n + " problem(s)): notes may be missing or shown resolved.</div>" : "";
+      if (open.length) {
+        const items = open.map((o) => "<li><strong>" + esc(o.status) + "</strong> " + esc(o.label || o.anchor) + (o.note ? " — " + esc(o.note) : "") + "</li>").join("");
+        html += '<div class="rev-orphans-h">⚠ ' + open.length + " review note(s) no longer anchored (the text changed) — still open:</div><ul>" + items + "</ul>";
+      }
+      bar2.innerHTML = html + '<button class="rev-orphans-x">dismiss</button>';
+      body.appendChild(bar2);
       bar2.querySelector(".rev-orphans-x").onclick = () => {
         bar2.remove();
         if (orphanBar === bar2) orphanBar = null;
@@ -663,6 +1615,7 @@
       rail.querySelector(".rev-rail-show, .rev-rail-hide").focus();
     }
     function railRows() {
+      const waiting = store.entries();
       const rows = [];
       function add(at, a, section, label, quote) {
         (committed[a] || []).forEach((c) => {
@@ -676,10 +1629,12 @@
             label: c.label || label,
             state: c.state,
             reviewer: c.reviewer || "",
-            unsent: false
+            tag: "",
+            answer: c.state !== "open" && c.resolutionNote ? c.resolutionNote : "",
+            region: c.region
           });
         });
-        const m = draft(a);
+        const m = ds[a];
         if (m) {
           rows.push({
             at,
@@ -690,18 +1645,17 @@
             section: m.section || section,
             label: m.label || label,
             state: "",
-            reviewer: reviewer || "(you)",
-            unsent: true
+            reviewer: who() || "(you)",
+            tag: store.unsaved(a) ? "unsaved" : queued(waiting, m) ? "queued" : "unsent",
+            answer: "",
+            region: m.region
           });
         }
       }
-      const nth = /* @__PURE__ */ Object.create(null);
-      placed.forEach((p) => {
-        const k = nth[p.anchor] = nth[p.anchor] === void 0 ? 0 : nth[p.anchor] + 1;
-        add({ anchor: p.anchor, nth: k }, p.anchor, p.section, p.label, p.quote || "");
-      });
+      add(null, WHOLE.a, WHOLE.section, WHOLE.label, "");
+      placed.forEach((p) => add({ anchor: p.anchor, nth: 0 }, p.anchor, p.section, p.label, p.quote || ""));
       unplaced.forEach((a) => {
-        const m = draft(a);
+        const m = ds[a];
         const its = (committed[a] || []).concat(m ? [m] : []);
         const q = its.filter((x) => x.quote)[0];
         const any = q || its.filter((x) => x.label)[0] || its[0];
@@ -713,9 +1667,16 @@
       if (!rail) {
         rail = document.createElement("aside");
         rail.className = "rev-rail";
-        document.body.appendChild(rail);
+        body.appendChild(rail);
         rail.addEventListener("click", (ev) => {
-          if (ev.target.closest(".rev-rail-show, .rev-rail-hide")) toggleRail();
+          const t = ev.target;
+          if (t.closest(".rev-rail-show, .rev-rail-hide")) toggleRail();
+          const plan2 = t.closest(".rev-rail-plan");
+          if (plan2) {
+            const b = plan2.getBoundingClientRect();
+            openPop(WHOLE, { left: b.left, bottom: b.bottom }, true);
+            popByHost = true;
+          }
         });
       }
       const r = rail;
@@ -732,19 +1693,22 @@
         return;
       }
       const hide = '<button class="rev-rail-hide" title="Hide comments">Hide</button>';
+      const plan = on ? '<button class="rev-rail-plan">+ Comment on the whole plan</button>' : "";
       if (!rows.length) {
-        r.innerHTML = '<div class="rev-rail-h">Comments' + hide + '</div><div class="rev-rail-empty">Click any section, risk, or row — or highlight text — to leave a comment.</div>';
+        r.innerHTML = '<div class="rev-rail-h">Comments' + hide + "</div>" + plan + '<div class="rev-rail-empty">Click any section, risk, or row — or highlight text' + (revision ? ", or Draw around part of the plan" : "") + " — to leave a comment.</div>";
         return;
       }
-      let html = '<div class="rev-rail-h">Comments <span class="rev-rail-n">' + rows.length + "</span>" + hide + '</div><ul class="rev-rail-list">';
+      let html = '<div class="rev-rail-h">Comments <span class="rev-rail-n">' + rows.length + "</span>" + hide + "</div>" + plan + '<ul class="rev-rail-list">';
       rows.forEach((row, i) => {
+        const whole = row.a === WHOLE.a;
         let tag = "";
-        if (row.unsent) tag = '<span class="rev-rail-tag unsent">unsent</span>';
-        else if (row.state && row.state !== "open") tag = '<span class="rev-rail-tag ' + esc(row.state) + '">' + esc(row.state) + "</span>";
-        if (!row.at) tag += '<span class="rev-rail-tag">text changed</span>';
-        const content = (row.quote ? '<div class="rev-rail-quote">' + esc(row.label) + "</div>" : "") + (row.note ? '<div class="rev-rail-note">' + esc(row.note) + "</div>" : row.quote ? "" : '<div class="rev-rail-note muted">' + esc(row.label) + "</div>");
+        if (row.tag) tag = '<span class="rev-rail-tag ' + row.tag + '">' + row.tag + "</span>";
+        else if (STATE_TAG[row.state]) tag = '<span class="rev-rail-tag ' + STATE_TAG[row.state] + '">' + STATE_TAG[row.state] + "</span>";
+        if (!row.at && !whole) tag += outcome[row.a] === "ambiguous" ? '<span class="rev-rail-tag" title="What it was drawn around now appears a different number of times">repeated</span>' : '<span class="rev-rail-tag">text changed</span>';
+        else if (outcome[row.a] === "hidden") tag += '<span class="rev-rail-tag" title="Collapsed or on another tab: click to show it">hidden</span>';
+        const content = (row.quote ? '<div class="rev-rail-quote">' + esc(row.label) + "</div>" : "") + (row.note ? '<div class="rev-rail-note">' + esc(row.note) + "</div>" : row.quote || whole ? "" : '<div class="rev-rail-note muted">' + esc(row.label) + "</div>") + (row.answer ? '<div class="rev-rail-answer">↳ ' + esc(row.answer) + "</div>" : "") + (row.region ? '<button class="rev-rail-orig" title="What lay under this drawing when it was drawn">View original</button>' : "");
         const whoTag = row.reviewer ? '<span class="rev-rail-who">' + esc(row.reviewer) + "</span>" : "";
-        html += '<li class="rev-rail-item" data-i="' + i + '" data-status="' + esc(row.status) + '"><span class="rev-rail-glyph">' + glyphFor(row.status) + '</span><div class="rev-rail-body"><div class="rev-rail-sec"><span class="rev-rail-sec-t">' + esc(row.section || "(plan)") + "</span>" + whoTag + tag + "</div>" + content + "</div></li>";
+        html += '<li class="rev-rail-item" data-i="' + i + '" data-status="' + esc(row.status) + '"><span class="rev-rail-glyph">' + glyphFor(row.status) + '</span><div class="rev-rail-body"><div class="rev-rail-sec"><span class="rev-rail-sec-t">' + esc(whole ? WHOLE.label : row.section || "(plan)") + "</span>" + whoTag + tag + "</div>" + content + "</div></li>";
       });
       html += "</ul>";
       r.innerHTML = html;
@@ -752,57 +1716,69 @@
         li.onclick = (ev) => {
           const row = rows[+li.getAttribute("data-i")];
           if (!row) return;
-          if (!row.at) {
-            openPop({ a: row.a, section: row.section, label: row.label, quote: row.quote }, { left: ev.clientX, bottom: ev.clientY });
+          if (row.region && ev.target.closest(".rev-rail-orig")) {
+            showOriginal(row.region);
             ev.stopPropagation();
             return;
           }
-          port.send({ type: "reveal", anchor: row.at.anchor, nth: row.at.nth });
+          if (row.at) port.send({ type: "reveal", anchor: row.at.anchor, nth: row.at.nth });
+          if (!row.at || DRAWING.test(row.a)) {
+            openPop({ a: row.a, section: row.section, label: row.label, quote: row.quote }, { left: ev.clientX, bottom: ev.clientY });
+            popByHost = true;
+            ev.stopPropagation();
+          }
         };
       });
     }
     let pop = null;
+    let popAbout = null;
+    let popNote = "";
+    let popByHost = false;
     function sendMode() {
-      port.send({ type: "mode", on, open: !!pop });
+      port.send({ type: "mode", on, open: !!pop, draw: tool });
     }
-    function closePop() {
+    function held() {
+      const n = pop ? pop.querySelector(".rev-note") : null;
+      return !!pop && (popByHost || !!n && n.value.trim() !== popNote);
+    }
+    function closePop(replacing) {
+      popByHost = false;
       if (pop) {
         pop.remove();
         pop = null;
         sendMode();
+        popAbout = null;
+        if (pending) {
+          pending = null;
+          paint();
+        }
       }
       port.send({ type: "focus", anchor: null });
-      if (pendingReload) {
-        pendingReload = false;
-        location.reload();
-      }
+      if (!replacing) idle();
     }
-    function openPop(t, rect) {
-      closePop();
+    function openPop(t, rect, fresh) {
+      closePop(true);
+      popAbout = t;
       const a = t.a;
       const cstate = committedState(a);
       const p = pop = document.createElement("div");
       p.className = "rev-pop";
-      const quote = t.quote ? '<div class="rev-quote">' + esc(t.label) + "</div>" : "";
+      const quote = '<div class="' + (t.quote ? "rev-quote" : "rev-about") + '">' + esc(clip(t.label || t.a, 280)) + "</div>";
       port.send({ type: "focus", anchor: a });
-      if (live && (cstate === "addressed" || cstate === "verified")) {
+      if (live && opts.resolve && !fresh && (cstate === "addressed" || cstate === "verified")) {
+        popNote = "";
         p.innerHTML = quote + '<div class="rev-cap">Agent marked this ' + cstate + '.</div><textarea class="rev-note" placeholder="reopen note (optional)"></textarea><div class="rev-row"><button class="rev-accept">Accept</button><button class="rev-reopen">Reopen</button></div>';
         placePop(rect);
         p.querySelector(".rev-accept").onclick = () => {
-          post("/accept", { anchor: a }, (data) => {
-            closePop();
-            reportSync(syncMessage("Accepted", data));
-          });
+          accept(a);
         };
         p.querySelector(".rev-reopen").onclick = () => {
-          post("/reopen", { anchor: a, note: p.querySelector(".rev-note").value.trim() }, (data) => {
-            closePop();
-            reportSync(syncMessage("Reopened", data));
-          });
+          reopen(a, p.querySelector(".rev-note").value.trim());
         };
         return;
       }
-      const existing = draft(a) || { status: "request-change", note: "" };
+      const existing = ds[a] || { status: "request-change", note: "" };
+      popNote = existing.note || "";
       const btns = STATUS.map((s) => '<button data-s="' + s.id + '" class="rev-s' + (existing.status === s.id ? " on" : "") + '">' + s.glyph + " " + s.id + "</button>").join("");
       p.innerHTML = quote + '<div class="rev-row">' + btns + '</div><textarea class="rev-note" placeholder="note (optional)">' + esc(existing.note || "") + '</textarea><div class="rev-row"><button class="rev-save">Save</button><button class="rev-del">Delete</button></div>';
       placePop(rect);
@@ -815,23 +1791,76 @@
         };
       });
       p.querySelector(".rev-save").onclick = () => {
-        const m = { anchor: a, section: t.section, label: t.label, status, note: p.querySelector(".rev-note").value.trim(), updated_at: nextStamp() };
+        const m = { anchor: a, section: t.section, label: t.label, status, note: p.querySelector(".rev-note").value.trim() };
         if (t.quote) m.quote = t.quote;
-        marks[a] = m;
-        save();
+        const r = regionOf(a);
+        if (r) m.region = r;
+        const kept = store.save(m);
+        pending = null;
         paint();
         closePop();
+        if (!kept) showSync("err", "This browser could not save your note: it lives in this tab only and is lost when the tab closes. Free up browser storage, then save it again.");
       };
       p.querySelector(".rev-del").onclick = () => {
-        removeMark(a);
-        save();
+        store.remove(a);
+        pending = null;
         paint();
         closePop();
       };
     }
+    let original = null;
+    function closeOriginal() {
+      if (original) {
+        original.remove();
+        original = null;
+      }
+    }
+    function showOriginal(r) {
+      closeOriginal();
+      const el = original = document.createElement("div");
+      el.className = "rev-original";
+      el.setAttribute("role", "dialog");
+      el.setAttribute("aria-label", "The original drawing");
+      const head = document.createElement("div");
+      head.className = "rev-original-h";
+      const l = r.layout;
+      head.textContent = "Drawn on revision " + r.plan_revision.slice(7, 19) + " at " + l.viewport.join(" × ") + ", " + l.theme + (revision ? r.plan_revision === revision ? " · the revision shown" : " · not the revision shown" : "");
+      const x = document.createElement("button");
+      x.className = "rev-original-x";
+      x.textContent = "Close";
+      x.onclick = closeOriginal;
+      head.appendChild(x);
+      el.appendChild(head);
+      el.appendChild(originalView(r, document));
+      body.appendChild(el);
+    }
+    function box2() {
+      return opts.frame ? opts.frame.getBoundingClientRect() : { left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight };
+    }
+    function toHost(r) {
+      const b = box2();
+      return {
+        left: Math.min(Math.max(r.left + b.left, b.left), Math.max(b.left, b.right - 300)),
+        bottom: Math.min(Math.max(r.bottom + b.top, b.top), Math.max(b.top, b.bottom - 200))
+      };
+    }
+    function place() {
+      if (!opts.frame || destroyed) return;
+      const r = opts.frame.getBoundingClientRect();
+      const top = Math.max(r.top, 0), bottom = Math.min(r.bottom, window.innerHeight);
+      const v = {
+        top,
+        left: Math.max(r.left, 0),
+        right: Math.max(window.innerWidth - r.right, 0),
+        bottom: Math.max(window.innerHeight - bottom, 0),
+        width: Math.max(r.width, 0),
+        height: Math.max(bottom - top, 0)
+      };
+      Object.keys(v).forEach((k) => body.style.setProperty("--rev-" + k, v[k] + "px"));
+    }
     function placePop(rect) {
       const p = pop;
-      document.body.appendChild(p);
+      body.appendChild(p);
       p.style.top = window.scrollY + rect.bottom + 8 + "px";
       p.style.left = window.scrollX + Math.min(rect.left, window.innerWidth - 300) + "px";
       sendMode();
@@ -840,92 +1869,116 @@
       const t = ev.target;
       if (pop && pop.contains(t)) return;
       if (t.closest && t.closest(CHROME) && (on || pop)) closePop();
-    }, true);
-    function submit() {
-      if (sending) return;
-      let box = live ? readOutbox() : null;
-      if (!box) {
-        const items = Object.keys(marks).map((k) => wireItem(marks[k]));
-        if (!items.length) {
-          showSync("info", "No marks yet. Toggle Review, click a section, leave a note.");
-          return;
-        }
-        if (!reviewer) {
-          askName("Your name, so teammates know whose feedback this is:", submit);
-          return;
-        }
-        const stamps = {};
-        Object.keys(marks).forEach((k) => {
-          stamps[k] = stampOf(marks[k]);
-        });
-        box = { id: newRoundId(), items, reviewer, created_at: (/* @__PURE__ */ new Date()).toISOString(), stamps };
-        if (!live) {
-          exportJSON(box);
-          return;
-        }
-        writeOutbox(box);
-      }
-      send(box);
-    }
-    function wireItem(m) {
-      const o = {};
-      Object.keys(m).forEach((k) => {
-        if (k !== "updated_at") o[k] = m[k];
-      });
-      return o;
-    }
-    function send(box) {
-      sending = true;
-      paintSubmit();
-      showSync("pending", "Sending…");
-      post("/feedback", { id: box.id, slug, reviewer: box.reviewer, items: box.items }, (data) => {
-        sending = false;
-        if (!roundAcked(box, data)) {
-          paintSubmit();
-          showSync("err", "Not confirmed — the server acknowledged a different round. Your marks are kept.", [{ label: "Retry", fn: submit }]);
-          return;
-        }
-        const acked = ackState(mergeState({ marks, tombs }, readStored()), box);
-        marks = acked.marks;
-        tombs = acked.tombs;
-        save();
-        const cur = readOutbox();
-        if (cur && cur.id === box.id) writeOutbox(null);
-        paint();
-        paintSubmit();
-        reportSync(syncMessage("Sent", data));
-      }, (msg, isOffline) => {
-        sending = false;
-        paintSubmit();
-        if (isOffline) showSync("warn", "Review server offline — your feedback is queued in this browser and sends when the server is back.");
-        else showSync("err", "Not sent (" + msg + "). Your marks are kept.", [{ label: "Retry", fn: submit }]);
-      });
-    }
-    function approve() {
-      if (!live) {
-        showSync("info", "Approve is available in the live `ox plan review` loop.");
+    }, { capture: true, signal });
+    function queue(act, build, stamps, retry) {
+      if (!who()) {
+        askName("Your name, so teammates know whose feedback this is:", retry);
         return;
       }
+      const id = newId();
+      if (!store.freeze(act, id, build(id, named), stamps)) {
+        showSync("err", "Not sent — this browser could not store it, so nothing was sent. Free up browser storage, then try again.");
+        return;
+      }
+      closePop();
+      paint();
+      flush();
+    }
+    function submit() {
+      if (!live) {
+        exportJSON();
+        return;
+      }
+      const waiting = store.entries();
+      const fresh = store.drafts().filter((m) => !queued(waiting, m));
+      if (!fresh.length) {
+        if (waiting.length) flush();
+        else showSync("info", "No marks yet. Toggle Review, click a section, leave a note.");
+        return;
+      }
+      const stamps = /* @__PURE__ */ Object.create(null);
+      fresh.forEach((m) => {
+        stamps[m.anchor] = m.at;
+      });
+      queue("submit", (id, r) => submitBody(id, r, fresh), stamps, submit);
+    }
+    function accept(a) {
+      queue("accept", (id, r) => acceptBody(id, r, a), {}, () => accept(a));
+    }
+    function reopen(a, note) {
+      const c = (committed[a] || []).filter((x) => x.label || x.quote)[0];
+      const item = c ? { anchor: a, section: c.section, label: c.label, quote: c.quote, region: regionOf(a) } : { anchor: a, region: regionOf(a) };
+      queue("reopen", (id, r) => reopenBody(id, r, item, note), {}, () => reopen(a, note));
+    }
+    function flush() {
+      if (!transport || destroyed) return;
+      if (flushing) {
+        again = true;
+        return;
+      }
+      if (!store.entries().length) return;
+      flushing = true;
+      inflight++;
+      paintSubmit();
+      showSync("pending", "Sending…");
+      deliver(store, transport, report, () => destroyed).finally(() => {
+        flushing = false;
+        inflight--;
+        paintSubmit();
+        if (again && !destroyed) {
+          again = false;
+          flush();
+        }
+        idle();
+      });
+    }
+    function report(e, r) {
+      if (destroyed) return;
+      if (r.state === "owned") Object.keys(e.stamps).forEach((a) => {
+        if (DRAWING.test(a)) ownedDrawings.add(a);
+      });
+      paint();
+      setOffline(r.state === "offline");
+      const verb = e.act === "accept" ? "Accepted" : e.act === "reopen" ? "Reopened" : "Sent";
+      if (r.state === "owned") reportSync(syncMessage(verb, r));
+      else if (r.state === "refused") showSync("err", "Not saved — the server refused it (" + r.message + ")." + (e.act === "submit" ? " Your marks are kept: Submit sends them as a new review." : ""));
+      else if (r.state === "failed") showSync("err", "Not sent (" + r.message + "). " + (e.act === "submit" ? "Your marks are kept." : "It stays queued in this browser."), [{ label: "Retry", fn: flush }]);
+      else showSync("warn", "Review server offline — your feedback is queued in this browser and sends when the server is back.");
+    }
+    function approve() {
+      const send = opts.approve;
       showSync("ask", "Approve this plan? This stamps it approved and closes the review loop.", [
         { label: "Approve", fn: () => {
           showSync("pending", "Approving…");
-          post("/approve", {}, (data) => {
-            const m = syncMessage("Approved", data);
-            if (m.kind !== "err") m.text += " — you can close this tab.";
-            reportSync(m);
+          inflight++;
+          Promise.resolve().then(send).catch((err) => ({ state: "failed", message: err instanceof Error ? err.message : String(err) })).then((r) => {
+            inflight--;
+            if (!destroyed) {
+              setOffline(r.state === "offline");
+              if (r.state === "owned") {
+                const m = syncMessage("Approved", r);
+                m.text += " — you can close this tab.";
+                reportSync(m);
+              } else if (r.state === "offline") showSync("err", "The review server is offline — Approve can’t be sent right now.");
+              else showSync("err", "Not approved (" + r.message + ").", [{ label: "Retry", fn: approve }]);
+            }
+            idle();
           });
         } },
         { label: "Cancel", fn: hideSync }
       ]);
     }
-    function exportJSON(box) {
-      const prev = readJSON(EXPORT_KEY);
-      const id = prev && prev.id && sameItems(prev.items, box.items) ? prev.id : box.id;
-      try {
-        localStorage.setItem(EXPORT_KEY, JSON.stringify({ id, items: box.items }));
-      } catch (e) {
+    function exportJSON() {
+      const items = store.drafts().map(wireItem);
+      if (!items.length) {
+        showSync("info", "No marks yet. Toggle Review, click a section, leave a note.");
+        return;
       }
-      const json = JSON.stringify({ id, slug, reviewer: box.reviewer, items: box.items }, null, 2);
+      if (!who()) {
+        askName("Your name, so teammates know whose feedback this is:", exportJSON);
+        return;
+      }
+      const json = JSON.stringify(Object.assign({ id: store.exportId(items), slug, reviewer: who() }, roundItems(items)), null, 2);
       const blob = new Blob([json], { type: "application/json" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -948,14 +2001,14 @@
         syncEl = null;
       }
     }
-    function showSync(kind, text, actions, input) {
+    function showSync(kind, text2, actions, input) {
       hideSync();
       const el = syncEl = document.createElement("div");
       el.className = "rev-sync " + kind;
       el.setAttribute("role", kind === "err" ? "alert" : "status");
       const msg = document.createElement("span");
       msg.className = "rev-sync-msg";
-      msg.textContent = text;
+      msg.textContent = text2;
       el.appendChild(msg);
       let field = null;
       if (input !== void 0) {
@@ -981,7 +2034,7 @@
         x.onclick = hideSync;
         el.appendChild(x);
       }
-      document.body.appendChild(el);
+      body.appendChild(el);
       if (field) {
         const f = field;
         f.focus();
@@ -1016,9 +2069,9 @@
       showSync("ask", q, [
         { label: "Save", fn: (n) => {
           if (!n) return;
-          reviewer = n;
+          named = n;
           try {
-            localStorage.setItem("ox-plan-reviewer", reviewer);
+            localStorage.setItem("ox-plan-reviewer", named);
           } catch (e) {
           }
           hideSync();
@@ -1027,99 +2080,102 @@
           if (then) then();
         } },
         { label: "Cancel", fn: hideSync }
-      ], reviewer);
+      ], named);
     }
     let connEl = null, offlineBar = null, toastEl = null;
-    function restartCmd() {
-      return "ox plan review " + slug;
-    }
     function paintConn() {
       if (!connEl) return;
       connEl.textContent = offline ? "● offline" : "● live";
       connEl.className = "rev-conn " + (offline ? "off" : "ok");
-      connEl.title = offline ? "Review server unreachable — feedback is NOT being saved" : "Connected to the review server";
+      connEl.title = offline ? "Review server unreachable — feedback is NOT reaching it" : "Connected to the review server";
     }
     function setOffline(down) {
-      if (offline === down) return;
+      if (offline === down || destroyed) return;
       offline = down;
       body.classList.toggle("rev-offline", down);
       paintConn();
-      if (down) {
-        showOfflineBar();
-        startProbe();
-      } else {
-        hideOfflineBar();
-        stopProbe();
-      }
-    }
-    function showOfflineBar() {
-      hideOfflineBar();
-      const n = Object.keys(marks).length;
-      const bar2 = offlineBar = document.createElement("div");
-      bar2.className = "rev-offline-bar";
-      bar2.innerHTML = "<strong>⚠ Review server offline</strong> — new feedback is NOT being saved. " + (n ? n + " unsent mark(s) are" : "Your marks are") + " kept in this browser and restored on reconnect. Restart: <code>" + esc(restartCmd()) + '</code> <button class="rev-offline-copy">copy</button>';
-      document.body.appendChild(bar2);
-      const copy = bar2.querySelector(".rev-offline-copy");
-      copy.onclick = () => {
-        if (navigator.clipboard) navigator.clipboard.writeText(restartCmd()).then(() => {
-          copy.textContent = "copied ✓";
-        }).catch(() => {
-        });
-      };
-    }
-    function hideOfflineBar() {
       if (offlineBar) {
         offlineBar.remove();
         offlineBar = null;
       }
-    }
-    function offlineNotice() {
-      const n = Object.keys(marks).length;
-      showSync("err", "The review server is offline — feedback can NOT be saved right now. " + (n ? "Your " + n + " unsent mark(s) stay in this browser and will be restored. " : "") + "Restart the loop with: " + restartCmd());
+      if (!down) {
+        flush();
+        return;
+      }
+      const n = Object.keys(ds).length;
+      const cmd = opts.restartCommand;
+      const bar2 = offlineBar = document.createElement("div");
+      bar2.className = "rev-offline-bar";
+      bar2.innerHTML = "<strong>⚠ Review server offline</strong> — feedback is NOT reaching it. " + (n ? n + " unsent mark(s) are" : "Your marks are") + " kept in this browser and sent on reconnect." + (cmd ? " Restart: <code>" + esc(cmd) + '</code> <button class="rev-offline-copy">copy</button>' : "");
+      body.appendChild(bar2);
+      const copy = bar2.querySelector(".rev-offline-copy");
+      if (copy) copy.onclick = () => {
+        if (navigator.clipboard) navigator.clipboard.writeText(cmd || "").then(() => {
+          copy.textContent = "copied ✓";
+        }).catch(() => {
+        });
+      };
     }
     function toast(msg) {
       if (toastEl) toastEl.remove();
       const el = toastEl = document.createElement("div");
       el.className = "rev-toast";
       el.textContent = msg;
-      document.body.appendChild(el);
+      body.appendChild(el);
       setTimeout(() => {
         el.remove();
         if (toastEl === el) toastEl = null;
       }, 8e3);
     }
-    function startProbe() {
-      if (probeTimer) return;
-      probeTimer = setInterval(() => {
-        fetch(base + "/healthz", { cache: "no-store" }).then((r) => r.ok ? r.json() : null).then((j) => {
-          if (j && j.app === "ox-plan-review") reloadWhenIdle();
-        }).catch(() => {
-        });
-      }, 3e3);
-    }
-    function stopProbe() {
-      if (probeTimer) {
-        clearInterval(probeTimer);
-        probeTimer = null;
+    function idle() {
+      if (waiter && !inflight && !pop) {
+        const fn = waiter;
+        waiter = null;
+        fn();
       }
     }
-    function reloadWhenIdle() {
-      if (pop) {
-        pendingReload = true;
-        return;
-      }
-      location.reload();
+    if (opts.frame) {
+      body.classList.add("rev-framed");
+      place();
+      window.addEventListener("resize", place, { signal });
+      document.addEventListener("scroll", place, { capture: true, passive: true, signal });
     }
+    const resized = opts.frame && typeof ResizeObserver !== "undefined" ? new ResizeObserver(place) : null;
+    if (resized && opts.frame) resized.observe(opts.frame);
     const bar = document.createElement("div");
     bar.className = "rev-bar";
-    bar.innerHTML = (live ? '<span class="rev-conn"></span>' : "") + '<button class="rev-toggle" title="Toggle review mode">Review</button><span class="rev-count"></span>' + (live ? '<button class="rev-who" title="Set the name teammates see on your comments"></button>' : "") + '<button class="rev-submit" title="Send feedback to the agent">' + (live ? "Submit" : "Export") + "</button>" + (live ? '<button class="rev-approve" title="Approve and close the loop">Approve</button>' : "");
-    document.body.appendChild(bar);
+    bar.innerHTML = (live ? '<span class="rev-conn"></span>' : "") + '<button class="rev-toggle" title="Toggle review mode">Review</button>' + (revision ? '<button class="rev-draw" aria-pressed="false" title="Drag to draw an oval around part of the plan to comment on it">Draw</button>' : "") + '<span class="rev-count"></span>' + (live && !opts.reviewer ? '<button class="rev-who" title="Set the name teammates see on your comments"></button>' : "") + '<button class="rev-submit" title="Send feedback to the agent">' + (live ? "Submit" : "Export") + "</button>" + (opts.approve ? '<button class="rev-approve" title="Approve and close the loop">Approve</button>' : "");
+    body.appendChild(bar);
+    let drag = null;
+    bar.addEventListener("pointerdown", (e) => {
+      if (drag || !e.isPrimary || e.button !== 0 || e.target.closest("button")) return;
+      const r = bar.getBoundingClientRect();
+      drag = { x: e.clientX - r.left, y: e.clientY - r.top };
+      bar.setPointerCapture(e.pointerId);
+      bar.classList.add("rev-dragging");
+      if (hintBubble) {
+        hintBubble.remove();
+        hintBubble = null;
+      }
+      e.preventDefault();
+    }, { signal });
+    bar.addEventListener("pointermove", (e) => {
+      if (!drag || !e.isPrimary) return;
+      const b = box2();
+      bar.style.left = Math.max(0, b.left, Math.min(e.clientX - drag.x, Math.min(b.right, window.innerWidth) - bar.offsetWidth)) + "px";
+      bar.style.top = Math.max(0, b.top, Math.min(e.clientY - drag.y, Math.min(b.bottom, window.innerHeight) - bar.offsetHeight)) + "px";
+      bar.style.bottom = "auto";
+    }, { signal });
+    bar.addEventListener("lostpointercapture", () => {
+      drag = null;
+      bar.classList.remove("rev-dragging");
+    }, { signal });
     const countEl = bar.querySelector(".rev-count");
     connEl = bar.querySelector(".rev-conn");
     paintConn();
     const whoEl = bar.querySelector(".rev-who");
     function updateWho() {
-      if (whoEl) whoEl.textContent = reviewer ? "You: " + reviewer : "Set name";
+      if (whoEl) whoEl.textContent = named ? "You: " + named : "Set name";
     }
     updateWho();
     if (whoEl) whoEl.onclick = () => {
@@ -1127,15 +2183,38 @@
     };
     const submitEl = bar.querySelector(".rev-submit");
     function paintSubmit() {
-      if (!live) return;
-      submitEl.disabled = sending;
-      submitEl.textContent = sending ? "Sending…" : "Submit";
+      if (!live || destroyed) return;
+      submitEl.disabled = flushing;
+      submitEl.textContent = flushing ? "Sending…" : "Submit";
     }
     const toggleEl = bar.querySelector(".rev-toggle");
+    const drawEl = bar.querySelector(".rev-draw");
     let hintBubble = null;
+    let drawTaught = false;
+    function setTool(next) {
+      if (next && !on) setReview(true, true);
+      tool = next;
+      if (drawEl) {
+        drawEl.classList.toggle("on", tool);
+        drawEl.setAttribute("aria-pressed", String(tool));
+      }
+      sendMode();
+      if (tool && !drawTaught) {
+        drawTaught = true;
+        toast("Drag to draw an oval. Drag its outline to move it, or its handles to resize it before submitting. Esc puts the pen down.");
+      }
+    }
     function setReview(next, silent) {
       on = next;
       toggleEl.classList.toggle("on", on);
+      body.classList.toggle("rev-on", on);
+      if (!on && tool) {
+        tool = false;
+        if (drawEl) {
+          drawEl.classList.remove("on");
+          drawEl.setAttribute("aria-pressed", "false");
+        }
+      }
       sendMode();
       toggleEl.textContent = on ? "Exit review" : "Review";
       toggleEl.title = on ? "Leave review mode (Esc)" : "Enter review mode (r)";
@@ -1165,31 +2244,48 @@
     toggleEl.onclick = () => {
       setReview(!on);
     };
+    if (drawEl) drawEl.onclick = () => {
+      setTool(!tool);
+    };
     submitEl.onclick = submit;
-    if (live) bar.querySelector(".rev-approve").onclick = approve;
+    if (opts.approve) bar.querySelector(".rev-approve").onclick = approve;
+    function escape() {
+      if (original) {
+        closeOriginal();
+        return true;
+      }
+      if (pop) {
+        closePop();
+        return true;
+      }
+      if (tool) {
+        setTool(false);
+        return true;
+      }
+      if (on) {
+        setReview(false);
+        return true;
+      }
+      return false;
+    }
     document.addEventListener("keydown", (e) => {
       if (e.defaultPrevented) return;
       if (e.key === "Escape") {
-        if (pop) {
-          closePop();
-          e.preventDefault();
-        } else if (on) {
-          setReview(false);
-          e.preventDefault();
-        }
+        if (escape()) e.preventDefault();
         return;
       }
       if (e.key === "r" && !typing(e) && !e.metaKey && !e.ctrlKey && !e.altKey) {
         setReview(!on);
         e.preventDefault();
       }
-    });
+    }, { signal });
     try {
-      if (!localStorage.getItem("ox-plan-rev-seen")) {
+      if (!opts.reviewing && !localStorage.getItem("ox-plan-rev-seen")) {
         const hint = hintBubble = document.createElement("div");
         hint.className = "rev-hint";
-        hint.textContent = "← Click Review to mark up this plan";
-        document.body.appendChild(hint);
+        hint.textContent = "↓ Click Review to mark up this plan";
+        hint.style.left = toggleEl.getBoundingClientRect().left + "px";
+        body.appendChild(hint);
         setTimeout(() => {
           if (hintBubble === hint) {
             hint.remove();
@@ -1199,67 +2295,24 @@
       }
     } catch (e) {
     }
-    if (live && window.EventSource) {
-      try {
-        const es = new EventSource(base + "/events?t=" + encodeURIComponent(token));
-        es.onopen = () => {
-          if (offline) {
-            setOffline(false);
-            reloadWhenIdle();
-            return;
-          }
-          paintConn();
-        };
-        es.onerror = () => {
-          setOffline(true);
-        };
-        es.onmessage = () => {
-          if (posting) {
-            reloadAfterPost = true;
-            return;
-          }
-          if (pop) {
-            pendingReload = true;
-            return;
-          }
-          location.reload();
-        };
-      } catch (e) {
-      }
-    }
-    if (live && "serviceWorker" in navigator) {
-      try {
-        navigator.serviceWorker.register("/sw.js").catch(() => {
-        });
-      } catch (e) {
-      }
-    }
+    let repaint;
     window.addEventListener("storage", (e) => {
-      if (e.key === null || e.key === KEY || e.key === TOMB_KEY) {
-        const m = mergeState({ marks, tombs }, readStored());
-        marks = m.marks;
-        tombs = m.tombs;
-        paint();
+      if (e.key === null || e.key.indexOf(store.prefix) === 0) {
+        clearTimeout(repaint);
+        repaint = setTimeout(paint, 50);
       }
-    });
-    const pendingBox = live ? readOutbox() : null;
-    if (live && Object.keys(marks).length && !pendingBox) {
-      toast(Object.keys(marks).length + " unsent mark(s) restored — Submit to send them.");
-    }
+    }, { signal });
+    window.addEventListener("online", flush, { signal });
     let started = false;
     port.listen((m) => {
       switch (m.type) {
         case "ready":
           paint();
-          if (started) {
-            sendMode();
-            return;
-          }
+          sendMode();
+          if (started) return;
           started = true;
-          restoreSync();
-          if (pendingBox) send(pendingBox);
           try {
-            if (sessionStorage.getItem(ON_KEY)) setReview(true, true);
+            if (!on && sessionStorage.getItem(ON_KEY)) setReview(true, true);
           } catch (e) {
           }
           break;
@@ -1267,27 +2320,123 @@
           onPlaced(m.items);
           break;
         case "target":
-          openPop({ a: m.target.anchor, section: m.target.section, label: m.target.label, quote: m.target.quote }, m.target.rect);
+          if (!on || held()) break;
+          openPop({ a: m.target.anchor, section: m.target.section, label: m.target.label, quote: m.target.quote }, toHost(m.target.rect));
           break;
+        case "capture": {
+          if (!on || !tool) break;
+          const anchor = m.anchor;
+          if (anchor) {
+            if (committed[anchor]?.length || ownedDrawings.has(anchor) || store.entries().some((e) => e.stamps[anchor] !== void 0)) break;
+            const old = pending && "q-" + pending.id === anchor ? pending : ds[anchor]?.region;
+            if (!old) break;
+            const r2 = { ...m.capture, id: old.id, plan_revision: revision, created_at: old.created_at };
+            if (checkRegion(r2)) break;
+            const label = drawingLabel(r2), section = r2.targets[0].section;
+            if (pending && pending.id === r2.id) pending = r2;
+            else if (!store.save({ ...ds[anchor], region: r2, label, section })) toast("This browser could not save the updated drawing. It is kept in this tab only.");
+            if (pop && popAbout?.a === anchor) {
+              popAbout.label = label;
+              popAbout.section = section;
+              const about = pop.querySelector(".rev-about");
+              if (about) about.textContent = label;
+              placePop(toHost(m.rect));
+            }
+            paint();
+            break;
+          }
+          if (held()) {
+            toast("Save or delete the open note, then draw again.");
+            break;
+          }
+          const r = { ...m.capture, id: newId(), plan_revision: revision, created_at: (/* @__PURE__ */ new Date()).toISOString() };
+          const why = checkRegion(r);
+          if (why) {
+            toast("That drawing cannot be kept: its " + why + " is out of bounds.");
+            break;
+          }
+          closePop(true);
+          pending = r;
+          paint();
+          openPop({ a: "q-" + r.id, section: r.targets[0].section, label: drawingLabel(r) }, toHost(m.rect), true);
+          break;
+        }
         case "refused":
-          closePop();
-          toast(m.reason === "repeated" ? "“" + clip(m.quote, 40) + "” appears " + m.count + " times in this section — highlight a longer phrase so the comment points at one place." : "Highlight text within one section to comment on it.");
+          if (m.reason === "cancelled") break;
+          if (!held() && !pending) closePop();
+          if (m.reason === "repeated") toast("“" + clip(m.quote, 40) + "” appears " + m.count + " times in this section — highlight a longer phrase so the comment points at one place.");
+          else toast(DRAW_REFUSED[m.reason] || "Highlight text within one section to comment on it.");
           break;
         case "dismiss":
-          if (on || pop) closePop();
+          if ((on || pop) && !held()) closePop();
+          break;
+        case "key":
+          if (held()) break;
+          if (m.key === "Escape") escape();
+          else setReview(!on);
           break;
       }
     });
+    restoreSync();
+    if (opts.reviewing) {
+      let seen = true;
+      try {
+        seen = !!localStorage.getItem("ox-plan-rev-seen");
+      } catch (e) {
+      }
+      setReview(true, seen);
+    }
+    paint();
+    const restored = Object.keys(ds).length;
+    if (live && restored && !store.entries().length) toast(restored + " unsent mark(s) restored — Submit to send them.");
+    flush();
+    return {
+      update(items, n) {
+        setCommitted(items);
+        problems = n || 0;
+        paint();
+      },
+      setOffline,
+      whenIdle(fn) {
+        waiter = fn;
+        idle();
+      },
+      destroy() {
+        if (destroyed) return;
+        waiter = null;
+        closePop();
+        destroyed = true;
+        off.abort();
+        clearTimeout(repaint);
+        port.listen(() => {
+        });
+        port.send({ type: "mode", on: false, open: false, draw: false });
+        port.send({ type: "paint", items: [], drawings: [] });
+        if (resized) resized.disconnect();
+        [bar, rail, orphanBar, syncEl, toastEl, offlineBar, hintBubble, original].forEach((el) => {
+          if (el) el.remove();
+        });
+        body.classList.remove("rev-on", "rev-offline", "rev-framed");
+        ["top", "left", "right", "bottom", "width", "height"].forEach((k) => body.style.removeProperty("--rev-" + k));
+      }
+    };
   }
 
   // src/local.ts
+  var ACCOUNT = "local";
   (function() {
+    let storage;
     try {
-      if (!window.localStorage) return;
+      storage = window.localStorage;
+      if (!storage) return;
     } catch (e) {
       return;
     }
     const body = document.body;
+    const slug = (body.getAttribute("data-slug") || document.title || "plan").trim();
+    const plan = body.getAttribute("data-review-plan") || slug;
+    const base = body.getAttribute("data-review-endpoint") || "";
+    const token = body.getAttribute("data-review-token") || "";
     let committed = [];
     try {
       const el = document.getElementById("ox-review-state");
@@ -1296,13 +2445,97 @@
     } catch (e) {
       committed = [];
     }
+    migrateLegacy(storage, slug, openStore(storage, ACCOUNT, plan));
+    let probe = null;
+    function reload() {
+      controls.whenIdle(() => location.reload());
+    }
+    function watch() {
+      if (probe) return;
+      probe = setInterval(() => {
+        fetch(base + "/healthz", { cache: "no-store" }).then((r) => r.ok ? r.json() : null).then((j) => {
+          if (j && j.app === "ox-plan-review") back();
+        }).catch(() => {
+        });
+      }, 3e3);
+    }
+    function back() {
+      if (!probe) return;
+      clearInterval(probe);
+      probe = null;
+      controls.setOffline(false);
+      reload();
+    }
+    function post(path, payload) {
+      return fetch(base + path, { method: "POST", headers: { "Content-Type": "application/json", "X-Review-Token": token }, body: payload }).catch(() => {
+        watch();
+        return null;
+      });
+    }
+    async function failure(r) {
+      const t = (await r.text().catch(() => "")).trim();
+      return "HTTP " + r.status + (t ? " — " + clip(t, 120) : "");
+    }
+    async function send(op) {
+      const r = await post(op.kind === "round" ? "/feedback" : "/accept", op.body);
+      if (!r) return { state: "offline" };
+      if (!r.ok) {
+        const message = await failure(r);
+        if (r.status === 400 || r.status === 409 || r.status === 413) return { state: "refused", message };
+        return { state: "failed", message };
+      }
+      const d = await r.json().catch(() => ({}));
+      if (d.saved !== true) return { state: "failed", message: "the server did not say it stored this" };
+      return {
+        state: "owned",
+        id: op.kind === "round" ? d.round_id : d.resolution_id,
+        synced: !!d.pushed,
+        // a duplicate is a resend of an operation whose first save already notified (or tried to)
+        warning: d.notified === false && !d.duplicate ? "the plan’s authoring coworker was not notified automatically — tell them directly" : void 0
+      };
+    }
+    async function approve() {
+      const r = await post("/approve", "{}");
+      if (!r) return { state: "offline" };
+      if (!r.ok) return { state: "failed", message: await failure(r) };
+      const d = await r.json().catch(() => ({}));
+      return { state: "owned", synced: !!d.pushed };
+    }
     const ports = localPorts();
-    mountHostControls(ports.host, {
-      slug: (body.getAttribute("data-slug") || document.title || "plan").trim(),
-      endpoint: body.getAttribute("data-review-endpoint") || "",
-      token: body.getAttribute("data-review-token") || "",
-      committed
+    const controls = mountHostControls(ports.host, {
+      account: ACCOUNT,
+      plan,
+      slug,
+      committed,
+      problems: Number(body.getAttribute("data-review-problems")) || 0,
+      transport: base ? { send } : void 0,
+      resolve: true,
+      // any reviewer of a local review may Accept or Reopen
+      approve: base ? approve : void 0,
+      restartCommand: "ox plan review " + slug,
+      // the revision ox rendered this page from; a page without one offers no Draw
+      revision: body.getAttribute("data-review-revision") || void 0
     });
     startDocumentTools(ports.document);
+    if (!base) return;
+    if (window.EventSource) {
+      try {
+        const es = new EventSource(base + "/events?t=" + encodeURIComponent(token));
+        es.onopen = back;
+        es.onerror = () => {
+          controls.setOffline(true);
+          watch();
+        };
+        es.onmessage = reload;
+      } catch (e) {
+      }
+    }
+    if ("serviceWorker" in navigator) {
+      try {
+        navigator.serviceWorker.register("/sw.js").catch(() => {
+        });
+      } catch (e) {
+      }
+    }
   })();
 })();

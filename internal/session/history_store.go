@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/paths"
 )
 
@@ -48,6 +49,25 @@ func StoreCapturedHistory(history *CapturedHistory, agentID string, activeRecord
 	if !result.Valid {
 		return "", fmt.Errorf("%w: %v", ErrHistoryStorageFailed, result.Errors)
 	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("%w: workspace unavailable", ErrHistoryStorageFailed)
+	}
+	// capture-prior may run from a nested source directory; custom rules belong
+	// to the workspace root, not whichever directory the caller happens to use.
+	projectRoot := config.FindProjectRoot()
+	if projectRoot == "" {
+		projectRoot = cwd
+	}
+	if activeRecording {
+		state, err := LoadRecordingStateForAgent(projectRoot, agentID)
+		if err != nil {
+			return "", fmt.Errorf("%w: recording state unavailable", ErrHistoryStorageFailed)
+		}
+		if state != nil && state.AdapterName == "cursor" {
+			return "", fmt.Errorf("%w: unsupported-scope: capture-prior cannot merge into a native Cursor recording", ErrHistoryStorageFailed)
+		}
+	}
 
 	storagePath = GetHistoryStoragePath(agentID, activeRecording)
 	if storagePath == "" {
@@ -57,7 +77,7 @@ func StoreCapturedHistory(history *CapturedHistory, agentID string, activeRecord
 	if activeRecording {
 		// merge into active recording's raw.jsonl
 		sessionPath := filepath.Dir(storagePath)
-		if err := MergeHistoryWithRecording(sessionPath, history); err != nil {
+		if err := MergeHistoryWithRecordingForProject(sessionPath, history, projectRoot); err != nil {
 			return "", fmt.Errorf("%w: merge failed: %w", ErrHistoryStorageFailed, err)
 		}
 		return storagePath, nil
@@ -68,7 +88,7 @@ func StoreCapturedHistory(history *CapturedHistory, agentID string, activeRecord
 		return "", fmt.Errorf("%w: create directory: %w", ErrHistoryStorageFailed, err)
 	}
 
-	if err := WriteHistoryJSONL(storagePath, history); err != nil {
+	if err := WriteHistoryJSONLForProject(storagePath, history, projectRoot); err != nil {
 		return "", fmt.Errorf("%w: write history: %w", ErrHistoryStorageFailed, err)
 	}
 
@@ -88,6 +108,9 @@ func GetHistoryStoragePath(agentID string, activeRecording bool) string {
 	if err != nil {
 		slog.Warn("GetHistoryStoragePath: os.Getwd failed, using '.'", "error", err)
 		cwd = "."
+	}
+	if projectRoot := config.FindProjectRoot(); projectRoot != "" {
+		cwd = projectRoot
 	}
 
 	if activeRecording {
@@ -139,6 +162,12 @@ func getSessionsBasePath(projectRoot string) string {
 //  3. Adjust existing entry seq numbers to continue after history
 //  4. Write merged entries back to raw.jsonl
 func MergeHistoryWithRecording(sessionPath string, history *CapturedHistory) error {
+	return MergeHistoryWithRecordingForProject(sessionPath, history, "")
+}
+
+// MergeHistoryWithRecordingForProject applies the workspace policy to both imported
+// history and existing records before atomically replacing the recording.
+func MergeHistoryWithRecordingForProject(sessionPath string, history *CapturedHistory, projectRoot string) error {
 	if history == nil {
 		return ErrHistoryNilHistory
 	}
@@ -176,6 +205,11 @@ func MergeHistoryWithRecording(sessionPath string, history *CapturedHistory) err
 		if he.ToolOutput != "" {
 			entry["tool_output"] = he.ToolOutput
 		}
+		if he.CallID != "" {
+			// Keep the command/result join key so canonical redaction can suppress
+			// an opaque credential result emitted separately from its command.
+			entry["call_id"] = he.CallID
+		}
 		if he.IsError {
 			entry["is_error"] = true
 		}
@@ -193,7 +227,7 @@ func MergeHistoryWithRecording(sessionPath string, history *CapturedHistory) err
 	}
 
 	// write merged file
-	return writeMergedRawJSONL(rawPath, existingMeta, mergedEntries)
+	return writeMergedRawJSONLForProject(rawPath, existingMeta, mergedEntries, projectRoot)
 }
 
 // readRawJSONLEntries reads entries from a raw.jsonl file.
@@ -237,105 +271,87 @@ func readRawJSONLEntries(path string) ([]map[string]any, map[string]any, error) 
 
 // writeMergedRawJSONL writes a merged raw.jsonl file with header, entries, and footer.
 func writeMergedRawJSONL(path string, meta map[string]any, entries []map[string]any) error {
-	// create temp file for atomic write
+	return writeMergedRawJSONLForProject(path, meta, entries, "")
+}
+
+func writeMergedRawJSONLForProject(path string, meta map[string]any, entries []map[string]any, projectRoot string) error {
+	return writeSessionSnapshot(path, projectRoot, func(writer *RawWriter) error {
+		if meta != nil {
+			if err := writer.WriteRaw(meta); err != nil {
+				return fmt.Errorf("write header: %w", err)
+			}
+		}
+		for _, entry := range entries {
+			if err := writer.WriteRaw(entry); err != nil {
+				return fmt.Errorf("write entry: %w", err)
+			}
+		}
+		return writer.WriteRaw(map[string]any{
+			"type":        "footer",
+			"closed_at":   time.Now().Format(time.RFC3339Nano),
+			"entry_count": len(entries),
+		})
+	})
+}
+
+// writeSessionSnapshot keeps policy or encoding failures from replacing the prior
+// artifact. Even its private temporary file receives only RawWriter output.
+func writeSessionSnapshot(path, projectRoot string, write func(*RawWriter) error) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("create directory: %w", err)
 	}
-
 	tmpFile, err := os.CreateTemp(dir, "raw-*.jsonl.tmp")
 	if err != nil {
 		return fmt.Errorf("create temp file: %w", err)
 	}
 	tmpPath := tmpFile.Name()
 	defer func() {
-		tmpFile.Close()
-		os.Remove(tmpPath) // clean up on error
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
 	}()
-
-	encoder := json.NewEncoder(tmpFile)
-
-	// write header if present
-	if meta != nil {
-		if err := encoder.Encode(meta); err != nil {
-			return fmt.Errorf("write header: %w", err)
-		}
+	writer, err := NewRawStreamWriter(tmpFile, projectRoot)
+	if err != nil {
+		return fmt.Errorf("session redaction policy: %w", err)
 	}
-
-	// write entries
-	for _, entry := range entries {
-		if err := encoder.Encode(entry); err != nil {
-			return fmt.Errorf("write entry: %w", err)
-		}
+	if err := write(writer); err != nil {
+		return err
 	}
-
-	// write footer
-	footer := map[string]any{
-		"type":        "footer",
-		"closed_at":   time.Now().Format(time.RFC3339Nano),
-		"entry_count": len(entries),
-	}
-	if err := encoder.Encode(footer); err != nil {
-		return fmt.Errorf("write footer: %w", err)
-	}
-
-	// sync and close temp file
 	if err := tmpFile.Sync(); err != nil {
 		return fmt.Errorf("sync temp file: %w", err)
 	}
 	if err := tmpFile.Close(); err != nil {
 		return fmt.Errorf("close temp file: %w", err)
 	}
-
-	// atomic rename
 	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("rename to final path: %w", err)
 	}
-
 	return nil
 }
 
-// WriteHistoryJSONL writes captured history to a JSONL file.
+// WriteHistoryJSONL writes captured history through the canonical redaction stack.
 // Writes the _meta line first, then each entry on its own line.
 func WriteHistoryJSONL(path string, history *CapturedHistory) error {
+	return WriteHistoryJSONLForProject(path, history, "")
+}
+
+// WriteHistoryJSONLForProject enforces custom rules for imported history. The
+// original destination survives invalid policy and failed serialization.
+func WriteHistoryJSONLForProject(path string, history *CapturedHistory, projectRoot string) error {
 	if history == nil {
 		return ErrHistoryNilHistory
 	}
-
-	// ensure directory exists
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return fmt.Errorf("create directory: %w", err)
-	}
-
-	f, err := os.Create(path)
-	if err != nil {
-		return fmt.Errorf("create file: %w", err)
-	}
-	defer f.Close()
-
-	encoder := json.NewEncoder(f)
-
-	// write metadata line (always write, even if empty - schema requires it)
-	metaLine := map[string]any{
-		"_meta": history.Meta,
-	}
-	if err := encoder.Encode(metaLine); err != nil {
-		return fmt.Errorf("write meta: %w", err)
-	}
-
-	// write entries
-	for _, entry := range history.Entries {
-		if err := encoder.Encode(entry); err != nil {
-			return fmt.Errorf("write entry seq=%d: %w", entry.Seq, err)
+	return writeSessionSnapshot(path, projectRoot, func(writer *RawWriter) error {
+		if err := writer.WriteRaw(map[string]any{"_meta": history.Meta}); err != nil {
+			return fmt.Errorf("write meta: %w", err)
 		}
-	}
-
-	// sync to ensure durability
-	if err := f.Sync(); err != nil {
-		return fmt.Errorf("sync file: %w", err)
-	}
-
-	return nil
+		for _, entry := range history.Entries {
+			if err := writer.WriteValue(entry); err != nil {
+				return fmt.Errorf("write entry seq=%d: %w", entry.Seq, err)
+			}
+		}
+		return nil
+	})
 }
 
 // LoadHistoryFromSession loads captured history from a session folder.

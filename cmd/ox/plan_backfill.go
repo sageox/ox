@@ -46,7 +46,7 @@ via plan.Title/plan.Slugify, rewrites meta.json + re-stamps plan.html + appends
 a 'revised' event, and renames the plan directory to the corrected slug WHILE
 KEEPING ITS ORIGINAL DATE PREFIX — the plan's identity, not today's date. Any
 sessions/*/meta.json produced_plans entry pointing at an old slug is rewritten
-too, so 'ox agent stop' reconciliation keeps resolving it.
+too, so 'ox agent <id> session stop' reconciliation keeps resolving it.
 
 Always run --dry-run first: it prints the full retitle/rename table and
 touches nothing — that table is the reviewable artifact before a real run.

@@ -86,6 +86,7 @@ func commitMissingSessionPointer(t *testing.T, ledger, session string, content [
 }
 
 func TestReconcile_ReuploadsExactRecoveryCacheWithoutLocalMutation(t *testing.T) {
+	useBundledSessionRules(t)
 	ledger, _ := initLedgerWithRemote(t)
 	content := []byte("exact recovery content\n")
 	pointerPath, metaPath, cachePath, ref := commitMissingSessionPointer(t, ledger, "exact", content)
@@ -113,6 +114,7 @@ func TestReconcile_ReuploadsExactRecoveryCacheWithoutLocalMutation(t *testing.T)
 }
 
 func TestReconcile_RecoveryCacheFailuresAreAtomic(t *testing.T) {
+	useBundledSessionRules(t)
 	for _, test := range []struct {
 		name         string
 		prepareCache func(t *testing.T, path string, content []byte)
@@ -191,6 +193,7 @@ func TestReconcile_RecoveryCacheFailuresAreAtomic(t *testing.T) {
 }
 
 func TestReconcile_MissingUpstreamDoesNotFallBackToWholeTree(t *testing.T) {
+	useBundledSessionRules(t)
 	ledger := initLedgerRepo(t)
 	content := []byte("unpublished\n")
 	pointerPath, _, _, _ := commitMissingSessionPointer(t, ledger, "no-upstream", content)
@@ -212,6 +215,7 @@ func TestReconcile_MissingUpstreamDoesNotFallBackToWholeTree(t *testing.T) {
 }
 
 func TestReconcile_DivergedBranchDoesNotMutate(t *testing.T) {
+	useBundledSessionRules(t)
 	ledger, bare := initLedgerWithRemote(t)
 	content := []byte("local content\n")
 	pointerPath, _, _, _ := commitMissingSessionPointer(t, ledger, "diverged", content)
@@ -237,6 +241,7 @@ func TestReconcile_DivergedBranchDoesNotMutate(t *testing.T) {
 }
 
 func TestReconcile_ManyUnrecoverablePointersDoNotMutate(t *testing.T) {
+	useBundledSessionRules(t)
 	ledger, _ := initLedgerWithRemote(t)
 	missing := make(map[string]bool)
 	files := make(map[string]string)
@@ -264,6 +269,7 @@ func TestReconcile_ManyUnrecoverablePointersDoNotMutate(t *testing.T) {
 }
 
 func TestReconcile_MixedReuploadAndUnrecoverableKeepsPushPaused(t *testing.T) {
+	useBundledSessionRules(t)
 	ledger, _ := initLedgerWithRemote(t)
 	content := []byte("keep the recording\n")
 	pointerPath, metaPath, cachePath, sessionRef := commitMissingSessionPointer(t, ledger, "mixed", content)
@@ -304,6 +310,7 @@ func mustReadFile(t *testing.T, path string) []byte {
 // sitting in .sageox/cache was still reported as "no blob locally" and kept
 // every push rejected.
 func TestReconcile_ReuploadsExactRecoveryCacheForPlan(t *testing.T) {
+	useBundledSessionRules(t)
 	ledger, _ := initLedgerWithRemote(t)
 	content := []byte("<!doctype html><html><head><meta name=\"sageox:plan\" content=\"p\"></head><body>plan</body></html>\n")
 	ref := NewFileRef(content)
@@ -331,6 +338,7 @@ func TestReconcile_ReuploadsExactRecoveryCacheForPlan(t *testing.T) {
 // promised those bytes are there, so an unreadable cache is an error, never
 // permission to call the pointer unrecoverable.
 func TestReconcile_SessionCacheUnreadableFailsClosed(t *testing.T) {
+	useBundledSessionRules(t)
 	ledger, _ := initLedgerWithRemote(t)
 	content := []byte("recording whose cache is obstructed\n")
 	_, _, _, ref := commitMissingSessionPointer(t, ledger, "obstructed", content)

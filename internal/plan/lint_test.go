@@ -301,3 +301,102 @@ func TestLintRender_GoRendererOutputIsClean(t *testing.T) {
 		t.Errorf("the Go renderer's own output must lint clean, got %v", ruleIDs(findings))
 	}
 }
+
+// issue1432Page is the ox#1432 repro: a minimal authored page that never
+// mentions SageOx.
+const issue1432Page = `<!doctype html><html><body><main><h1>x</h1></main></body></html>`
+
+// injected runs a page through the chrome injection `ox plan lint --file`
+// applies before linting, with the chrome data a plan with res would carry.
+func injected(page string, res Result) string {
+	return string(InjectChrome([]byte(page), BuildChromeData(res, RenderOptions{Slug: "p"})))
+}
+
+// TestLintBranding_CreditIsWhatTheReaderSees pins the credit signal to what a
+// reader of the page sees: visible text, the chrome's runtime credit, or the
+// SageOx wordmark lockup — never script source, comments, or an attribute value
+// on its own (ox#1432).
+// Failure prevented: every page linted outside an enriched checkout fails
+// --strict with branding.overclaim, because the inlined chrome.js source
+// carries the credit string, so strict lint means nothing on those pages.
+func TestLintBranding_CreditIsWhatTheReaderSees(t *testing.T) {
+	tests := []struct {
+		name      string
+		html      string
+		res       Result
+		wantRules []string
+	}{
+		// --- un-enriched: nothing to credit ---
+		{
+			name: "issue repro with chrome injected and no enrichment is clean",
+			html: injected(issue1432Page, Result{}),
+			res:  Result{},
+		},
+		{
+			name: "credit string only inside a script body is not a credit",
+			html: `<p>plan</p><script>var s = 'Team context enriched by SageOx';</script>`,
+			res:  Result{},
+		},
+		{
+			name: "credit string only inside an HTML comment is not a credit",
+			html: `<p>plan</p><!-- Team context enriched by SageOx -->`,
+			res:  Result{},
+		},
+		{
+			name: "credit string only in an aria-label is not a credit",
+			html: `<a href="https://sageox.ai" aria-label="enriched by SageOx">home</a>`,
+			res:  Result{},
+		},
+		{
+			name: "credit under a hidden element, nested, is not a credit",
+			html: `<div hidden><p>Team context <em>enriched by</em> SageOx</p></div><p>plan</p>`,
+			res:  Result{},
+		},
+		{
+			name:      "credit after a closed hidden element still counts",
+			html:      `<div hidden><div><br>draft</div></div><p>Team context enriched by SageOx`,
+			res:       Result{},
+			wantRules: []string{"branding.overclaim"},
+		},
+		{
+			name:      "hand-authored visible credit without enrichment is an overclaim",
+			html:      injected(`<html><body><footer>Team context enriched by SageOx</footer></body></html>`, Result{}),
+			res:       Result{},
+			wantRules: []string{"branding.overclaim"},
+		},
+		{
+			name:      "visible credit split across inline markup is an overclaim",
+			html:      `<footer>Team context enriched by <strong>SageOx</strong></footer>`,
+			res:       Result{},
+			wantRules: []string{"branding.overclaim"},
+		},
+		{
+			name:      "the SageOx wordmark lockup without enrichment is an overclaim",
+			html:      `<a class="wm-corner" data-ox-wordmark href="https://sageox.ai" aria-label="enriched by SageOx"><span class="wm-label">enriched by</span><svg><title>SageOx Wordmark</title></svg></a>`,
+			res:       Result{},
+			wantRules: []string{"branding.overclaim"},
+		},
+		// --- enriched: the credit must actually render ---
+		{
+			name: "enriched page credited by the injected chrome is clean",
+			html: injected(`<html><body><p>plan</p></body></html>`, contextOnlyResult()),
+			res:  contextOnlyResult(),
+		},
+		{
+			name: "enriched page with its own rendered credit is clean",
+			html: `<p>plan</p>` + footerCredit,
+			res:  contextOnlyResult(),
+		},
+		{
+			name:      "enriched page whose credit exists only in script source is flagged",
+			html:      `<p>plan</p><script>var s = 'Team context enriched by SageOx';</script>`,
+			res:       contextOnlyResult(),
+			wantRules: []string{"branding.footer-credit"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assertRules(t, LintBranding([]byte(tt.html), tt.res), tt.wantRules)
+		})
+	}
+}

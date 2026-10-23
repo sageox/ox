@@ -100,6 +100,17 @@ type Capabilities struct {
 	// the CLI is running in. Drives caching strategy (don't warm caches
 	// that won't pay back) and telemetry batching cadence.
 	EnvLifetime Lifetime
+
+	// HostEndsWithAgent reports that the machine may pause or be torn
+	// down once the coding agent finishes: an Amp orb, Claude Code Cloud,
+	// Devin. Work handed to the daemon at session end may then never run,
+	// so session end must upload before it returns.
+	//
+	// Independent of DaemonViable: an Amp orb runs the daemon (it clones
+	// the Ledger and serves the session) yet pauses minutes after its
+	// agent goes idle. False on a laptop, so the zero value still reads
+	// as one.
+	HostEndsWithAgent bool
 }
 
 // envOverrides captures the capability-level OX_* env vars that let an
@@ -158,10 +169,11 @@ func Reset() {
 // want to bypass the cache.
 func Probe() Capabilities {
 	c := Capabilities{
-		PersistDisk:    probePersistDisk(),
-		TmpdirWritable: probeTmpdir(),
-		Browser:        probeBrowser(),
-		EnvLifetime:    probeLifetime(),
+		PersistDisk:       probePersistDisk(),
+		TmpdirWritable:    probeTmpdir(),
+		Browser:           probeBrowser(),
+		EnvLifetime:       probeLifetime(),
+		HostEndsWithAgent: probeHostEndsWithAgent(),
 	}
 	// DaemonViable composes other capabilities, so probe it last.
 	c.DaemonViable = probeDaemonViable(c)
@@ -283,6 +295,9 @@ func probeLifetime() Lifetime {
 	if os.Getenv("CLAUDE_CODE_REMOTE") != "" {
 		return LifetimeHours
 	}
+	if IsAmpOrb() {
+		return LifetimeHours
+	}
 	if isCodespaces() {
 		return LifetimePersistent
 	}
@@ -299,6 +314,13 @@ func probeLifetime() Lifetime {
 	}
 	// default assumption: a dev shell or service that will run for a while
 	return LifetimePersistent
+}
+
+// probeHostEndsWithAgent reports the venues whose machine pauses or is torn
+// down once the coding agent is done. Venue markers only: an explicit
+// OX_EPHEMERAL says the disk is lost, not when the machine stops.
+func probeHostEndsWithAgent() bool {
+	return IsAmpOrb() || isClaudeCloud() || isDevin()
 }
 
 // probeDaemonViable composes the other capability fields plus the

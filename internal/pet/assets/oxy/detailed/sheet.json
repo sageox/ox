@@ -1,0 +1,90 @@
+{
+  "animations": [
+    {
+      "fps": 8,
+      "frames": 12,
+      "name": "idle",
+      "row": 0
+    },
+    {
+      "fps": 8,
+      "frames": 12,
+      "name": "thinking",
+      "row": 1
+    },
+    {
+      "fps": 14,
+      "frames": 16,
+      "name": "spin",
+      "row": 2
+    },
+    {
+      "fps": 14,
+      "frames": 14,
+      "name": "glint",
+      "row": 3
+    },
+    {
+      "fps": 14,
+      "frames": 10,
+      "name": "hop",
+      "row": 4
+    },
+    {
+      "fps": 6,
+      "frames": 16,
+      "name": "sleep",
+      "row": 5
+    },
+    {
+      "fps": 14,
+      "frames": 8,
+      "name": "error",
+      "row": 6
+    },
+    {
+      "fps": 8,
+      "frames": 10,
+      "name": "confused",
+      "row": 7
+    },
+    {
+      "fps": 10,
+      "frames": 10,
+      "name": "celebrate",
+      "row": 8
+    },
+    {
+      "fps": 14,
+      "frames": 24,
+      "name": "orbit",
+      "row": 9
+    },
+    {
+      "fps": 12,
+      "frames": 18,
+      "name": "prime",
+      "row": 10
+    },
+    {
+      "fps": 12,
+      "frames": 16,
+      "name": "query",
+      "row": 11
+    },
+    {
+      "fps": 10,
+      "frames": 16,
+      "name": "plan",
+      "row": 12
+    },
+    {
+      "fps": 10,
+      "frames": 12,
+      "name": "murmur",
+      "row": 13
+    }
+  ],
+  "cell": 128,
+  "columns": 24
+}

@@ -10,6 +10,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/plan"
+	"github.com/sageox/ox/pkg/planreview"
 	"github.com/spf13/cobra"
 )
 
@@ -43,7 +44,9 @@ Ask first, or pass a short --timeout and poll between other work.
 
 Emits immediately if feedback is already waiting (never strands a race). Exits with
 status "timeout" if nothing arrives within --timeout, or "approved" once a reviewer
-approves the plan (the loop is done).`,
+approves the plan (the loop is done). "complete" is false when the review could not be
+fully read or holds conflicting copies of an operation; "failures" and "conflicts" then
+say what, and the open items may be missing some.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		timeout, _ := cmd.Flags().GetDuration("timeout")
@@ -53,11 +56,14 @@ approves the plan (the loop is done).`,
 
 // awaitResult is the JSON contract the agent consumes from stdout.
 type awaitResult struct {
-	Slug      string            `json:"slug"`
-	Status    string            `json:"status"` // feedback | approved | timeout
-	Open      []plan.MergedItem `json:"open"`
-	Contested []string          `json:"contested,omitempty"`
-	Counts    awaitCounts       `json:"counts"`
+	Slug      string                `json:"slug"`
+	Status    string                `json:"status"` // feedback | approved | timeout
+	Open      []plan.MergedItem     `json:"open"`
+	Contested []string              `json:"contested,omitempty"`
+	Counts    awaitCounts           `json:"counts"`
+	Complete  bool                  `json:"complete"`
+	Failures  []planreview.Failure  `json:"failures,omitempty"`
+	Conflicts []planreview.Conflict `json:"conflicts,omitempty"`
 }
 
 type awaitCounts struct {
@@ -114,12 +120,12 @@ func runPlanReviewAwait(cmd *cobra.Command, slug string, timeout time.Duration) 
 	for {
 		select {
 		case <-ctx.Done():
-			return emitAwait(cmd, slug, awaitResult{Status: "timeout"})
+			return emitAwait(cmd, slug, awaitTimeout(planDir))
 		case <-timer.C:
-			return emitAwait(cmd, slug, awaitResult{Status: "timeout"})
+			return emitAwait(cmd, slug, awaitTimeout(planDir))
 		case _, ok := <-w.Events:
 			if !ok {
-				return emitAwait(cmd, slug, awaitResult{Status: "timeout"})
+				return emitAwait(cmd, slug, awaitTimeout(planDir))
 			}
 			// coalesce write bursts (a round write, a resolve, a re-render) into one recheck
 			if debounce != nil {
@@ -132,7 +138,7 @@ func runPlanReviewAwait(cmd *cobra.Command, slug string, timeout time.Duration) 
 			}
 		case _, ok := <-w.Errors:
 			if !ok {
-				return emitAwait(cmd, slug, awaitResult{Status: "timeout"})
+				return emitAwait(cmd, slug, awaitTimeout(planDir))
 			}
 		}
 	}
@@ -140,39 +146,49 @@ func runPlanReviewAwait(cmd *cobra.Command, slug string, timeout time.Duration) 
 
 // awaitSnapshot reads current review state; done is true when there is open feedback
 // (from any reviewer) or the plan has been approved — the two conditions that end a
-// wait and hand the agent something to do.
+// wait and hand the agent something to do. An incomplete read ends no wait on its
+// own: every result carries its completeness, so the agent sees it whenever the
+// wait ends.
 func awaitSnapshot(planDir string) (awaitResult, bool) {
-	if meta, err := plan.LoadMeta(planDir); err == nil && meta.Status == plan.PlanStatusApproved {
-		return awaitResult{Status: "approved"}, true
+	rev := plan.ReadReview(planDir)
+	res := awaitResult{Complete: rev.Problems() == 0, Failures: rev.Failures, Conflicts: rev.Conflicts}
+	if plan.CurrentStatus(planDir) == plan.PlanStatusApproved {
+		res.Status = "approved"
+		return res, true
 	}
-	items, err := plan.AssembleReview(planDir)
-	if err != nil {
-		return awaitResult{}, false
-	}
-	var open []plan.MergedItem
 	reviewers := map[string]bool{}
-	for _, it := range items {
-		if it.Open && it.Status != plan.FeedbackApprove {
-			open = append(open, it)
+	for _, it := range rev.Items {
+		if it.Open && it.Status != planreview.StatusApprove {
+			// a drawing's record is the review page's geometry, kilobytes the
+			// coworker cannot act on; its label, section and note say what and why
+			it.Region = nil
+			res.Open = append(res.Open, it)
 			if it.Reviewer != "" {
 				reviewers[it.Reviewer] = true
 			}
 		}
 	}
-	if len(open) == 0 {
-		return awaitResult{}, false
+	if len(res.Open) == 0 {
+		return res, false
 	}
-	var contested []string
-	for a := range plan.ContestedAnchors(items) {
-		contested = append(contested, a)
+	for a := range plan.ContestedAnchors(rev.Items) {
+		res.Contested = append(res.Contested, a)
 	}
-	sort.Strings(contested)
-	return awaitResult{
-		Status:    "feedback",
-		Open:      open,
-		Contested: contested,
-		Counts:    awaitCounts{Open: len(open), Reviewers: len(reviewers)},
-	}, true
+	sort.Strings(res.Contested)
+	res.Status = "feedback"
+	res.Counts = awaitCounts{Open: len(res.Open), Reviewers: len(reviewers)}
+	return res, true
+}
+
+// awaitTimeout is the result of a wait that ends: what a last read finds, so
+// feedback that arrived just before the end is still handed over, else
+// "timeout" with that read's completeness.
+func awaitTimeout(planDir string) awaitResult {
+	res, done := awaitSnapshot(planDir)
+	if !done {
+		res.Status = "timeout"
+	}
+	return res
 }
 
 func emitAwait(cmd *cobra.Command, slug string, res awaitResult) error {

@@ -58,14 +58,15 @@ func TestAnchorVectors(t *testing.T) {
 // TestRebind_MovesAMarkOnlyWhenTheMoveIsUnambiguous pins the rebind rules: an
 // exact label match follows a reworded heading, identical text is rebound only
 // within the mark's own section, a fuzzy match needs a strong score and a
-// clear margin, and highlights, closed items and blank labels never move.
+// clear margin, and highlights, marks on the whole plan, closed items and
+// blank labels never move.
 // Failure prevented: an edit orphans an unaddressed mark, or attaches a
 // reviewer's words to the wrong element.
 func TestRebind_MovesAMarkOnlyWhenTheMoveIsUnambiguous(t *testing.T) {
 	t.Parallel()
 	page := `<section id="a"><h2>Rollout Plan</h2><ul><li>Ship the CLI first</li><li>TBD budget</li></ul></section>` +
 		`<section id="b"><h2>Beta</h2><ul><li>TBD budget</li><li>ship the daemon first now</li><li>ship the daemon first soon</li></ul></section>` +
-		`<section id="c"><h2>Gamma</h2><ul><li>migrate the ledger store before the cutover window</li></ul></section>`
+		`<section id="c"><h2>Gamma</h2><ul><li>migrate the ledger store before the cutover window</li><li>Whole plan</li></ul></section>`
 	mark := func(anchor, section, label string) Merged {
 		return Merged{Item: Item{Anchor: anchor, Section: section, Label: label}, Open: true}
 	}
@@ -83,6 +84,7 @@ func TestRebind_MovesAMarkOnlyWhenTheMoveIsUnambiguous(t *testing.T) {
 		{"nothing similar", mark("hdead0005", "Rollout", "entirely unrelated words"), "", ""},
 		{"blank label", mark("hdead0006", "Rollout", "   "), "", ""},
 		{"a highlight", mark("q5e1f00ba", "Rollout", "Ship the CLI first"), "", ""},
+		{"the whole plan", mark(WholePlanAnchor, "", "Whole plan"), "", ""},
 		{"a closed item", Merged{Item: Item{Anchor: "hdead0007", Label: "Ship the CLI first"}}, "", ""},
 		{"still anchored", mark(AnchorFor("Rollout Plan", "Ship the CLI first"), "Rollout Plan", "Ship the CLI first"), "", ""},
 	} {

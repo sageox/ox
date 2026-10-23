@@ -439,6 +439,12 @@ func resolveTeamCard(projectRoot, teamRef string) (teamCard, bool, error) {
 		if t := resolveTeamByQuery(projectRoot, teamRef); t != nil {
 			return teamCardFromEnriched(*t), true, nil
 		}
+		// Not synced locally: resolve the ref against the account's teams so a
+		// name or slug becomes its real team ID instead of being echoed back.
+		if matches := resolveTeamMembership(serverTeamMemberships(projectRoot), teamRef); len(matches) == 1 {
+			m := matches[0]
+			return teamCard{teamID: m.ID, name: m.Name, slug: m.Slug}, false, nil
+		}
 		// Not synced locally — the server is the authority on whether this team
 		// exists and who belongs to it. runTeamShow confirms it via the roster
 		// before rendering, so a typo cannot print a plausible-looking card.

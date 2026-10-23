@@ -1,7 +1,7 @@
 ---
 title: "ox session import"
 description: "CLI reference for ox session import"
-sidebar_position: 87
+sidebar_position: 92
 ---
 
 ## ox session import
@@ -27,6 +27,15 @@ Up to 3 sessions are summarized at once; --parallel 1 runs one at a time.
 Running the import again uploads nothing twice: sessions already imported,
 and sessions ox recorded live, are recognized and skipped.
 
+A session whose ox recording you aborted is listed as aborted and never
+uploaded. To upload one anyway, name it with --session and add
+--include-aborted; the confirmation says it was aborted.
+
+With --json, each session's state is one of ready, in_progress,
+already_imported, recorded_live, aborted, not_shared, needs_summarizer or
+ineligible, and counts has a key for each state present. Only ready sessions
+are uploaded; treat any other value, including one added later, as skipped.
+
 This is not 'ox agent <id> session import', which adds a planning
 conversation to the current recording.
 
@@ -43,6 +52,7 @@ ox session import [flags]
   ox session import --dry-run --json   # preview only, machine-readable
   ox session import --agent codex --since 30d
   ox session import --session 3f9a1c2b --yes
+  ox session import --session 3f9a1c2b --include-aborted
 ```
 
 ### Options
@@ -52,6 +62,7 @@ ox session import [flags]
       --browse              review session content in a local browser; return to the terminal to confirm
       --dry-run             preview only; never upload
   -h, --help                help for import
+      --include-aborted     also upload the sessions named with --session whose ox recording you aborted
       --parallel int        maximum sessions summarized at once (at least 1) (default 3)
       --preview             read one session's content without importing; requires --session
       --session strings     import exactly these sessions, by native session ID or a unique prefix of 8+ characters

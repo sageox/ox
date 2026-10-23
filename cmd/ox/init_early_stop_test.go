@@ -78,6 +78,7 @@ func TestRunInit_StoppingEarlyFailsAndSaysWhy(t *testing.T) {
 			for _, s := range tc.says {
 				assert.Contains(t, stdout+stderr, s)
 			}
+			assert.NotContains(t, stdout+stderr, "ox session import")
 			assert.NoDirExists(t, filepath.Join(repo, ".sageox"), "nothing was initialized")
 		})
 	}

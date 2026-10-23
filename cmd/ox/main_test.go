@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,6 +25,28 @@ import (
 // inside the real ox repository. Captured before TestMain moves away from it, for
 // the few tests that legitimately need to read fixtures from the source tree.
 var packageDir string
+
+// publicationCatalogTransport keeps real push integration tests on the complete
+// catalog without adding any production option to bypass current-rules checks.
+// Every other HTTP request uses the normal transport unchanged.
+type publicationCatalogTransport struct {
+	base        http.RoundTripper
+	catalogPath string
+}
+
+// The catalog is read per request, not in TestMain: tests that re-exec the test
+// binary inherit a sandbox working directory where the path does not resolve,
+// and only a child that actually fetches the catalog should care.
+func (transport publicationCatalogTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	if request.URL.String() == "https://raw.githubusercontent.com/gitleaks/gitleaks/master/config/gitleaks.toml" {
+		catalog, err := os.ReadFile(transport.catalogPath)
+		if err != nil {
+			return nil, fmt.Errorf("cmd/ox tests: cannot read bundled publication rules: %w", err)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(catalog)), Request: request}, nil
+	}
+	return transport.base.RoundTrip(request)
+}
 
 // repoPath resolves a path relative to the ox source tree, for tests that read
 // checked-in fixtures. Use it instead of a relative literal: the process working
@@ -61,6 +85,15 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	packageDir = wd
+	// Publication tests use the real checked-in catalog, never a public network
+	// dependency. Production keeps its unconditional current-rules refresh.
+	// runtime.Caller, not packageDir: re-exec'd child test processes inherit the
+	// sandbox working directory, where a cwd-relative path does not resolve.
+	_, thisFile, _, _ := runtime.Caller(0)
+	http.DefaultTransport = publicationCatalogTransport{
+		base:        http.DefaultTransport,
+		catalogPath: filepath.Join(filepath.Dir(thisFile), "..", "..", "internal", "secretguard", "gitleaks.toml"),
+	}
 
 	sandbox, err := os.MkdirTemp("", "ox-cmd-tests-")
 	if err != nil {
@@ -86,6 +119,15 @@ func TestMain(m *testing.M) {
 				"A FixLevelAuto doctor check would reconcile that repository. "+
 				"Set TMPDIR to a directory outside any checkout and re-run.\n",
 			sandbox, root)
+		_ = os.Chdir(packageDir)
+		_ = os.RemoveAll(sandbox)
+		os.Exit(1)
+	}
+
+	// The same reasoning applies to the developer's home directory: move it into
+	// the sandbox before any test runs, rather than trusting every test to.
+	if err := isolateHome(sandbox); err != nil {
+		fmt.Fprintf(os.Stderr, "cmd/ox tests: cannot isolate the home directory: %v\n", err)
 		_ = os.Chdir(packageDir)
 		_ = os.RemoveAll(sandbox)
 		os.Exit(1)

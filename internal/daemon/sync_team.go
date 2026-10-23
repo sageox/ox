@@ -373,6 +373,8 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 			// cleared inside pullTeamContext instead, next to where they're
 			// raised, so the key is never re-derived or guessed here.
 			s.issues.ClearIssue(IssueTypeSyncBackoff, r.ws.ID)
+			// the clone-failure issue is also keyed on the workspace ID
+			s.issues.ClearIssue(IssueTypeCloneFailed, r.ws.ID)
 		}
 
 		mCfg := s.applySparseCheckout(ctx, r.ws.Path)
@@ -638,17 +640,16 @@ type teamPullOutcome struct {
 }
 
 // pullTeamContext performs a git pull on a single team context repo.
-// Returns a nil error if skipped due to recent fetch (by another daemon).
+// Returns a nil error if the remote is unchanged.
 //
 // Multi-daemon deduplication: Users often work on multiple repos that share
 // the same team context (e.g., 5-6 project repos all pointing to one team
 // context directory). Each repo has its own daemon, so without coordination,
 // they'd all try to git pull the same team context simultaneously.
 //
-// We solve this by checking .git/FETCH_HEAD mtime before fetching. Git updates
-// this file on every fetch, so if it was recently modified (by any process),
-// we skip the pull. This naturally deduplicates without locks - whichever
-// daemon fetches first "wins" and others skip for that interval.
+// The endpoint ownership lease selects one background sync daemon, and the
+// per-repository lock serializes it with on-demand syncs. Under that lock,
+// ls-remote skips unchanged repos. A recent fetch must not delay a new commit.
 //
 // Change Detection: After a successful pull, this function compares file states
 // before and after to detect changes in key team context files (distilled discussions,
@@ -656,12 +657,6 @@ type teamPullOutcome struct {
 // so that CLI commands can "whisper" updates to agents.
 func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) (teamPullOutcome, error) {
 	repoName := filepath.Base(path)
-
-	// compute FETCH_HEAD min age from manifest if available
-	minFetchAge := minTeamContextFetchAge
-	if intervalMin := s.workspaceRegistry.GetSyncIntervalMin(path); intervalMin > 0 {
-		minFetchAge = time.Duration(intervalMin) * time.Minute
-	}
 
 	// read manifest before pull to get auto-resolve prefixes. The manifest
 	// is already on disk from the previous clone/pull. If missing, ParseFile
@@ -671,11 +666,20 @@ func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) (teamP
 	mCfg := manifest.ParseFile(manifestPath, manifest.RepoKindTeamContext)
 
 	result := s.pullManagedRepo(ctx, ManagedRepoPullOpts{
+		// Discussion dirs are ID-named and full of near-identical JSON, so when
+		// upstream deletes one discussion and adds another, rename detection
+		// pairs them and any local change to the deleted one becomes a false
+		// rename/delete conflict that suspends sync. Cost: a real upstream
+		// rename racing a local edit of that same file now surfaces as
+		// modify/delete instead of following the rename, which suspends sync
+		// the same way until it is resolved. The local edit is kept (in the
+		// worktree and the autostash), never discarded.
+		ImmutablePaths:     true,
 		RepoPath:           path,
 		RepoName:           repoName,
 		ProjectRoot:        s.config.ProjectRoot,
 		SyncInterval:       s.config.TeamContextSyncInterval,
-		MinFetchAge:        minFetchAge,
+		SkipFetchAgeCheck:  true,
 		ValidateIntegrity:  true,
 		DetectDivergence:   true,
 		ResolveRules:       mCfg.ResolveRules,
@@ -698,6 +702,15 @@ func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) (teamP
 			return outcome, fmt.Errorf("corrupt team context at %s but rename failed: %w", path, err)
 		}
 		return outcome, fmt.Errorf("team context repo was corrupt and moved aside for re-clone; re-run after the daemon re-clones it (path: %s)", path)
+	}
+
+	// The repo exists and is not corrupt, so it is cloned: drop a clone_failed
+	// issue left by an earlier attempt. `ox doctor --fix` repairs a clone
+	// without going through the daemon's clone path, which is the only other
+	// place that clears it, so the warning would otherwise print every session.
+	// Before the skip branch: an unchanged remote skips every cycle.
+	if s.issues != nil {
+		s.issues.ClearIssue(IssueTypeCloneFailed, repoName)
 	}
 
 	// handle skip

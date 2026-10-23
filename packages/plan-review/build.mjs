@@ -1,7 +1,8 @@
 // Builds @sageox/plan-review from src/ into
 //   dist/                   the npm package: ESM entries and their types, the
 //                           framed document tools script (as a file and as a
-//                           string), its stylesheet, and manifest.json
+//                           string), its stylesheet, framePlan with ox's vendored
+//                           Mermaid build, and manifest.json
 //   internal/plan/assets/   the ox CLI's review page: review.js, review.css
 //                           and review.manifest.json, committed so that
 //                           building ox never needs node
@@ -21,6 +22,8 @@ import { fileURLToPath } from 'node:url';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const cliAssets = join(root, '..', '..', 'internal', 'plan', 'assets');
+// framePlan inlines the Mermaid build artifact renders already inline
+const mermaid = join('..', '..', 'internal', 'plan', 'assets', 'mermaid.min.js');
 const dist = join(root, 'dist');
 const check = process.argv.includes('--check');
 const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
@@ -29,7 +32,7 @@ const tsc = (config) => execFileSync(join(root, 'node_modules', '.bin', 'tsc'), 
 
 // sourceDigest covers every file that decides the output bytes.
 function sourceDigest() {
-  const files = ['build.mjs', 'package-lock.json', 'package.json', 'tsconfig.build.json', 'tsconfig.json'];
+  const files = ['build.mjs', 'package-lock.json', 'package.json', 'tsconfig.build.json', 'tsconfig.json', mermaid];
   const walk = (dir) => readdirSync(join(root, dir), { withFileTypes: true }).forEach((e) => {
     if (e.isDirectory()) walk(dir + '/' + e.name);
     else files.push(dir + '/' + e.name);
@@ -79,6 +82,10 @@ const npm = {
   'document-tools-script.js': 'export default ' + JSON.stringify(framed) + ';\n',
   'document-tools-script.d.ts': 'declare const script: string;\nexport default script;\n',
   'document-tools.css': documentCss,
+  'host.css': hostCss,
+  'frame-plan.js': await bundle('frame-plan.ts', 'esm', {
+    define: { __OX_MERMAID__: JSON.stringify(readFileSync(join(root, mermaid), 'utf8')), __OX_DOCUMENT_TOOLS__: JSON.stringify(framed) },
+  }),
 };
 
 for (const [name, js] of [['review.js', cli['review.js']], ['document-tools.iife.js', framed]]) {
@@ -89,6 +96,8 @@ refuse('document-tools.iife.js', framed,
   ['localStorage', 'sessionStorage', 'document.cookie', 'indexedDB', 'fetch(', 'XMLHttpRequest', 'EventSource', 'WebSocket', 'sendBeacon',
     'serviceWorker', 'window.open', 'location.href', 'location.assign', 'location.replace', 'eval(', 'new Function'],
   'an opaque-origin frame has no storage, the host CSP no network or eval, and the tools never navigate');
+refuse('document-tools.iife.js', framed, ['ox-review:', 'mountHostControls', 'X-Review-Token'],
+  'the review controls, the outbox and credentials stay in the trusted host, never in the plan document');
 
 const { PROTOCOL } = await import('data:text/javascript;base64,' + Buffer.from(npm['index.js']).toString('base64'));
 const digest = sourceDigest();

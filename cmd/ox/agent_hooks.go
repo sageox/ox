@@ -14,16 +14,14 @@ var agentHooksCmd = &cobra.Command{
 	Short: "Git and CI hooks for agent integrations",
 	Long: `Deterministic hooks called by git and CI tooling via agent integrations.
 
-This is the canonical path for git hooks. Legacy 'ox hooks <git-subcommand>'
-still works for backward compatibility.
-
-Available subcommands are registered by the same hooks that serve 'ox hooks'.
+The git hook subcommands are currently served by 'ox hooks <git-subcommand>';
+'ox agent hooks' has no subcommands of its own yet.
 Use 'ox hooks --help' to see all available git hook subcommands.
 
 Examples:
-  ox agent hooks pre-commit
-  ox agent hooks post-commit
-  ox agent hooks commit-msg`,
+  ox hooks post-commit
+  ox hooks commit-msg
+  ox hooks pre-push`,
 }
 
 func init() {

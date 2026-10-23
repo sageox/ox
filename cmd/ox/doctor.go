@@ -899,6 +899,13 @@ func runDoctorChecksWithState(parent context.Context, opts doctorOptions, state 
 	if check := GetDoctorCheck(CheckSlugSessionTrace); check != nil {
 		integrationChecks = append(integrationChecks, check.Run(opts.shouldFix(CheckSlugSessionTrace)))
 	}
+	// Oxy, the opt-in Claude Code pet: refreshed after an ox upgrade, silent
+	// on machines that never enabled it.
+	if check := GetDoctorCheck(CheckSlugPetOxy); check != nil {
+		if res := check.Run(opts.shouldFix(CheckSlugPetOxy)); !res.skipped {
+			integrationChecks = append(integrationChecks, res)
+		}
+	}
 	integrationChecks = append(integrationChecks, checkClaudeSkills(opts.shouldFix(CheckSlugClaudeSkills)))
 	legacyCheck, legacyPending := checkLegacyOxFilesWithPreflight(legacyRoot, legacyFix, legacyPreflight)
 	// The ox-managed inventory: keep ox's own files ignored, report any that are
@@ -1370,6 +1377,14 @@ var ledgerGitHealthOrder = []string{
 	CheckSlugLedgerStuckOperation,
 	CheckSlugLedgerCleanWorkdir,
 	CheckSlugLedgerBranchStatus,
+	// plan-stranded-saves before plan-unsaved-edits and plan-pending-writes: a
+	// save it queues is not also listed as an unsaved edit, and lands in this
+	// run's retry.
+	CheckSlugPlanStrandedSaves,
+	CheckSlugPlanUnsavedEdits,
+	// after branch-status, whose push can land review records still waiting
+	// in the retry queue, so their entries are cleared instead of reported.
+	CheckSlugPlanPendingWrites,
 	// ox-eeqi: post-migration the PAT lives in the credential helper, not the
 	// origin URL. Flags + strips any leftover oauth2:TOKEN@ that survived from a
 	// pre-eeqi clone, and catches the silent-success trap of a bare origin URL

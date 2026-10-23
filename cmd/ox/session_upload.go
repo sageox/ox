@@ -490,7 +490,13 @@ var ledgerAutoResolvePrefixes = ledger.AutoResolvePrefixes
 // Per-phase timing is captured as nested spans so OX_TRACE=1 / -v shows
 // which segment of the push dominates — the secret scan, credential
 // refresh, the push itself, or LFS reconcile.
+//
+// The push ignores its caller's cancellation (a Ctrl-C, a closed review
+// page): PushWithRetry's pull rebases the Ledger, and a cancel mid-rebase
+// kills git and skips the abort, leaving the clone mid-rebase. Its own
+// per-step timeouts still bound it.
 func pushLedger(ctx context.Context, ledgerPath string) error {
+	ctx = context.WithoutCancel(ctx)
 	ctx, span := perf.Start(ctx, "pre-push total")
 	defer span.End()
 

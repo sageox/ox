@@ -3,8 +3,9 @@
 **Status:** frozen (#1288). `pkg/planreview` implements and tests 3.5 and 3.6,
 and a consuming host passed the §5 probes on its own storage. The three points
 that host raised are settled in 3.2 (identity on retries), 3.6 (per-host
-bounds) and §5 (what a host proves). Follow-up owners: #1289 (CLI adoption),
-#1291 (browser outbox), #1294 (certification).
+bounds) and §5 (what a host proves). The CLI adopted the module in #1289
+(§1.1), and the browser's outbox in #1291 (3.9). #1384 added whole-plan
+marks (3.10). Follow-up owner: #1294 (certification).
 
 **Goal:** supported concurrent reviewers never lose feedback and never repair
 Git conflicts by hand. This spec records what the CLI does today, names the
@@ -21,17 +22,21 @@ contract choices the shared module implements.
 | `pkg/planreview/testdata/anchors.json` | The review page's anchor, label and markable-element vectors; the anchors are goldens from a JS engine running review.js. `packages/plan-review` is checked against them: anchors and labels in node, the page in Chrome (`TestBrowser_DocumentToolsMatchSharedPageVectors`) |
 | `TestContractFixtures` (`pkg/planreview/review_test.go`) | Every fixture through two transports (`Capture` and a plain read of every file) and the shared assembler |
 | `TestPublish_*`, `TestCapture_*` (`pkg/planreview/local_test.go`) | 3.5 and 3.6 |
-| `TestReviewContractFixtures` (`internal/plan/feedback_test.go`) | The CLI's v1 reader against the six fixtures it can read, `many-rounds` (120 rounds, every layout) and `region-items` (drawn regions, #1292) included, until #1289 replaces it |
-| `TestPlanReviewDurability_RacingClonesKeepEveryRecord` (`cmd/ox/plan_review_durability_test.go`) | Rounds and resolutions from three clones survive the push rebase |
+| `TestReviewContractFixtures` (`internal/plan/feedback_test.go`) | The CLI's reader, `plan.ReadReview`, against every fixture but `oversized` (which sets limits of its own) |
+| `TestPlanReviewDurability_RetryPublishesOnlyTheOriginalRecord` (`cmd/ox/plan_review_durability_test.go`) | 3.7: a failed commit and a failed push, then dirty authoring files, another operation's success and a restarted retry; each review commit carries one record and each entry clears only on its own record |
+| `TestPlanReviewDurability_RacingClonesAndLostResponses` (same file) | Rounds and resolutions from three clones survive the push rebase; a retried round is one logical submission, on the clone that stored it and on one that never saw it |
+| `packages/plan-review/test/state.test.mjs`; in Chrome (`cmd/ox`, tag `browser`) `TestBrowser_UnstorableReviewIsNeverSent`, `…LostAnswerAndAnEditDuringSendDeliverOnce`, `…TwoTabsKeepEachOthersMarks`, `…HostControlsAroundAFramedPlan`, `…ResolveOfferedOnlyToReviewersWhoMay` | 3.9: the browser's outbox |
+| `TestRebind_MovesAMarkOnlyWhenTheMoveIsUnambiguous` (`pkg/planreview`); in Chrome `TestBrowser_WholePlanCommentReachesTheLedger` | 3.10: whole-plan marks |
 
-The CLI does not import the module yet: `go install
+The CLI requires the released module (`pkg/planreview v0.1.0`): `go install
 github.com/sageox/ox/cmd/ox@<version>` refuses a `go.mod` with a `replace`
-directive, so the CLI can only require a published module version. #1289 adopts the released `pkg/planreview` and removes the CLI's own
-reader and writers; until then §1 describes the CLI as it is.
+directive. §1 records the CLI as #1287 found it; §1.1 is the CLI since #1289.
 
 ---
 
 ## 1. Inventory
+
+This is the CLI as #1287 found it. §1.1 describes it since #1289.
 
 ### Where review state lives
 
@@ -92,6 +97,136 @@ included.
 - `sharePlanDir` (save, render, lifecycle verbs) writes no marker at all.
 - Markers live in `.git/`; a re-clone loses them.
 
+### 1.1 Since #1289
+
+The CLI reads and writes review records only through `pkg/planreview`.
+
+| Operation | Record | Operation id |
+|---|---|---|
+| `POST /feedback` (a submission or a reopen), `ox plan feedback apply` | round | the request's `id`, minted by the page's outbox (3.9); else random (`/feedback`) or `ContentRoundID` (`apply`) |
+| `POST /accept` | resolution, `verified` only | the request's `id`, minted by the page's outbox |
+| `ox plan feedback resolve` | resolution | minted by the CLI |
+| `Save` with HTML (author only) | one remap record per move, `feedback/remaps/` | derived from the move; none written from an incomplete read |
+
+- **Write** (`publishReviewRecord`, `cmd/ox/plan_commit.go`): under a lock per
+  operation, this clone's own recovery entry for the operation answers first,
+  then `Prior` over a capture (a duplicate is answered with the stored copy,
+  as committed when HEAD holds it; a conflicting one is a 409 and nothing is
+  written). The recovery entry, holding the record's path, SHA-256 and bytes,
+  is written durably before the record is published create-only, and only
+  then is the operation reported saved. An entry that cannot be read blocks
+  its operation, since it may hold the only copy; a write that fails after its
+  record reached the disk keeps the entry for the retry. `apply` freezes an
+  export canonically, so whitespace or key order never makes a retry a
+  different operation.
+- **Commit:** the record's bytes are staged as a blob at its one path and
+  committed by `CommitLedgerSnapshot` with that path as the only pathspec, so no
+  other index entry or worktree file reaches a review commit.
+- **Publish:** `pushLedger`, then the remote-tracking tip must hold the
+  record's blob at its path; only that verification clears the entry and
+  reports `pushed`.
+- **Retry:** entries live in `<ledger>/.git/ox-plan-review-pending/`, one per
+  `(plan, kind, id)`. `ox plan flush-pending` (started by `ox agent prime`)
+  restores a record the worktree lost, then commits, pushes and verifies each
+  entry on its own, and stops at the first rejected push. A restore happens
+  only under the repo lock and never while a rebase is in progress: a rebase
+  replaying the record's commit has the record off disk, and a copy written
+  then stops the replay for good. An entry whose plan dir is gone (`ox plan
+  backfill` renames plan dirs, records included) is cleared once the remote
+  tip holds its bytes anywhere among the plans, and kept otherwise. Plan-dir
+  markers remain for authoring commits (the whole dir) and lifecycle events
+  (their files). `ox doctor` (`plan-pending-writes`) lists every entry and
+  marker still waiting, with its age and why it has not landed (its plan dir
+  is gone, it cannot be read, or it is committed but not on the remote). Its
+  fix runs on every `ox doctor`, as the session upload retry does, and is the
+  retry `ox plan flush-pending` runs, which clears only an entry whose bytes
+  the remote tip holds and a marker whose plan dir is gone.
+- **Read** (`plan.ReadReview`): `Capture` of the worktree, the Ledger's git dir
+  passed for the replay check, then `Assemble`. A clone with `core.autocrlf`
+  checks records out with CRLF endings, so the worktree is not byte-exact
+  there: a record whose name-pinned digest matches only its bytes with LF
+  endings is read with LF endings. `feedback show` (text and `--json`),
+  `review await`, the digest, `ox plan list`'s table, prime's count and the
+  rendered page all report an incomplete read and an operation stored with
+  differing content: the JSON `complete` is false for either, and the list
+  and prime surface such a plan even with nothing open.
+- **Lifecycle** (`commitPlanEvent`, `cmd/ox/plan_commit.go`): `/approve` and
+  the lifecycle verbs append their event and commit only `events.jsonl` and
+  `meta.json`, in one hold of the repo lock, so a pull never finds them half
+  written and an author's unsaved files never ride along. While the Ledger is
+  mid-rebase, locked, or holds unmerged entries they record nothing, and
+  `/approve` answers 503. A failed commit or push, from the browser or a CLI
+  verb, leaves a plan-dir marker owing only those files (`files`); a
+  lifecycle push never clears a marker owed for the whole dir, and no success
+  clears a failure recorded after its own attempt began. A verb that records
+  nothing new still commits and pushes, retrying an earlier event, and says
+  so when that left the plan unshared. With no Ledger checkout the event is
+  recorded and reported not committed, and no git command runs. Session stop
+  (`reconcileProducedPlansAtStop`) records the session's id and outcome in
+  `meta.json`, outside the repo lock, and commits only `events.jsonl` and
+  `meta.json`, with the same file-scoped marker. While a whole-dir marker is
+  pending for the plan it commits nothing: the plan's latest save is not yet
+  shared, and that retry carries `meta.json` with the rest of it.
+- **Saves** (`savePlanArtifacts`): a large plan.html, stamped as `Save` will
+  write it (`plan.SavedHTML`), is uploaded first, before the repo lock is
+  taken: the upload's timeouts run to minutes on a stalled network, and while
+  the lock is held the daemon's sync skips its cycles and other Ledger writes
+  wait on it. Then, under the lock, a save writes nothing while the Ledger is
+  mid-rebase, locked, or holds unmerged entries; otherwise the prior
+  revision's snapshot, the writes (companion pages included), the pointer swap
+  and the commit run in that one hold, so a daemon pull never finds a save
+  half written. The push follows outside it. The pointer replaces plan.html
+  only while the file holds exactly the uploaded bytes; when the store did not
+  take the page, or the page changed after its upload, the save commits
+  nothing. With no store reachable it commits everything but the page. Each of
+  these, and a failed commit or push, leaves a whole-dir marker in a Ledger
+  checkout, which `ox plan flush-pending` retries with the dir as it is then:
+  it uploads a page still awaiting upload before it takes the lock, and while
+  the page stays unstored it commits and pushes the rest of the dir and keeps
+  the marker.
+- **Whole-index commits** (`commitLedgerSnapshot` in `cmd/ox`: the commit
+  that uploads a session, at stop and in `ox doctor`'s upload retry, the
+  automatic doctor sweeps `ledger-clean-workdir`, `ledger-cache-tracked` and
+  `ledger-rej-tracked`, and the `--fix`-only GitHub data migration) commit
+  everything but `data/plans/`, through
+  `CommitLedgerSnapshot` with an exclude pathspec, and the sweeps stage nothing
+  there. A plan file stays as it was, staged or not, as do its retry marker
+  and review entries: the plan's own writers and their retries commit it.
+  Plan files alone make `ledger-clean-workdir` commit nothing. The `--fix`-only
+  session-id backfill commits only the `meta.json` files it rewrote, and H12's
+  squash commits the tree of the commits it collapses, so neither carries a
+  staged plan file (#1442). The mass-deletion guard does not count removed
+  `*.rej` and `*.needs-summary` files (#1443).
+- **Plan changes no retry owns** (`ox doctor`, just before
+  `plan-pending-writes`): a plan dir with uncommitted changes, no plan retry
+  marker, and changes outside the review records an entry lands. If its
+  `events.jsonl` holds more `created` or `revised` events than HEAD's, the
+  save ran and never committed (a crash, an older ox, a lost marker):
+  `plan-stranded-saves`, automatic, gives it a whole-dir marker and this run's
+  retry publishes it. Otherwise the change was never saved:
+  `plan-unsaved-edits` lists it in plain `ox doctor` output, and publishes it
+  as it is (a whole-dir marker, then the retry) only when
+  `ox doctor --fix-slug=plan-unsaved-edits` is confirmed at a terminal or with
+  `--yes`. `ox agent prime` retries only what is already queued.
+- **Pushes** (`pushLedger`) ignore their caller's cancellation: a cancel
+  during the pull-rebase that a rejected push runs kills git and skips its
+  abort, leaving the clone mid-rebase. `PushWithRetry`'s own timeouts bound
+  the push.
+- **Autostash conflicts on save files** (`gitutil.ResolveAutostashConflicts`):
+  when the daemon's pull re-applies its autostash over a teammate's change to
+  a file a save writes (`plan.md`, `meta.json`, `plan.html`, `annotations.json`,
+  `hero.svg`, `companions/`), the local copy is kept, as a rebase of `data/`
+  keeps the local commit. Upstream's copy stays in history, and the stash entry
+  stays in `git stash list`. `events.jsonl` and review records still refuse.
+- **Event logs merge:** `data/plans/*/events.jsonl` is `merge=union` in each
+  clone's `.git/info/attributes` (`kb.MergeUnionPaths`, rewritten before every
+  push and pull), so two clones' appends merge, upstream's lines first, in a
+  rebase and in an autostash re-apply. Union is safe because no writer edits
+  a line once appended: a line gets its `session_id`, if it has one, when it
+  is written, and session stop records the session only in `meta.json`. An
+  edited line next to another clone's append would come out of the merge
+  twice.
+
 ---
 
 ## 2. Hazards
@@ -110,7 +245,30 @@ included.
 | H10 | Daemon GC re-clone captures dirty state before a clone that can take minutes, then deletes the old clone; nothing written in between is captured, and plan writes do not wait on `.gc-swap-lock` | review files written, or committed but not pushed, during the clone are deleted with their retry markers | code: `internal/daemon/sync_gc.go` phase 0 vs swap | Ledger (daemon) |
 | H11 | Session-finalize and GitHub-sync pushes push whatever is unpushed | a review commit the CLI's pre-push gate refused can be published by the daemon | code: `session_finalize.go`, `github_sync.go` vs `.claude/rules/daemon-git.md` | Ledger (daemon) |
 | H12 | `SquashUnpushed` (over 100 unpushed commits) commits the whole index | staged-but-uncommitted review files join an unrelated squash commit | code: `internal/gitutil/squash.go` | Ledger |
-| H13 | `CommitLedgerSnapshot` refuses every commit while any index entry is unmerged | an exact-set review commit is still blocked by an unrelated conflict (relevant to H5's fix) | code: global check in `CommitLedgerSnapshotPreserving` | #1289 + Ledger: decide whether record commits may be built from HEAD plus frozen blobs |
+| H13 | `CommitLedgerSnapshot` refuses every commit while any index entry is unmerged | an exact-set review commit is still blocked by an unrelated conflict (relevant to H5's fix) | code: global check in `CommitLedgerSnapshotPreserving` | decided in #1289 (3.7); Ledger owns the refusal |
+| H14 | The daemon's sparse-checkout refresh (each sync cycle, daemon startup) and `ox doctor --fix`'s cone repair rewrite the index outside the repo lock | an ox commit holding the lock fails on `index.lock` and leaves its files uncommitted (16 of 60 lifecycle commits in a stress run) | stress run | Ledger (daemon) |
+
+**Since #1289** (§1.1): the CLI fixes H2–H4 and H6–H9, and H1 for review files,
+which it no longer writes to any shared file. `events.jsonl` stays shared but
+merges (`merge=union`), so H1 no longer drops events, and its autostash
+re-apply no longer conflicts; this needs no per-entry layout, and a reader
+sees the same file format. Lifecycle writes commit under the repo lock and
+refuse while the Ledger needs repair, so they leave no plan file uncommitted
+for a pull to conflict on. H14 is fixed: all three refreshes take the repo
+lock (`ledger.RefreshSparseCheckout`). The blob fetch a widened cone starts
+in a blobless clone fails on a stalled transfer (`gitutil.GitHTTPTimeoutFlags`),
+and a refresh still running after `sparseRefreshTimeout` (10 minutes) is
+ended, so neither holds that lock for long. Still open:
+
+- `meta.json` stays keep-local on a rebase conflict, so its status can lag
+  `events.jsonl`; readers fold the log (`plan.CurrentStatus`) instead of
+  trusting it.
+- H5 remains only where picking a side would drop entries: `events.jsonl`
+  without its union attribute, and review records.
+- H10 and H11 are unchanged.
+
+**Since #1442:** H12 is fixed: `SquashUnpushed` commits the unpushed tip's tree,
+never the index.
 
 **Reproductions** (real clones of one Ledger with a bare remote, publishing
 through `commitAndPushPlanDir`; one-off, not kept as tests because they assert
@@ -130,10 +288,6 @@ today's bugs):
 - **H7:** a rebase stopped at a `break` between two local commits, the second
   re-raising a resolved item. `AssembleReview` shows the item resolved without
   error.
-
-Browser-side hazards (outbox poisoned by a deterministic 400/413, an outbox
-resent unchanged while newer marks wait, `/accept` and `/reopen` with no
-outbox, no reviewer, and no idempotency) belong to #1291.
 
 Two rounds with the same id and the same payload are *not* a hazard on main:
 they assemble once and an acceptance time alone never reopens an item (fixture
@@ -298,14 +452,20 @@ reader answers.
 
 - Stage and commit exactly the operation's write set, through the existing
   `CommitLedgerSnapshot` and repo lock.
-- Key pending entries by `(plan, operation)`, holding paths, hashes and, once
-  committed, the commit. Retry only that set; clear only that entry, only on
+- Key pending entries by `(plan, operation)`, holding the record's path,
+  SHA-256 and exact bytes. Retry only that set; clear only that entry, only on
   verified remote bytes. Whole-plan authoring recovery stays separate.
 - Acknowledge local ownership (the browser may clear its outbox) only after
   the record and its pending entry are both durable.
-- H13 decides whether that is enough under H5; if the Ledger keeps refusing
-  all commits during an unrelated conflict, record commits need a path built
-  from HEAD plus the frozen blobs.
+- **H13, decided in #1289:** record commits keep the existing primitive and
+  its global refusal. During an unrelated conflict the record and its entry
+  stay durable in the clone, the operation is reported saved but not
+  committed, and the first retry after the conflict clears publishes it. No
+  reviewer action is needed and nothing is lost. A commit built from HEAD plus
+  the frozen blob would land while git itself refuses to commit; that changes
+  the Ledger's commit contract for every writer and belongs to its owner. H5
+  also arises less often since #1289: rounds, resolutions and remaps are no
+  longer shared files, so only authoring files can conflict.
 
 ### 3.8 Retained v1 assembly
 
@@ -329,9 +489,80 @@ writer's clock, so one dated far in the future keeps its item closed until
 then. Closing either needs an authority outside the Ledger (push rules, or
 receipts signed by the host); this contract does not provide one.
 
+### 3.9 Browser outbox (#1291)
+
+`mountHostControls` in `@sageox/plan-review` is the one browser writer, on
+ox's page and in a hosted viewer (`packages/plan-review/src/state.ts`):
+
+- **Keys:** one storage key per draft and per operation, under
+  `ox-review:<account>:<plan>:`, so tabs never rewrite each other's keys and
+  another account never sees or sends them. ox's page uses the plan's
+  directory as `<plan>`: it also names the page's port, so it holds through a
+  legacy plan's first save, which mints its plan id. ox's local
+  review has no sign-in: its account is `local` and the request names the
+  reviewer. A hosted viewer passes its signed-in account and stamps the
+  caller itself.
+- **Freeze before send:** Submit, Reopen and Accept each mint an id and store
+  the frozen request before anything is sent; what storage refuses is never
+  sent.
+- **Delivery:** oldest first, one at a time, the frozen bytes on every
+  attempt, so a mark edited after Submit is stored after the copy Submit
+  froze. It stops at the first operation that fails or finds the host
+  offline; one refused for good (400, 409, 413) is dropped, its drafts kept.
+- **Receipts:** an operation clears only on a receipt naming its id: from
+  ox's server `saved: true` (record and recovery entry on disk, 3.7), from a
+  hosted one its publication. Its drafts clear only where unedited since.
+- **Reopen** is a one-item `request-change` round carrying the item's
+  section, label and words. **Accept** is a `verified` resolution, the only
+  state `/accept` takes.
+- **Upgrade:** drafts and the outbox that pages before 0.3.0 kept under
+  `ox-plan-fb:<slug>` move to the new keys; a waiting submission keeps its
+  bytes, so its resend is the same operation.
+- **Resolving:** Accept and Reopen are offered only when the host mounts the
+  controls with `resolve` (#1383); ox's page always does.
+
+### 3.10 Whole-plan marks (#1384)
+
+A mark on the plan as a whole (its direction, scope or readiness) has the
+anchor `plan` (`WholePlanAnchor`), an empty section and the label
+`Whole plan`.
+
+- **Assembled like any mark:** the latest per reviewer; a resolution naming
+  `plan` closes it; a later round raises it again (fixture `whole-plan`).
+- **On no element:** `Rebind` never moves it, and the document tools never
+  paint or place it. The review controls list it first in the rail, without
+  the "text changed" tag, and open its composer from the rail.
+- **Released CLIs** read and resolve it. Measured on v0.23.0 with this
+  fixture: `ox plan feedback show` and the agent's digest list the open mark
+  as `[comment] (plan) Whole plan @Avery — Agree with the split.`, `--json`
+  carries both marks, and `ox plan feedback resolve <slug> plan` resolves
+  them. Its review page lists both in the rail as notes whose text changed,
+  and the open one in the banner of notes no longer anchored.
+
+### 3.11 Drawn regions (#1293)
+
+A drawing is a round item anchored `q-<region id>` that carries its record
+under `region` (`plan-review-drawn-context.md`, section 7; fixture
+`region-items`).
+
+- **Requests:** a round with a drawing lists its items under `marks`, with
+  `items` empty, a shape every earlier release refuses. `ParseRoundRequest`
+  checks each region (`testdata/drawn-context/regions.json`) and refuses a
+  drawing under `items`, a drawing whose anchor is not `q-<its id>`, and items
+  under both keys. A request without a drawing is unchanged.
+- **Records:** the items are stored under `items`, and `marks` is not kept.
+  A region is stored as the same JSON value the request carried (3.3), and it
+  is part of what two copies of a round must agree on (3.2).
+- **Assembly:** unchanged. Each drawing has its own anchor, so assembly never
+  merges two, a resolution closes only the one it names, and `Rebind` never
+  moves a `q` anchor. `Item.Region` carries the record to the reader.
+
 ---
 
 ## 4. Compatibility
+
+The tables describe older builds. Current test results and release dependencies
+are in [the certification matrix](../guides/plan-review-certification.md).
 
 Measured on the official `ox_0.20.0_darwin_arm64` release asset (checksum
 verified, commit `5428a78a`) and on a build of main at `651ac29a` (unreleased;
@@ -341,32 +572,33 @@ Ledger and read with `ox plan feedback show <slug> --json` and
 dir, `SAGEOX_DAEMON=false` and `DO_NOT_TRACK=1`. Both commands agreed on every
 fixture.
 
-| Fixture | v0.20.0 | main |
+| Fixture | v0.20.0 | prototype `651ac29a` |
 |---|---|---|
 | `resolution-layouts` | h2 **open**: per-entry resolutions are invisible | as `expect.json` |
 | `same-id` | h1 **reopened** by the repeated acceptance; h3 from the conflicting payload shown | as `expect.json`; h3 hidden (H4) |
 | `corrupt-records` | same items; the torn round is not reported (bare-array JSON) | reports the torn round; resolution and remaps failures unreported (H6) |
 | `unknown-fields` | as `expect.json` | as `expect.json` |
 
-| Writer | v0.20.0 | main |
+| Writer | v0.20.0 | prototype `651ac29a` |
 |---|---|---|
 | `feedback resolve` | rewrites the shared legacy array (H1) and drops unknown fields of every existing entry | writes a per-entry file; legacy array untouched |
 | `feedback apply` twice | two rounds; drops `id` and unknown fields | one round; keeps `id`; drops unknown fields |
 | `remaps.json` (from code; `remap.go` is unchanged since v0.20.0) | read-modify-write, drops unknown fields, resets an unreadable file | same |
 | `show --json` shape | bare array | `{items, corrupt_rounds}` |
 
-Neither build rewrites a round or a per-entry resolution, so those records and
-their unknown fields survive on disk. Mixed teams today: v0.20.0 users see
+Neither measured build rewrites rounds or per-entry resolutions, so their
+unknown fields survive on disk. Mixed teams with v0.20.0 users see
 items resolved by newer clients as open, can see a retried round reopen a
 resolved item, and write the shared legacy array, so their resolutions are
 subject to H1.
 
-**First fully supported release: none yet.** main reads every fixture as
-`expect.json` says but is not released, and still carries H1–H9. A release is
-fully supported when it reads every fixture as `expect.json` says, its writers
-keep unknown fields and write no shared review file, H1–H9 are fixed, and
-conflicts and failed reads are reported. #1294 records that release by
-repeating the measurement above against its binary.
+**First fully supported release: none certified yet.** Current `feedback apply`
+preserves unknown fields and drawing records
+(`TestRunPlanFeedbackApply_StoresAnExportedDrawingWhole`). The released
+Go module is v0.4.0 and the browser package is 0.6.0 (protocol 3); the latest
+released CLI at the 2026-10-20 audit is v0.23.0, whose page predates drawing
+writers. H1–H9 describe the older builds. #1294 still needs recovery fixes,
+owner review, a fully capable CLI release and consuming-host test results.
 
 ---
 

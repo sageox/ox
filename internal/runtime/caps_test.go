@@ -14,6 +14,7 @@ func clearEnv(t *testing.T) {
 		"OX_EPHEMERAL",
 		"CLAUDE_CODE_REMOTE",
 		"DEVIN_TASK_ID",
+		"AMP_ORB",
 		"CODESPACES",
 		"CI",
 		"GITHUB_ACTIONS",
@@ -168,6 +169,63 @@ func TestProbe_OxEphemeralCanary(t *testing.T) {
 	}
 	if c.Browser {
 		t.Errorf("OX_EPHEMERAL=1: Browser should be false")
+	}
+}
+
+// TestProbe_AmpOrbKeepsDaemonButEndsWithAgent: an Amp orb has a persistent
+// disk and must keep its daemon (the daemon clones the Ledger, and recording
+// does not start without the clone), but the orb pauses minutes after the
+// agent goes idle. Failure prevented (sageox/ox#1314): treating the orb as a
+// laptop, so session end hands the upload to a daemon that is frozen with
+// the orb before it runs — or treating it as ephemeral, so recording never
+// starts at all.
+func TestProbe_AmpOrbKeepsDaemonButEndsWithAgent(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("AMP_ORB", "1")
+	c := Probe()
+	if !c.HostEndsWithAgent {
+		t.Errorf("Amp orb: HostEndsWithAgent should be true — the orb pauses once the agent is idle")
+	}
+	if !c.PersistDisk {
+		t.Errorf("Amp orb: PersistDisk should stay true — AMP_ORB must not feed Reason()")
+	}
+	if !c.DaemonViable {
+		t.Errorf("Amp orb: DaemonViable should stay true — the daemon clones the Ledger")
+	}
+	if c.EnvLifetime != LifetimeHours {
+		t.Errorf("Amp orb: EnvLifetime should be LifetimeHours, got %v", c.EnvLifetime)
+	}
+	if got := Reason(); got != "" {
+		t.Errorf("Amp orb: Reason() should stay empty, got %q", got)
+	}
+}
+
+// TestProbe_HostEndsWithAgent covers every venue the flag reads, plus the
+// overrides that must not set it.
+func TestProbe_HostEndsWithAgent(t *testing.T) {
+	cases := []struct {
+		name string
+		env  map[string]string
+		want bool
+	}{
+		{"laptop", nil, false},
+		{"amp orb", map[string]string{"AMP_ORB": "true"}, true},
+		{"claude code cloud", map[string]string{"CLAUDE_CODE_REMOTE": "true"}, true},
+		{"devin", map[string]string{"DEVIN_TASK_ID": "t_abc"}, true},
+		{"codespaces outlives its agent", map[string]string{"CODESPACES": "true"}, false},
+		{"OX_EPHEMERAL is disk loss, not a venue", map[string]string{"OX_EPHEMERAL": "1"}, false},
+		{"OX_NO_DAEMON is not a venue", map[string]string{envNoDaemon: "1"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clearEnv(t)
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			if got := Probe().HostEndsWithAgent; got != tc.want {
+				t.Errorf("HostEndsWithAgent = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 

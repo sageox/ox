@@ -92,6 +92,16 @@ func WithPreCloneLock(ctx context.Context, repoPath string, fn func() error) err
 	return fileutil.WithFileLockTimeout(ctx, PreCloneLockTarget(repoPath), PreCloneLockTimeout, fn)
 }
 
+// TryWithPreCloneLock is WithPreCloneLock for a caller that would only be
+// waiting out another clone of the same path. A Ledger clone holds this lock
+// for as long as its download runs, which can be many minutes, so instead of
+// waiting it returns acquired=false at once, without running fn, and the
+// caller reports the clone as already under way. A non-nil error with
+// acquired=false means the lock could not be tried at all.
+func TryWithPreCloneLock(repoPath string, fn func() error) (acquired bool, err error) {
+	return fileutil.TryWithFileLock(PreCloneLockTarget(repoPath), fn)
+}
+
 // PreCloneLockTarget is the path the pre-clone lock is keyed on. Suffixed
 // (not the bare repoPath) so its hash never collides with a WithRepoLock
 // key for the same path, even though the two are never expected to be held

@@ -435,12 +435,10 @@ func TestPullTeamContext_ReadableSkipClearsStaleIntegrityIssue(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: real git index states")
 	}
-	repo := newProbeTestRepo(t, "notes.txt")
-	// A FETCH_HEAD younger than the dedup window is what makes this cycle skip
-	// with "recently fetched" — decided only after ResolveAutostashConflicts
-	// read the index and returned cleanly.
-	require.NoError(t, os.WriteFile(filepath.Join(repo, ".git", "FETCH_HEAD"),
-		[]byte("0000000000000000000000000000000000000000\t\tbranch 'main' of origin\n"), 0o644))
+	isolateCredentials(t)
+	bare := makeBareRepo(t, "readable-skip", "notes.txt", "notes\n")
+	repo := filepath.Join(t.TempDir(), "clone")
+	gitInDir(t, t.TempDir(), "clone", bare, repo)
 
 	s := newTestScheduler(t.TempDir())
 	s.issues = NewIssueTracker()
@@ -452,8 +450,11 @@ func TestPullTeamContext_ReadableSkipClearsStaleIntegrityIssue(t *testing.T) {
 		Summary:  "left over from a cycle that could not read the index",
 	})
 
-	_, err := s.pullTeamContext(context.Background(), repo)
+	// An unchanged remote skips only after the index has been read successfully.
+	require.True(t, s.remoteRefCheck(context.Background(), repo))
+	outcome, err := s.pullTeamContext(context.Background(), repo)
 	require.NoError(t, err)
+	assert.False(t, outcome.PullRan)
 
 	_, still := s.issues.GetIssue(IssueTypeRepoIntegrity, repoName)
 	assert.False(t, still, "the skip proved the index is readable; the issue is stale")

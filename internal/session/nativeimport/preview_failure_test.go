@@ -24,7 +24,8 @@ func TestPreviewEntriesRejectsUnserializableEntry(t *testing.T) {
 	}
 	entries, err := PreviewEntries(root, raw)
 	require.ErrorContains(t, err, "redact entry 1")
-	require.ErrorContains(t, err, "year outside of range")
+	// the writer deliberately drops the encoder's message: it can echo entry content
+	require.ErrorContains(t, err, "invalid entry")
 	assert.Nil(t, entries, "a partial preview must never be returned as safe content")
 	files, err := os.ReadDir(root)
 	require.NoError(t, err)

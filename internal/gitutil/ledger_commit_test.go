@@ -71,6 +71,30 @@ func TestCommitLedgerSnapshot_CommitsStagedBlobNotWorktree(t *testing.T) {
 	assert.Equal(t, "finalize session example", gitInRepo(t, repo, "log", "-1", "--format=%s"))
 }
 
+// TestStageLedgerBlob_CommitsTheFrozenBytes: a writer that froze a record's
+// bytes stages exactly those, whatever the worktree file holds, and a path
+// git refuses is an error, not a silent no-op. Failure prevented: a commit of
+// a record publishes bytes edited after they were frozen.
+func TestStageLedgerBlob_CommitsTheFrozenBytes(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git repository")
+	}
+	repo := newSnapshotRepo(t)
+	const path = "data/plans/p/feedback/round-x.json"
+	writeGitutilFixture(t, repo, path, "edited after it was frozen\n")
+
+	oid, err := StageLedgerBlob(context.Background(), repo, path, []byte(cleanMeta))
+	require.NoError(t, err)
+	committed, err := CommitLedgerSnapshot(context.Background(), repo, "plan review: p", path)
+	require.NoError(t, err)
+	require.True(t, committed)
+	assert.Equal(t, cleanMeta, headBlob(t, repo, path), "the commit must carry the frozen bytes")
+	assert.Equal(t, oid, gitInRepo(t, repo, "rev-parse", "HEAD:"+path))
+
+	_, err = StageLedgerBlob(context.Background(), repo, "../outside.json", []byte(cleanMeta))
+	assert.Error(t, err, "git refuses a path outside the repository")
+}
+
 // TestCommitLedgerSnapshot_PathScopeLeavesOtherStagedEntries protects the
 // isolation callers rely on: a session finalize must not sweep another
 // session's staged files into its own commit, and must leave them staged.
@@ -134,7 +158,7 @@ func TestCommitLedgerSnapshot_IgnoresBlobStagedAfterSnapshot(t *testing.T) {
 	writeGitutilFixture(t, repo, "sessions/y/meta.json", conflictMarkerFixture)
 	gitInRepo(t, repo, "add", "--sparse", "sessions/y/meta.json")
 
-	require.NoError(t, commitTreeToBranch(ctx, repo, tree, parent, "session: x"))
+	require.NoError(t, commitTreeToBranch(ctx, repo, tree, parent, parent, "session: x"))
 	assert.Equal(t, cleanMeta, headBlob(t, repo, "sessions/x/meta.json"))
 	assert.False(t, headHasPath(t, repo, "sessions/y/meta.json"), "a blob staged after the snapshot must not be committed")
 }
@@ -160,7 +184,7 @@ func TestCommitTreeToBranch_RefusesWhenBranchAdvanced(t *testing.T) {
 	gitInRepo(t, repo, "commit", "-m", "theirs")
 	theirs := gitInRepo(t, repo, "rev-parse", "HEAD")
 
-	err = commitTreeToBranch(ctx, repo, tree, parent, "ours")
+	err = commitTreeToBranch(ctx, repo, tree, parent, parent, "ours")
 	require.ErrorContains(t, err, "concurrent ledger commit")
 	assert.Equal(t, theirs, gitInRepo(t, repo, "rev-parse", "HEAD"), "the concurrent commit must survive")
 }
@@ -190,7 +214,7 @@ func TestCommitTreeToBranch_RefusesWhenUnbornBranchWasBorn(t *testing.T) {
 	gitInRepo(t, repo, "commit", "-m", "theirs")
 	theirs := gitInRepo(t, repo, "rev-parse", "HEAD")
 
-	err = commitTreeToBranch(ctx, repo, tree, parent, "ours")
+	err = commitTreeToBranch(ctx, repo, tree, parent, parent, "ours")
 	require.ErrorContains(t, err, "concurrent ledger commit")
 	assert.Equal(t, theirs, gitInRepo(t, repo, "rev-parse", "HEAD"), "the concurrent first commit must survive")
 }
@@ -239,24 +263,32 @@ func TestCommitLedgerSnapshot_RefusesInvalidBlob(t *testing.T) {
 	}
 }
 
+// TestCommitLedgerSnapshot_UnbornBranch: a scope holds on the first commit,
+// whether it names a path or excludes one, as `ox doctor` excludes data/plans/.
+// Failure prevented: the first commit publishes what its scope left out, or an
+// exclude pathspec fails it outright.
 func TestCommitLedgerSnapshot_UnbornBranch(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: real git repository")
 	}
-	repo := t.TempDir()
-	gitInRepo(t, repo, "init", "-b", "main")
-	gitInRepo(t, repo, "config", "user.name", "Test")
-	gitInRepo(t, repo, "config", "user.email", "test@example.com")
-	writeGitutilFixture(t, repo, "sessions/x/meta.json", cleanMeta)
-	writeGitutilFixture(t, repo, "data/murmurs/m.json", "{}\n")
-	gitInRepo(t, repo, "add", "--sparse", ".")
+	for _, pathspecs := range [][]string{{"sessions/x/"}, {":/", ":(exclude)data/murmurs"}} {
+		t.Run(strings.Join(pathspecs, " "), func(t *testing.T) {
+			repo := t.TempDir()
+			gitInRepo(t, repo, "init", "-b", "main")
+			gitInRepo(t, repo, "config", "user.name", "Test")
+			gitInRepo(t, repo, "config", "user.email", "test@example.com")
+			writeGitutilFixture(t, repo, "sessions/x/meta.json", cleanMeta)
+			writeGitutilFixture(t, repo, "data/murmurs/m.json", "{}\n")
+			gitInRepo(t, repo, "add", "--sparse", ".")
 
-	committed, err := CommitLedgerSnapshot(context.Background(), repo, "first", "sessions/x/")
-	require.NoError(t, err)
-	require.True(t, committed)
-	assert.True(t, headHasPath(t, repo, "sessions/x/meta.json"))
-	assert.False(t, headHasPath(t, repo, "data/murmurs/m.json"), "scope must hold on the first commit too")
-	assert.Equal(t, "main", strings.TrimSpace(gitInRepo(t, repo, "branch", "--show-current")))
+			committed, err := CommitLedgerSnapshot(context.Background(), repo, "first", pathspecs...)
+			require.NoError(t, err)
+			require.True(t, committed)
+			assert.True(t, headHasPath(t, repo, "sessions/x/meta.json"))
+			assert.False(t, headHasPath(t, repo, "data/murmurs/m.json"), "scope must hold on the first commit too")
+			assert.Equal(t, "main", strings.TrimSpace(gitInRepo(t, repo, "branch", "--show-current")))
+		})
+	}
 }
 
 // TestCommitLedgerSnapshot_RefusesUnmergedIndexOutsideScope — git refuses every

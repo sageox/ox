@@ -1,627 +1,181 @@
 package plan
 
 import (
-	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
-	"errors"
+	"bytes"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
-	"regexp"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
-	"github.com/sageox/ox/internal/fileutil"
+	"github.com/sageox/ox/pkg/planreview"
 )
 
-// randSuffix returns a short random hex tag for a round filename, so two reviewers
-// submitting in the same nanosecond never clobber each other's round. Falls back to
-// a fixed tag only if the OS entropy source fails (the timestamp still disambiguates
-// the common case); uniqueness degrades gracefully, it never errors the save.
-func randSuffix() string {
-	b := make([]byte, 4)
-	if _, err := rand.Read(b); err != nil {
-		return "00000000"
-	}
-	return hex.EncodeToString(b)
-}
-
-// feedback.go is the ledger side of the agent-driven plan review loop. The agent
+// feedback.go is the read side of the agent-driven plan review loop. The agent
 // renders the plan, a reviewer marks up sections / risks / decisions in the
-// HTML, and the marks land here under the plan's ledger dir as immutable review
-// ROUNDS. The agent then records what it did about each item as RESOLUTIONS (an
-// append log). Re-rendering shows each item's state inline, so the committed
-// plan carries the whole review conversation + the agent's response.
+// HTML, and each submit lands under the plan's ledger dir as one immutable
+// review ROUND; the agent records what it did about each item as RESOLUTIONS,
+// also one immutable record each. Re-rendering shows each item's state inline,
+// so the committed plan carries the whole review conversation + the agent's
+// response.
+//
+// The record format, the bounded read and the assembly belong to the shared
+// module github.com/sageox/ox/pkg/planreview
+// (docs/specs/plan-review-ledger-contract.md), so the CLI and every other host
+// assemble the same review from the same bytes. The CLI's writers live in
+// cmd/ox (plan_commit.go), which owns the Ledger commit.
 //
 // Why on-disk in the ledger (not a live socket as the source of truth): a
 // machine runs many ox daemons, so a persistent localhost endpoint would be
 // ambiguous about WHICH plan it targets. The `ox plan review` server is instead
 // ephemeral and agent-owned (it spawns it, owns the port), and it just writes
-// these same files. Rounds + resolutions are version-controlled with the plan —
-// the human's words are immutable; the agent's responses append. License-clean,
-// self-contained; nothing depends on a third-party review tool.
+// these same files.
 
-// feedbackSubdir is the per-plan folder holding review rounds + resolutions.
-const feedbackSubdir = "feedback"
-
-// resolutionsFile is the LEGACY single-array resolution log. It is still read
-// (plans committed before the per-entry layout carry their history there) but
-// never rewritten: two machines appending to one shared file both lose an
-// entry when the ledger rebase auto-resolves the data/ conflict to one side.
-const resolutionsFile = "resolutions.json"
-
-// resolutionsSubdir holds one file per resolution (see AppendResolution). It
-// sits under feedback/ rather than beside it so every piece of review state
-// stays in one subtree — and so a blocked feedback/ path still fails a
-// resolution write loudly instead of silently landing elsewhere.
-const resolutionsSubdir = "resolutions"
-
-// roundPrefix marks a review-round file. Only round-*.json is a round: the
-// feedback dir also holds remaps.json and resolutions.json, which must never
-// be decoded (or reported corrupt) as rounds.
-const roundPrefix = "round-"
-
-// roundTimeLayout is fixed-width, so the round ID can be sliced out of the
-// filename unambiguously even though IDs may themselves contain '-'.
-const roundTimeLayout = "20060102-150405.000000000"
-
-// roundIDPattern bounds a client-supplied round ID to filename-safe characters.
-// The ID is embedded in a path, so this is a traversal guard as much as a
-// format check; 8 chars minimum keeps accidental collisions implausible.
-var roundIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{8,64}$`)
-
-// ErrDuplicateRound is returned by SaveFeedback when a round with the same ID
-// is already on disk — a double Submit or a re-applied export. The caller
-// treats it as success-already-done, not as a failure.
-var ErrDuplicateRound = errors.New("feedback round already saved")
-
-// FeedbackStatus is the reviewer's verdict on one anchored element.
-type FeedbackStatus string
-
-const (
-	FeedbackApprove       FeedbackStatus = "approve"
-	FeedbackRequestChange FeedbackStatus = "request-change"
-	FeedbackFlag          FeedbackStatus = "flag"
-	FeedbackComment       FeedbackStatus = "comment"
-)
-
-func validStatus(s FeedbackStatus) bool {
-	switch s {
-	case FeedbackApprove, FeedbackRequestChange, FeedbackFlag, FeedbackComment:
-		return true
-	}
-	return false
-}
-
-// ResolutionState is the agent's disposition of a review item.
-type ResolutionState string
-
-const (
-	ResolutionAddressed ResolutionState = "addressed" // agent made the change
-	ResolutionWontfix   ResolutionState = "wontfix"   // agent declined, with reason
-	ResolutionVerified  ResolutionState = "verified"  // human confirmed the fix
-)
-
-func validResolutionState(s ResolutionState) bool {
-	switch s {
-	case ResolutionAddressed, ResolutionWontfix, ResolutionVerified:
-		return true
-	}
-	return false
-}
-
-// FeedbackItem is one anchored review mark. Anchor is a CONTENT hash computed
-// page-side — of (section heading + element text) for a mark on a whole
-// element, of (section heading + Quote) for a highlight — so it survives a
-// re-render and only disappears when the agent rewrites that text — which is
-// itself the signal the item was addressed. Anchor doubles as the item id used
-// by `ox plan feedback resolve`.
-type FeedbackItem struct {
-	Anchor   string         `json:"anchor"`             // stable content-hash id: "h…" for an element, "q…" for a highlight
-	Section  string         `json:"section,omitempty"`  // section heading the element sits under
-	Label    string         `json:"label"`              // short text of the element, or the start of Quote
-	Quote    string         `json:"quote,omitempty"`    // the exact words a highlight covers; empty for a whole-element mark
-	Status   FeedbackStatus `json:"status"`             // approve | request-change | flag | comment
-	Note     string         `json:"note,omitempty"`     // the reviewer's comment
-	Reviewer string         `json:"reviewer,omitempty"` // who left this mark (multi-user); stamped from the round on save
-}
-
-// FeedbackSet is one review round (one submit from the page).
-//
-// ID is the round's idempotency key: when set, SaveFeedback writes at most one
-// round per ID per plan, so a retried submit or a re-applied export cannot
-// duplicate the reviewer's marks. Empty keeps the pre-ID behavior (every save
-// is a new round).
-type FeedbackSet struct {
-	ID        string         `json:"id,omitempty"`
-	Slug      string         `json:"slug"`
-	Reviewer  string         `json:"reviewer,omitempty"`
-	CreatedAt time.Time      `json:"created_at"`
-	Items     []FeedbackItem `json:"items"`
-}
-
-// Resolution is one agent disposition of a review item, append-logged.
-type Resolution struct {
-	Anchor string          `json:"anchor"`           // the item it resolves
-	State  ResolutionState `json:"state"`            // addressed | wontfix | verified
-	Commit string          `json:"commit,omitempty"` // commit SHA that made the change
-	Note   string          `json:"note,omitempty"`   // what the agent did / why wontfix
-	At     time.Time       `json:"at"`
-}
-
-// MergedItem is a review item joined with its latest resolution and a computed
-// open/closed state. Open = no resolution, or the item was re-raised after the
-// last resolution (CreatedAt newer than the resolution's At).
+// MergedItem is one review item as `ox plan feedback show --json` and
+// `ox plan review await` print it: planreview.Merged under the keys those
+// commands have always used (RaisedAt, Resolution and Open carry no JSON tag).
 type MergedItem struct {
-	FeedbackItem
+	planreview.Item
 	RaisedAt   time.Time
-	Resolution *Resolution
-	Open       bool
+	Resolution *planreview.Resolution
+	// Open is true with no resolution, or when the mark was raised after it.
+	Open bool
 	// RemappedFrom is the item's original anchor when a plan update moved its
-	// content and the save-time remap rebound it (see remap.go). Empty when the
-	// mark still lives at its original address. Anchor always holds the CURRENT
-	// address — the one `ox plan feedback resolve` acts on.
+	// content and the save-time remap rebound it (see remap.go). Anchor always
+	// holds the CURRENT address — the one `ox plan feedback resolve` acts on.
 	RemappedFrom string `json:"remapped_from,omitempty"`
 }
 
-// validateSlug rejects a slug that is not a simple ledger name. Feedback JSON is
-// the one externally-authored input that flows toward filesystem paths, so its
-// slug must never contain a path separator or traversal — otherwise a crafted
-// export could steer SaveFeedback/Load outside the plans tree.
-func validateSlug(slug string) error {
-	s := strings.TrimSpace(slug)
-	if s == "" {
-		return fmt.Errorf("empty slug")
-	}
-	if s != filepath.Base(s) || strings.ContainsAny(s, `/\`) || strings.Contains(s, "..") {
-		return fmt.Errorf("invalid slug %q: must be a simple name, not a path", slug)
-	}
-	return nil
+// Review is one read of a plan's review records. With Failures it is
+// incomplete; ReviewWarnings says so at the head of every digest.
+type Review struct {
+	Dir       string // the plan dir read
+	Items     []MergedItem
+	Rounds    []planreview.Round // the rounds assembled, oldest first, each operation once
+	Failures  []planreview.Failure
+	Conflicts []planreview.Conflict
 }
 
-// ParseFeedback decodes and validates a review-round JSON (the page submit/export).
-// Fail-loud on malformed input, an unknown status, or an unsafe slug.
-func ParseFeedback(raw []byte) (FeedbackSet, error) {
-	var set FeedbackSet
-	if err := json.Unmarshal(raw, &set); err != nil {
-		return FeedbackSet{}, fmt.Errorf("parse feedback json: %w", err)
-	}
-	if set.Slug != "" {
-		if err := validateSlug(set.Slug); err != nil {
-			return FeedbackSet{}, err
+// Complete reports whether the read holds every review record of the plan.
+func (r Review) Complete() bool { return len(r.Failures) == 0 }
+
+// Problems counts what a page must warn about: failures, and operations
+// stored with differing content, of which only the earliest copy is shown.
+func (r Review) Problems() int { return len(r.Failures) + len(r.Conflicts) }
+
+// OpenCount counts the open, actionable items: an approval closes the loop
+// rather than opening it.
+func (r Review) OpenCount() int {
+	n := 0
+	for _, it := range r.Items {
+		if it.Open && it.Status != planreview.StatusApprove {
+			n++
 		}
 	}
-	if err := validateRoundID(set.ID); err != nil {
-		return FeedbackSet{}, err
-	}
-	if len(set.Items) == 0 {
-		return FeedbackSet{}, fmt.Errorf("feedback has no items")
-	}
-	for i := range set.Items {
-		set.Items[i].Status = FeedbackStatus(strings.ToLower(strings.TrimSpace(string(set.Items[i].Status))))
-		if set.Items[i].Status == "" {
-			set.Items[i].Status = FeedbackComment
-		}
-		if !validStatus(set.Items[i].Status) {
-			return FeedbackSet{}, fmt.Errorf("item %d: unknown status %q (want approve|request-change|flag|comment)", i, set.Items[i].Status)
-		}
-	}
-	return set, nil
+	return n
 }
 
-// validateRoundID accepts an empty ID (no idempotency requested) or one that
-// matches roundIDPattern.
-func validateRoundID(id string) error {
-	if id == "" || roundIDPattern.MatchString(id) {
-		return nil
+// ReadReview reads planDir's review from the worktree, so records not yet
+// committed or pushed are included. The read is bounded, never follows a
+// symlink, and is incomplete when a record could not be read, the review files
+// changed while they were read, or the Ledger was mid-rebase or merge (its
+// worktree then lacks the commits being replayed).
+func ReadReview(planDir string) Review {
+	rev := assembleReview(planDir)
+	out := Review{Dir: planDir, Rounds: rev.Rounds, Failures: rev.Failures, Conflicts: rev.Conflicts}
+	for _, m := range rev.Items {
+		out.Items = append(out.Items, MergedItem{Item: m.Item, RaisedAt: m.RaisedAt, Resolution: m.Resolution, Open: m.Open, RemappedFrom: m.RemappedFrom})
 	}
-	return fmt.Errorf("invalid round id %q: want 8-64 chars of [A-Za-z0-9_-]", id)
+	return out
 }
 
-// ContentRoundID derives a deterministic round ID from what the reviewer said
-// (reviewer + items), for inputs that carry no ID of their own — e.g. an
-// exported JSON applied by hand. Applying the same export twice then yields
-// the same ID, which SaveFeedback dedups. Slug and timestamps are excluded on
-// purpose: they vary between exports of identical marks.
-func ContentRoundID(set FeedbackSet) (string, error) {
-	canon, err := json.Marshal(struct {
-		Reviewer string         `json:"reviewer"`
-		Items    []FeedbackItem `json:"items"`
-	}{set.Reviewer, set.Items})
-	if err != nil {
-		return "", fmt.Errorf("encode feedback for round id: %w", err)
-	}
-	sum := sha256.Sum256(canon)
-	// 32 hex chars (128 bits) is collision-proof for per-plan dedup and keeps
-	// filenames readable; the "c" prefix marks the ID as content-derived.
-	return "c" + hex.EncodeToString(sum[:16]), nil
+func assembleReview(planDir string) planreview.Review {
+	return planreview.Assemble(CaptureReview(planDir, ledgerGitDir(planDir)), planreview.Limits{})
 }
 
-// roundIDFromName extracts the ID (or legacy random suffix) from a round
-// filename, or "" if the name is not a well-formed round file.
-func roundIDFromName(name string) string {
-	if !strings.HasPrefix(name, roundPrefix) || !strings.HasSuffix(name, ".json") {
-		return ""
-	}
-	rest := strings.TrimSuffix(strings.TrimPrefix(name, roundPrefix), ".json")
-	if len(rest) <= len(roundTimeLayout)+1 || rest[len(roundTimeLayout)] != '-' {
-		return ""
-	}
-	return rest[len(roundTimeLayout)+1:]
-}
-
-// findRoundByID returns the path of the round in dir whose filename carries id.
-func findRoundByID(dir, id string) (string, bool, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return "", false, fmt.Errorf("read feedback dir: %w", err)
-	}
-	for _, e := range entries {
-		if !e.IsDir() && roundIDFromName(e.Name()) == id {
-			return filepath.Join(dir, e.Name()), true, nil
-		}
-	}
-	return "", false, nil
-}
-
-// SaveFeedback writes a review round under <planDir>/feedback/. now controls the
-// timestamp (tests stay deterministic). Returns the written path.
-//
-// When set.ID is non-empty and a round with that ID already exists, nothing is
-// written and (existingPath, ErrDuplicateRound) is returned. The exists-check
-// and the write share one advisory lock, so concurrent same-ID submits (the
-// review server and an `apply` in another process) produce exactly one round.
-// The write is atomic (temp+fsync+rename): a crash leaves either the whole
-// round or none of it, never a torn file that would later read as corrupt.
-func SaveFeedback(planDir string, set FeedbackSet, now time.Time) (string, error) {
-	if err := validateRoundID(set.ID); err != nil {
-		return "", err
-	}
-	if set.CreatedAt.IsZero() {
-		set.CreatedAt = now.UTC()
-	}
-	// stamp the round's reviewer onto each item so the merge can attribute marks
-	// per-author (multi-user): two reviewers marking the same anchor are both kept.
-	for i := range set.Items {
-		if set.Items[i].Reviewer == "" {
-			set.Items[i].Reviewer = set.Reviewer
-		}
-	}
-	dir := filepath.Join(planDir, feedbackSubdir)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", fmt.Errorf("create feedback dir: %w", err)
-	}
-	b, err := json.MarshalIndent(set, "", "  ")
-	if err != nil {
-		return "", fmt.Errorf("encode feedback: %w", err)
-	}
-	// timestamp prefix keeps rounds chronologically sortable by filename; the
-	// suffix is the round ID when given (so a duplicate is findable by name
-	// without decoding every round) or a random tag that makes concurrent
-	// multi-user submits collision-proof (two reviewers in the same nanosecond).
-	suffix := set.ID
-	if suffix == "" {
-		suffix = randSuffix()
-	}
-	path := filepath.Join(dir, roundPrefix+now.UTC().Format(roundTimeLayout)+"-"+suffix+".json")
-	if set.ID == "" {
-		if err := fileutil.AtomicWriteBytes(path, b, 0o644); err != nil {
-			return "", fmt.Errorf("write feedback: %w", err)
-		}
-		return path, nil
-	}
-	// The lock target is a name, not a file we create: WithFileLock keys a
-	// sidecar lock off it, serializing every ID'd save for this plan.
-	var existing string
-	err = fileutil.WithFileLock(context.Background(), filepath.Join(dir, ".rounds"), func() error {
-		found, ok, ferr := findRoundByID(dir, set.ID)
-		if ferr != nil {
-			return ferr
-		}
-		if ok {
-			existing = found
-			return ErrDuplicateRound
-		}
-		if werr := fileutil.AtomicWriteBytes(path, b, 0o644); werr != nil {
-			return fmt.Errorf("write feedback: %w", werr)
-		}
-		return nil
+// CaptureReview is planreview.Capture of a Ledger worktree, the CLI's one
+// review transport. A clone with core.autocrlf (the Git for Windows default)
+// checks records out with CRLF line endings, so their bytes no longer hash to
+// the digest their names pin. A record whose bytes miss that digest but match
+// it with LF line endings is taken with LF endings: the bytes that were
+// committed. Writers emit JSON with no raw carriage return, so no record a
+// writer stored is changed. CRLF endings can push a record a writer stored at
+// the limit past it, so the read allows each record and the capture twice
+// their limits; Assemble applies the real ones to the bytes as committed.
+func CaptureReview(planDir, gitDir string) planreview.Inventory {
+	inv := planreview.Capture(planDir, gitDir, planreview.Limits{
+		RecordBytes:  2 * planreview.MaxRecordBytes,
+		CaptureBytes: 2 * planreview.DefaultLimits.CaptureBytes,
 	})
-	if errors.Is(err, ErrDuplicateRound) {
-		return existing, ErrDuplicateRound
-	}
-	if err != nil {
-		return "", fmt.Errorf("save feedback round %s: %w", set.ID, err)
-	}
-	return path, nil
-}
-
-// roundFileNames lists the round files under dir, oldest first. A missing dir
-// is an empty list.
-func roundFileNames(dir string) ([]string, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("read feedback dir: %w", err)
-	}
-	var names []string
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasPrefix(e.Name(), roundPrefix) || !strings.HasSuffix(e.Name(), ".json") {
+	for i, f := range inv.Files {
+		lf := bytes.ReplaceAll(f.Data, []byte("\r\n"), []byte("\n"))
+		if len(lf) == len(f.Data) || RecordIntact(f) {
 			continue
 		}
-		names = append(names, e.Name())
-	}
-	sort.Strings(names) // timestamped names sort chronologically
-	return names, nil
-}
-
-// readRound decodes one round file.
-func readRound(path string) (FeedbackSet, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return FeedbackSet{}, fmt.Errorf("read round: %w", err)
-	}
-	var set FeedbackSet
-	if err := json.Unmarshal(b, &set); err != nil {
-		return FeedbackSet{}, fmt.Errorf("parse round: %w", err)
-	}
-	return set, nil
-}
-
-// LoadAllFeedback reads every review round under a plan dir, oldest first. A
-// missing feedback/ dir is not an error.
-//
-// An unreadable round does not fail the load — one torn file must not blank
-// the whole review — but it is logged, and CorruptFeedbackRounds surfaces it
-// to the human, because a skipped round is a reviewer's words going missing.
-// Two rounds sharing an ID (only possible when two machines saved the same
-// round before the ledger synced) collapse to the earliest.
-func LoadAllFeedback(planDir string) ([]FeedbackSet, error) {
-	dir := filepath.Join(planDir, feedbackSubdir)
-	names, err := roundFileNames(dir)
-	if err != nil {
-		return nil, err
-	}
-	var sets []FeedbackSet
-	seenID := map[string]bool{}
-	for _, n := range names {
-		set, err := readRound(filepath.Join(dir, n))
-		if err != nil {
-			slog.Warn("plan feedback: skipping unreadable review round", "error", err, "round", n, "dir", planDir)
-			continue
+		if fixed := (planreview.File{Path: f.Path, Data: lf}); RecordIntact(fixed) {
+			inv.Files[i] = fixed
 		}
-		if set.ID != "" {
-			if seenID[set.ID] {
-				slog.Info("plan feedback: skipping duplicate review round", "round_id", set.ID, "round", n, "dir", planDir)
-				continue
+	}
+	return inv
+}
+
+// RecordIntact reports whether f's bytes hash to the digest its name pins; a
+// name that pins none (a record from before immutable names) always is. The
+// limits admit f whatever its size, since one refused as too large is never
+// checked.
+func RecordIntact(f planreview.File) bool {
+	size := int64(len(f.Data))
+	rev := planreview.Assemble(planreview.Inventory{Files: []planreview.File{f}}, planreview.Limits{Records: 1, RecordBytes: size, CaptureBytes: size})
+	return !slices.ContainsFunc(rev.Failures, func(x planreview.Failure) bool { return x.Reason == planreview.ReasonAltered })
+}
+
+// ledgerGitDir returns the .git of the checkout holding planDir, where Capture
+// looks for a rebase or merge in progress, or "" when planDir is in no
+// checkout. A Ledger is a full clone; a .git that is not a directory is
+// returned as is, so Capture reports the check it cannot make instead of
+// skipping it.
+func ledgerGitDir(planDir string) string {
+	for dir := planDir; ; dir = filepath.Dir(dir) {
+		gitPath := filepath.Join(dir, ".git")
+		if _, err := os.Lstat(gitPath); err == nil {
+			return gitPath
+		}
+		if filepath.Dir(dir) == dir {
+			return ""
+		}
+	}
+}
+
+// ReviewWarnings describes what a read could not use or found stored twice,
+// for the head of a digest: "" for a complete review without conflicting
+// operations. Paths are quoted, so a hostile file name cannot forge a line.
+func ReviewWarnings(rev Review) string {
+	var b strings.Builder
+	if !rev.Complete() {
+		fmt.Fprintf(&b, "WARNING: this review is incomplete: %d problem(s) reading it, so items may be missing or shown resolved:\n", len(rev.Failures))
+		for _, f := range rev.Failures {
+			where := "review files"
+			if f.Path != "" {
+				where = fmt.Sprintf("%q", filepath.Join(rev.Dir, filepath.FromSlash(f.Path)))
 			}
-			seenID[set.ID] = true
-		}
-		sets = append(sets, set)
-	}
-	return sets, nil
-}
-
-// CorruptFeedbackRounds returns the paths of round files under planDir that
-// cannot be read or decoded — the rounds LoadAllFeedback skips. Empty when
-// every round is intact or there is no feedback.
-func CorruptFeedbackRounds(planDir string) ([]string, error) {
-	dir := filepath.Join(planDir, feedbackSubdir)
-	names, err := roundFileNames(dir)
-	if err != nil {
-		return nil, err
-	}
-	var corrupt []string
-	for _, n := range names {
-		p := filepath.Join(dir, n)
-		if _, err := readRound(p); err != nil {
-			corrupt = append(corrupt, p)
-		}
-	}
-	return corrupt, nil
-}
-
-// AppendResolution records one agent disposition as its own file under
-// <planDir>/feedback/resolutions/<utc ns>-<rand>.json.
-//
-// One file per entry, never a shared file rewritten in place: the reviewer's
-// Accept (review server) and the agent's `ox plan feedback resolve` run in
-// different processes and, across machines, different clones. A shared array
-// survives the in-process race with a lock but not the cross-machine one — the
-// ledger rebase auto-resolves a data/ conflict to one side, silently dropping
-// the other machine's entry. Distinct filenames never conflict.
-func AppendResolution(planDir string, r Resolution, now time.Time) error {
-	if err := validateAnchor(r.Anchor); err != nil {
-		return err
-	}
-	if !validResolutionState(r.State) {
-		return fmt.Errorf("invalid resolution state %q (want addressed|wontfix|verified)", r.State)
-	}
-	if r.At.IsZero() {
-		r.At = now.UTC()
-	}
-	dir := filepath.Join(planDir, feedbackSubdir, resolutionsSubdir)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("create resolutions dir: %w", err)
-	}
-	b, err := json.MarshalIndent(r, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encode resolution: %w", err)
-	}
-	name := r.At.UTC().Format(roundTimeLayout) + "-" + randSuffix() + ".json"
-	if err := fileutil.AtomicWriteBytes(filepath.Join(dir, name), b, 0o644); err != nil {
-		return fmt.Errorf("write resolution: %w", err)
-	}
-	return nil
-}
-
-// validateAnchor keeps anchors to the page-emitted shape (no separators) so a
-// resolution can never be keyed to a path.
-func validateAnchor(a string) error {
-	a = strings.TrimSpace(a)
-	if a == "" {
-		return fmt.Errorf("empty anchor")
-	}
-	if strings.ContainsAny(a, `/\`) || strings.Contains(a, "..") {
-		return fmt.Errorf("invalid anchor %q", a)
-	}
-	return nil
-}
-
-// LoadResolutions returns every resolution, oldest first: the legacy
-// resolutions.json array merged with the per-entry files. Missing is empty.
-//
-// An entry present in both (a clone that carried a legacy entry forward) is
-// kept once. A corrupt legacy file is an error, as before; a single corrupt
-// per-entry file is skipped with a warning so one torn write cannot hide
-// every other disposition.
-func LoadResolutions(planDir string) ([]Resolution, error) {
-	var rs []Resolution
-	b, err := os.ReadFile(filepath.Join(planDir, feedbackSubdir, resolutionsFile))
-	switch {
-	case errors.Is(err, os.ErrNotExist):
-	case err != nil:
-		return nil, fmt.Errorf("read resolutions: %w", err)
-	default:
-		if err := json.Unmarshal(b, &rs); err != nil {
-			return nil, fmt.Errorf("parse resolutions: %w", err)
-		}
-	}
-
-	dir := filepath.Join(planDir, feedbackSubdir, resolutionsSubdir)
-	entries, err := os.ReadDir(dir)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("read resolutions dir: %w", err)
-	}
-	names := make([]string, 0, len(entries))
-	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".json") {
-			names = append(names, e.Name())
-		}
-	}
-	sort.Strings(names)
-	for _, n := range names {
-		eb, err := os.ReadFile(filepath.Join(dir, n))
-		if err != nil {
-			slog.Warn("plan feedback: skipping unreadable resolution", "error", err, "file", n, "dir", planDir)
-			continue
-		}
-		var r Resolution
-		if err := json.Unmarshal(eb, &r); err != nil {
-			slog.Warn("plan feedback: skipping corrupt resolution", "error", err, "file", n, "dir", planDir)
-			continue
-		}
-		if containsResolution(rs, r) {
-			continue
-		}
-		rs = append(rs, r)
-	}
-	// Stable: equal timestamps keep legacy-before-dir, then filename order.
-	sort.SliceStable(rs, func(i, j int) bool { return rs[i].At.Before(rs[j].At) })
-	return rs, nil
-}
-
-// containsResolution reports whether rs already holds an entry identical to r.
-// Time is compared with Equal: a JSON round-trip drops the monotonic reading.
-func containsResolution(rs []Resolution, r Resolution) bool {
-	for _, x := range rs {
-		if x.Anchor == r.Anchor && x.State == r.State && x.Commit == r.Commit && x.Note == r.Note && x.At.Equal(r.At) {
-			return true
-		}
-	}
-	return false
-}
-
-// AssembleReview joins every review item (latest mark per anchor across rounds)
-// with its latest resolution, computing open/closed. This is the single source
-// the digest and the render read. An item is OPEN when it has no resolution, or
-// when it was re-raised after the latest resolution (supporting the verify loop).
-//
-// Anchors are CANONICALIZED through the remap chain first (see remap.go): a
-// mark whose content moved when the plan was updated is merged, resolved, and
-// rendered at its current address, with the original preserved in
-// RemappedFrom. Rounds on disk are never rewritten — the chain is applied at
-// read time.
-func AssembleReview(planDir string) ([]MergedItem, error) {
-	sets, err := LoadAllFeedback(planDir)
-	if err != nil {
-		return nil, err
-	}
-	resolutions, err := LoadResolutions(planDir)
-	if err != nil {
-		return nil, err
-	}
-	// Remaps are DERIVED state — an unreadable remaps.json must degrade (marks
-	// reappear at their original anchors, orphaned but visible), never brick
-	// the merge: this function feeds every render, digest, and await for the
-	// plan, and the sacred inputs (rounds/resolutions) are still intact.
-	remaps, err := LoadRemaps(planDir)
-	if err != nil {
-		slog.Warn("plan feedback: remaps.json unreadable — merging without remaps", "error", err, "dir", planDir)
-		remaps = nil
-	}
-	canon := remapResolver(remaps)
-
-	// latest mark per (anchor, reviewer): multi-user — two reviewers marking the
-	// same anchor are BOTH preserved (keying by anchor alone silently dropped one).
-	// With a single/anonymous reviewer the key collapses to per-anchor, so existing
-	// single-user behavior is unchanged.
-	type markKey struct{ anchor, reviewer string }
-	latestItem := map[markKey]FeedbackItem{}
-	raisedAt := map[markKey]time.Time{}
-	origAnchor := map[markKey]string{}
-	var order []markKey
-	for _, set := range sets {
-		for _, it := range set.Items {
-			if it.Reviewer == "" {
-				it.Reviewer = set.Reviewer // rounds saved before per-item stamping carried it on the set
+			fmt.Fprintf(&b, "  %s: %s", where, f.Reason)
+			if f.Detail != "" {
+				fmt.Fprintf(&b, " (%q)", f.Detail)
 			}
-			orig := it.Anchor
-			it.Anchor = canon(orig)
-			k := markKey{it.Anchor, it.Reviewer}
-			if _, seen := latestItem[k]; !seen {
-				order = append(order, k)
-			}
-			latestItem[k] = it
-			raisedAt[k] = set.CreatedAt
-			if it.Anchor != orig {
-				origAnchor[k] = orig
-			} else {
-				delete(origAnchor, k) // a later round marked the element at its new address directly
-			}
+			b.WriteByte('\n')
 		}
 	}
-
-	// latest resolution per anchor: the agent resolves the underlying element, which
-	// closes every reviewer's mark on that anchor unless a later round re-raises it.
-	// Resolutions written before a remap follow their item to the new address.
-	latestRes := map[string]Resolution{}
-	for _, r := range resolutions {
-		a := canon(r.Anchor)
-		if cur, ok := latestRes[a]; !ok || r.At.After(cur.At) {
-			latestRes[a] = r
+	for _, c := range rev.Conflicts {
+		fmt.Fprintf(&b, "WARNING: %s %q is stored with differing content; the earliest copy is shown:\n", c.Kind, c.ID)
+		for _, p := range c.Paths {
+			fmt.Fprintf(&b, "  %q\n", filepath.Join(rev.Dir, filepath.FromSlash(p)))
 		}
 	}
-
-	out := make([]MergedItem, 0, len(order))
-	for _, k := range order {
-		mi := MergedItem{FeedbackItem: latestItem[k], RaisedAt: raisedAt[k], Open: true, RemappedFrom: origAnchor[k]}
-		if r, ok := latestRes[k.anchor]; ok {
-			rc := r
-			mi.Resolution = &rc
-			// re-raised after resolution → open again
-			mi.Open = mi.RaisedAt.After(r.At)
-		}
-		out = append(out, mi)
+	if b.Len() > 0 {
+		b.WriteByte('\n')
 	}
-	return out, nil
+	return b.String()
 }
 
 // ContestedAnchors returns the set of anchors where OPEN reviewer verdicts conflict
@@ -629,20 +183,20 @@ func AssembleReview(planDir string) ([]MergedItem, error) {
 // a human authorizer must reconcile before the plan is safe to execute (ADR-026).
 // Comment-only marks never contest; an approve alongside any change/flag does.
 func ContestedAnchors(items []MergedItem) map[string]bool {
-	byAnchor := map[string]map[FeedbackStatus]bool{}
+	byAnchor := map[string]map[planreview.Status]bool{}
 	for _, it := range items {
-		if !it.Open || it.Status == FeedbackComment {
+		if !it.Open || it.Status == planreview.StatusComment {
 			continue
 		}
 		if byAnchor[it.Anchor] == nil {
-			byAnchor[it.Anchor] = map[FeedbackStatus]bool{}
+			byAnchor[it.Anchor] = map[planreview.Status]bool{}
 		}
 		byAnchor[it.Anchor][it.Status] = true
 	}
 	contested := map[string]bool{}
 	for anchor, verdicts := range byAnchor {
-		approve := verdicts[FeedbackApprove]
-		change := verdicts[FeedbackRequestChange] || verdicts[FeedbackFlag]
+		approve := verdicts[planreview.StatusApprove]
+		change := verdicts[planreview.StatusRequestChange] || verdicts[planreview.StatusFlag]
 		if approve && change {
 			contested[anchor] = true
 		}
@@ -661,7 +215,7 @@ func FeedbackDigest(items []MergedItem) string {
 	var open, addressed, verified, wontfix, approvals int
 	var openItems []MergedItem
 	for _, it := range items {
-		if it.Status == FeedbackApprove && it.Open {
+		if it.Status == planreview.StatusApprove && it.Open {
 			approvals++
 			continue
 		}
@@ -671,11 +225,11 @@ func FeedbackDigest(items []MergedItem) string {
 			continue
 		}
 		switch it.Resolution.State {
-		case ResolutionAddressed:
+		case planreview.StateAddressed:
 			addressed++
-		case ResolutionVerified:
+		case planreview.StateVerified:
 			verified++
-		case ResolutionWontfix:
+		case planreview.StateWontfix:
 			wontfix++
 		}
 	}
@@ -735,23 +289,6 @@ func clipQuote(q string) string {
 	return string(r[:digestQuoteMax-1]) + "…"
 }
 
-// CountOpenFeedback returns the number of OPEN, actionable review items for a
-// plan dir — approvals don't count (they close, not open, the loop). Fail-open:
-// 0 on any read error, so a discovery surface never breaks on one bad plan.
-func CountOpenFeedback(planDir string) int {
-	items, err := AssembleReview(planDir)
-	if err != nil {
-		return 0
-	}
-	n := 0
-	for _, it := range items {
-		if it.Open && it.Status != FeedbackApprove {
-			n++
-		}
-	}
-	return n
-}
-
 // OpenFeedbackSummary is one saved plan with unaddressed human review feedback
 // waiting — the unit a discovery surface (ox plan list, ox agent prime) lists so
 // the feedback is findable even when the push notification missed.
@@ -760,15 +297,19 @@ type OpenFeedbackSummary struct {
 	Topic     string `json:"topic,omitempty"`
 	Open      int    `json:"open"`                 // open, actionable items (approvals excluded)
 	AgentType string `json:"agent_type,omitempty"` // authoring coworker type, if recorded
-	Dir       string `json:"-"`                    // absolute plan dir (local only)
+	// Incomplete is true when the plan's review could not be fully read, or
+	// holds an operation stored with differing content, of which Open counts
+	// only the earliest copy: it may hold open feedback Open does not count.
+	Incomplete bool   `json:"incomplete,omitempty"`
+	Dir        string `json:"-"` // absolute plan dir (local only)
 }
 
 // OpenFeedbackPlans returns every saved plan in the project's ledger that has
-// open review feedback, newest first. It is the PULL half of the feedback loop:
-// the push (a plan-feedback agent-task) can miss — wrong agent type, a failed
-// queue write, an unlinked plan, or simply a human choosing to look — so this
-// reads the ledger directly and never depends on the queue. Fail-open: an
-// unreadable plan dir is skipped, not fatal.
+// open review feedback, or a review that may be incomplete, newest
+// first. It is the PULL half of the feedback loop: the push (a plan-feedback
+// agent-task) can miss — wrong agent type, a failed queue write, an unlinked
+// plan, or simply a human choosing to look — so this reads the ledger directly
+// and never depends on the queue.
 func OpenFeedbackPlans(gitRoot string) ([]OpenFeedbackSummary, error) {
 	plans, err := List(gitRoot)
 	if err != nil {
@@ -776,11 +317,12 @@ func OpenFeedbackPlans(gitRoot string) ([]OpenFeedbackSummary, error) {
 	}
 	var out []OpenFeedbackSummary
 	for _, p := range plans {
-		open := CountOpenFeedback(p.Dir)
-		if open == 0 {
+		rev := ReadReview(p.Dir)
+		open := rev.OpenCount()
+		if open == 0 && rev.Problems() == 0 {
 			continue
 		}
-		s := OpenFeedbackSummary{Slug: p.Slug, Topic: p.Topic, Open: open, Dir: p.Dir}
+		s := OpenFeedbackSummary{Slug: p.Slug, Topic: p.Topic, Open: open, Incomplete: rev.Problems() > 0, Dir: p.Dir}
 		if meta, err := readMeta(p.Dir); err == nil && meta.Provenance != nil {
 			s.AgentType = meta.Provenance.AgentType
 		}

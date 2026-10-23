@@ -14,6 +14,7 @@ import (
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/manifest"
 	"github.com/sageox/ox/internal/tokens"
@@ -646,8 +647,10 @@ func checkTeamSparseCheckout(fix bool) checkResult {
 					continue
 				}
 				fixed++
-				// Re-read reality after `sparse-checkout set`. Only a directory
-				// that actually materialized counts as repaired.
+				// Re-read reality after `sparse-checkout set`, against the
+				// manifest the repair used. Only a directory that actually
+				// materialized counts as repaired.
+				cfg = manifest.ParseFile(filepath.Join(tc.Path, ".sageox", "sync.manifest"), manifest.RepoKindTeamContext)
 				missing = missingSparseTopLevelDirs(tc.Path, cfg)
 				if len(missing) == 0 {
 					continue
@@ -765,25 +768,28 @@ func locallyRepairableMissingDirs(cfg *manifest.ManifestConfig, missing []string
 // repairTeamSparseCheckout re-applies sparse-checkout from the manifest
 // with root-level file patterns included.
 func repairTeamSparseCheckout(tcPath string) error {
-	manifestPath := filepath.Join(tcPath, ".sageox", "sync.manifest")
-	cfg := manifest.ParseFile(manifestPath, manifest.RepoKindTeamContext)
+	// under the repo lock: `git sparse-checkout set` rewrites the index, so a
+	// run outside it can fail an ox commit to this clone on index.lock. The
+	// manifest is read inside it: a sync the repair waited out may change it.
+	return gitutil.WithRepoLock(context.Background(), tcPath, func() error {
+		manifestPath := filepath.Join(tcPath, ".sageox", "sync.manifest")
+		cfg := manifest.ParseFile(manifestPath, manifest.RepoKindTeamContext)
+		sparsePaths := manifest.SparseSetFor(cfg, manifest.RepoKindTeamContext)
+		if len(sparsePaths) == 0 {
+			return fmt.Errorf("no sparse paths computed from manifest")
+		}
 
-	sparsePaths := manifest.SparseSetFor(cfg, manifest.RepoKindTeamContext)
-	if len(sparsePaths) == 0 {
-		return fmt.Errorf("no sparse paths computed from manifest")
-	}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	args := append([]string{"-C", tcPath, "sparse-checkout", "set", "--no-cone"}, sparsePaths...)
-	cmd := exec.CommandContext(ctx, "git", args...)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("git sparse-checkout set: %w: %s", err, strings.TrimSpace(string(output)))
-	}
-
-	return nil
+		args := append([]string{"-C", tcPath, "sparse-checkout", "set", "--no-cone"}, sparsePaths...)
+		cmd := exec.CommandContext(ctx, "git", args...)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("git sparse-checkout set: %w: %s", err, strings.TrimSpace(string(output)))
+		}
+		return nil
+	})
 }
 
 // runGitStatus runs git status --porcelain on a directory and returns the output.

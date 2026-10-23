@@ -15,6 +15,7 @@ import (
 
 	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/lfs/pointer"
+	"github.com/sageox/ox/internal/secretguard"
 	"github.com/sageox/ox/internal/session/pipeline"
 )
 
@@ -103,6 +104,13 @@ func ValidateLedgerBlob(path string, data []byte) error {
 func validateLedgerBlob(path string, data []byte, storage string) error {
 	if HasConflictMarkersBytes(data) {
 		return fmt.Errorf("%s contains an unresolved conflict", path)
+	}
+	// Inspect immutable tree bytes, including storage=git imports and session
+	// metadata. Pointer-only checks cannot protect alternate storage or headers.
+	if isSessionPath(path) {
+		if err := secretguard.ValidateContent(path, data); err != nil {
+			return fmt.Errorf("%s refused: %w", path, err)
+		}
 	}
 	if isSessionContentPath(path) && storage != "git" {
 		if _, _, err := pointer.Parse(string(data)); err != nil {
@@ -396,13 +404,15 @@ func runPlumbing(ctx context.Context, repoPath string, stdin []byte, extraEnv []
 	return stdout.Bytes(), nil
 }
 
-// ResolveAutostashConflicts clears formatting-only session metadata conflicts
-// left by pull --autostash, which can exit successfully with an unmerged index.
-// It preserves every field from both sides and refuses differing values —
-// except for the small allowlist of ox-owned bookkeeping fields in
-// sessionMetaBookkeepingMerges, whose merge is mechanical rather than a choice
-// between two authors' content. Deletions, other paths, active git operations,
-// and edits made after the conflict are always refused.
+// ResolveAutostashConflicts clears the conflicts pull --autostash can leave
+// behind while exiting successfully with an unmerged index, on two kinds of
+// path. For sessions/<name>/meta.json it preserves every field from both sides
+// and refuses differing values — except for the small allowlist of ox-owned
+// bookkeeping fields in sessionMetaBookkeepingMerges, whose merge is
+// mechanical rather than a choice between two authors' content. For a file
+// `ox plan save` writes (isPlanSaveFile) it keeps the stash's local copy, as a
+// rebase of data/ keeps the local commit. Deletions, other paths, active git
+// operations, and edits made after the conflict are always refused.
 // The caller must hold WithRepoLock. No commits are made or stashes removed.
 func ResolveAutostashConflicts(ctx context.Context, repoPath string, safePrefixes, denyPrefixes []string) (bool, error) {
 	// A pull killed after "Created autostash" strands the change under
@@ -440,11 +450,12 @@ func ResolveAutostashConflicts(ctx context.Context, repoPath string, safePrefixe
 	var repairs []repair
 	for path, stages := range groupByPath(entries) {
 		parts := strings.Split(path, "/")
-		if len(parts) != 3 || parts[0] != "sessions" || parts[2] != "meta.json" ||
+		planFile := isPlanSaveFile(path)
+		if !planFile && (len(parts) != 3 || parts[0] != "sessions" || parts[2] != "meta.json") ||
 			!matchesSafePrefix(path, safePrefixes, denyPrefixes) || !stages[1] || !stages[2] || !stages[3] {
 			return false, fmt.Errorf("unresolved conflict in %s requires manual resolution", path)
 		}
-		var fields [4]map[string]any
+		var raw [4][]byte
 		var files [4]string
 		for stage := 1; stage <= 3; stage++ {
 			// Read raw blobs: RunGit sanitizes output and must not rewrite metadata.
@@ -452,54 +463,27 @@ func ResolveAutostashConflicts(ctx context.Context, repoPath string, safePrefixe
 			if err != nil {
 				return false, fmt.Errorf("read conflict stage for %s: %w", path, err)
 			}
-			decoder := json.NewDecoder(bytes.NewReader(data))
-			decoder.UseNumber() // preserve large IDs and sizes exactly
-			if !json.Valid(data) || decoder.Decode(&fields[stage]) != nil || fields[stage] == nil {
-				return false, fmt.Errorf("invalid JSON in conflict for %s", path)
-			}
+			raw[stage] = data
 			files[stage] = filepath.Join(tmp, fmt.Sprint(stage))
 			if err := os.WriteFile(files[stage], data, 0o600); err != nil {
 				return false, err
 			}
 		}
-		for key := range fields[1] {
-			_, ours := fields[2][key]
-			_, theirs := fields[3][key]
-			if !ours || !theirs {
-				return false, fmt.Errorf("field %s was deleted in %s; manual resolution required", key, path)
+		merged := raw[3] // stage 3 is the stash: the local, uncommitted copy
+		if !planFile {
+			if merged, err = mergeSessionMetaConflict(path, raw); err != nil {
+				return false, err
 			}
-		}
-		for key, value := range fields[3] {
-			if ours, exists := fields[2][key]; exists && !reflect.DeepEqual(ours, value) {
-				// Differing values refuse by default. The narrow exception is
-				// ox's own bookkeeping, where the merge is mechanical rather
-				// than a choice between two authors' content — see
-				// sessionMetaBookkeepingMerges. Reached only for a path the
-				// guard above already confined to sessions/<name>/meta.json
-				// inside safePrefixes, so the policy cannot escape that tree.
-				merged, ok := mergeSessionMetaBookkeeping(key, ours, value)
-				if !ok {
-					return false, fmt.Errorf("field %s differs in %s; manual resolution required", key, path)
-				}
-				fields[2][key] = merged
-				continue
-			}
-			fields[2][key] = value
 		}
 		fullPath := filepath.Join(repoPath, path)
 		info, err := os.Lstat(fullPath)
 		if err != nil || !info.Mode().IsRegular() {
-			return false, fmt.Errorf("conflicted metadata is missing or not a regular file: %s", path)
+			return false, fmt.Errorf("conflicted file is missing or not a regular file: %s", path)
 		}
 		original, err := os.ReadFile(fullPath)
 		if err != nil {
 			return false, err
 		}
-		merged, err := json.MarshalIndent(fields[2], "", "  ")
-		if err != nil {
-			return false, err
-		}
-		merged = append(merged, '\n')
 		// Reproduce git's stash conflict before replacing it. Otherwise a human's
 		// edits outside the markers could be lost by rebuilding from index stages.
 		cmd := commandContext(ctx, "git", "-C", repoPath, "merge-file", "-p",
@@ -521,7 +505,7 @@ func ResolveAutostashConflicts(ctx context.Context, repoPath string, safePrefixe
 				return err
 			}
 			if !bytes.Equal(current, r.original) {
-				return fmt.Errorf("conflicted metadata changed during recovery: %s", r.path)
+				return fmt.Errorf("conflicted file changed during recovery: %s", r.path)
 			}
 			if err := fileutil.AtomicWriteBytes(fullPath, r.merged, r.mode); err != nil {
 				return err
@@ -533,6 +517,67 @@ func ResolveAutostashConflicts(ctx context.Context, repoPath string, safePrefixe
 		}
 	}
 	return true, nil
+}
+
+// mergeSessionMetaConflict merges the three stages of a sessions/*/meta.json
+// autostash conflict field by field (see ResolveAutostashConflicts).
+func mergeSessionMetaConflict(path string, raw [4][]byte) ([]byte, error) {
+	var fields [4]map[string]any
+	for stage := 1; stage <= 3; stage++ {
+		decoder := json.NewDecoder(bytes.NewReader(raw[stage]))
+		decoder.UseNumber() // preserve large IDs and sizes exactly
+		if !json.Valid(raw[stage]) || decoder.Decode(&fields[stage]) != nil || fields[stage] == nil {
+			return nil, fmt.Errorf("invalid JSON in conflict for %s", path)
+		}
+	}
+	for key := range fields[1] {
+		_, ours := fields[2][key]
+		_, theirs := fields[3][key]
+		if !ours || !theirs {
+			return nil, fmt.Errorf("field %s was deleted in %s; manual resolution required", key, path)
+		}
+	}
+	for key, value := range fields[3] {
+		if ours, exists := fields[2][key]; exists && !reflect.DeepEqual(ours, value) {
+			// Differing values refuse by default. The narrow exception is
+			// ox's own bookkeeping, where the merge is mechanical rather
+			// than a choice between two authors' content — see
+			// sessionMetaBookkeepingMerges. Reached only for a path
+			// ResolveAutostashConflicts already confined to
+			// sessions/<name>/meta.json inside safePrefixes, so the policy
+			// cannot escape that tree.
+			merged, ok := mergeSessionMetaBookkeeping(key, ours, value)
+			if !ok {
+				return nil, fmt.Errorf("field %s differs in %s; manual resolution required", key, path)
+			}
+			fields[2][key] = merged
+			continue
+		}
+		fields[2][key] = value
+	}
+	merged, err := json.MarshalIndent(fields[2], "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(merged, '\n'), nil
+}
+
+// isPlanSaveFile reports whether path is a file `ox plan save` rewrites in a
+// plan dir. events.jsonl is merge=union and review records are immutable, so
+// they are left out: keeping one side there would drop the other's entries.
+func isPlanSaveFile(path string) bool {
+	parts := strings.Split(path, "/")
+	if len(parts) < 4 || parts[0] != "data" || parts[1] != "plans" || parts[2] == "" {
+		return false
+	}
+	if len(parts) == 5 {
+		return parts[3] == "companions" && parts[4] != ""
+	}
+	switch parts[3] {
+	case "plan.md", "annotations.json", "meta.json", "plan.html", "hero.svg":
+		return len(parts) == 4
+	}
+	return false
 }
 
 // sessionMetaBookkeepingMerges is the complete allowlist of sessions/*/meta.json

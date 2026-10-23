@@ -595,9 +595,11 @@ type immutablePathsKey struct{}
 // move: a Ledger, where session and plan directories are append-only. Rebase
 // steps under such a context skip git's rename detection, which otherwise runs
 // over every tracked path on every replayed commit (47k-65k paths per step on
-// 2026-10-07, minutes per step in the background band). Repositories where a
-// rename can legitimately race an add under the old name (team context, a
-// project checkout) must not be marked; there the detection stays on.
+// 2026-10-07, minutes per step in the background band). Team context pulls are
+// marked too: rare real renames there cost less than the false rename/delete
+// conflicts its look-alike discussion files produce (see pullTeamContext). A
+// project checkout must not be marked; there a rename can legitimately race an
+// edit under the old name, so the detection stays on.
 func WithImmutablePaths(ctx context.Context) context.Context {
 	return context.WithValue(ctx, immutablePathsKey{}, true)
 }

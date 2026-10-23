@@ -93,6 +93,7 @@ sessions/
 # But DO track our plugin marketplace and manifest
 !/.claude-plugin/
 !/claude-plugin/.claude-plugin/
+!/internal/pet/mod/.claude-plugin/
 
 # Claude Code local settings (user-specific)
 .claude/settings.local.json

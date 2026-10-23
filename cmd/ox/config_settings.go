@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 
@@ -28,12 +29,18 @@ const (
 // ConfigSetting defines a configurable setting.
 type ConfigSetting struct {
 	Key             string        // setting key (e.g., "session_recording")
-	Description     string        // short description for list views
+	Label           string        // short user-facing name (e.g., "Session recording")
+	Description     string        // one plain-language sentence for list views and 'ox config schema'
 	LongDescription string        // detailed explanation for help
 	Category        string        // grouping category (e.g., "Sessions", "Privacy")
 	ValidValues     []string      // allowed values (empty = any string)
 	Default         string        // default value
 	Levels          []ConfigLevel // which levels support this setting
+
+	// Number marks a free-text setting that must be a number in
+	// [Number.Min, Number.Max]. 'ox config set' validates against it and
+	// 'ox config schema' publishes it, so the two cannot disagree.
+	Number *NumberRange
 
 	// Deprecated marks a setting kept only for backward compatibility: it
 	// remains resolvable and settable (existing config files and scripts
@@ -46,6 +53,11 @@ type ConfigSetting struct {
 	// and name the setting that actually does the job. Empty unless
 	// Deprecated is true.
 	DeprecationNotice string
+}
+
+// NumberRange is the inclusive range a numeric setting accepts.
+type NumberRange struct {
+	Min, Max float64
 }
 
 // ConfigValue represents a resolved config value with its source.
@@ -64,7 +76,8 @@ type ConfigValue struct {
 var AllSettings = []ConfigSetting{
 	{
 		Key:         "session_recording",
-		Description: "Session recording mode",
+		Label:       "Session recording",
+		Description: "Whether AI coding sessions are recorded to the ledger, and when recording starts.",
 		LongDescription: `Controls whether and how AI agent sessions are recorded.
 
   disabled - No sessions are recorded
@@ -83,6 +96,7 @@ conventions and knowledge that apply to ALL repos your team owns.`,
 	},
 	{
 		Key:         "session_publishing",
+		Label:       "Session publishing",
 		Description: "Whether a recorded session is published to the ledger, or held locally until you upload it explicitly.",
 		LongDescription: `Controls whether a recorded session is published to the ledger, or held
 locally until you upload it explicitly.
@@ -110,7 +124,8 @@ them.`,
 	},
 	{
 		Key:         "murmur_send",
-		Description: "Auto work-in-progress signals",
+		Label:       "Send murmurs",
+		Description: "Whether AI coworkers are nudged to share work-in-progress signals with teammates.",
 		LongDescription: `Controls work-in-progress signals to teammates.
 
 Murmurs are short coordination signals that let teammates know what
@@ -127,7 +142,8 @@ coworkers.
 	},
 	{
 		Key:         "murmur_receive",
-		Description: "Receive murmurs from other coworkers",
+		Label:       "Receive murmurs",
+		Description: "Whether teammates' work-in-progress signals reach your AI coworker.",
 		LongDescription: `Controls whether work-in-progress signals from other coworkers
 appear in your whisper stream.
 
@@ -143,7 +159,8 @@ delivery, not whether murmurs are relayed for others.`,
 	},
 	{
 		Key:         "telemetry",
-		Description: "Usage telemetry",
+		Label:       "Usage telemetry",
+		Description: "Send usage data that helps improve ox. Never includes your code or session conversations.",
 		LongDescription: `Controls the usage data ox sends to help improve it.
 
 When on, ox sends:
@@ -174,8 +191,37 @@ DO_NOT_TRACK=1 turns all of it off, the same as setting this to off.`,
 		Levels:      []ConfigLevel{ConfigLevelUser},
 	},
 	{
+		Key:         "disposable_machine",
+		Label:       "Disposable machine",
+		Description: "This machine runs one job and goes away; only its home directory persists.",
+		LongDescription: `Turn on for a machine that runs ox for one job and then goes away,
+keeping only its home directory, such as a pod with a persistent home
+volume. Leave it off on a laptop or a long-lived server.
+
+When on:
+  - The daemon's first start on a machine removes the Ledger's git lock
+    files, which a machine that went away mid-command leaves behind.
+  - The daemon runs no periodic auto-fix and no clone garbage collection.
+  - The daemon restarts once the Ledger's first clone lands, so the work
+    that needs a Ledger starts.
+  - A recording stores when its AI coworker's process started, so a
+    process on a later machine that reuses the same PID is not taken
+    for it.
+  - Git commands that ox runs in its own clones (the Ledger, team
+    contexts, Knowledge Bubbles) run no hooks and get credentials only
+    from ox.
+
+The daemon reads this setting when it starts: run 'ox daemon restart'
+after changing it.`,
+		Category:    "Machine",
+		ValidValues: []string{"on", "off"},
+		Default:     "off",
+		Levels:      []ConfigLevel{ConfigLevelUser},
+	},
+	{
 		Key:         "tips",
-		Description: "Show helpful tips",
+		Label:       "Tips",
+		Description: "Show contextual tips after command output.",
 		LongDescription: `Controls whether ox shows contextual tips and suggestions.
 
 When enabled, ox displays helpful hints about features and workflows
@@ -188,6 +234,7 @@ once you're familiar with the tool.`,
 	},
 	{
 		Key:         "context_git.auto_commit",
+		Label:       "Auto-commit sessions (deprecated)",
 		Description: "DEPRECATED — never had any effect; use session_publishing",
 		LongDescription: `DEPRECATED: this setting has never had any effect. Sessions were committed
 to the ledger regardless of what it was set to — it was never wired to any
@@ -208,6 +255,7 @@ control anything. See bead ox-6p5y.11.`,
 	},
 	{
 		Key:         "context_git.auto_push",
+		Label:       "Auto-push sessions (deprecated)",
 		Description: "DEPRECATED — never had any effect; use session_publishing",
 		LongDescription: `DEPRECATED: this setting has never had any effect. Sessions were published
 to the ledger regardless of what it was set to — it was never wired to any
@@ -228,7 +276,8 @@ control anything. See bead ox-6p5y.11.`,
 	},
 	{
 		Key:         "view_format",
-		Description: "Default session view format",
+		Label:       "Session view format",
+		Description: "Default output format for 'ox session view'.",
 		LongDescription: `Controls the default output format for 'ox session view'.
 
   html - Opens session in browser with rich HTML viewer (default)
@@ -243,8 +292,9 @@ Override per-invocation with --html, --text, or --json flags.`,
 	},
 	{
 		Key:         "session.draft",
+		Label:       "Early session link",
 		Category:    "Sessions",
-		Description: "Publish an early placeholder so /c/<id> resolves mid-session (on/off)",
+		Description: "Publish a placeholder so a session's link works while it is still recording.",
 		LongDescription: `Controls whether ox commits an early placeholder for a recording.
 
   on  — At turn 2, ox commits a metadata-only placeholder to the ledger so
@@ -267,7 +317,8 @@ the ledger.`,
 	},
 	{
 		Key:         "agent.summarizer",
-		Description: "Who runs the session-stop summarization (inline/delegated)",
+		Label:       "Session summarizer",
+		Description: "Who writes the session summary at stop: your AI coworker, the background daemon, or nobody.",
 		LongDescription: `Selects who runs the LLM call that summarizes a session at stop.
 
   inline    — The calling agent (Claude Code, Cursor, etc.) runs the LLM
@@ -305,7 +356,8 @@ See ADR-016 for full rationale.`,
 	},
 	{
 		Key:         "agent_worker",
-		Description: "Daemon AI coworker for background tasks",
+		Label:       "Background AI coworker",
+		Description: "Which AI coworker CLI the daemon uses for background tasks, such as filling in missing summaries.",
 		LongDescription: `Selects which agent CLI the daemon uses for background tasks like
 session anti-entropy (generating missing summaries for orphaned sessions).
 
@@ -325,7 +377,8 @@ Rate-limited to 60 invocations/hour, 4 concurrent.`,
 	},
 	{
 		Key:         "recording_reminder",
-		Description: "Periodic recording status reminders",
+		Label:       "Recording reminders",
+		Description: "Periodically remind AI coworkers that the session is being recorded.",
 		LongDescription: `Controls whether AI coworkers receive periodic reminders
 that their session is being recorded.
 
@@ -342,7 +395,8 @@ as whispers in the agent's context.`,
 	},
 	{
 		Key:         "plan.save",
-		Description: "Auto-save approved plans to the ledger",
+		Label:       "Save plans",
+		Description: "Automatically save approved plans to the ledger.",
 		LongDescription: `Controls whether 'ox plan' auto-saves the enriched plan to this repo's
 ledger.
 
@@ -357,7 +411,8 @@ ledger.
 	},
 	{
 		Key:         "plan.html",
-		Description: "Enriched-HTML render mode",
+		Label:       "Plan HTML pages",
+		Description: "When ox renders an enriched HTML page for a plan.",
 		LongDescription: `Controls when 'ox plan' renders an enriched HTML plan for human review.
 
   off       - Never render, never nudge.
@@ -378,7 +433,8 @@ values).`,
 	},
 	{
 		Key:         "plan.open",
-		Description: "Browser-open policy for rendered plans",
+		Label:       "Open rendered plans",
+		Description: "Whether a rendered plan may open in your browser, and whether to ask first.",
 		LongDescription: `Controls whether the plan-exit nudge may instruct opening a rendered
 plan in a browser. Independent of 'plan.html' (which controls rendering) —
 this setting only matters once a render/nudge would already happen; 'plan.html
@@ -403,7 +459,8 @@ values).`,
 	},
 	{
 		Key:         "pr_visuals.rich",
-		Description: "Generate rich pull-request visuals",
+		Label:       "Rich PR visuals",
+		Description: "Guide AI coworkers to make rich images for pull requests.",
 		LongDescription: `Controls whether AI coworkers are guided to generate rich, review-only
 PNG/SVG visuals for GitHub pull requests.
 
@@ -425,7 +482,8 @@ repository choice; repository choices override a team default.`,
 	},
 	{
 		Key:         "pr_visuals.theme",
-		Description: "Pull-request visual theme",
+		Label:       "PR visual theme",
+		Description: "Light or dark appearance for pull-request visuals.",
 		LongDescription: `Selects the intended appearance of rich GitHub pull-request visuals.
 
   light - White/light canvas with SageOx accents. Default: aligns with GitHub's
@@ -442,7 +500,8 @@ GitHub's own color scheme. Set it at team, repository, or personal scope.`,
 	},
 	{
 		Key:         "pr_visuals.header",
-		Description: "Emit the SageOx PR credit line (header)",
+		Label:       "PR credit line",
+		Description: "Add the SageOx credit line to the top of pull requests.",
 		LongDescription: `Controls whether the ox pr header command emits the top-of-PR SageOx credit
 line — the human-facing counterpart to the SageOx-Session: trailer. It links the
 session(s) and plan(s) that produced the change, names the team, and whispers a
@@ -462,7 +521,8 @@ repository choice; repository choices override a team default.`,
 	// in ox config — they are always-on transparency requirements, not user preferences.
 	{
 		Key:         "attribution.commit",
-		Description: "Git commit trailer for AI coworker attribution",
+		Label:       "Commit attribution",
+		Description: "Git trailer added to commits made with an AI coworker. Empty turns it off.",
 		LongDescription: `Controls the git trailer added to commits made with AI coworker assistance.
 
 Any coding agent that touches your code and is deeply involved in the plan
@@ -483,7 +543,8 @@ Default: "Co-Authored-By: SageOx <ox@sageox.ai>"`,
 	},
 	{
 		Key:         "attribution.pr",
-		Description: "PR body attribution for AI coworker contribution",
+		Label:       "PR attribution",
+		Description: "Attribution line added to pull request descriptions. Empty turns it off.",
 		LongDescription: `Controls the attribution line added to pull request descriptions.
 
 When team context shapes the code in a PR — architecture decisions,
@@ -503,7 +564,8 @@ Default: "Co-Authored-By: [SageOx](https://github.com/SageOx)"`,
 	},
 	{
 		Key:         "hooks.userpromptsubmit.cloud_query",
-		Description: "Allow UserPromptSubmit to also query SageOx cloud",
+		Label:       "Cloud recall on prompts",
+		Description: "Also search SageOx cloud for context on each prompt. Sends redacted prompt text.",
 		LongDescription: `Controls whether the UserPromptSubmit hook may issue a remote SageOx
 query IN ADDITION to the always-on local query.
 
@@ -526,7 +588,8 @@ redaction is non-negotiable, not a separate toggle.`,
 	},
 	{
 		Key:         "attribution.score_threshold",
-		Description: "Minimum SageOx contribution score for commit attribution",
+		Label:       "Attribution threshold",
+		Description: "Minimum SageOx contribution score (0.0 to 1.0) before a commit is attributed.",
 		LongDescription: `Controls the threshold at which SageOx earns commit attribution.
 
 AI coworkers self-report how much SageOx team context influenced their work
@@ -541,6 +604,7 @@ commit hook adds the Co-Authored-By trailer.
 Default: 0.5`,
 		Category:    "Attribution",
 		ValidValues: []string{},
+		Number:      &NumberRange{Min: 0, Max: 1},
 		Default:     "0.5",
 		Levels:      []ConfigLevel{ConfigLevelUser, ConfigLevelRepo},
 	},
@@ -698,6 +762,11 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 			} else if userCfg.TipsEnabled != nil {
 				cv.UserVal = "off"
 			}
+		}
+
+	case "disposable_machine":
+		if userCfg != nil && userCfg.DisposableMachine != nil {
+			cv.UserVal = boolToOnOff(*userCfg.DisposableMachine)
 		}
 
 	case "view_format":
@@ -896,11 +965,11 @@ func SetConfigValue(key, value string, level ConfigLevel, projectRoot string) er
 		return fmt.Errorf("unknown setting: %s", key)
 	}
 
-	// validate value — score_threshold uses float validation, others use ValidValues list
-	if key == "attribution.score_threshold" {
+	// validate value — numeric settings use their range, others use ValidValues list
+	if r := setting.Number; r != nil {
 		f, err := strconv.ParseFloat(value, 64)
-		if err != nil || f < 0.0 || f > 1.0 {
-			return fmt.Errorf("invalid value %q for %s: must be a number between 0.0 and 1.0", value, key)
+		if err != nil || math.IsNaN(f) || f < r.Min || f > r.Max { // NaN passes both comparisons
+			return fmt.Errorf("invalid value %q for %s: must be a number between %.1f and %.1f", value, key, r.Min, r.Max)
 		}
 	} else if len(setting.ValidValues) > 0 {
 		valid := false
@@ -982,6 +1051,10 @@ func setUserConfig(key, value string) error {
 	case "tips":
 		enabled := value == "on"
 		cfg.TipsEnabled = &enabled
+
+	case "disposable_machine":
+		enabled := value == "on"
+		cfg.DisposableMachine = &enabled
 
 	case "view_format":
 		cfg.ViewFormat = value
@@ -1295,6 +1368,9 @@ func unsetUserConfig(key string) error {
 
 	case "tips":
 		cfg.TipsEnabled = nil
+
+	case "disposable_machine":
+		cfg.DisposableMachine = nil
 
 	case "view_format":
 		cfg.ViewFormat = ""

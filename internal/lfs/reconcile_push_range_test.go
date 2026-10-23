@@ -90,6 +90,7 @@ func mustPush(t *testing.T, ledger string) {
 // missing pointer, the push is accepted after reconcile even though the
 // coworker's session is still broken on the remote.
 func TestReconcile_PushRangeScope_IgnoresPointersTheRemoteAlreadyHas(t *testing.T) {
+	useBundledSessionRules(t)
 	if testing.Short() {
 		t.Skip("short: real git remote and mocked LFS batch API")
 	}
@@ -165,58 +166,35 @@ func TestReconcile_PushRangeScope_IgnoresPointersTheRemoteAlreadyHas(t *testing.
 	}
 }
 
-// Negative control for the test above: the whole-tree variant still sees the
-// coworker's broken session, so the scoping — not a weaker check — is what lets
-// the push-range repair through. `ox doctor` relies on the whole-tree variant to
-// clear pointers the remote already holds.
-func TestReconcile_WholeTreeScope_StillSeesAlreadyPushedPointers(t *testing.T) {
+// TestReconcile_PushRangeIgnoresPointerLookalikes: an unpushed file that starts
+// like a pointer but is over maxPointerSize, or a pointer with no size line, is
+// not a pointer, so the reconcile scans none and needs no LFS client.
+// pointer.Parse skips lines it does not know, so for the large file the size
+// filter is the only guard. Failure prevented: content mistaken for a pointer is
+// probed, reported missing, and pauses the push.
+func TestReconcile_PushRangeIgnoresPointerLookalikes(t *testing.T) {
+	useBundledSessionRules(t)
 	if testing.Short() {
-		t.Skip("short: real git remote and mocked LFS batch API")
+		t.Skip("short: real git remote")
 	}
-	teammateOID := strings.Repeat("7", 64)
-	teammateMetaOID := strings.Repeat("8", 64)
+	for _, tc := range []struct{ name, content string }{
+		{"over the pointer size", lfsPointerContent(strings.Repeat("a", 64), 999) + strings.Repeat("x", maxPointerSize)},
+		{"no size line", "version https://git-lfs.github.com/spec/v1\noid sha256:" + strings.Repeat("b", 64) + "\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ledger, _ := initLedgerWithRemote(t)
+			writeAndCommit(t, ledger, "pointer look-alike", map[string]string{"sessions/s/raw.jsonl": tc.content})
 
-	setup := func(t *testing.T) (string, *Client) {
-		ledger, _ := initLedgerWithRemote(t)
-		writeAndCommit(t, ledger, "teammate session", map[string]string{
-			"sessions/teammate/summary.md": lfsPointerContent(teammateOID, 10),
-			"sessions/teammate/meta.json":  metaFor(metaRef("summary.md", teammateMetaOID, 10)),
+			result, err := reconcileUnpushedPointers(context.Background(), ledger, nil, func() (*Client, error) {
+				t.Fatal("a push range with no pointer needs no LFS client")
+				return nil, nil
+			})
+
+			require.NoError(t, err)
+			assert.Zero(t, result.ScannedPointers)
+			assert.False(t, result.Changed())
 		})
-		mustPush(t, ledger)
-		return ledger, fakeLFSDownloadServer(t, map[string]int{teammateOID: http.StatusNotFound})
 	}
-
-	t.Run("whole tree reports the coworker's pointer and removes nothing", func(t *testing.T) {
-		ledger, client := setup(t)
-		_, err := reconcileAllPointers(context.Background(), ledger, nil, func() (*Client, error) { return client, nil })
-		var unrecoverable *UnrecoverablePointersError
-		require.ErrorAs(t, err, &unrecoverable)
-		assert.Equal(t, "sessions/teammate/summary.md", filepath.ToSlash(unrecoverable.Pointers[0].Path))
-		assert.FileExists(t, filepath.Join(ledger, "sessions", "teammate", "summary.md"))
-	})
-
-	t.Run("push range has nothing to do", func(t *testing.T) {
-		ledger, client := setup(t)
-		result, err := reconcileUnpushedPointers(context.Background(), ledger, nil, func() (*Client, error) { return client, nil })
-		require.NoError(t, err)
-		assert.Zero(t, result.ScannedPointers)
-		assert.False(t, result.Changed())
-	})
-
-	t.Run("whole tree never removes an already-pushed pointer with a dead blob", func(t *testing.T) {
-		ledger, _ := initLedgerWithRemote(t)
-		writeAndCommit(t, ledger, "plan with a dead blob", map[string]string{
-			"data/plans/p1/plan.html": lfsPointerContent(teammateOID, 500),
-		})
-		mustPush(t, ledger)
-		client := fakeLFSDownloadServer(t, map[string]int{teammateOID: http.StatusNotFound})
-
-		result, err := reconcileAllPointers(context.Background(), ledger, nil, func() (*Client, error) { return client, nil })
-		var unrecoverable *UnrecoverablePointersError
-		require.ErrorAs(t, err, &unrecoverable)
-		assert.False(t, result.Changed())
-		assert.FileExists(t, filepath.Join(ledger, "data", "plans", "p1", "plan.html"))
-	})
 }
 
 // Failure prevented: a missing object referenced only by an intermediate
@@ -226,8 +204,10 @@ func TestReconcile_WholeTreeScope_StillSeesAlreadyPushedPointers(t *testing.T) {
 // pointers with empty stubs" commit, but history still carried the pointers.
 //
 // Observable difference: the pre-receive hook declines the push before reconcile
-// and accepts it after.
+// and accepts it after. A plan edit someone only staged stays staged and off
+// the remote: the squash once committed the whole index (#1442).
 func TestReconcile_SquashesMissingObjectReferencedOnlyByIntermediateCommit(t *testing.T) {
+	useBundledSessionRules(t)
 	if testing.Short() {
 		t.Skip("short: real git remote and mocked LFS batch API")
 	}
@@ -244,6 +224,10 @@ func TestReconcile_SquashesMissingObjectReferencedOnlyByIntermediateCommit(t *te
 	writeAndCommit(t, ledger, "drop orphaned pointer", map[string]string{"sessions/s1/meta.json": `{"title":"t"}`})
 	writeAndCommit(t, ledger, "unrelated murmur", map[string]string{"data/murmurs/m1.json": `{"content":"m"}`})
 	require.Equal(t, 3, unpushedCount(t, ledger))
+	const stagedPlan = "data/plans/p/plan.md"
+	require.NoError(t, os.MkdirAll(filepath.Join(ledger, "data", "plans", "p"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(ledger, filepath.FromSlash(stagedPlan)), []byte("# not saved\n"), 0o644))
+	git(t, ledger, "add", stagedPlan)
 
 	installMissingPointerHook(t, bare, deadOID)
 	ok, out := tryPush(t, ledger)
@@ -262,12 +246,15 @@ func TestReconcile_SquashesMissingObjectReferencedOnlyByIntermediateCommit(t *te
 	ok, out = tryPush(t, ledger)
 	assert.True(t, ok, "push must be accepted once the poisoned commit is squashed away: %s", out)
 	assert.FileExists(t, filepath.Join(ledger, "data", "murmurs", "m1.json"), "squash must keep every unpushed change")
+	assert.NotContains(t, git(t, bare, "ls-tree", "-r", "--name-only", "HEAD"), stagedPlan, "the squash published a staged plan edit")
+	assert.Equal(t, stagedPlan, git(t, ledger, "diff", "--cached", "--name-only"), "the plan edit must stay staged")
 }
 
 // Failure prevented: the repair rewrites the user's working copy, so it must not
 // destroy a pointer path whose file no longer matches what was committed, and it
 // must not guess about a missing object it has no way to clean up.
 func TestReconcile_RefusesWhatItCannotRepairSafely(t *testing.T) {
+	useBundledSessionRules(t)
 	if testing.Short() {
 		t.Skip("short: real git remote and mocked LFS batch API")
 	}
@@ -330,6 +317,7 @@ func writeFile(t *testing.T, path, content string) {
 // every run and could not tell one stuck path from many. In range, disagreement
 // still fails closed (never silently rewriting metadata) — but deterministically.
 func TestReconcile_InRangeMetadataDisagreementIsReportedInSortedOrder(t *testing.T) {
+	useBundledSessionRules(t)
 	if testing.Short() {
 		t.Skip("short: real git remote and mocked LFS batch API")
 	}
@@ -355,9 +343,10 @@ func TestReconcile_InRangeMetadataDisagreementIsReportedInSortedOrder(t *testing
 	}
 }
 
-// Failure prevented: reset --soft to an upstream HEAD does not contain commits
-// the index back over whatever HEAD lacks, reverting a coworker's work.
+// Failure prevented: a squash onto an upstream HEAD does not contain commits
+// HEAD's tree over whatever HEAD lacks, reverting a coworker's work.
 func TestSquashUnpushed_RefusesDivergedBranch(t *testing.T) {
+	useBundledSessionRules(t)
 	if testing.Short() {
 		t.Skip("short: real git remote")
 	}

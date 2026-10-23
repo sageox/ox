@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -26,6 +27,7 @@ import (
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/paths"
+	"github.com/sageox/ox/internal/proc"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/internal/session/claudesource"
@@ -1003,6 +1005,7 @@ func (h *SessionFinalizeHandler) DetectOrphanedForAgent(ledgerPath, agentID stri
 			}
 
 			var state struct {
+				AdapterName    string     `json:"adapter_name"`
 				AgentID        string     `json:"agent_id"`
 				ParentPID      int        `json:"parent_pid,omitempty"`
 				StoppedAt      *time.Time `json:"stopped_at,omitempty"`
@@ -1012,6 +1015,12 @@ func (h *SessionFinalizeHandler) DetectOrphanedForAgent(ledgerPath, agentID stri
 				continue
 			}
 			if state.AgentID != agentID || state.SourceRejected {
+				continue
+			}
+			// Cursor hook processes are transient and the desktop PID is shared
+			// by many conversations. Ordinary detection applies its native-end
+			// or inactivity policy; a process exit cannot end a Cursor recording.
+			if state.AdapterName == "cursor" && state.StoppedAt == nil {
 				continue
 			}
 
@@ -2668,10 +2677,11 @@ func extractPayload(item *WorkItem) (*SessionFinalizePayload, error) {
 // callers that need to know how strong the evidence is compare the method.
 //
 // Only stalenessPIDDead rests on an actual liveness check: a PID was available
-// and kill(pid, 0) refused it. That check reads ANY signal error as death,
-// which on Unix means ESRCH (gone) or EPERM — and EPERM can only arise here
-// from PID reuse by another user's process, in which case the original owner is
-// gone too.
+// and kill(pid, 0) refused it, or the process holding it started at another
+// time than the one recorded in parent_start_time. That check reads ANY signal
+// error as death, which on Unix means ESRCH (gone) or EPERM — and EPERM can
+// only arise here from PID reuse by another user's process, in which case the
+// original owner is gone too.
 //
 // stalenessTimeThreshold is the opposite: it fires precisely when there was no
 // PID to ask (unreadable/unparseable marker, or a legacy marker predating
@@ -2704,9 +2714,13 @@ func isStaleRecording(recPath string, info os.FileInfo, pidLookup func(string) i
 	}
 
 	var state struct {
-		StartedAt time.Time `json:"started_at"`
-		AgentID   string    `json:"agent_id"`
-		ParentPID int       `json:"parent_pid"`
+		StartedAt       time.Time  `json:"started_at"`
+		AgentID         string     `json:"agent_id"`
+		ParentPID       int        `json:"parent_pid"`
+		ParentStartTime int64      `json:"parent_start_time"` // set only under disposable_machine
+		AdapterName     string     `json:"adapter_name"`
+		LastHookAt      *time.Time `json:"last_hook_at,omitempty"`
+		StoppedAt       *time.Time `json:"stopped_at,omitempty"`
 	}
 	if jsonErr := json.Unmarshal(data, &state); jsonErr != nil {
 		age = time.Since(info.ModTime())
@@ -2720,6 +2734,15 @@ func isStaleRecording(recPath string, info os.FileInfo, pidLookup func(string) i
 	age = time.Since(info.ModTime())
 	if !state.StartedAt.IsZero() {
 		age = time.Since(state.StartedAt)
+	}
+	if state.AdapterName == "cursor" {
+		if state.StoppedAt != nil {
+			return true, age, "native_end_pending"
+		}
+		if state.LastHookAt != nil {
+			age = time.Since(*state.LastHookAt)
+		}
+		return age > staleRecordingThreshold, age, "cursor_inactivity"
 	}
 
 	// try PID from .recording.json first, then fall back to daemon in-memory PID
@@ -2737,8 +2760,8 @@ func isStaleRecording(recPath string, info os.FileInfo, pidLookup func(string) i
 	// if we have a PID, check liveness — dead process = stale immediately,
 	// live process = never stale (wait for next cycle)
 	if pid > 0 {
-		proc, procErr := os.FindProcess(pid)
-		if procErr != nil || proc.Signal(syscall.Signal(0)) != nil {
+		p, procErr := os.FindProcess(pid)
+		if procErr != nil || p.Signal(syscall.Signal(0)) != nil || proc.IsReused(pid, state.ParentStartTime) {
 			// grace period: young recordings with dead PIDs may have stored a
 			// transient shell PID. Don't mark stale until grace period expires.
 			if age < session.GhostGracePeriod {
@@ -3023,6 +3046,24 @@ func stampCarrierBeforeReclaim(logger *slog.Logger, sessionDir, rawPath string, 
 	}
 }
 
+// rawCarriesRecordingState reports whether the fields that disappear with the
+// recording marker are already durable in raw.jsonl. Cursor finalization is
+// retryable after its atomic rewrite, so the retry must not append the same
+// carrier footer again. A failed first stamp still returns false and retries it.
+func rawCarriesRecordingState(rawPath string, state *session.RecordingState) bool {
+	stored, err := session.ReadSessionFromPath(rawPath)
+	if err != nil || stored == nil || stored.Meta == nil || stored.Meta.StoppedAt == nil {
+		return false
+	}
+	if state.StoppedAt != nil && !stored.Meta.StoppedAt.Equal(state.StoppedAt.UTC()) {
+		return false
+	}
+	if len(state.NativeSessions) > 0 && !slices.Equal(stored.Meta.NativeSessions, state.NativeSessions) {
+		return false
+	}
+	return state.Trace == nil || reflect.DeepEqual(stored.Meta.TraceCapture, state.Trace)
+}
+
 // sessionQuarantined reports whether the recording marker in sessionDir says
 // its native source was quarantined. An unreadable marker is not a quarantine.
 func sessionQuarantined(sessionDir string) bool {
@@ -3054,6 +3095,37 @@ func recoverRawFromSessionFile(logger *slog.Logger, recPath, sessionDir, rawPath
 	if state.SourceRejected {
 		return false, fmt.Errorf("native source quarantined for manual ownership review")
 	}
+	if state.AdapterName == "cursor" {
+		adapter, err := adapters.GetAdapter("cursor")
+		if err != nil {
+			return false, fmt.Errorf("adapter-missing: Cursor adapter is unavailable")
+		}
+		reader, ok := adapter.(adapters.IncrementalReader)
+		if !ok {
+			return false, fmt.Errorf("adapter-missing: Cursor incremental reader is unavailable")
+		}
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return false, fmt.Errorf("resolve Cursor source home: %w", err)
+		}
+		// Cursor controls do not take the lifetime raw owner lock. The shared
+		// capture transaction reloads the checkpoint, rechecks inactivity and
+		// validates replay before it can settle a journal under append + state
+		// locks. Never roll back using the pre-transaction state loaded above.
+		finalState, err := session.FinalizeInactiveCursorCapture(context.Background(), state.WorkspacePath, sessionDir, home, reader, time.Now().Add(-staleRecordingThreshold))
+		if err != nil {
+			return false, err // pending native writes retain raw and marker
+		}
+		hasRaw := session.HasSubstantiveEntries(rawPath)
+		if hasRaw && !rawCarriesRecordingState(rawPath, finalState) {
+			// Cursor's final rewrite owns its durable capture boundary. Carry
+			// the native IDs, stop time, and trace snapshot before the caller
+			// removes the recording marker.
+			stampCarrierBeforeReclaim(logger, sessionDir, rawPath, finalState)
+		}
+		return hasRaw, nil
+	}
+
 	// A capture that died mid-batch leaves raw.jsonl.append.json beside the
 	// transcript. Settle it against the persisted cursor before anything reads
 	// raw.jsonl, as the hook, stop, recover and watcher paths do: roll back an
@@ -3230,9 +3302,13 @@ func recoverRawFromSessionFile(logger *slog.Logger, recPath, sessionDir, rawPath
 		}
 	}
 
+	// An Amp recording starts at its prompt's line, which the bridge wrote
+	// before the prime: the offset read above already bounds it.
+	_, incremental := adapter.(adapters.IncrementalReader)
+	startsAtPrompt := incremental && state.AmpStartsAtPrompt()
 	var filtered []adapters.RawEntry
 	for _, e := range rawEntries {
-		if !e.Timestamp.IsZero() && e.Timestamp.Before(state.StartedAt) {
+		if !startsAtPrompt && !e.Timestamp.IsZero() && e.Timestamp.Before(state.StartedAt) {
 			continue
 		}
 		filtered = append(filtered, e)

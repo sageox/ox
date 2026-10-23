@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/sageox/ox/pkg/adapterprotocol"
 )
@@ -48,12 +49,14 @@ func handleDiagnose(p adapterprotocol.DiagnoseParams) (*adapterprotocol.Diagnose
 			// accept either the current or legacy Aider marker — a pre-#527
 			// install is still considered "installed" for diagnosis purposes
 			if !aiderBlockAlreadyPresent(string(data)) {
+				// preserve the path as one literal argument when copied into a POSIX shell
+				quotedRepoRoot := "'" + strings.ReplaceAll(p.RepoRoot, "'", "'\\''") + "'"
 				issues = append(issues, adapterprotocol.DiagnoseIssue{
 					Slug:     "aider:hooks-missing",
 					Severity: "warning",
 					Title:    "Aider hooks not installed",
-					Detail:   "CONVENTIONS.md does not contain ox prime marker.",
-					Fix:      "ox-adapter-aider install-hooks --repo-root " + p.RepoRoot + " --scope project",
+					Detail:   "CONVENTIONS.md does not contain the ox agent prime marker.",
+					Fix:      "ox-adapter-aider install-hooks --repo-root " + quotedRepoRoot + " --scope project",
 					FixSafe:  true,
 				})
 			}

@@ -441,6 +441,9 @@ func isGCStagingPath(p string) bool {
 		return false
 	}
 	base := filepath.Base(p)
+	if paths.IsHiddenTeamsEntry(base) && strings.Contains(base, ".tmp-") {
+		return true // team-context clone staging, see teamCloneTempPath
+	}
 	switch {
 	case strings.HasSuffix(base, ".new"),
 		strings.HasSuffix(base, ".old"),

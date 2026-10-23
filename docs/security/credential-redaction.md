@@ -9,8 +9,8 @@ when something slips through.
 ## What's caught at write time
 
 Every session entry ox records — whether it comes from the daemon's session
-watcher tailing a live agent, the CLI hook drain, or a one-shot coworker-load
-event — passes through two redactors before bytes touch disk in
+watcher tailing a live agent, a CLI log entry, an import, reconstructed history,
+or recovery — passes through the canonical writer before bytes touch disk in
 `.sageox/cache/sessions/<n>/raw.jsonl`:
 
 1. **Command-allowlist redaction** runs first. For known credential-emitting
@@ -50,24 +50,37 @@ event — passes through two redactors before bytes touch disk in
    The `[REDACTED_*]` slugs are a stable contract — downstream consumers can
    `grep` for them without worrying about version drift.
 
-The pattern set is defined in `internal/session/secrets.go`. Per-project
-custom rules live in `.sageox/REDACT.md` (literal-string redactions); see the
+The complete upstream Gitleaks catalog and contextual env/Helm detection live in
+`internal/secretguard/`; legacy detectors in `internal/session/secrets.go` and
+project rules are additive. Structured name/value pairs and nested tool data are
+scanned together so an opaque value does not need a provider-specific prefix.
+Custom rules cannot disable mandatory detection or introduce an unchecked secret.
+Per-project custom rules live in `.sageox/REDACT.md` (literal-string redactions); see the
 existing `docs/security/redaction-policy.md` for the rule format.
 
 ## What's caught at push time
 
-When ox is about to push the local Ledger to `git.sageox.ai` (the
-`ox session stop` / `ox session push` flow), a pre-push gate runs before
-`git push` is invoked:
+Before session content leaves the machine, ox independently checks:
 
-1. Enumerate `git diff --name-only origin/main...HEAD`.
-2. Scan each file's current working-tree content against the same
-   `DefaultPatterns` as the write-time redactor.
-3. If anything matches, **refuse the push**, print the detector name, file,
-   and line number, and exit non-zero. The push never goes through.
+1. **Uploaded bytes:** session, trace, single-blob and recovery uploads validate
+   the exact immutable buffers the transport sends, including already-present
+   server responses when content was supplied.
+2. **Committed bytes:** every supported Ledger push checks all newly reachable
+   session blobs, including merged side branches and earlier versions later
+   redacted or deleted. A clean working tree is not proof about Git history.
+3. **Current rules:** publication fetches the current upstream default-branch
+   Gitleaks catalog automatically. Gitleaks intentionally follows latest rules;
+   no new ox release is needed for publication to recognize a new upstream rule.
+   Missing, malformed or unsupported rules hold publication for retry.
 
-Bypass: `OX_ALLOW_SECRETS=1` overrides the gate. A loud `WARNING` is emitted
-to stderr; the override is for genuine false positives, not routine use.
+Local capture and import previews use the complete bundled catalog while offline.
+Import publication has the same fresh-rule requirement as live recordings.
+`make sync-gitleaks-rules` refreshes the bundled offline fallback.
+
+Detected credentials, unreadable content and scan failures cannot be overridden
+with `OX_ALLOW_SECRETS` or another flag. Where safe, the CLI redacts or preserves
+content in local quarantine; remaining unsafe history stays local until repaired.
+Errors report detector information, never matched credential values.
 
 ## What's caught in the GitHub PR / Issue cache
 
@@ -88,10 +101,9 @@ These are explicit non-goals for this layer of defense:
   manually if you want to spot-check; it uses the same pattern set as the
   write-time redactor.
 - **Audio**. Voice-mode recordings are not transcribed and scanned.
-- **Multi-line spans**. Detectors operate per line. A secret that wraps
-  across multiple lines (e.g. a private key body) gets caught at the header
-  pattern but the middle lines may pass through if they don't carry their
-  own structure.
+- **Secrets split across records**. Multiline text within an entry is scanned,
+  but fragments distributed across unrelated turns may lack the context needed
+  for detection. Audit commands can also have narrower line-oriented coverage.
 - **Base64-of-credentials**. If a value is base64-encoded before being
   pasted, the encoded form is opaque to text detectors.
 - **Arbitrary adapter binaries**. ox cannot sandbox external adapter
@@ -124,10 +136,11 @@ The sequence matters:
    ox doctor --check=ledger-secrets
    ```
 
-   This walks every file in your local Ledger working tree and reports
-   findings per detector, never printing the matched bytes. Use this to
-   answer "did the same token leak anywhere else?" before deciding the
-   scope of cleanup.
+   This is a local working-tree check and reports detector findings without
+   printing matched bytes. Size limits, unreadable files, LFS pointers and prior
+   Git versions limit its coverage. A clean result does not establish that a
+   token never reached remote storage or another historical object; those need
+   a separate authorized remote/history audit.
 
 3. **Clean up local working tree.** For findings in commits that haven't
    been pushed yet:

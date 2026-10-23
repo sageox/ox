@@ -48,12 +48,34 @@ func (d *collisionDetector) Detect(ctx context.Context, in Input, gitRoot string
 
 	var annotations []Annotation
 	annotations = append(annotations, d.detectCodeDB(ctx, gitRoot, files)...)
-	annotations = append(annotations, d.detectMurmurs(gitRoot, in, files)...)
+	annotations = append(annotations, withoutReportedPRs(d.detectMurmurs(gitRoot, in, files), annotations)...)
 
 	if len(annotations) == 0 {
 		return nil, nil
 	}
 	return annotations, nil
+}
+
+// withoutReportedPRs drops murmur collisions for a (file, pull request) pair
+// the code index already reported, so outside news about a PR the index has
+// seen does not badge the same file twice.
+func withoutReportedPRs(murmurAnns, reported []Annotation) []Annotation {
+	seen := make(map[string]struct{}, len(reported))
+	for _, a := range reported {
+		if a.SourceURL != "" && len(a.Files) == 1 {
+			seen[a.Files[0]+"\x00"+a.SourceURL] = struct{}{}
+		}
+	}
+	var out []Annotation
+	for _, a := range murmurAnns {
+		if a.SourceURL != "" && len(a.Files) == 1 {
+			if _, dup := seen[a.Files[0]+"\x00"+a.SourceURL]; dup {
+				continue
+			}
+		}
+		out = append(out, a)
+	}
+	return out
 }
 
 // detectCodeDB opens the shared codedb read-only, SQL-only (no integrity check; mirroring
@@ -245,8 +267,14 @@ func matchMurmurs(murmurs []ledger.MurmurFile, files []string, headings []string
 	seen := make(map[string]struct{})
 
 	for _, m := range murmurs {
-		who := murmurAuthor(m)
 		ago := humanizeAgo(now.Sub(m.Timestamp.UTC()))
+		if m.IsOutsideNews() {
+			// a pull request opened outside the team: credit the PR, never a
+			// teammate, and route no expert to it.
+			annotations = append(annotations, outsideNewsCollisions(m, want, seen, ago)...)
+			continue
+		}
+		who := murmurAuthor(m)
 
 		// explicit file references in murmur metadata.
 		for _, mf := range murmurFiles(m) {
@@ -282,7 +310,7 @@ func matchMurmurs(murmurs []ledger.MurmurFile, files []string, headings []string
 		if _, done := matchedMurmur[m.ID]; done {
 			continue
 		}
-		if m.Topic == "" || len(headings) == 0 {
+		if m.Topic == "" || len(headings) == 0 || m.IsOutsideNews() {
 			continue
 		}
 		if !topicMatchesHeading(m.Topic, headings) {
@@ -301,6 +329,64 @@ func matchMurmurs(murmurs []ledger.MurmurFile, files []string, headings []string
 
 	sort.SliceStable(annotations, func(i, j int) bool { return annotations[i].Why < annotations[j].Why })
 	return annotations
+}
+
+// outsideNewsCollisions reports the plan files an outside news murmur's pull
+// request changes. The badge names the PR by its validated number and links
+// it; the PR's title and author never reach the badge text.
+func outsideNewsCollisions(m ledger.MurmurFile, want map[string]struct{}, seen map[string]struct{}, ago string) []Annotation {
+	pr := ledger.ParseOutsideNewsPR(m.Metadata)
+	name := "a GitHub pull request"
+	if pr.Number != "" {
+		name = "GitHub PR #" + pr.Number
+	}
+	var annotations []Annotation
+	for _, mf := range murmurFiles(m) {
+		matched, ok := matchPlanFile(mf, want)
+		if !ok {
+			continue
+		}
+		key := matched + "\x00" + m.ID
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		annotations = append(annotations, Annotation{
+			Kind:      BadgeDeterministic,
+			Type:      BadgeCollision,
+			Why:       fmt.Sprintf("%s is in %s, opened %s (outside news, not a teammate's work)", matched, name, ago),
+			HumanWhy:  fmt.Sprintf("%s is in %s", matched, name),
+			SourceURL: pr.URL,
+			Files:     []string{matched},
+		})
+	}
+	return annotations
+}
+
+// FileOverlap returns the files in local that refs touch, matched the way
+// collision detection matches a murmur's files to plan files: exact paths,
+// directory references, and fuller paths ending in a local path. Results use
+// local's spelling, deduplicated and sorted.
+func FileOverlap(refs, local []string) []string {
+	if len(refs) == 0 || len(local) == 0 {
+		return nil
+	}
+	want := make(map[string]struct{}, len(local))
+	for _, f := range local {
+		if clean := normalizePath(f); clean != "" {
+			want[clean] = struct{}{}
+		}
+	}
+	hits := make(map[string]struct{})
+	for _, ref := range refs {
+		if matched, ok := matchPlanFile(ref, want); ok {
+			hits[matched] = struct{}{}
+		}
+	}
+	if len(hits) == 0 {
+		return nil
+	}
+	return sortedKeys(hits)
 }
 
 // matchPlanFile reports whether a murmur-referenced path corresponds to one of
@@ -369,10 +455,15 @@ func tokenize(s string) []string {
 	})
 }
 
-// murmurFiles extracts the file list a murmur references from its metadata. The
-// convention is a comma- or newline-separated metadata["files"] value.
+// murmurFiles extracts the file list a murmur references from its metadata.
 func murmurFiles(m ledger.MurmurFile) []string {
-	raw, ok := m.Metadata["files"]
+	return MetadataFileRefs(m.Metadata)
+}
+
+// MetadataFileRefs extracts the file list a murmur's metadata references. The
+// convention is a comma- or newline-separated metadata["files"] value.
+func MetadataFileRefs(metadata map[string]string) []string {
+	raw, ok := metadata["files"]
 	if !ok || strings.TrimSpace(raw) == "" {
 		return nil
 	}

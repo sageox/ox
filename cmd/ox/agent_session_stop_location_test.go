@@ -57,10 +57,8 @@ func setupStopLocationTest(t *testing.T, sessionPublishing string) stopLocationT
 		SessionPublishing: sessionPublishing,
 	})
 
-	// sessionLinkOutputs' manual-publishing gate resolves the mode via
-	// findGitRoot() (git rev-parse --show-toplevel), not via a passed-in
-	// root — so this fixture needs a REAL git repo, not just a .sageox/
-	// directory, or that gate silently no-ops.
+	// A real git repo, as every SageOx project is, not just a .sageox/
+	// directory.
 	runGit(t, projectRoot, "init")
 	runGit(t, projectRoot, "config", "user.name", "ox-test")
 	runGit(t, projectRoot, "config", "user.email", "test@test.sageox.ai")

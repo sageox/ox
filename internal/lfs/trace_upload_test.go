@@ -17,6 +17,7 @@ import (
 // An upload failure must never leave compressed trace content in the git tree,
 // even while the first blob succeeds and the second is being transferred.
 func TestTracePublishNeverCopiesContentIntoLedger(t *testing.T) {
+	useBundledSessionRules(t)
 	for _, fail := range []int{0, 1, 2} {
 		t.Run(string(rune('0'+fail)), func(t *testing.T) {
 			cache, ledger := t.TempDir(), t.TempDir()
@@ -80,6 +81,7 @@ func TestTracePublishNeverCopiesContentIntoLedger(t *testing.T) {
 // A second pointer-write failure must restore an existing attachment, or remove
 // the first new pointer when this is the session's first trace publication.
 func TestTracePublishRollsBackPointerPair(t *testing.T) {
+	useBundledSessionRules(t)
 	for _, existing := range []bool{false, true} {
 		t.Run(fmt.Sprintf("existing=%t", existing), func(t *testing.T) {
 			cache, ledger := t.TempDir(), t.TempDir()
@@ -125,6 +127,7 @@ func TestTracePublishRollsBackPointerPair(t *testing.T) {
 }
 
 func TestTracePublishRefusesUnsafeOrMissingArtifacts(t *testing.T) {
+	useBundledSessionRules(t)
 	for _, shape := range []string{"missing cache", "directory cache", "existing content", "existing directory", "existing symlink"} {
 		t.Run(shape, func(t *testing.T) {
 			cache, ledger := t.TempDir(), t.TempDir()

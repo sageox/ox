@@ -36,6 +36,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/sageox/ox/internal/ledger"
 )
 
 // MaxSessionAge bounds how far back we scan session folders.
@@ -366,6 +368,12 @@ func scanMurmurs(ledgerPath string, terms []string, now time.Time, strict bool) 
 					continue
 				}
 				if !m.Timestamp.IsZero() && m.Timestamp.Before(cutoff) {
+					continue
+				}
+				// outside news (a PR title written outside the team) is not
+				// team knowledge, so it never surfaces as a search result.
+				var murmur ledger.MurmurFile
+				if json.Unmarshal(data, &murmur) == nil && murmur.IsOutsideNews() {
 					continue
 				}
 				// search across topic + content

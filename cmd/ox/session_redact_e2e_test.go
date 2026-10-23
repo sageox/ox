@@ -16,7 +16,7 @@ import (
 
 // captureStderr redirects the process stderr to a pipe for the duration of fn
 // and returns everything written to it. The pre-push gate writes its
-// customer-facing guidance (quarantine recovery, override warning) straight to
+// customer-facing guidance (quarantine recovery, publication holds) straight to
 // os.Stderr, so asserting on it is the only way to protect those messages from
 // silent removal.
 func captureStderr(t *testing.T, fn func()) string {
@@ -54,10 +54,9 @@ func captureStderr(t *testing.T, fn func()) string {
 //
 // Why this lens is not covered elsewhere: every existing secret test asserts on
 // LOCAL bytes (a re-scan came back clean, a working-tree file was rewritten) and
-// stops before `git push`. The pre-push gate deliberately NEVER blocks — it
-// auto-redacts or quarantines and returns nil — so "the secret didn't leave the
-// machine" depends entirely on the redaction landing before the push. That push
-// leg, with a live secret present, is the untested seam. These tests drive the
+// stops before `git push`. The gate must repair or quarantine leaked bytes and
+// verify the immutable outgoing content before permitting publication. These
+// tests exercise that final push boundary and drive the
 // real pushLedger pipeline to a real bare remote and assert on the remote's
 // object database — the only surface a teammate can actually read.
 //
@@ -186,33 +185,17 @@ func TestRedactE2E_SecretInSummaryQuarantinedNotPushed(t *testing.T) {
 	gitFsckClean(t, f.barePath)
 }
 
-// TestRedactE2E_AllowSecretsOverrideShipsRawSecret pins the escape hatch.
-//
-// OX_ALLOW_SECRETS=1 is the documented, deliberately-dangerous override: the
-// coworker has chosen to publish raw. This test asserts the RAW secret DOES
-// reach the remote under the override — so that if a future change silently
-// starts redacting even under the override (changing the contract), it is caught.
-func TestRedactE2E_AllowSecretsOverrideShipsRawSecret(t *testing.T) {
+// A legacy environment override cannot publish credential-bearing session bytes.
+func TestRedactE2E_AllowSecretsOverrideCannotShipRawSecret(t *testing.T) {
 	f := newDraftLedgerFixture(t)
 	t.Setenv("OX_ALLOW_SECRETS", "1")
 	const sessionName = "2026-01-01T00-00-testuser-OxOvrd"
 	const canary = "AKIAIOSFODNN7EXAMPLE"
-
 	dir := seedFinalizedLedgerSessionWithArtifacts(t, f.ledgerPath, sessionName)
 	rawLine := `{"type":"assistant","content":"export AWS_ACCESS_KEY_ID=` + canary + `"}` + "\n"
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "raw.jsonl"), []byte(rawLine), 0644))
 	commitSession(t, f.ledgerPath, sessionName)
-
-	stderr := captureStderr(t, func() {
-		require.NoError(t, pushLedger(context.Background(), f.ledgerPath))
-	})
-
-	// The override must warn loudly before it publishes credentials.
-	assert.Contains(t, stderr, "credentials may be published",
-		"OX_ALLOW_SECRETS must warn that credentials may reach the cloud Ledger")
-
-	// The override deliberately ships the raw secret. If this ever redacts, the
-	// override contract changed — fail loudly so a human re-decides.
-	assert.Contains(t, runGit(t, f.barePath, "show", "HEAD:sessions/"+sessionName+"/raw.jsonl"), canary,
-		"OX_ALLOW_SECRETS=1 must ship the raw secret unchanged — that is the chosen, dangerous behavior")
+	require.NoError(t, pushLedger(context.Background(), f.ledgerPath))
+	assert.NotContains(t, runGit(t, f.barePath, "show", "HEAD:sessions/"+sessionName+"/raw.jsonl"), canary,
+		"legacy environment override must not ship a raw secret")
 }

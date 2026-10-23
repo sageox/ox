@@ -8,8 +8,11 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/sageox/ox/internal/secretguard"
 	"github.com/sageox/ox/internal/session/pipeline"
 )
+
+var currentSessionRules = secretguard.LatestRules
 
 // ContentFiles lists the session content files eligible for LFS upload.
 // These are the files that get uploaded to LFS blob storage and replaced
@@ -97,6 +100,15 @@ func UploadSessionFilesContext(ctx context.Context, client *Client, sessionPath 
 		return fileRefs, nil // nothing to upload
 	}
 
+	// Validate the same immutable buffers that UploadAll receives, before even
+	// requesting upload actions. Import, daemon repair and CLI capture all use
+	// this boundary; a worktree scan alone has a check/use race and can be skipped.
+
+	proofs, err := prepareUploads(ctx, files)
+	if err != nil {
+		return nil, fmt.Errorf("session publication pending: %w", err)
+	}
+
 	logger.Info("uploading session to LFS", "path", sessionPath, "files", len(batchObjects))
 
 	// request upload URLs from LFS batch API
@@ -107,7 +119,7 @@ func UploadSessionFilesContext(ctx context.Context, client *Client, sessionPath 
 	}
 
 	// upload blobs in parallel (up to 4 concurrent)
-	results := UploadAll(resp, files, 4)
+	results := uploadAllGuarded(resp, proofs, 4)
 
 	// collect all errors so devs can see everything that failed, and callers
 	// can still match each one with errors.Is

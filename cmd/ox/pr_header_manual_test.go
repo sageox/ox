@@ -40,8 +40,7 @@ func TestPRHeaderCommand_WithholdsManualPublishingSession(t *testing.T) {
 		LifecycleRegistrationState: "deferred",
 	})
 
-	restore := stubSessionPublishing(t, config.SessionPublishingManual)
-	defer restore()
+	t.Setenv(config.EnvSessionPublishing, config.SessionPublishingManual)
 
 	// Default: no link, and with nothing else to link, no header at all.
 	c, out, _ := buildPRHeaderCmd()
@@ -81,13 +80,46 @@ func TestAutoSessionURL_AutoModeStillLinks(t *testing.T) {
 		LifecycleRegistrationState: "deferred",
 	})
 
-	restore := stubSessionPublishing(t, config.SessionPublishingAuto)
-	defer restore()
+	t.Setenv(config.EnvSessionPublishing, config.SessionPublishingAuto)
 
 	c, out, _ := buildPRHeaderCmd()
 	require.NoError(t, runPRHeader(c, nil))
 	require.Contains(t, out.String(), "/c/"+confirmedID,
 		"auto publishing must still link the session")
+}
+
+// TestPRHeaderCommand_WithholdsSessionStartedUnderManual covers a recording
+// that saved session_publishing: manual at start while the setting now resolves
+// to auto (the env var that selected manual is gone). The recording is held on
+// this machine and was never registered — notifySessionStarted honors the saved
+// mode — so its /c/ link 404s exactly like the manual case above.
+//
+// Failure prevented: a held session ships a permanently dead /c/ link in a
+// public PR because the header read only the current setting. Red-first: drop
+// the saved-mode check from the rule autoSessionURL applies and the no-link
+// assertion fails.
+func TestPRHeaderCommand_WithholdsSessionStartedUnderManual(t *testing.T) {
+	root := prHeaderProject(t, true)
+	const heldID = "ses_01920000-0000-7000-8000-0000000000cf"
+	startFakeRecording(t, root, session.RecordingState{
+		SessionPath:                filepath.Join(root, "sessions", "2026-08-20T10-00-devon-Oxheld1"),
+		SessionID:                  heldID,
+		LifecycleRegistrationState: "deferred",
+		PublishingMode:             config.SessionPublishingManual,
+	})
+
+	t.Setenv(config.EnvSessionPublishing, config.SessionPublishingAuto)
+
+	c, out, _ := buildPRHeaderCmd()
+	require.NoError(t, runPRHeader(c, nil))
+	require.NotContains(t, out.String(), "/c/"+heldID,
+		"a session held on this machine must never be linked — the link 404s")
+
+	c2, out2, _ := buildPRHeaderCmd()
+	require.NoError(t, c2.Flags().Set("allow-unconfirmed", "true"))
+	require.NoError(t, runPRHeader(c2, nil))
+	require.NotContains(t, out2.String(), "/c/"+heldID,
+		"--allow-unconfirmed must not force a link that can never resolve")
 }
 
 // TestPRHeaderCommand_PendingAndManualIsHardWithheld covers the ordering the
@@ -107,8 +139,7 @@ func TestPRHeaderCommand_PendingAndManualIsHardWithheld(t *testing.T) {
 		LifecycleRegistrationState: "pending", // pending AND manual
 	})
 
-	restore := stubSessionPublishing(t, config.SessionPublishingManual)
-	defer restore()
+	t.Setenv(config.EnvSessionPublishing, config.SessionPublishingManual)
 
 	// No link, and crucially no suggestion of a flag that cannot help.
 	c, out, errb := buildPRHeaderCmd()

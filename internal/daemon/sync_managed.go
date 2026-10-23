@@ -31,9 +31,11 @@ type ManagedRepoPullOpts struct {
 	// RepoName identifies the repo in issues and logs (e.g., "ledger", "team-context-foo").
 	RepoName string
 
-	// ImmutablePaths declares that this repository's paths never move (the
-	// Ledger). Pull-rebase and conflict resolution then skip git's rename
-	// detection; see gitutil.WithImmutablePaths.
+	// ImmutablePaths makes pull-rebase and conflict resolution skip git's
+	// rename detection; see gitutil.WithImmutablePaths. Set it where renames
+	// are rare and detection does more harm than good: the Ledger, whose paths
+	// never move, and team context, whose look-alike discussion dirs get
+	// paired as false renames. It does not promise that no path ever moves.
 	ImmutablePaths bool
 
 	// NoSymlinks holds the fetch and pull until ledger.DisableSymlinks has
@@ -52,6 +54,11 @@ type ManagedRepoPullOpts struct {
 	// MinFetchAge overrides the minimum FETCH_HEAD age for dedup.
 	// Zero means use gitutil.MinFetchHeadAge.
 	MinFetchAge time.Duration
+
+	// SkipFetchAgeCheck lets Team Context pull a changed remote immediately.
+	// The endpoint ownership lease and per-repo lock already serialize writers;
+	// FETCH_HEAD freshness must not delay newly published discussions.
+	SkipFetchAgeCheck bool
 
 	// ValidateIntegrity runs isValidGitRepo before pulling. If false (or repo
 	// is corrupt), returns a CorruptRepo result so the caller can handle reclone.
@@ -213,7 +220,7 @@ type ManagedRepoPullResult struct {
 //  1. Rebase-in-progress check
 //  2. Lock file check
 //  3. ls-remote dedup (skip if HEAD unchanged)
-//  4. FETCH_HEAD mtime dedup (secondary)
+//  4. FETCH_HEAD mtime dedup (secondary, unless disabled)
 //  5. Credential refresh
 //  6. git fetch
 //  7. Divergence detection (optional)
@@ -294,7 +301,7 @@ func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPul
 				result = ManagedRepoPullResult{Skipped: true, SkipReason: skipReasonRemoteUnchanged}
 				return nil
 			}
-			if age, ok := gitutil.FetchHeadAge(path); ok {
+			if age, ok := gitutil.FetchHeadAge(path); ok && !opts.SkipFetchAgeCheck {
 				minAge := opts.MinFetchAge
 				if minAge == 0 {
 					minAge = gitutil.MinFetchHeadAge
@@ -825,8 +832,8 @@ func skipProvesIndexReadable(reason string) bool {
 // still would keep reporting the failure until the remote next changed.
 func (s *SyncScheduler) clearDisprovedBySkip(repo, reason string) {
 	if reason == skipReasonRemoteUnchanged {
-		// HEAD is already the remote tip, where a successful pull leaves it, so
-		// no local commit is left to rebase. "recently fetched" proves less: the
+		// HEAD already contains the remote tip, so the histories are not
+		// diverged. "recently fetched" proves less: the
 		// fetch that wrote FETCH_HEAD may belong to a pull that then failed.
 		s.clearErrors(repo)
 		if s.issues != nil {

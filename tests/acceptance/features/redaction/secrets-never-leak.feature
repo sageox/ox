@@ -1,49 +1,89 @@
-Feature: A Coworker's Secrets Never Leak
-  ox watches every point where a recorded session could carry a credential to
-  the shared Ledger. If a key slips into a recording, ox scrubs it before the
-  push leaves the machine — the teammate who pulls the Ledger sees a redaction
-  marker, never the key. When ox cannot rewrite a file safely, it holds that one
-  file back and lets everything else sync, so a single leak never wedges the
-  team. The scrub covers what ox records into a session; content a coworker
-  authors by hand elsewhere is their own to guard.
+Feature: Credentials in a session never reach the shared Ledger
+  Devon records or imports an AI coworker session without publishing credentials
+  quoted in the conversation, passed to a tool, or printed by a tool. ox applies
+  the same mandatory redaction to every supported recording and import path.
+  Teammates receive useful session context and redaction markers instead of keys.
 
-  See also: session-recording/session-abort-kill.feature
-  See also: business-actions/record-session.md
+  This feature states user intent. Executable tests must prove it; this prose alone
+  is not a passing integration test.
 
-  Rule: A credential captured in a session is scrubbed before it reaches the Ledger
+  See also: session-recording/auto-record.feature
+  See also: session-recording/import-past-sessions.feature
+  See also: session-recording/manual-publishing.feature
 
-    Scenario: Sam pushes a session whose transcript captured an access key
-      Given a session of Sam's recorded a live access key into its transcript
-      When Sam's Ledger is pushed to the team remote
-      Then the access key appears in no version of the Ledger the team can pull
-      And teammates see a redaction marker in the transcript where the key was
-      And the session records that a redaction happened, so the scrub is auditable
+  Rule: Every supported recording protects all of its content
+    A credential Devon's tool prints would otherwise be stored and shared with the
+    team. Observable difference: no stored or published artifact contains it, and
+    teammates see a redaction marker in its place.
 
-  Rule: Redaction covers what a command was given and what it printed, not only the conversation
+    Scenario: Devon's tool prints a credential during a recorded session
+      Given Devon's session contains a synthetic credential in a conversation turn
+      And a tool call carries the credential inside a nested argument
+      And the tool's output prints the credential
+      When ox stores and publishes the session
+      Then no stored or published session artifact contains that credential
+      And teammates see redaction markers where it appeared
+      And the benign conversation and tool context remain readable
 
-    Scenario: Avery runs a command that prints a team token and a term Sam's team redacts
-      Given Sam has added an internal project name to the repo's redaction rules
-      And during Devon's session, Avery runs a command that mentions the project name and prints a SageOx team token
-      When the session is recorded
-      Then neither the project name nor the token appears in the recorded session
-      And teammates see redaction markers in their place
+    Scenario: Avery selects a session adapter that is not available
+      Given the session adapter for Avery's tool is not installed
+      When Avery tries to record or import a session from that tool
+      Then ox tells Avery the adapter is unavailable
+      And ox produces no captured or published session
 
-  Rule: A credential ox cannot rewrite is held back while everyone else's work still syncs
+  Rule: Imports and reconstructed history have the same protection as live recording
+    An imported earlier session is the easiest place for a credential to slip past
+    redaction. Observable difference: the stored import and any reconstructed
+    recording are as clean as a live one.
 
-    Scenario: Sam pushes a session whose summary contains a key alongside a clean session
-      Given one of Sam's session summaries contains an access key
-      And a second, unrelated session of Sam's is clean
-      When Sam's Ledger is pushed to the team remote
-      Then the access key appears in no version of the Ledger the team can pull
-      And the summary carrying the key is held back from the push
-      And ox preserves the held-back file on Sam's machine and tells Sam how to recover it
-      And the unrelated clean session still reaches the team remote
+    Scenario: Sam imports an earlier session containing a credential
+      Given Sam has an earlier native session with a synthetic credential in conversation and tool data
+      When Sam imports that session
+      And ox reconstructs or merges the earlier history with a current recording
+      Then neither the stored import nor the reconstructed recording contains the credential
+      And the benign turns and their order remain intact
+      And publishing the imported session applies the same checks as a live one
 
-  Rule: A coworker can override the gate and ship a credential on purpose
+  Rule: Capture continuity never resets the protection for command output
+    A tool that was running when recording restarted would otherwise return its
+    credential unredacted. Observable difference: the later result is redacted and
+    the next turn is still recorded.
 
-    Scenario: Sam overrides the secret gate to publish raw
-      Given Sam has set the explicit "allow secrets" override
-      And a session of Sam's recorded an access key into its transcript
-      When Sam's Ledger is pushed to the team remote
-      Then ox warns loudly that credentials may be published
-      And the access key reaches the team remote unchanged, as Sam chose
+    Scenario: Riley's credential-emitting tool returns after a recording restart
+      Given Riley's recording captured a credential-emitting tool call in one batch
+      And recording resumed after a restart before that tool returned
+      When ox reads the tool's result in a later batch
+      Then the credential output is redacted before it is stored
+      And the following benign turn is still recorded
+
+  Rule: A failed check holds publication instead of bypassing redaction
+    A broken or bypassed check would otherwise publish unchecked bytes.
+    Observable difference: nothing reaches the shared Ledger, and Devon keeps the
+    local original and gets a way to recover.
+
+    Scenario: Devon publishes when the redaction rules cannot be loaded
+      Given Devon's session is ready to publish
+      And the mandatory redaction rules are missing or invalid
+      When Devon publishes the session
+      Then ox refuses publication and explains how to recover
+      And no unchecked session bytes reach the shared Ledger
+      And the original source remains available locally
+
+    Scenario: Quinn tries to override the check to publish a credential
+      Given Quinn's session artifact contains a synthetic credential
+      And Quinn asks ox to allow secrets
+      When Quinn publishes the session
+      Then ox does not publish the credential
+      And ox explains that session credential protection cannot be bypassed
+
+  Rule: Redaction follows upstream detection improvements
+    A credential format added upstream after Devon installed ox would otherwise go
+    unrecognized until the next ox release. Observable difference: a new or
+    imported session is checked against the current upstream rules, and ox holds
+    publication if it cannot confirm they are current.
+
+    Scenario: Devon publishes after upstream adds a detection rule
+      Given the upstream credential rule catalog has a detector added since Devon installed ox
+      When Devon publishes a new or imported session
+      Then the published session is checked against the current complete catalog
+      And ox holds publication if it cannot confirm the catalog is current

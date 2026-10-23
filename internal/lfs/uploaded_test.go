@@ -19,6 +19,7 @@ import (
 // still return a usable UploadedRef — "already present" is a successful upload
 // outcome, which is all UploadedRef attests.
 func TestUploadBlob_AlreadyPresentYieldsUsableRef(t *testing.T) {
+	useBundledSessionRules(t)
 	content := []byte("already in the store")
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -61,6 +62,7 @@ func TestUploadBlob_AlreadyPresentYieldsUsableRef(t *testing.T) {
 // This scans production source (non-test) for that adjacency and fails if it
 // reappears — the enforcement backstop the compile-time type can't provide.
 func TestNoAssertUploadedOfFreshFileRef(t *testing.T) {
+	useBundledSessionRules(t)
 	root := repoRootForTest(t)
 	// AssertUploaded( ... NewFileRef(  — allowing whitespace and an optional lfs. qualifier.
 	bad := regexp.MustCompile(`AssertUploaded\(\s*(lfs\.)?NewFileRef\(`)

@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/sageox/ox/internal/proc"
 )
 
 // TestIsStaleRecording_StartedAtWinsOverFreshMtime is the regression test for
@@ -140,5 +142,50 @@ func TestIsStaleRecording_FallsBackToMtimeWhenJSONUnreadable(t *testing.T) {
 	}
 	if method != "time_threshold" {
 		t.Errorf("expected method=time_threshold for mtime fallback, got %q", method)
+	}
+}
+
+// Failure prevented: on a disposable machine the daemon finds a recording that
+// a machine which went away left on the persistent home. Its parent PID is now
+// held by an unrelated process, so the recording reads as live, is never
+// finalized, and `ox session wait` times out on it every shift.
+func TestIsStaleRecording_ParentPIDTakenByAnotherProcess(t *testing.T) {
+	start, ok := proc.StartTime(os.Getpid())
+	if !ok {
+		t.Skip("this platform cannot report a process start time")
+	}
+	for _, tc := range []struct {
+		name        string
+		parentStart int64
+		stale       bool
+		method      string
+	}{
+		{"the process that started the recording", start, false, stalenessPIDAlive},
+		{"another process under the same PID", start - 1, true, stalenessPIDDead},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recPath := filepath.Join(t.TempDir(), ".recording.json")
+			body, err := json.Marshal(map[string]any{
+				"started_at":        time.Now().Add(-time.Hour).UTC(), // past the dead-PID grace period
+				"agent_id":          "OxReuse",
+				"parent_pid":        os.Getpid(),
+				"parent_start_time": tc.parentStart,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(recPath, body, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			info, err := os.Stat(recPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			stale, _, method := isStaleRecording(recPath, info, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			if stale != tc.stale || method != tc.method {
+				t.Errorf("got stale=%v method=%s, want stale=%v method=%s", stale, method, tc.stale, tc.method)
+			}
+		})
 	}
 }

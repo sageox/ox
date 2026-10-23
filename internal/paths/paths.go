@@ -153,6 +153,14 @@ func WhisperDBDir(repoID, endpointURL string) string {
 	return filepath.Join(LedgersDataDir(repoID, endpointURL), ".sageox", "cache", "whisper")
 }
 
+// IsHiddenTeamsEntry reports whether a name inside TeamsDataDir is ox-internal
+// scratch (a clone staging directory such as ".team_x.tmp-123"), not a team
+// context. Every directory scan of the teams directory must skip these, or a
+// half-built clone is listed, and imported into, as if it were a team.
+func IsHiddenTeamsEntry(name string) bool {
+	return strings.HasPrefix(name, ".")
+}
+
 // TeamWhisperDBDir returns the directory for a team's whisper SQLite database.
 // Shared across daemons on the same machine that pull the same team context.
 // Format: ~/.local/share/sageox/<endpoint>/teams/<teamID>/.sageox/cache/whisper/

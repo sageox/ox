@@ -496,9 +496,7 @@ func runDaemonForeground(ledgerPath string) error {
 	// that escapes with the interactive UA is silently counted as a human.
 	useragent.SetDaemonMode()
 
-	cfg := daemon.DefaultConfig()
-	cfg.LedgerPath = ledgerPath
-	cfg.ProjectRoot = findGitRoot() // required for team context syncing
+	cfg := daemonConfig(ledgerPath)
 
 	// default to INFO; OX_LOG_LEVEL=debug enables verbose output
 	logLevel := slog.LevelInfo
@@ -518,14 +516,38 @@ func runDaemonForeground(ledgerPath string) error {
 	if !d.RestartRequested() {
 		return nil
 	}
+	return reexecDaemon(cfg, logger)
+}
 
-	// version mismatch: re-exec with updated binary (same PID, same FDs)
+// daemonConfig is the configuration `ox daemon start` runs the daemon with.
+func daemonConfig(ledgerPath string) *daemon.Config {
+	cfg := daemon.DefaultConfig()
+	cfg.LedgerPath = ledgerPath
+	cfg.ProjectRoot = findGitRoot() // required for team context syncing
+	cfg.DisposableMachine = config.DisposableMachineEnabled()
+	return cfg
+}
+
+// execProcess replaces this process; tests stub it.
+var execProcess = syscall.Exec
+
+// reexecDaemon re-executes this daemon in place (same PID, same FDs), running
+// the binary now installed. The daemon moved to $HOME at start (StabilizeCWD),
+// and `daemon start` finds its project, Ledger, and workspace from the working
+// directory. Return to the original project before re-exec so version upgrades
+// and restarts after the Ledger's first clone retain its workspace and Ledger.
+func reexecDaemon(cfg *daemon.Config, logger *slog.Logger) error {
 	exe, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("self-restart: resolve executable: %w", err)
 	}
-	logger.Info("re-executing daemon with updated binary", "exe", exe)
-	return syscall.Exec(exe, os.Args, os.Environ())
+	if cfg.ProjectRoot != "" {
+		if err := os.Chdir(cfg.ProjectRoot); err != nil {
+			return fmt.Errorf("self-restart: return to the project: %w", err)
+		}
+	}
+	logger.Info("re-executing daemon", "exe", exe)
+	return execProcess(exe, os.Args, os.Environ())
 }
 
 // startDaemonBackground starts the daemon as a background process.

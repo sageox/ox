@@ -365,6 +365,13 @@ type UserConfig struct {
 	// signal still overrides it. See docs/adr/adr-ephemeral-mode.md.
 	Ephemeral *bool `yaml:"ephemeral,omitempty"`
 
+	// DisposableMachine marks a machine that runs ox for one job and then
+	// goes away, keeping only the home directory, such as a pod with a
+	// persistent home volume. Unlike Ephemeral, the daemon runs and the Ledger
+	// is cloned. Read through DisposableMachineEnabled. Pointer so unset stays
+	// distinct from an explicit false.
+	DisposableMachine *bool `yaml:"disposable_machine,omitempty"`
+
 	// PATExpiryWarningThresholdPct is the fraction of token lifetime remaining
 	// at which to emit a single-line stderr warning during interactive
 	// commands. Default 0.05 (warn at 5% remaining). The effective threshold
@@ -470,6 +477,13 @@ func (c *UserConfig) IsTelemetryEnabled() bool {
 // SetTelemetryEnabled sets the telemetry preference
 func (c *UserConfig) SetTelemetryEnabled(enabled bool) {
 	c.TelemetryEnabled = &enabled
+}
+
+// DisposableMachineEnabled reports the user's disposable_machine setting. It
+// is off unless set, and an unreadable user config reads as off.
+func DisposableMachineEnabled() bool {
+	cfg, err := LoadUserConfig()
+	return err == nil && cfg != nil && cfg.DisposableMachine != nil && *cfg.DisposableMachine
 }
 
 // AreSessionsEnabled returns whether session recording is enabled.

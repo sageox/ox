@@ -293,6 +293,27 @@ func TestBackfill_Idempotent(t *testing.T) {
 	}
 }
 
+// TestAppendBackfillRevisedEvent_FirstEventKeepsTheLegacyStatus: a plan saved
+// before event logs existed holds its status in meta.json alone; the first
+// event backfill records carries it, because readers fold the log once it
+// exists. Failure prevented: backfill turns a legacy approval into a draft.
+func TestAppendBackfillRevisedEvent_FirstEventKeepsTheLegacyStatus(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "meta.json"), []byte(`{"topic":"Old","slug":"old","status":"approved"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := appendBackfillRevisedEvent(context.Background(), dir, "Old plan"); err != nil {
+		t.Fatal(err)
+	}
+	events, err := LoadEvents(dir)
+	if err != nil || len(events) != 1 || events[0].Kind != EventCreated {
+		t.Fatalf("want one created event, got %+v (err %v)", events, err)
+	}
+	if got := Fold(events).Status; got != PlanStatusApproved {
+		t.Fatalf("folded status after backfill = %q, want approved", got)
+	}
+}
+
 // TestAppendBackfillRevisedEvent_UnreadableEventsNeverMintsNewID is the
 // finding-5 regression: a plan dir with real prior history whose
 // events.jsonl becomes unreadable (here, a malformed trailing line) must

@@ -2,6 +2,7 @@
 
 **Status**: Draft (Proposed) — **awaiting Ryan's review**. Two items are Required-Review per `CLAUDE.md`: the **delivery-class terminology** (§2, customer-facing vocabulary) and the **anchor scheme + delivery defaults** (§3–§4, data-access ergonomics).
 **Date**: 2026-06-30
+**Amended**: 2026-10-19 — drawings (§4's `region` target and attachments, §5) follow the built, measured drawn-context format; see "Addendum (2026-10-19): drawn regions" at the end (#1325). The drawing's `q-<id>` anchor is part of §3's Required-Review. Everything else here stays draft.
 **Deciders**: SageOx Engineering (terminology + ergonomics owned by Ryan)
 **Relates to**: [ADR-021 `ox plan` context-not-inference](ADR-021-ox-plan-context-not-inference.md), [ADR Whisper & Murmur Architecture](adr-whisper-murmur-architecture.md), [ADR-018 UserPromptSubmit JIT discovery](ADR-018-userpromptsubmit-jit-discovery.md), [ADR-026 Collaborative review & execution gating](ADR-026-collaborative-review-and-execution-gating.md), `docs/specs/plan-render-adoption.md`
 
@@ -131,25 +132,27 @@ An **anchor** is the stable identity of an addressable plan element, the thing a
 
 Backward-compatible mapping: today's `{anchor, section, label, status, note}` ≡ `{ targets:[{anchor}], kind:status, payload:{note} }`, with `section`/`label` as derived display metadata. `Resolution` keys on a target (anchor today; annotation `id` under durable-ids).
 
-### 5. Visual / free-form feedback — one normalization rule
+> **Amended 2026-10-19 (#1325):** for drawings, the `region` target (a rectangle relative to a block) and the raster `attachments` above are superseded. A drawing is built as a round item of today's shape, anchored `q-<its id>`, that carries its own record under `region`: see the Addendum.
 
-The thesis that answers "how does a drawing get passed?": **every input modality normalizes to the same envelope; geometry resolves to anchors; the raw visual is preserved as an attachment; the agent always receives an actionable anchored form regardless of how the human expressed it.** Typed-note-at-anchor is simply the gesture-free profile.
+### 5. Visual / free-form feedback — one normalization rule (amended 2026-10-19)
+
+The thesis that answers "how does a drawing get passed?": **every input modality normalizes to an anchored review item; geometry resolves to exact anchors; what the human drew and what lay under it travel inline, in the item, as bounded data; the agent always receives an actionable anchored form regardless of how the human expressed it.** Typed-note-at-anchor is simply the gesture-free profile.
 
 ```mermaid
 flowchart LR
-  H["Human draws: circle, arrow, strike, or types a note"] --> CAP["Capture in page: vector strokes relative to the nearest block box, or note text"]
-  CAP --> RES["Resolve geometry to anchors: which blocks the gesture overlaps"]
-  RES --> ENV["Envelope: targets plus kind plus payload plus raster attachment"]
-  ENV --> CH{"Active delivery class"}
+  H["Reviewer draws a loop around part of the plan"] --> CAP["Document tools: stroke, fitted ellipse, enclosed elements by exact anchor, bounded copy of what lay under it"]
+  CAP -->|"postMessage, data only"| HOST["Trusted host: checks it, mints its id, stamps the revision it showed"]
+  HOST --> ITEM["Round item: anchor q-id, label, status, note, plus the region record"]
+  ITEM --> CH{"Active delivery class"}
   CH -->|real-time| RT["await tool returns items this turn"]
   CH -->|next-turn| NT["whisper on next prompt"]
   CH -->|delegated| DG["task queue or fresh agent"]
-  RT --> AG["Agent acts on targets plus gloss; multimodal agent may also read the raster"]
+  RT --> AG["Agent acts on the item: its label names what was drawn around, its note says why"]
   NT --> AG
   DG --> AG
 ```
 
-Concretely, a free-form circle around two paragraphs becomes: `targets:[anchor(p1), anchor(p2)]`, `kind` inferred from the gesture (circle/arrow → `flag`/"here"; strike → `request-change`/"remove"), `payload.gesture.strokes` + optional human `gloss`, and an `attachment` PNG of the marked region. **Text-only agents** act on the resolved targets + gloss; **multimodal agents** additionally look at the raster. Voice notes (future) attach audio + transcript into `payload.note`. One pipeline, graceful degradation.
+Concretely, a loop around two paragraphs becomes one round item anchored `q-<id>`, with section and label naming the first paragraph ("Drawing: …"), the reviewer's status and note, and a `region` holding the stroke, the ellipse fitted to it, the revision and layout it was drawn on, the two paragraphs' exact anchors, and the text that lay there. No raster is made or stored, and no agent needs to see one: text-only and multimodal agents read the same item. The kind is the status the reviewer picked, never inferred from the gesture. Voice notes (future) would follow the same rule. The Addendum records the format and the evidence for it.
 
 ### 6. Security posture — feedback is untrusted data
 
@@ -175,8 +178,8 @@ Plans will be **multi-player**: many humans and agents annotating concurrently, 
 
 ### Negative / risks
 - **Anchor fragility (today).** Content-hash anchors orphan on incidental edits. Mitigated now by surfacing orphans; resolved later by durable ids (§3) — but that adds a renderer responsibility and a migration of existing marks.
-- **Gesture resolution is lossy.** Geometry→anchor mapping can mis-attribute a sloppy circle. Mitigation: attach the raster so a human (and a multimodal agent) can disambiguate; keep the inferred targets editable in the page before submit.
-- **Multimodal dependence.** Full fidelity of drawings needs a multimodal agent; text-only agents get targets + gloss only. Acceptable — the gloss + targets are themselves actionable.
+- **Gesture resolution is lossy.** Geometry→anchor mapping can mis-attribute a sloppy circle. Mitigation (amended 2026-10-19): the reviewer sees the fitted ellipse, not the raw stroke, and the note names what it encloses before they save it; the record keeps the stroke and what lay under it, so View original shows what was meant after the plan changes.
+- ~~**Multimodal dependence.**~~ Withdrawn 2026-10-19 for drawings: nothing about a drawing is only in a raster, so text-only agents get the same item as multimodal ones.
 - **Vocabulary churn cost.** Renaming `turn-aligned`/`batch` in any place they've already leaked (the strategy doc, the explainer) is a one-time sweep.
 
 ## Alternatives considered
@@ -188,6 +191,8 @@ Plans will be **multi-player**: many humans and agents annotating concurrently, 
 - **Live socket as the source of truth (rejected, per `feedback.go`).** A machine runs many ox daemons, so a persistent localhost endpoint is ambiguous about which plan it targets. The server stays ephemeral and agent-owned; the ledger files are the source of truth.
 
 ## References
+- [`docs/specs/plan-review-drawn-context.md`](../specs/plan-review-drawn-context.md) — the drawn-region format, its placement rules and the evidence behind them (#1292, #1293).
+- `pkg/planreview` (`region.go`, `record.go`) and `packages/plan-review` (`draw.ts`, `region.ts`, `host-controls.ts`) — the built drawing writers and readers.
 - `internal/plan/feedback.go` — `FeedbackItem` / `FeedbackSet` / `Resolution` / `AssembleReview` (the built v1 profile).
 - `internal/plan/assets/review.js` — the anchor function (`anchorFor`, `fnv1a`) and the mark/orphan UX.
 - `cmd/ox/plan_review.go`, `cmd/ox/plan_feedback.go` — the live server, `/feedback|/accept|/reopen|/approve`, and the `KindPlanFeedback` delegated path.
@@ -195,3 +200,22 @@ Plans will be **multi-player**: many humans and agents annotating concurrently, 
 - [Whisper & Murmur ADR](adr-whisper-murmur-architecture.md) — the next-turn delivery substrate and the untrusted-data / prompt-injection posture (§6).
 - [ADR-026](ADR-026-collaborative-review-and-execution-gating.md) — multiplayer review semantics + execution gating (the governance layer §7 reserves space for).
 - `~/.claude/plans/system-instruction-you-are-working-partitioned-lecun.md` — feedback-channel strategy; `.context/plan-feedback-sota.html` — visual explainer.
+
+## Addendum (2026-10-19): drawn regions
+
+**Decided in:** #1292 (format and evidence), #1293 (built), #1325 (this amendment). **Amends** §4's `region` target and drawing attachments, and §5. **Required review:** the `q-<id>` anchor (§3) is Ryan's to review with this amendment; this note is not that sign-off.
+
+**What a drawing is.** A reviewer picks Draw and loops around part of the plan. They see a perfect ellipse, fitted to the stroke, and write a note. The drawing is stored as one round item:
+
+- **Legacy fields**, so every reader that predates drawings lists it: anchor `q-<id>`, section, label `Drawing: <what it encloses>` (≤ 70 units), status, note, reviewer.
+- **`region`**, the record ([spec §1](../specs/plan-review-drawn-context.md)): the drawing's own `id`, minted by the trusted host; the `plan_revision` it was drawn on, stamped by the host that served that revision; `created_at`; the raw stroke (`path`) and the fitted `ellipse` in document coordinates; the `layout` it was drawn in; its `targets`, the enclosed elements by exact content anchor; and `context`, a bounded copy of what lay under and around it, with `truncated` when anything was cut.
+
+**Decisions.**
+
+- **D1: inline context, no raster.** Measured over 42 authored plans: a drawing around one element is 1.1 KB at p50 and 1.7 KB at p95; a 2× PNG of the same box 22 KB and 69 KB, and a section's PNG passes the 1 MiB line above which the Ledger stores files through LFS at p95. A raster also loses the page's styles in a sandbox, or needs permissions the sandbox denies. Bounds: 512 points, 16 targets, 48 context items, 2,000 characters of an enclosed element's text and 600 of a neighbour's, 16 KiB of context and 64 KiB per region.
+- **D2: placement by exact anchors, never by similar text.** On every render a drawing is `exact`, `moved` with its targets, `reflowed` (its targets outlined, never the drawing), `hidden` (Show reopens what capture had open), `missing` or `ambiguous`. A missing or ambiguous drawing is listed, not placed elsewhere: a one-word rewording that save-time remapping would rebind is `missing`.
+- **D3: View original from the record alone.** The host redraws what lay under the drawing from its context, names the revision and layout, says when that is not the revision shown, says when the context was cut, and inserts text as text. It needs neither the plan's frame nor the revision's bytes.
+- **D4: the host stamps, the document proposes.** A framed plan is untrusted. Its document tools send a capture as data; the host keeps only the fields the format names, checks them, mints the id and stamps the revision and time. A host that cannot name the revision it shows offers no Draw.
+- **D5: refuse rather than lose.** A request carrying a drawing lists its items under `marks`, with `items` empty, and every ox before #1293 refuses that shape. Given a drawing under `items`, releases through v0.23.0 store it without its region, and main before #1293 stores it unchecked. Rounds without a drawing keep the old shape. So importing a drawing through an older ox is refused, never silently lossy, while the rounds already stored stay readable by every release through their legacy fields.
+
+**Still draft, outside #1293:** the delivery classes (§2), the generalized envelope beyond drawings (§4), durable block ids (§3), suggested edits and other gestures, voice, and the multiplayer and governance rules (§7, ADR-026).

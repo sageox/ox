@@ -74,6 +74,10 @@ type TokenMeta struct {
 	// coworker field at all.
 	NoCoworker bool `json:"no_coworker,omitempty"`
 
+	// User is the person a personal token belongs to, as /auth/me names them.
+	// Nil for a team token or a server that predates the field.
+	User *TokenUser `json:"user,omitempty"`
+
 	// FetchedAt is when this entry was last refreshed from the server.
 	FetchedAt time.Time `json:"fetched_at"`
 }
@@ -238,6 +242,14 @@ type authMeResponse struct {
 	CreatedAt   time.Time  `json:"created_at"`
 	TokenPrefix string     `json:"token_prefix"`
 	Name        string     `json:"name"`
+	User        *TokenUser `json:"user"`
+}
+
+// TokenUser is the person behind a personal token.
+type TokenUser struct {
+	ID    string `json:"id"`
+	Email string `json:"email"`
+	Name  string `json:"name"`
 }
 
 // fetchTokenMetaFromServer GETs /api/v1/auth/me and maps the response
@@ -278,6 +290,7 @@ func fetchTokenMetaFromServer(ctx context.Context, ep, token string) (*TokenMeta
 		CreatedAt:   parsed.CreatedAt,
 		TokenPrefix: parsed.TokenPrefix,
 		Name:        parsed.Name,
+		User:        parsed.User,
 	}, nil
 }
 

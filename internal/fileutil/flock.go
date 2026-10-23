@@ -176,3 +176,37 @@ func WithFileLockTimeout(ctx context.Context, targetPath string, timeout time.Du
 
 	return fn()
 }
+
+// TryWithFileLock is WithFileLock without the wait. When another goroutine or
+// process holds the lock it returns acquired=false and a nil error at once,
+// without running fn. Use it where a held lock is the answer: another holder
+// is already doing the work, so waiting for it would only tie up the caller.
+//
+// acquired=false with a non-nil error means the lock could not be tried at
+// all (the lock file would not open, or flock failed for a reason other than
+// contention), so a broken lock is never reported as a busy one.
+func TryWithFileLock(targetPath string, fn func() error) (acquired bool, err error) {
+	lockPath := LockPath(targetPath)
+	gate := inProcessChan(lockPath)
+	select {
+	case gate <- struct{}{}:
+	default:
+		return false, nil
+	}
+	defer func() { <-gate }()
+
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return false, fmt.Errorf("open lock file %q: %w", lockPath, err)
+	}
+	defer f.Close()
+	if err := tryFlock(f); err != nil {
+		if flockContended(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("lock %q: %w", lockPath, err)
+	}
+	defer func() { _ = unlockFlock(f) }()
+
+	return true, fn()
+}

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/sageox/ox/internal/secretguard"
 )
 
 // Catalog identity for the redactor's currently-loaded pattern set.
@@ -49,8 +51,8 @@ func canonicalPattern(p SecretPattern) string {
 	if p.Pattern != nil {
 		regex = p.Pattern.String()
 	}
-	return fmt.Sprintf("name=%s\nregex=%s\nskip=%s\nkeywords=%s\n",
-		p.Name, regex, strings.Join(skip, ","), strings.Join(kws, ","))
+	return fmt.Sprintf("name=%s\nregex=%s\nredact=%s\nsource=%s\nskip=%s\nkeywords=%s\n",
+		p.Name, regex, p.Redact, p.Source, strings.Join(skip, ","), strings.Join(kws, ","))
 }
 
 // computeCatalogIdentity returns (version, hash) for the given pattern
@@ -66,6 +68,7 @@ func computeCatalogIdentity(patterns []SecretPattern) (string, string) {
 	}
 	sort.Strings(canon) // hash is order-independent
 	h := sha256.New()
+	h.Write([]byte("complete-gitleaks:" + secretguard.CatalogHash() + "\n"))
 	for _, c := range canon {
 		h.Write([]byte(c))
 		h.Write([]byte{0}) // delimiter so concatenation can't collide

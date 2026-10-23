@@ -1,10 +1,17 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/sageox/ox/pkg/adapterprotocol"
+	"github.com/sageox/ox/pkg/adapterruntime"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // --- A. Line parsing ---
@@ -306,4 +313,107 @@ func TestFindAmpSession_LegacyFallback(t *testing.T) {
 	if got != legacyFile {
 		t.Errorf("got %q, want %q (legacy fallback)", got, legacyFile)
 	}
+}
+
+// TestFindAmpSession_ByThreadURL: Amp exports the thread as AMP_THREAD_URL,
+// and that URL is the native session id ox records and passes back for
+// lookup. The ox-bridge sidecar is named by the bare thread id. Failure
+// prevented (sageox/ox#1314): the URL's slashes were rejected as a path
+// before any lookup, so a recording that started without its sidecar path
+// could never find it — at prime or at stop — and never uploaded.
+func TestFindAmpSession_ByThreadURL(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	bridgeDir := filepath.Join(home, ".cache", "amp", "ox-sessions")
+	require.NoError(t, os.MkdirAll(bridgeDir, 0o755))
+	line := []byte(`{"type":"user","timestamp":"2026-10-14T10:00:00Z","content":"rename the retry helper"}` + "\n")
+	want := filepath.Join(bridgeDir, "T-5f0c2a71-3b9e.jsonl")
+	require.NoError(t, os.WriteFile(want, line, 0o644))
+	// a newer sidecar from another thread: only a direct lookup picks want
+	other := filepath.Join(bridgeDir, "T-other.jsonl")
+	require.NoError(t, os.WriteFile(other, line, 0o644))
+	past := time.Now().Add(-time.Hour)
+	require.NoError(t, os.Chtimes(want, past, past))
+
+	for _, id := range []string{
+		"T-5f0c2a71-3b9e",
+		"https://ampcode.com/threads/T-5f0c2a71-3b9e",
+		"https://ampcode.com/threads/T-5f0c2a71-3b9e/",
+		"https://amp.example.com/threads/T-5f0c2a71-3b9e?view=full#m-4",
+	} {
+		t.Run(id, func(t *testing.T) {
+			got, err := findAmpSession("", "", "", id)
+			require.NoError(t, err)
+			assert.Equal(t, want, got)
+		})
+	}
+
+	for _, id := range []string{
+		"https://ampcode.com/threads/../../.ssh/id_ed25519",
+		"https://ampcode.com/threads/",
+		"https://ampcode.com/not-a-thread/T-5f0c2a71-3b9e",
+		"sub/dir",
+	} {
+		t.Run("rejects "+id, func(t *testing.T) {
+			_, err := findAmpSession("", "", "", id)
+			require.Error(t, err)
+		})
+	}
+}
+
+// TestDispatch_FindSession_ByThreadURL drives the same lookup through the
+// adapter protocol, the way ox calls it at prime and at session stop.
+func TestDispatch_FindSession_ByThreadURL(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	bridgeDir := filepath.Join(home, ".cache", "amp", "ox-sessions")
+	require.NoError(t, os.MkdirAll(bridgeDir, 0o755))
+	want := filepath.Join(bridgeDir, "T-abc123.jsonl")
+	require.NoError(t, os.WriteFile(want, []byte(`{"type":"user","content":"hi"}`+"\n"), 0o644))
+
+	repo := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(repo, ".sageox"), 0o755))
+
+	var out bytes.Buffer
+	args := []string{"find-session", "--repo-root", repo, "--agent-session-id", "https://ampcode.com/threads/T-abc123"}
+	require.NoError(t, adapterruntime.RunWithArgs(newConfig(), args, nil, &out), out.String())
+	var got adapterprotocol.FindSessionResult
+	require.NoError(t, json.Unmarshal(out.Bytes(), &got), out.String())
+	assert.Equal(t, want, got.SessionFile)
+}
+
+// TestFindAmpSession_ExplicitThreadMissIsNotFound: a lookup that names a
+// thread must find that thread's sidecar or nothing. Failure prevented:
+// session stop (or import) for thread A, whose sidecar is missing, silently
+// picks the newest sidecar on the machine, thread B, and uploads B's
+// conversation under A's recording.
+func TestFindAmpSession_ExplicitThreadMissIsNotFound(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	line := []byte(`{"type":"user","timestamp":"2026-10-14T10:00:00Z","content":"another thread"}` + "\n")
+	other := filepath.Join(home, ".cache", "amp", "ox-sessions", "T-other.jsonl")
+	legacy := filepath.Join(home, ".amp", "sessions", "legacy.jsonl")
+	for _, p := range []string{other, legacy} {
+		require.NoError(t, os.MkdirAll(filepath.Dir(p), 0o755))
+		require.NoError(t, os.WriteFile(p, line, 0o644))
+	}
+
+	for _, id := range []string{"T-missing", "https://ampcode.com/threads/T-missing"} {
+		t.Run(id, func(t *testing.T) {
+			got, err := findAmpSession("", "", "", id)
+			require.Error(t, err, "a named thread with no sidecar must not resolve to another thread's")
+			assert.Empty(t, got)
+		})
+	}
+
+	t.Run("no id still finds the newest sidecar", func(t *testing.T) {
+		got, err := findAmpSession("", "", "", "")
+		require.NoError(t, err)
+		assert.Equal(t, other, got)
+	})
+
+	t.Run("import by a missing id fails", func(t *testing.T) {
+		_, err := handleImportSession(adapterprotocol.ImportSessionParams{SessionID: "T-missing"})
+		require.Error(t, err)
+	})
 }

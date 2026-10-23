@@ -226,6 +226,7 @@ var adapterAliases = map[string]string{
 	"gemini":      "gemini",
 	"gemini-cli":  "gemini",
 	"gemini cli":  "gemini",
+	"cursor":      "cursor",
 
 	// generic adapter fallbacks (remove alias when deep adapter is added)
 	"codex":           "codex",
@@ -236,13 +237,9 @@ var adapterAliases = map[string]string{
 	"omp":             "omp",
 	"oh-my-pi":        "omp",
 	"oh my pi":        "omp",
-	"cursor":          "generic",
-	"windsurf":        "generic",
-	"copilot":         "generic",
 	"aider":           "aider",
 	"cody":            "generic",
 	"continue":        "generic",
-	"cline":           "generic",
 	"goose":           "goose",
 	"kiro":            "generic",
 	"droid":           "droid",
@@ -259,7 +256,7 @@ func GetAdapter(name string) (Adapter, error) {
 	}
 
 	// adapter not in registry — try discovering external binaries before failing.
-	// this allows `ox session stop --adapter=gemini` to work even when gemini
+	// this allows `ox agent <id> session capture-prior --adapter=gemini` to work even when gemini
 	// is only installed as an external adapter binary, not a built-in.
 	if err := RegisterExternalAdapters(); err != nil {
 		slog.Debug("external adapter discovery failed during get", "error", err)

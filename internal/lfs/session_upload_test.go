@@ -1,6 +1,7 @@
 package lfs
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -9,10 +10,13 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/sageox/ox/internal/secretguard"
+
 	"github.com/stretchr/testify/require"
 )
 
 func TestUploadSessionFiles_Basic(t *testing.T) {
+	useBundledSessionRules(t)
 	// create a session dir with raw.jsonl and summary.md
 	sessionDir := t.TempDir()
 	rawContent := []byte(`{"_meta":{"schema_version":"1"}}\n{"type":"user","content":"hello","seq":1}\n`)
@@ -151,6 +155,7 @@ func TestUploadSessionFiles_Basic(t *testing.T) {
 }
 
 func TestUploadSessionFiles_SkipsExistingPointers(t *testing.T) {
+	useBundledSessionRules(t)
 	sessionDir := t.TempDir()
 
 	// write raw.jsonl as a regular file
@@ -222,6 +227,7 @@ func TestUploadSessionFiles_SkipsExistingPointers(t *testing.T) {
 }
 
 func TestUploadSessionFiles_MissingFiles(t *testing.T) {
+	useBundledSessionRules(t)
 	sessionDir := t.TempDir()
 	// empty session dir — all content files missing
 
@@ -250,6 +256,7 @@ func TestUploadSessionFiles_MissingFiles(t *testing.T) {
 }
 
 func TestUploadSessionFiles_UploadFailure(t *testing.T) {
+	useBundledSessionRules(t)
 	sessionDir := t.TempDir()
 	rawContent := []byte(`{"type":"user","content":"hello","seq":1}`)
 	if err := os.WriteFile(filepath.Join(sessionDir, "raw.jsonl"), rawContent, 0644); err != nil {
@@ -308,6 +315,7 @@ func TestUploadSessionFiles_UploadFailure(t *testing.T) {
 // took this path until ParsePointer accepted size 0 (#934), which is how the
 // object ox #1000 found got into a ledger.
 func TestUploadSessionFiles_NeverUploadsAPointerItCannotParse(t *testing.T) {
+	useBundledSessionRules(t)
 	t.Setenv("OX_LFS_MAX_OBJECT_SIZE", "")
 	sessionDir := t.TempDir()
 	pointer := FormatPointer("sha256:"+ComputeOID([]byte("a very large transcript")), DefaultMaxObjectSize+1)
@@ -348,6 +356,7 @@ func TestUploadSessionFiles_NeverUploadsAPointerItCannotParse(t *testing.T) {
 }
 
 func TestUploadSessionFiles_PartialFailure(t *testing.T) {
+	useBundledSessionRules(t)
 	// two files: raw.jsonl upload succeeds, summary.md upload fails with 500
 	sessionDir := t.TempDir()
 	rawContent := []byte(`{"_meta":{"schema_version":"1"}}` + "\n" + `{"type":"user","content":"hello","seq":1}` + "\n")
@@ -419,6 +428,7 @@ func TestUploadSessionFiles_PartialFailure(t *testing.T) {
 }
 
 func TestUploadSessionFiles_VerifyFailure(t *testing.T) {
+	useBundledSessionRules(t)
 	sessionDir := t.TempDir()
 	rawContent := []byte(`{"type":"user","content":"hello","seq":1}`)
 	if err := os.WriteFile(filepath.Join(sessionDir, "raw.jsonl"), rawContent, 0644); err != nil {
@@ -674,4 +684,17 @@ func writePointerForContent(t *testing.T, sessionDir, filename string, content [
 	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, filename), content, 0644))
 	_, err := WritePointerFiles(sessionDir, AssertUploadedManifest(refs))
 	require.NoError(t, err)
+}
+
+// Production refreshes upstream; package tests use the identical bundled rules
+// without making the test result depend on a network service.
+func useBundledSessionRules(t *testing.T) {
+	t.Helper()
+	data, err := os.ReadFile("../secretguard/gitleaks.toml")
+	require.NoError(t, err)
+	rules, err := secretguard.NewRules(data)
+	require.NoError(t, err)
+	original := currentSessionRules
+	currentSessionRules = func(context.Context) (*secretguard.RuleSet, error) { return rules, nil }
+	t.Cleanup(func() { currentSessionRules = original })
 }

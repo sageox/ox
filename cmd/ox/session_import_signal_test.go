@@ -16,6 +16,7 @@ import (
 
 	"github.com/sageox/ox/internal/session/nativeimport"
 	"github.com/sageox/ox/internal/testguard"
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
 )
 
@@ -25,7 +26,17 @@ const importSignalProbeEnv = "GO_WANT_IMPORT_SIGNAL_PROBE"
 // while a final push uses WithoutCancel. Test in a child to protect the runner.
 func TestImportInterrupt_SecondSignalKillsFinalPush(t *testing.T) {
 	if os.Getenv(importSignalProbeEnv) == "1" {
-		runImportSignalProbe(t)
+		f := newImportFixture(t)
+		probe := &cobra.Command{
+			Use:    "import-signal-probe",
+			Hidden: true,
+			Run: func(cmd *cobra.Command, _ []string) {
+				runImportSignalProbe(t, f, cmd.Context())
+			},
+		}
+		rootCmd.AddCommand(probe)
+		defer rootCmd.RemoveCommand(probe)
+		executeWithSignalContext([]string{probe.Name()})
 		return
 	}
 	if testing.Short() {
@@ -94,12 +105,9 @@ func TestImportInterrupt_SecondSignalKillsFinalPush(t *testing.T) {
 
 // runImportSignalProbe runs in the child test process and holds final publication
 // after the first interrupt. A second interrupt must terminate this process
-// instead of remaining captured by the canceled import's signal registration.
-func runImportSignalProbe(t *testing.T) {
+// instead of being swallowed during cancellation cleanup.
+func runImportSignalProbe(t *testing.T, f *importFixture, ctx context.Context) {
 	t.Helper()
-	f := newImportFixture(t)
-	ctx, stop := importSignalContext(context.Background())
-	defer stop()
 	f.ctx = ctx
 	f.summarizer.before = func(prompt string) {
 		if !strings.Contains(prompt, pushPrompt) {

@@ -23,6 +23,10 @@ cue range (--cues N-M), a media-clock time window (--from/--to), or the
 selectors carried by a sageox:// citation URI passed as <id>. With no
 selector, the first 100 cues are served and the window reports truncated.
 
+--limit N caps whatever window was selected at its first N cues; it never
+widens one (add --full for the whole transcript). A capped page reports
+window.truncated and its guidance names the --cues range that continues it.
+
 For a screen walkthrough, --frames adds under each cue the keyframes that
 fall in it (a one-sentence description of what was on screen, plus the
 local image path, ready to open or behind an ox fetch command) and what
@@ -50,6 +54,7 @@ type conversationTranscriptFlags struct {
 	To     string
 	Full   bool
 	Frames bool
+	Limit  int
 }
 
 var conversationTranscriptFlagSet conversationTranscriptFlags
@@ -65,6 +70,7 @@ func registerConversationTranscriptFlags(cmd *cobra.Command, f *conversationTran
 	cmd.Flags().StringVar(&f.To, "to", "", "window end on the media clock (same forms as --from)")
 	cmd.Flags().BoolVar(&f.Full, "full", false, "serve the entire transcript — intended for humans; agents should request windows (--cues or --from/--to)")
 	cmd.Flags().BoolVar(&f.Frames, "frames", false, "screen walkthroughs: show the keyframes and what was pointed at under each cue")
+	cmd.Flags().IntVar(&f.Limit, "limit", 0, "serve at most N cues of the selected window (0 = no cap beyond the window itself)")
 }
 
 func runConversationTranscript(cmd *cobra.Command, args []string) error {
@@ -76,6 +82,10 @@ func runConversationTranscript(cmd *cobra.Command, args []string) error {
 	if len(args) != 1 {
 		return conversationUsageExit(cmd.OutOrStdout(), format, conversationUsageErrorCode,
 			"transcript takes exactly one <id> (cnv_<uuidv7>, rec_<uuidv7>, a sageox:// citation URI, or a sageox.ai recording link)")
+	}
+	if flags.Limit < 0 {
+		return conversationUsageExit(cmd.OutOrStdout(), format, conversationUsageErrorCode,
+			fmt.Sprintf("--limit must be 0 (no cap) or a positive cue count, got %d", flags.Limit))
 	}
 	opts, selErr := resolveTranscriptSelectors(flags)
 	if selErr != nil {
@@ -91,7 +101,30 @@ func runConversationTranscript(cmd *cobra.Command, args []string) error {
 		return finishConversationEnvelope(cmd.OutOrStdout(), format, read.ErrorEnvelope(shareErr), nil)
 	}
 	env := reader.Transcript(idArg, opts)
+	capTranscriptCues(env, flags.Limit)
 	return finishConversationEnvelope(cmd.OutOrStdout(), format, env, renderConversationTranscriptText)
+}
+
+// capTranscriptCues serves at most limit cues of the window the reader
+// resolved, so --limit composes with every selector (--cues, --from/--to,
+// --full, a citation URI, the default window) instead of replacing them. A
+// capped page is reported honestly: the window narrows to the cues served,
+// truncated is set, and the guidance names the cue range that continues it.
+// limit <= 0 caps nothing.
+func capTranscriptCues(env *read.Envelope, limit int) {
+	if limit <= 0 || env == nil || env.Error != nil {
+		return
+	}
+	data, ok := env.Data.(*read.TranscriptData)
+	if !ok || data == nil || len(data.Cues) <= limit {
+		return
+	}
+	data.Cues = data.Cues[:limit]
+	first, last := data.Cues[0].N, data.Cues[limit-1].N
+	data.Window.Cues = []int{first, last}
+	data.Window.Truncated = true
+	env.Guidance = strings.TrimSpace(env.Guidance + fmt.Sprintf(" Capped at %d cues by --limit; continue with --cues %d-%d.", limit, last+1, last+limit))
+	restampConversationTokens(env)
 }
 
 // resolveTranscriptSelectors validates the selector flag combination and
@@ -242,7 +275,7 @@ func renderConversationTranscriptText(w io.Writer, env *read.Envelope) {
 		renderTranscriptScreenLines(w, c)
 	}
 	if data.Window.Truncated {
-		fmt.Fprintln(w, cli.StyleDim.Render("(default window; more cues exist — request --cues N-M or --full)"))
+		fmt.Fprintln(w, cli.StyleDim.Render("(more cues exist beyond this window — request --cues N-M or --full)"))
 	}
 	if data.Window.Clamped {
 		fmt.Fprintln(w, cli.StyleDim.Render("(requested range clamped to the available cues)"))

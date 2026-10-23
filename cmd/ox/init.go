@@ -133,6 +133,9 @@ This command will:
 
 Use --team to specify a team by name, slug, or ID, or let ox init prompt you.
 
+After setup and sync, run 'ox session import' to preview and choose
+past Claude Code or Codex sessions from this repo for your team's Ledger.
+
 After init, run 'ox guide getting-started' for a five-minute walkthrough,
 or 'ox guide team-rules' to learn how to share AI coworker conventions
 across your whole team (Claude, Codex, Amp, etc.).`,
@@ -305,6 +308,8 @@ func checkRemoteSageoxExists(gitRoot string) (found bool, stale bool, err error)
 	return false, false, nil
 }
 
+// runInit configures AI coworker integrations and registers the authenticated
+// repository, then prints setup guidance when human-readable output is enabled.
 func runInit() error {
 	// warn if using non-default endpoint (subtle, informational)
 	if endpoint.Get() != endpoint.Default {
@@ -1064,7 +1069,7 @@ func runInit() error {
 			step++
 		}
 
-		// step N: invite teammates — ox invite sends the invitations directly,
+		// step N: invite teammates — ox team invite sends the invitations directly,
 		// so this no longer sends people to the dashboard to copy a link.
 		if cfg.TeamID != "" {
 			teamLabel := cfg.TeamName
@@ -1072,14 +1077,21 @@ func runInit() error {
 				teamLabel = cfg.TeamID
 			}
 			fmt.Printf("  %d. Invite teammates (%s):\n", step, teamLabel)
-			fmt.Printf("     Run %s\n", cli.StyleCommand.Render("ox invite alice@example.com,bob@example.com"))
+			fmt.Printf("     Run %s\n", cli.StyleCommand.Render("ox team invite alice@example.com,bob@example.com"))
 		} else {
-			fmt.Printf("  %d. Invite teammates with %s\n", step, cli.StyleCommand.Render("ox invite <email>..."))
+			fmt.Printf("  %d. Invite teammates with %s\n", step, cli.StyleCommand.Render("ox team invite <email>..."))
 		}
 		step++
 
 		// step N: start Claude Code (ox will auto-prime and surface team context)
 		fmt.Printf("  %d. Start Claude Code in this repo — ox will auto-prime and surface your team context\n", step)
+		step++
+
+		// Old IDs can survive skipped or partial registration and later reinit.
+		// Only a freshly confirmed repo and team qualify for the import step.
+		if resp != nil && resp.RepoID != "" && resp.TeamID != "" {
+			printInitSessionImportStep(gitRoot, cfg, step)
+		}
 
 		// show team context sync status so user knows what's happening in the background
 		if cfg.TeamID != "" {
@@ -1099,6 +1111,19 @@ func runInit() error {
 	}
 
 	return nil
+}
+
+// printInitSessionImportStep is deterministic setup help, independent of tips.
+// Sync requests do not establish import readiness; the importer owns preflight.
+func printInitSessionImportStep(gitRoot string, projectCfg *config.ProjectConfig, step int) {
+	if initQuiet || (cfg != nil && (cfg.JSON || cfg.Quiet)) || projectCfg == nil ||
+		projectCfg.RepoID == "" || projectCfg.TeamID == "" ||
+		!config.ResolveSessionRecording(gitRoot).ShouldRecord() {
+		return
+	}
+
+	fmt.Printf("  %d. Bring past Claude and Codex sessions into your team's Ledger:\n", step)
+	fmt.Printf("     Run %s\n", cli.StyleCommand.Render("ox session import"))
 }
 
 // fetchGitCredentials fetches git credentials from GET /api/v1/cli/repos (team context repos only).
@@ -2478,6 +2503,25 @@ type initEndpointInfo struct {
 	IsValid   bool
 }
 
+// soleLoggedInEndpoint returns the one endpoint ox init can default to without
+// asking: the only stored login, whatever the age of its access token. An
+// expired access token is the normal state of a login not used recently (the
+// auth gate refreshes it), so expiry must not rank logins against each other.
+// storedSlugs marks endpoints that came from stored logins, so the injected
+// production row is not mistaken for one.
+func soleLoggedInEndpoint(endpoints []initEndpointInfo, storedSlugs map[string]bool) (initEndpointInfo, bool) {
+	var stored []initEndpointInfo
+	for _, ep := range endpoints {
+		if storedSlugs[ep.Slug] {
+			stored = append(stored, ep)
+		}
+	}
+	if len(stored) == 1 {
+		return stored[0], true
+	}
+	return initEndpointInfo{}, false
+}
+
 // selectInitEndpoint shows endpoint selection UI for ox init.
 // needsLogin is true if the user must log in first. Cancellation returns an
 // empty endpoint; --no-input returns an error when a choice is needed.
@@ -2508,6 +2552,12 @@ func selectInitEndpoint() (string, bool, error) {
 		seenSlugs[info.Slug] = true
 	}
 
+	// remember which endpoints are real logins before the production row is injected
+	storedSlugs := make(map[string]bool, len(seenSlugs))
+	for slug := range seenSlugs {
+		storedSlugs[slug] = true
+	}
+
 	// add production endpoint if not already present
 	prodSlug := endpoint.NormalizeSlug(endpoint.Default)
 	if !seenSlugs[prodSlug] {
@@ -2528,6 +2578,13 @@ func selectInitEndpoint() (string, bool, error) {
 		return "", false, nil
 	}
 	if cli.NoInput() {
+		// logged in to exactly one endpoint: there is no choice to make. The
+		// injected production row is not a login, so it does not count. Not
+		// needsLogin even when the access token expired: the auth gate that
+		// follows refreshes it, or reports the login problem itself.
+		if only, ok := soleLoggedInEndpoint(endpoints, storedSlugs); ok {
+			return only.URL, false, nil
+		}
 		return "", false, fmt.Errorf("--no-input requires --endpoint <endpoint> to choose where to initialize")
 	}
 

@@ -41,6 +41,7 @@ func catFileCalls(t *testing.T, logPath string) int {
 // A long unpushed history of plain-git data files must not cost one cat-file
 // per blob: only session artifacts at the tip need inspection.
 func TestValidateUnpushedTip_LongHistoryOfDataFilesIsCheap(t *testing.T) {
+	useBundledSessionRules(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("sh git shim is not portable to Windows")
 	}

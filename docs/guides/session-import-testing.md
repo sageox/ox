@@ -26,47 +26,43 @@ preview behavior. `--yes` continues to import the explicitly selected sessions.
 Browser review cannot be combined with `--yes` or JSON output. If terminal input
 is disabled, `--browse` falls back to a structural preview without launching.
 
-## Manual testing against Tilt
+## Manual testing against a running SageOx service
 
-Use a disposable private repository in a local team. The cleaned Math Blitz
-fixture contains eight native recordings and cannot read your personal session
-stores when `--from-test-data` is supplied.
+Use a disposable repository in a team on the service you're testing. The
+cleaned Math Blitz fixture contains eight native recordings. The testbed downloads
+it from a [pinned public release asset](https://github.com/sageox/ox/releases/tag/session-import-fixtures-v1)
+and verifies its SHA-256 before creating the repository. It cannot read
+your personal session stores when `--from-test-data` is supplied.
 
-Find the running monorepo stack:
+The same workflow works with Tilt, another development setup, or a hosted
+service. Start your development stack as usual, then use its endpoint URL and
+a team you belong to on that service. Set `ox_import_endpoint` and
+`ox_import_team` once below; both `login` and `init` use those settings.
+The example uses `http://localhost:3100`; replace it with your service's URL
+(for example, `https://sageox.ai` for the public service).
 
-```sh
-ox_import_monorepo=/path/to/sageox-monorepo
-cd "$ox_import_monorepo"
-make dev-ls
-# If needed: make dev-shared-up, make dev, then make dev-wait.
-```
-
-The CLI endpoint is the edge router, `http://localhost:<3000 + stack offset>`.
-The checked stack had offset `100`, so its endpoint was `http://localhost:3100`.
-Use your stack's offset; the API and web application ports are different.
-
-Build the PR checkout and seed a fresh fixture repository:
+Build this checkout and seed a fresh fixture repository:
 
 ```sh
-ox_import_worktree=/path/to/ox-pr-checkout
-ox_import_stack=http://localhost:3100
-ox_import_team='YOUR LOCAL TEAM SLUG'
+ox_import_worktree=/path/to/ox-checkout
+ox_import_endpoint=http://localhost:3100
+ox_import_team='YOUR TEAM SLUG'
 cd "$ox_import_worktree"
 make build
 ox_import_bin="$ox_import_worktree/bin/ox"
 ox_import_parent=$(mktemp -d)
 ox_import_repo="$ox_import_parent/math-blitz"
 python3 "$ox_import_worktree/scripts/session_import_testbed.py" create "$ox_import_repo"
-"$ox_import_bin" login --endpoint "$ox_import_stack"
+"$ox_import_bin" login --endpoint "$ox_import_endpoint"
 cd "$ox_import_repo"
-"$ox_import_bin" init --endpoint "$ox_import_stack" --team "$ox_import_team"
+"$ox_import_bin" init --endpoint "$ox_import_endpoint" --team "$ox_import_team"
 "$ox_import_bin" config set session_recording auto --repo
 "$ox_import_bin" sync
 "$ox_import_bin" status
 ```
 
-The local account must belong to that team, and Ledger provisioning/cloning must
-finish. An actual import also needs an installed, authenticated Claude Code or
+Ledger provisioning and cloning must finish before importing. An actual import
+also needs an installed, authenticated Claude Code or
 Codex CLI to summarize. `--summarizer codex` or `--summarizer claude` can choose
 one usable CLI for both types. Previews make no summarization calls.
 
@@ -92,8 +88,8 @@ Check these paths:
 - Try `--browse --no-input`; it prints a structural preview and does not wait
   for the browser. Try `--preview --session 21BB267B`; prefixes are case tolerant.
 
-The local browser binds an ephemeral port on `127.0.0.1`, independently of Tilt.
-The browser returns native session IDs; it never calls Tilt or uploads sessions.
+The local browser binds an ephemeral port on `127.0.0.1`.
+The browser returns native session IDs; it does not upload sessions.
 The CLI verifies the destination, confirms, and then uses the existing Ledger
 upload pipeline. Authentication for the preview API is a per-run token in the
 opened URL fragment, carried in a header on subsequent local API requests.
@@ -107,6 +103,7 @@ go test -race ./cmd/ox ./internal/session/nativeimport \
 go test -tags browser ./cmd/ox -run '^TestImportBrowser' -count=1
 node --check cmd/ox/session_import_browser.js
 python3 scripts/session_import_testbed_test.py
+python3 scripts/session_import_fixture_test.py
 ```
 
 The reader opens in your default browser, including Safari; Chrome/Chromium is
@@ -114,6 +111,14 @@ required only by the automated `chromedp` browser tests. To capture desktop, mob
 QA images, add `-args -import-browser-screenshots=/private/tmp/ox-import-qa` to
 the browser test command. Real-adapter fixture tests build the adapter binaries
 from this checkout; fast `-short` tests omit that build.
+
+Manual and automated fixture tests share the same artifact cache under
+`${XDG_CACHE_HOME:-~/.cache}/sageox/test-fixtures/session-import/`. The first run
+needs access to the public release asset; subsequent runs verify cached bytes and
+work offline. To download it ahead of time, run
+`python3 scripts/session_import_testbed.py fixture`. A download or checksum failure
+fails the fixture test with a diagnostic. For a fixture you captured yourself,
+pass `--fixture /path/to/fixture` to the `create` command.
 
 To keep the complete gate independent of saved machine credentials and shared
 data, scope fresh XDG directories to that command:

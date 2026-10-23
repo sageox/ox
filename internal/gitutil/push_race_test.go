@@ -19,7 +19,7 @@ import (
 //   - "lockfail": the first `fetch` fails with a cannot-lock-ref error.
 //   - "fetchhead": `pull` fails the way git does when another fetch rewrote
 //     FETCH_HEAD with several for-merge heads; fetch and rebase pass through.
-//   - "revlistfail", "updatereffail", "resetfail": that one subcommand fails,
+//   - "revlistfail", "updatereffail": that one subcommand fails,
 //     for the squash's refusal paths.
 //   - "stashstorefail": `stash store` fails while `stash apply` and `stash
 //     create` pass through, for the leftover-autostash failure path.
@@ -62,9 +62,6 @@ case "` + mode + `:$sub" in
     exit 128;;
   updatereffail:update-ref)
     echo "fatal: update-ref refused" >&2
-    exit 128;;
-  resetfail:reset)
-    echo "fatal: reset refused" >&2
     exit 128;;
   stashstorefail:stash)
     case " $* " in *" store "*)
@@ -209,6 +206,25 @@ func TestPushWithRetry_NoUpstreamFallsBackToOriginBranch(t *testing.T) {
 	err := PushWithRetry(context.Background(), repo, PushOpts{MaxRetries: 3, OpTimeout: 10 * time.Second})
 	require.NoError(t, err)
 	assert.FileExists(t, filepath.Join(repo, "b.txt"))
+}
+
+// TestUpstreamTrackingRef_FallsBackWithoutUpstream: a branch that tracks no
+// upstream still names the ref a push to origin updates, so callers verifying
+// a push read the same ref the push wrote.
+func TestUpstreamTrackingRef_FallsBackWithoutUpstream(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git clone and push")
+	}
+	repo, _ := initBareRemoteRepo(t)
+	branch, err := RunGit(context.Background(), repo, "symbolic-ref", "--short", "HEAD")
+	require.NoError(t, err)
+	tracked, err := UpstreamTrackingRef(context.Background(), repo)
+	require.NoError(t, err)
+	run(t, repo, "git", "branch", "--unset-upstream")
+	untracked, err := UpstreamTrackingRef(context.Background(), repo)
+	require.NoError(t, err)
+	assert.Equal(t, "refs/remotes/origin/"+branch, tracked)
+	assert.Equal(t, tracked, untracked)
 }
 
 func TestUpstreamRefs_DetachedHeadErrors(t *testing.T) {

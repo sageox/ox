@@ -284,6 +284,28 @@ func TeamCoworker(ep string) (*Coworker, error) {
 	return meta.Coworker, nil
 }
 
+// PersonalTokenUser returns the person a personal SAGEOX_TOKEN belongs to, as
+// the server's /auth/me names them. An env token carries no UserInfo (there
+// was no login to learn it from), so without this, work done where git's
+// identity isn't the person's is filed under git's: an Amp project orb commits
+// as "Amp" and credited every session to "Amp" (sageox/ox#1425). Nil when
+// SAGEOX_TOKEN isn't a valid personal token for ep, or the server can't be
+// reached and nothing is cached.
+func PersonalTokenUser(ep string) *TokenUser {
+	if EnvTokenIsTeamFamily(ep) {
+		return nil
+	}
+	tok, state := EnvTokenFor(ep)
+	if state != EnvTokenValid || tok == nil {
+		return nil
+	}
+	meta, _ := FetchTokenMetaCached(context.Background(), ep, tok.AccessToken)
+	if meta == nil || meta.User == nil || (meta.User.Email == "" && meta.User.Name == "") {
+		return nil
+	}
+	return meta.User
+}
+
 // tokenFromEnv returns a StoredToken populated from SAGEOX_TOKEN when the
 // requested endpoint matches envTokenEndpoint(). Returns nil when the env var
 // is unset, when the request is for a different endpoint, or when the value

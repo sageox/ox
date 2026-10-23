@@ -31,6 +31,7 @@ func stagePlainSession(t *testing.T, ledger, session, username string, content [
 // the repair continues. Failure prevented: reconcile refused with "must contain
 // an LFS pointer" while finalize stayed paused until the push recovered.
 func TestReconcile_UploadsOwnStagedPlainArtifactInsteadOfRefusing(t *testing.T) {
+	useBundledSessionRules(t)
 	ledger, _ := initLedgerWithRemote(t)
 	recoverable := []byte("recoverable recording\n")
 	_, _, cachePath, ref := commitMissingSessionPointer(t, ledger, "wedged", recoverable)
@@ -58,6 +59,7 @@ func TestReconcile_UploadsOwnStagedPlainArtifactInsteadOfRefusing(t *testing.T) 
 // A teammate's staged plain artifact is never uploaded on their behalf: reconcile
 // refuses and names the file.
 func TestReconcile_RefusesTeammateStagedPlainArtifact(t *testing.T) {
+	useBundledSessionRules(t)
 	ledger, _ := initLedgerWithRemote(t)
 	recoverable := []byte("recoverable recording\n")
 	_, _, cachePath, _ := commitMissingSessionPointer(t, ledger, "wedged", recoverable)
@@ -79,6 +81,7 @@ func TestReconcile_RefusesTeammateStagedPlainArtifact(t *testing.T) {
 // metadata disappearing during the real upload must not panic, manufacture new
 // metadata, or replace either staged or working content with a pointer.
 func TestReconcile_MetadataDisappearsDuringOwnArtifactUpload(t *testing.T) {
+	useBundledSessionRules(t)
 	ledger, _ := initLedgerWithRemote(t)
 	content := []byte("recording retained during a concurrent removal\n")
 	rawPath := stagePlainSession(t, ledger, "own", "person-a", content)
@@ -101,6 +104,7 @@ func TestReconcile_MetadataDisappearsDuringOwnArtifactUpload(t *testing.T) {
 // win: the file is left alone, metadata is untouched, and the bytes are still
 // safe in the cache and on the store.
 func TestReconcile_WorktreeEditedDuringOwnArtifactUploadIsRefused(t *testing.T) {
+	useBundledSessionRules(t)
 	ledger, _ := initLedgerWithRemote(t)
 	content := []byte("recording edited mid-upload\n")
 	rawPath := stagePlainSession(t, ledger, "own", "person-a", content)
@@ -122,6 +126,7 @@ func TestReconcile_WorktreeEditedDuringOwnArtifactUploadIsRefused(t *testing.T) 
 }
 
 func TestPointerMatches_RejectsGarbageAndMismatch(t *testing.T) {
+	useBundledSessionRules(t)
 	ref := NewFileRef([]byte("x"))
 	assert.False(t, pointerMatches([]byte("not a pointer"), ref))
 	other := NewFileRef([]byte("y"))
@@ -131,6 +136,7 @@ func TestPointerMatches_RejectsGarbageAndMismatch(t *testing.T) {
 
 // A worktree copy that vanished during the upload is reported, not recreated.
 func TestReconcile_WorktreeRemovedDuringOwnArtifactUploadIsReported(t *testing.T) {
+	useBundledSessionRules(t)
 	ledger, _ := initLedgerWithRemote(t)
 	content := []byte("recording removed mid-upload\n")
 	rawPath := stagePlainSession(t, ledger, "own", "person-a", content)
@@ -145,6 +151,7 @@ func TestReconcile_WorktreeRemovedDuringOwnArtifactUploadIsReported(t *testing.T
 // A path that became a directory during the upload cannot be read as the
 // staged file: reported, nothing written.
 func TestReconcile_WorktreeReplacedByDirectoryDuringOwnArtifactUploadIsReported(t *testing.T) {
+	useBundledSessionRules(t)
 	ledger, _ := initLedgerWithRemote(t)
 	content := []byte("recording replaced mid-upload\n")
 	rawPath := stagePlainSession(t, ledger, "own", "person-a", content)
@@ -175,6 +182,7 @@ func commitPlainSession(t *testing.T, ledger, session, username string, content 
 // refused with "validate unpushed Ledger before LFS reconcile: ... must contain
 // an LFS pointer" on every attempt and the Ledger stayed wedged.
 func TestReconcile_UploadsOwnCommittedPlainArtifactInsteadOfRefusing(t *testing.T) {
+	useBundledSessionRules(t)
 	ledger, _ := initLedgerWithRemote(t)
 	recoverable := []byte("recoverable recording\n")
 	_, _, cachePath, ref := commitMissingSessionPointer(t, ledger, "wedged", recoverable)

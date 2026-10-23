@@ -139,3 +139,33 @@ func TestIsPreCloneLockBusy(t *testing.T) {
 	assert.True(t, IsPreCloneLockBusy(&fileutil.ErrLockTimeout{Path: "x", Timeout: time.Second}))
 	assert.True(t, IsPreCloneLockBusy(context.DeadlineExceeded))
 }
+
+// TestTryWithPreCloneLock_SharesTheBlockingLock verifies the non-blocking
+// pre-clone lock contends with the blocking one on the same path, and only
+// that path.
+// Failure prevented: a caller trying the lock (the daemon's Checkout, doctor's
+// direct clone) and one waiting on it (the Ledger HEAD repair, a read sync)
+// key on different files, and two clones write into the same Ledger path.
+func TestTryWithPreCloneLock_SharesTheBlockingLock(t *testing.T) {
+	target, other := t.TempDir()+"/ledger", t.TempDir()+"/other"
+	release, held := make(chan struct{}), make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = WithPreCloneLock(context.Background(), target, func() error { close(held); <-release; return nil })
+	}()
+	<-held
+	defer func() { close(release); <-done }()
+
+	acquired, err := TryWithPreCloneLock(target, func() error {
+		t.Error("ran while another clone of the same path held the lock")
+		return nil
+	})
+	require.NoError(t, err)
+	assert.False(t, acquired, "a clone already holding the path must be reported")
+
+	ran := false
+	acquired, err = TryWithPreCloneLock(other, func() error { ran = true; return nil })
+	require.NoError(t, err)
+	assert.True(t, acquired && ran, "another path's lock is free")
+}

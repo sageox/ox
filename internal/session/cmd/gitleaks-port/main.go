@@ -1,3 +1,7 @@
+// Historical compatibility generator only. The mandatory complete catalog now
+// lives in internal/secretguard; Gitleaks intentionally follows latest rules
+// automatically at publication and via make sync-gitleaks-rules. This frozen
+// subset must never be used as proof of current credential protection.
 // Command gitleaks-port translates the gitleaks default rule catalog
 // (config/gitleaks.toml from the gitleaks repo) into Go SecretPattern
 // entries for ox's session.RawWriter chokepoint.

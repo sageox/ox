@@ -2,6 +2,7 @@ package planreview
 
 import (
 	"encoding/json"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -187,8 +188,21 @@ func TestPrior_AnswersARetryFromWhatIsStored(t *testing.T) {
 	res, _ := ParseResolutionRequest([]byte(`{"id":"accept-0001","anchor":"h1","state":"verified"}`))
 	accepted, _ := res.Record("Ana", at(2))
 	again, _ := res.Record("Ana", at(5))
-	if r, found := Prior(Inventory{Files: []File{stored, accepted}}, again); !found || r.State != ReceiptAlreadyPublished || r.Path != accepted.Path {
-		t.Errorf("resolution retry: Prior = %+v %v, want already_published at %s", r, found, accepted.Path)
+	acceptedByOtherReviewer, _ := res.Record("Ben", at(5))
+	changedResolution, _ := ParseResolutionRequest([]byte(`{"id":"accept-0001","anchor":"h1","state":"wontfix"}`))
+	acceptedWithOtherPayload, _ := changedResolution.Record("Ana", at(5))
+	for _, c := range []struct {
+		name  string
+		rec   File
+		state string
+	}{
+		{"resolution retry", again, ReceiptAlreadyPublished},
+		{"resolution under another reviewer", acceptedByOtherReviewer, ReceiptConflict},
+		{"resolution with another payload", acceptedWithOtherPayload, ReceiptConflict},
+	} {
+		if r, found := Prior(Inventory{Files: []File{stored, accepted}}, c.rec); !found || r.State != c.state || r.Path != accepted.Path {
+			t.Errorf("%s: Prior = %+v %v, want %s at %s", c.name, r, found, c.state, accepted.Path)
+		}
 	}
 	if _, found := Prior(inv, File{Path: "feedback/remaps.json"}); found {
 		t.Error("Prior looked up a file that is no operation's record")
@@ -210,5 +224,85 @@ func TestRemapRecord(t *testing.T) {
 	}
 	if _, err := RemapRecord(Remap{From: "hold", To: "hnew", At: at(1), Label: strings.Repeat("x", MaxRecordBytes)}); err == nil {
 		t.Error("a remap over MaxRecordBytes became a record that readers refuse")
+	}
+}
+
+// drawingItem is a round item for a drawing of rec, a captures.json record:
+// anchored on its id, labeled as hosts label drawings.
+func drawingItem(t *testing.T, rec map[string]any, status, note string) string {
+	t.Helper()
+	region, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return `{"anchor":"q-` + rec["id"].(string) + `","section":"Risks","label":"Drawing: The retry path can double-fire under load when the queue is …",` +
+		`"status":"` + status + `","note":"` + note + `","region":` + string(region) + `}`
+}
+
+// TestRoundRequest_DrawingsTravelUnderMarks: a round with drawings sends its
+// items under marks (drawn-context spec §7), each drawing a well-formed region
+// on its own q-<id> anchor, and the record stores them under items with every
+// region the same JSON value it was sent as. Failure prevented: a drawing is
+// stored without its region, malformed, under another drawing's anchor, or
+// changed by the writer.
+func TestRoundRequest_DrawingsTravelUnderMarks(t *testing.T) {
+	t.Parallel()
+	recs := captures(t)
+	// text a writer escapes: the stored region is the same value, not the same bytes
+	item(recs[0], 1)["text"] = "Risk <Severity> & Mitigation"
+	element := `{"anchor":"h59e210da","section":"Risks","label":"The retry path can double-fire under load when the queue is saturated.","status":"request-change","note":"Bound the retries."}`
+	one, two := drawingItem(t, recs[0], "request-change", "Both retries fire here."), drawingItem(t, recs[1], "flag", "And again on requeue.")
+	frozen := []byte(`{"id":"r-0008-regions","items":[],"marks":[` + element + `,` + one + `,` + two + `]}`)
+	q, err := ParseRoundRequest(frozen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err := q.Record("rc-region-items", "Devon", at(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored struct {
+		Items         []map[string]any `json:"items"`
+		Marks         any              `json:"marks"`
+		RequestSHA256 string           `json:"request_sha256"`
+	}
+	if err := json.Unmarshal(rec.Data, &stored); err != nil {
+		t.Fatal(err)
+	}
+	if len(stored.Items) != 3 || stored.Marks != nil || stored.RequestSHA256 != sha256Hex(frozen) {
+		t.Fatalf("record: %d items, marks kept %v, digest %s; want the 3 marks stored as items, digest over the frozen bytes",
+			len(stored.Items), stored.Marks != nil, stored.RequestSHA256)
+	}
+	for i, want := range []map[string]any{recs[0], recs[1]} {
+		if got := stored.Items[i+1]["region"]; !reflect.DeepEqual(got, clone(t, want)) {
+			t.Errorf("drawing %d stored as %v, sent as %v", i, got, want)
+		}
+	}
+	rev := Assemble(Inventory{Files: []File{rec}}, Limits{})
+	if len(rev.Items) != 3 || !rev.Complete() {
+		t.Fatalf("assembled %d items, failures %v", len(rev.Items), rev.Failures)
+	}
+	for i, id := range []string{"", "r1-double-fire", "r2-double-fire-again"} {
+		var region struct{ ID string }
+		if len(rev.Items[i].Region) > 0 {
+			_ = json.Unmarshal(rev.Items[i].Region, &region)
+		}
+		if region.ID != id {
+			t.Errorf("item %s assembled with region %q, want %q", rev.Items[i].Anchor, region.ID, id)
+		}
+	}
+
+	misnamed := strings.Replace(one, `"anchor":"q-r1-double-fire"`, `"anchor":"q-r2-double-fire-again"`, 1)
+	for name, body := range map[string]string{
+		"a drawing under items":         `{"id":"r-0009-regions","items":[` + one + `]}`,
+		"items under both keys":         `{"id":"r-0009-regions","items":[` + element + `],"marks":[` + one + `]}`,
+		"a drawing on another's anchor": `{"id":"r-0009-regions","items":[],"marks":[` + misnamed + `]}`,
+		"a malformed region":            `{"id":"r-0009-regions","items":[],"marks":[` + strings.Replace(one, `"v":1`, `"v":2`, 1) + `]}`,
+		"a region keyed apart by case":  `{"id":"r-0009-regions","items":[],"marks":[` + strings.Replace(one, `"region":`, `"Region":`, 1) + `]}`,
+		"marks that are not a list":     `{"id":"r-0009-regions","items":[],"marks":{"0":` + one + `}}`,
+	} {
+		if _, err := ParseRoundRequest([]byte(body)); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
 	}
 }

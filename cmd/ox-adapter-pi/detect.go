@@ -69,7 +69,7 @@ func handleDiagnose(p adapterprotocol.DiagnoseParams) (*adapterprotocol.Diagnose
 			// the file is readable and just lacks the marker, or doesn't
 			// exist yet — both are repairable by writing/appending the
 			// block, which install-hooks does safely and idempotently.
-			detail := "AGENTS.md does not contain ox prime marker."
+			detail := "AGENTS.md does not contain the ox agent prime marker."
 			if err != nil {
 				detail = "AGENTS.md not found at " + agentsPath + "."
 			}

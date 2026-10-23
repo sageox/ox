@@ -1,0 +1,4 @@
+# Hosts mount @sageox/plan-review's controls in their own pages, and this
+# workflow publishes it.
+/packages/plan-review/ @shrimalmadhur
+/.github/workflows/plan-review-release.yml @shrimalmadhur

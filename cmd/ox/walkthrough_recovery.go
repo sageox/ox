@@ -19,6 +19,46 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// walkthroughFetchBudget caps the images one invocation downloads, whatever
+// their kind. Failed attempts count too: missing media must not become an
+// unbounded loop.
+const walkthroughFetchBudget = 8
+
+// walkthroughScope is what a team-scoped recording call needs: the team the
+// project belongs to, the endpoint, and a valid login for it.
+type walkthroughScope struct {
+	teamID   string
+	endpoint string
+	token    string
+}
+
+// resolveWalkthroughScope resolves the project's team, endpoint and login for
+// a recording id, refusing a link that belongs to another environment so a
+// credential is never presented to the wrong server.
+func resolveWalkthroughScope(id *read.ID) (*walkthroughScope, error) {
+	projectRoot, err := findProjectRoot()
+	if err != nil {
+		return nil, err
+	}
+	team := config.FindRepoTeamContext(projectRoot)
+	if team == nil || team.TeamID == "" {
+		return nil, fmt.Errorf("no active team context")
+	}
+	ep := endpoint.GetForProject(projectRoot)
+	if id.LinkHost != "" && id.LinkHost != endpoint.NormalizeSlug(ep) {
+		return nil, fmt.Errorf("recording link belongs to another SageOx environment; use its matching project/login")
+	}
+	stored, err := auth.EnsureValidTokenForEndpoint(ep, 300)
+	if err != nil || stored == nil || stored.AccessToken == "" {
+		return nil, fmt.Errorf("a valid login is required for server access")
+	}
+	return &walkthroughScope{teamID: team.TeamID, endpoint: ep, token: stored.AccessToken}, nil
+}
+
+func (s *walkthroughScope) client(timeout time.Duration) *api.RepoClient {
+	return api.NewRepoClientWithEndpoint(s.endpoint).WithAuthToken(s.token).WithTimeout(timeout)
+}
+
 func walkthroughRecovery(cmd *cobra.Command, idArg string, f conversationWalkthroughFlags, opts read.WalkthroughOptions) *read.Envelope {
 	fail := func(e error) *read.Envelope {
 		return read.ErrorEnvelope(read.NewError("extraction_unavailable", e.Error()))
@@ -27,21 +67,9 @@ func walkthroughRecovery(cmd *cobra.Command, idArg string, f conversationWalkthr
 	if e != nil {
 		return read.ErrorEnvelope(e)
 	}
-	projectRoot, err := findProjectRoot()
+	scope, err := resolveWalkthroughScope(id)
 	if err != nil {
 		return fail(err)
-	}
-	team := config.FindRepoTeamContext(projectRoot)
-	if team == nil || team.TeamID == "" {
-		return fail(fmt.Errorf("no active team context"))
-	}
-	ep := endpoint.GetForProject(projectRoot)
-	if id.LinkHost != "" && id.LinkHost != endpoint.NormalizeSlug(ep) {
-		return fail(fmt.Errorf("recording link belongs to another SageOx environment; use its matching project/login"))
-	}
-	stored, err := auth.EnsureValidTokenForEndpoint(ep, 300)
-	if err != nil || stored == nil || stored.AccessToken == "" {
-		return fail(fmt.Errorf("a valid login is required for server extraction"))
 	}
 	request := &api.WalkthroughExtractionRequest{Revision: f.Revision, CueFirst: opts.CueFirst, CueLast: opts.CueLast, MaxFrames: f.MaxFrames, MaxWidth: f.MaxWidth, Retry: f.Retry}
 	if opts.HasWindow {
@@ -53,12 +81,12 @@ func walkthroughRecovery(cmd *cobra.Command, idArg string, f conversationWalkthr
 	defer cancel()
 	// One request per explicit invocation. Repeated model tool calls must not
 	// silently become a paid preprocessing loop; the server coalesces/caps work.
-	client := api.NewRepoClientWithEndpoint(ep).WithAuthToken(stored.AccessToken).WithTimeout(15 * time.Second)
+	client := scope.client(15 * time.Second)
 	var result *api.WalkthroughJob
 	if f.Prepare {
-		result, err = client.PrepareWalkthrough(ctx, team.TeamID, id.RecordingID, f.Retry)
+		result, err = client.PrepareWalkthrough(ctx, scope.teamID, id.RecordingID, f.Retry)
 	} else {
-		result, err = client.WalkthroughExtraction(ctx, team.TeamID, id.RecordingID, f.Job, request)
+		result, err = client.WalkthroughExtraction(ctx, scope.teamID, id.RecordingID, f.Job, request)
 	}
 	if err != nil {
 		return fail(err)
@@ -82,8 +110,8 @@ func fetchWalkthroughImages(ctx context.Context, data *read.WalkthroughData) []s
 		if f == nil || f.LocalImage != "" || f.Image == "" || f.FetchCommand == "" {
 			continue
 		}
-		if fetched >= 8 {
-			warnings = append(warnings, "image fetch budget reached (8); narrow the cue/time window for remaining images")
+		if fetched >= walkthroughFetchBudget {
+			warnings = append(warnings, fmt.Sprintf("image fetch budget reached (%d); narrow the cue/time window for remaining images", walkthroughFetchBudget))
 			break
 		}
 		fetched++

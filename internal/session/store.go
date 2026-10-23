@@ -133,12 +133,12 @@ func sanitizeFilename(s string) string {
 // Uses session-folder structure: <session>/raw.jsonl
 // The sessionName should be generated using GenerateSessionName().
 func (s *Store) CreateRaw(sessionName string) (*SessionWriter, error) {
-	return s.createSessionSession(sessionName, rawFilename)
+	return s.CreateRawForProject(sessionName, "")
 }
 
-// createSessionSession creates a session file in a session folder.
-// TODO(server-side): move to server-side for MVP+1; client should not write to ledger directly.
-func (s *Store) createSessionSession(sessionName, filename string) (*SessionWriter, error) {
+// CreateRawForProject enforces the project redaction policy at the storage boundary.
+// Callers with workspace context must pass it so malformed custom rules fail closed.
+func (s *Store) CreateRawForProject(sessionName, projectRoot string) (*SessionWriter, error) {
 	if sessionName == "" {
 		return nil, ErrEmptyFilename
 	}
@@ -153,26 +153,24 @@ func (s *Store) createSessionSession(sessionName, filename string) (*SessionWrit
 		return nil, fmt.Errorf("create session dir=%s: %w", sessionPath, err)
 	}
 
-	filePath := filepath.Join(sessionPath, filename)
+	filePath := filepath.Join(sessionPath, rawFilename)
 
-	f, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	raw, err := NewRawWriter(filePath, projectRoot)
 	if err != nil {
 		return nil, fmt.Errorf("create session file=%s: %w", filePath, err)
 	}
 
 	return &SessionWriter{
-		file:        f,
+		raw:         raw,
 		filePath:    filePath,
-		encoder:     json.NewEncoder(f),
 		sessionName: sessionName,
 	}, nil
 }
 
 // SessionWriter handles JSONL writing with proper header/footer semantics.
 type SessionWriter struct {
-	file        *os.File
+	raw         *RawWriter
 	filePath    string
-	encoder     *json.Encoder
 	storeMeta   *StoreMeta
 	count       int
 	sessionName string // session folder name (empty for legacy files)
@@ -238,10 +236,10 @@ func (w *SessionWriter) WriteHeader(meta *StoreMeta) error {
 		"metadata": meta,
 	}
 
-	if err := w.encoder.Encode(header); err != nil {
+	if err := w.raw.WriteRaw(header); err != nil {
 		return fmt.Errorf("write header file=%s: %w", w.filePath, err)
 	}
-	if err := w.file.Sync(); err != nil {
+	if err := w.raw.Sync(); err != nil {
 		return fmt.Errorf("sync header file=%s: %w", w.filePath, err)
 	}
 	return nil
@@ -261,7 +259,7 @@ func (w *SessionWriter) WriteEntry(entry Writable) error {
 		"data":      entry,
 	}
 
-	if err := w.encoder.Encode(record); err != nil {
+	if err := w.raw.WriteRaw(record); err != nil {
 		return fmt.Errorf("write entry seq=%d file=%s: %w", w.count, w.filePath, err)
 	}
 
@@ -286,7 +284,7 @@ func (w *SessionWriter) WriteRaw(data map[string]any) error {
 		data["eid"] = GenerateEntryID()
 	}
 
-	if err := w.encoder.Encode(data); err != nil {
+	if err := w.raw.WriteRaw(data); err != nil {
 		return fmt.Errorf("write raw entry seq=%d file=%s: %w", w.count, w.filePath, err)
 	}
 
@@ -317,17 +315,17 @@ func (w *SessionWriter) Close() error {
 		"entry_count": w.count,
 	}
 
-	if err := w.encoder.Encode(footer); err != nil {
-		w.file.Close()
+	if err := w.raw.WriteRaw(footer); err != nil {
+		w.raw.Close()
 		return fmt.Errorf("write footer file=%s: %w", w.filePath, err)
 	}
 
-	if err := w.file.Sync(); err != nil {
-		w.file.Close()
+	if err := w.raw.Sync(); err != nil {
+		w.raw.Close()
 		return fmt.Errorf("sync file=%s: %w", w.filePath, err)
 	}
 
-	return w.file.Close()
+	return w.raw.Close()
 }
 
 // SessionInfo contains metadata about a stored session.
@@ -349,6 +347,7 @@ type SessionInfo struct {
 	EntryCount      int                 `json:"entry_count,omitempty"`        // from .recording.json or meta.json
 	IsSubagent      bool                `json:"is_subagent,omitempty"`        // true if spawned by a parent session
 	ParentPID       int                 `json:"parent_pid,omitempty"`         // from .recording.json for liveness detection
+	ParentStartTime int64               `json:"parent_start_time,omitempty"`  // from .recording.json; see RecordingState.ParentStartTime
 	Origin          string              `json:"origin,omitempty"`             // session origin: "human", "subagent", "agent"
 	HasRawData      bool                `json:"has_raw_data,omitempty"`       // true if raw.jsonl exists with content on disk
 	StopReason      string              `json:"stop_reason,omitempty"`        // how session ended (StopReason* constants)
@@ -458,6 +457,7 @@ func (s *Store) listSessionSessions(since time.Time) ([]SessionInfo, error) {
 		var recordingEntryCount int
 		var isSubagent bool
 		var parentPID int
+		var parentStartTime int64
 		var origin string
 		var suspendedAt *time.Time
 		recPath := filepath.Join(sessionPath, recordingFile)
@@ -470,6 +470,7 @@ func (s *Store) listSessionSessions(since time.Time) ([]SessionInfo, error) {
 				recordingEntryCount = recState.EntryCount
 				isSubagent = recState.IsSubagent()
 				parentPID = recState.ParentPID
+				parentStartTime = recState.ParentStartTime
 				origin = recState.Origin
 				// ADR-020: ClassifySession branches on SessionInfo.SuspendedAt to
 				// return StatusSuspended; without this propagation, suspended
@@ -564,6 +565,7 @@ func (s *Store) listSessionSessions(since time.Time) ([]SessionInfo, error) {
 			EntryCount:      entryCount(isRecording, recordingEntryCount, meta),
 			IsSubagent:      isSubagent,
 			ParentPID:       parentPID,
+			ParentStartTime: parentStartTime,
 			Origin:          origin,
 			HasRawData:      hasRawData,
 			StopReason:      stopReason(meta),

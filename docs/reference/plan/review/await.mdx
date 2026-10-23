@@ -1,7 +1,7 @@
 ---
 title: "ox plan review await"
 description: "CLI reference for ox plan review await"
-sidebar_position: 74
+sidebar_position: 79
 ---
 
 ## ox plan review await
@@ -29,7 +29,9 @@ Ask first, or pass a short --timeout and poll between other work.
 
 Emits immediately if feedback is already waiting (never strands a race). Exits with
 status "timeout" if nothing arrives within --timeout, or "approved" once a reviewer
-approves the plan (the loop is done).
+approves the plan (the loop is done). "complete" is false when the review could not be
+fully read or holds conflicting copies of an operation; "failures" and "conflicts" then
+say what, and the open items may be missing some.
 
 ```
 ox plan review await <slug> [flags]

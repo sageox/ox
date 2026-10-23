@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -247,6 +248,36 @@ func RemoveStaleLockFiles(gitDir string) (removed []string, errs []error) {
 			removed = append(removed, lock)
 		}
 	}
+	return removed, errs
+}
+
+// RemoveAllLockFiles removes every *.lock file under gitDir, whatever its age
+// or the PID it names, including the ref and packed-refs locks
+// RemoveStaleLockFiles never touches. Call it only when no git process can
+// hold one: the locks were left by a machine that has gone away, and no ox
+// process on this machine runs git in the clone yet.
+func RemoveAllLockFiles(gitDir string) (removed []string, errs []error) {
+	root, err := os.OpenRoot(gitDir)
+	if err != nil {
+		return nil, []error{err}
+	}
+	defer root.Close()
+	// The callback never returns an error, so WalkDir's own result is nil.
+	_ = fs.WalkDir(root.FS(), ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			errs = append(errs, err)
+			return nil
+		}
+		if !d.Type().IsRegular() || !strings.HasSuffix(d.Name(), ".lock") {
+			return nil
+		}
+		if err := root.Remove(filepath.FromSlash(path)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, fmt.Errorf("remove %s: %w", path, err))
+		} else if err == nil {
+			removed = append(removed, path)
+		}
+		return nil
+	})
 	return removed, errs
 }
 

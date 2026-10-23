@@ -15,23 +15,26 @@ function pins(file, want) {
 // Failure prevented: re-clicking a marked item computes a different anchor and
 // creates an unreachable duplicate mark instead of editing the existing one.
 test('an anchor ignores the glyph painted into its element', () => {
-  pins('anchor.ts', ["clone.querySelectorAll('.rev-glyph')", 'contentAnchor(headingOf(el), anchorText(el))']);
+  pins('anchor.ts', ["clone.querySelectorAll('.rev-glyph, style, script')", 'contentAnchor(headingOf(el), anchorText(el))']);
 });
 
 // Failure prevented: a reviewer keeps marking up a dead page believing their
 // feedback is reaching the agent (TestBrowser_UnsentMarkSurvivesReconnect).
 test('a dead server is detected, said plainly, and recovered from', () => {
-  pins('host-controls.ts', [
-    'es.onerror', // SSE drop detection
-    'es.onopen', // recovery detection
-    'setOffline(true)', // a failed POST flips the page offline
-    'NOT being saved', // the banner says it plainly
-    'rev-offline-bar', // sticky banner element
+  pins('local.ts', [
+    'es.onerror = () => { controls.setOffline(true); watch(); }', // SSE drop detection
+    'es.onopen = back', // recovery detection
     "'/healthz'", // recovery probe endpoint
     "'ox plan review ' + slug", // copyable restart command
     'serviceWorker', // offline shell registration
+    "if (!r) return { state: 'offline' };", // a POST that cannot reach the server…
+  ]);
+  pins('host-controls.ts', [
+    "setOffline(r.state === 'offline');", // …flips the page offline, and any answer back
+    'NOT reaching it', // the banner says it plainly
+    'rev-offline-bar', // sticky banner element
     'unsent mark(s) restored', // restored-marks notice after reconnect
-    "if (offline) { offlineNotice(); if (fail) fail('offline', true); return; }", // sends refused while offline
+    'your feedback is queued in this browser', // an unreachable server leaves it queued, and says so
   ]);
 });
 
@@ -44,17 +47,19 @@ test('review mode announces itself, keeps its exit in view, and survives a reloa
     "on ? 'Exit review' : 'Review'", // the button becomes the exit
     'Esc or Exit review to leave', // the entry toast names both exits
     'if (e.defaultPrevented) return;', // a key the page already handled is left alone
-    'if (pop) { closePop(); e.preventDefault(); }', // Esc: the note first…
-    'else if (on) { setReview(false); e.preventDefault(); }', // …then the mode, marked handled
+    'if (pop) { closePop(); return true; }', // Esc: the note first…
+    'if (on) { setReview(false); return true; }', // …then the mode…
+    "if (e.key === 'Escape') { if (escape()) e.preventDefault(); return; }", // …marked handled
+    "if (m.key === 'Escape') escape();", // a framed document's Esc too
     "if (e.key === 'r' && !typing(e)", // r toggles, not from a text field
     "sessionStorage.setItem(ON_KEY, '1')", // kept per tab, not per browser
-    'if (sessionStorage.getItem(ON_KEY)) setReview(true, true);', // restored silently after a reload
+    'if (!on && sessionStorage.getItem(ON_KEY)) setReview(true, true);', // restored silently after a reload
     'if (t.closest && t.closest(CHROME) && (on || pop)) closePop();', // a click on the controls dismisses a note
-    "case 'dismiss':\n        if (on || pop) closePop();", // so does a click on nothing markable
+    "case 'dismiss':\n        if ((on || pop) && !held()) closePop();", // so does a click on nothing markable, unless the reviewer opened the note from the rail or typed in it
     'if (toastEl === el) toastEl = null;', // a toast timer removes only its own toast
   ]);
   pins('document-tools.ts', [
-    "if (el0.closest && el0.closest(CHROME + ', .rev-pop')) return;", // the controls are never a target
+    "if (el0.closest && el0.closest(CHROME + ', .rev-pop, .rev-ink')) return;", // the controls, and the ink a stroke ends on, are never a target
     "if (!el) { port.send({ type: 'dismiss' }); return; }", // click-away
   ]);
 });
@@ -95,7 +100,7 @@ test('a highlight comments on exactly its words', () => {
   ]);
   pins('host-controls.ts', [
     'if (t.quote) m.quote = t.quote;', // the words travel with the mark
-    'if (!row.at) { openPop({ a: row.a, section: row.section, label: row.label, quote: row.quote }', // a comment whose text is gone opens from its row
+    'if (!row.at || DRAWING.test(row.a)) { openPop({ a: row.a, section: row.section, label: row.label, quote: row.quote }', // a comment whose text is gone, or a drawing, opens from its row
   ]);
   pins('document.css', ['sage', 'amber', 'red', 'gold', 'faint', 'focus'].map((t) => '::highlight(rev-q-' + t + '){'));
   pins('host.css', ['.rev-pop .rev-quote{', '.rev-rail-quote{']);
@@ -115,5 +120,7 @@ test('text from the Ledger cannot close an attribute', async () => {
   const { esc } = await load('host-controls.ts');
   const hostile = 'flag" onmouseover="fetch(\'/approve\')';
   assert.ok(!esc(hostile).includes('"'));
-  pins('host-controls.ts', ['data-status="\' + esc(row.status)', 'rev-rail-tag \' + esc(row.state)']);
+  assert.ok(!/['<>]/.test(esc("'><img>")));
+  // a state names a class only through STATE_TAG, never as Ledger text
+  pins('host-controls.ts', ['data-status="\' + esc(row.status)', 'rev-rail-tag \' + STATE_TAG[row.state]']);
 });

@@ -15,7 +15,7 @@ package plan
 //	meta.json        # always plain git (topic, slug, authors, timestamps, …)
 //	plan.html        # only if a render was passed in. Save writes it PLAIN;
 //	                 # a large render is dehydrated to an LFS pointer by the CLI
-//	                 # caller (DehydrateHTML) AFTER its blob is uploaded, never
+//	                 # caller (PointerizeHTML) AFTER its blob is uploaded, never
 //	                 # before — see the GH #810 note at the plan.html write below.
 //
 // CLI WRITES files into the ledger working tree (daemon-git split): we never
@@ -23,6 +23,7 @@ package plan
 // capture, which writes meta.json + content and lets a later push carry it.
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -90,18 +91,14 @@ const (
 // without the session present. Duplication is the feature, not a smell.
 type Provenance struct {
 	// Join keys (may dangle if the session was aborted / never uploaded).
-	//
-	// Two-phase population, because the canonical ses_ SessionID is minted
-	// fresh at session-STOP and is NOT knowable mid-recording:
-	//   - SessionName is the durable identifier available at plan-save time
-	//     (the recording's folder name, what `ox session view <name>` resolves).
-	//     It is the primary join key and is always set when a recording is live.
-	//   - SessionID (ses_<UUIDv7>) is BACKFILLED at session-stop, in the same
-	//     reconciliation that sets SessionOutcome=stopped — we have the real id
-	//     and the produced-plan slugs in hand there. Empty for aborted sessions
-	//     (no stop) and for plans saved outside a recording.
+	// Both are set at save time when a recording is live:
+	//   - SessionName is the recording's folder name, what `ox session view
+	//     <name>` resolves.
+	//   - SessionID (ses_<UUIDv7>) is minted when the recording starts. Session
+	//     stop (ReconcileSessionOutcome) fills it for a recording an older ox
+	//     started without one. Empty for plans saved outside a recording.
 	SessionName string `json:"session_name,omitempty"`
-	SessionID   string `json:"session_id,omitempty"` // ses_<UUIDv7>, backfilled at stop
+	SessionID   string `json:"session_id,omitempty"` // ses_<UUIDv7>, minted at recording start
 	AgentID     string `json:"agent_id,omitempty"`   // Ox#### stable agent instance
 	RepoID      string `json:"repo_id,omitempty"`
 
@@ -169,6 +166,11 @@ type Meta struct {
 	Provenance *Provenance `json:"provenance,omitempty"`
 	// Collaboration holds the deterministic collaboration-effort counts.
 	Collaboration *CollabSignals `json:"collaboration,omitempty"`
+
+	// NewPlanID is the pln_ id Save gives a plan this save creates; Save mints
+	// one when it is empty, and a revision keeps the plan's own id. Never
+	// stored in meta.json: the id lives in events.jsonl. See SavedHTML.
+	NewPlanID string `json:"-"`
 }
 
 // PlanInfo is the listing-level view of a captured plan, assembled from
@@ -278,7 +280,9 @@ func priorSaveOfSource(ledger, sourcePath string) (string, Meta, bool) {
 		if err != nil || m.SourcePlanPath != sourcePath {
 			continue
 		}
-		if isClosedStatus(m.Status) {
+		// the folded status, as every closed-plan check here: meta.json's
+		// snapshot can lag the event log after two clones race
+		if isClosedStatus(CurrentStatus(dir)) {
 			continue
 		}
 		// Most recent wins when a source path has been saved more than once.
@@ -293,7 +297,7 @@ func priorSaveOfSource(ledger, sourcePath string) (string, Meta, bool) {
 // It writes plan.md (from in.Raw), annotations.json (res), and meta.json as
 // plain git-tracked text. plan.html is written ONLY when html != nil, and always
 // as PLAIN bytes — dehydration of a large render to an LFS pointer is the CLI
-// caller's job (DehydrateHTML), post-upload. Save never renders HTML, never
+// caller's job (PointerizeHTML), post-upload. Save never renders HTML, never
 // uploads, and never commits — it only materializes files in the working tree.
 // Returns the absolute plan directory.
 //
@@ -372,7 +376,7 @@ func Save(gitRoot string, in Input, res Result, html []byte, meta Meta) (string,
 			existingEvents = nil
 		}
 		firstSave := len(existingEvents) == 0
-		planID = planid.GeneratePlanID()
+		planID = cmp.Or(meta.NewPlanID, planid.GeneratePlanID())
 		if !firstSave {
 			planID = existingEvents[0].PlanID
 		}
@@ -400,8 +404,15 @@ func Save(gitRoot string, in Input, res Result, html []byte, meta Meta) (string,
 		// original CreatedAt, while refreshing the rest. Routing through
 		// MutatePlanMeta also serializes against a concurrent session-stop/
 		// doctor outcome write to the same file.
+		var status PlanStatus // meta.json's, after this save
 		if err := MutatePlanMeta(context.Background(), dir, func(existing *Meta) (*Meta, error) {
 			merged := meta
+			// a copy: the event this save appends is stamped from the
+			// caller's provenance, which the merge below must not rewrite
+			if meta.Provenance != nil {
+				prov := *meta.Provenance
+				merged.Provenance = &prov
+			}
 			if existing != nil {
 				if existing.Status != "" {
 					merged.Status = existing.Status
@@ -421,10 +432,10 @@ func Save(gitRoot string, in Input, res Result, html []byte, meta Meta) (string,
 				if merged.Primary == "" {
 					merged.Primary = existing.Primary
 				}
-				// SessionID and SessionOutcome are system-managed (backfilled /
-				// reconciled at stop), never set by a save-time caller — preserve
-				// them across a re-save even when the caller supplies fresh
-				// provenance for the other (snapshot) fields.
+				// A re-save keeps the SessionID and SessionOutcome already
+				// recorded, so it cannot reset a stopped outcome to active or
+				// replace the producing session's id with its own; the other
+				// (snapshot) provenance fields take the caller's values.
 				if existing.Provenance != nil {
 					if existing.Provenance.SessionID != "" || existing.Provenance.SessionOutcome != "" {
 						if merged.Provenance == nil {
@@ -442,6 +453,7 @@ func Save(gitRoot string, in Input, res Result, html []byte, meta Meta) (string,
 			if merged.Status == "" {
 				merged.Status = PlanStatusDraft
 			}
+			status = merged.Status
 			merged.SchemaVersion = SchemaVersion
 			return &merged, nil
 		}); err != nil {
@@ -454,8 +466,9 @@ func Save(gitRoot string, in Input, res Result, html []byte, meta Meta) (string,
 		// exactly GH #810 — the render is lost AND the poisoned pointer makes the
 		// remote reject every future push, wedging the whole team's ledger.
 		// Dehydration of a large render to an LFS pointer happens in the CLI
-		// caller (savePlanArtifacts → DehydrateHTML) AFTER a confirmed upload, and
-		// only overwrites this plain file once the blob is provably in the store.
+		// caller (savePlanArtifacts → UploadHTML, then PointerizeHTML) AFTER a
+		// confirmed upload, and only overwrites this plain file once the blob is
+		// provably in the store.
 		// If that step is skipped or the store is unreachable, the plan stays
 		// plain: larger in git, but retrievable and pushable — never lost, never
 		// poisoned. That is the structural property the size-gate-here design
@@ -502,7 +515,9 @@ func Save(gitRoot string, in Input, res Result, html []byte, meta Meta) (string,
 		ev := Event{PlanID: planID, Kind: EventRevised, Topic: meta.Topic}
 		if firstSave {
 			ev.Kind = EventCreated
-			ev.Status = PlanStatusDraft
+			// draft, or the status a legacy plan's meta.json held before it
+			// had events: from now on the status is folded from them
+			ev.Status = status
 		}
 		savedKind = ev.Kind
 		if meta.Provenance != nil {
@@ -554,6 +569,37 @@ func ResolveSaveDir(gitRoot string, meta Meta) (string, error) {
 	}
 	dir, _, err := resolveSaveDir(ledger, meta)
 	return dir, err
+}
+
+// SavedHTML returns the plan.html Save writes for html when it saves meta:
+// html stamped with the id, slug and title of the plan meta resolves to. For a
+// plan the save would create, it mints meta.NewPlanID when that is empty and
+// returns meta carrying it, so Save stamps the same id. The CLI uploads this
+// page before it takes the Ledger's repo lock. A save of the same plan that
+// lands in between can change what Save writes, so a caller compares the
+// written bytes before relying on them.
+func SavedHTML(gitRoot string, meta Meta, html []byte) ([]byte, Meta, error) {
+	ledger := ledgerPathFor(gitRoot)
+	if ledger == "" {
+		return nil, meta, fmt.Errorf("no ledger configured for %q: cannot save plan", gitRoot)
+	}
+	if meta.CreatedAt.IsZero() {
+		meta.CreatedAt = time.Now().UTC()
+	}
+	dir, resolved, err := resolveSaveDir(ledger, meta)
+	if err != nil {
+		return nil, meta, err
+	}
+	// the id rule Save applies: the plan's own once it has events (an
+	// unreadable log counts as none), else the new id
+	id := meta.NewPlanID
+	if events, err := LoadEvents(dir); err == nil && len(events) > 0 {
+		id = events[0].PlanID
+	} else if id == "" {
+		id = planid.GeneratePlanID()
+		meta.NewPlanID = id
+	}
+	return StampHTMLMeta(html, id, resolved.Slug, resolved.Topic), meta, nil
 }
 
 // resolveSaveDir decides which plan directory a save lands in and returns meta
@@ -849,22 +895,6 @@ func MutatePlanMeta(ctx context.Context, planDir string, mutate func(*Meta) (*Me
 	})
 }
 
-// SetStatus updates a saved plan's lifecycle status (by slug) under the meta
-// flock. No-op if the plan dir has no meta.json. Use the PlanStatus* constants.
-func SetStatus(gitRoot, slug string, status PlanStatus) error {
-	dir, err := resolvePlanDirForSlug(gitRoot, slug)
-	if err != nil {
-		return err
-	}
-	return MutatePlanMeta(context.Background(), dir, func(m *Meta) (*Meta, error) {
-		if m == nil {
-			return nil, nil
-		}
-		m.Status = status
-		return m, nil
-	})
-}
-
 // SetSessionOutcome reconciles the producing session's lifecycle onto the plan
 // (by slug) under the meta flock — written only by session-stop / `ox doctor`,
 // never by Save. Use the SessionOutcome* constants. No-op if no meta.json.
@@ -885,10 +915,10 @@ func SetSessionOutcome(gitRoot, slug, outcome string) error {
 	})
 }
 
-// ReconcileSessionOutcome backfills the producing session's canonical id and
-// final outcome onto a plan (by slug) at session-stop, where both are known.
-// sessionID is the ses_<UUIDv7> minted at stop (skipped when ""); outcome is a
-// SessionOutcome* constant. Single flocked write so it can't race a re-save.
+// ReconcileSessionOutcome records the producing session's id and final outcome
+// in a plan's meta.json (by slug) at session-stop. sessionID is the session's
+// ses_<UUIDv7> (skipped when ""); outcome is a SessionOutcome* constant.
+// Single flocked write so it can't race a re-save.
 func ReconcileSessionOutcome(gitRoot, slug, sessionID, outcome string) error {
 	dir, err := resolvePlanDirForSlug(gitRoot, slug)
 	if err != nil {

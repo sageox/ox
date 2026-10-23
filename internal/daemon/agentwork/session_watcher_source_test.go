@@ -1,9 +1,12 @@
 package agentwork
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -177,72 +180,130 @@ func TestClaudeWatcherPreservesCursorAcrossOwnershipChanges(t *testing.T) {
 	}
 }
 
+// readHookAdapter lets a test order its writes against the watcher's reads.
+// beforeCatchUp runs ahead of the first incremental read, the catch-up, and
+// caughtUp closes once that read returns. turnReads counts the reads that
+// returned entries.
+type readHookAdapter struct {
+	testAdapter
+	beforeCatchUp func()
+	caughtUp      chan struct{}
+	turnReads     atomic.Int32
+	once          sync.Once
+}
+
+func (a *readHookAdapter) ReadFromOffset(path string, offset int64) ([]adapters.RawEntry, int64, error) {
+	first := false
+	a.once.Do(func() {
+		first = true
+		if a.beforeCatchUp != nil {
+			a.beforeCatchUp()
+		}
+	})
+	entries, next, err := a.testAdapter.ReadFromOffset(path, offset)
+	if len(entries) > 0 {
+		a.turnReads.Add(1)
+	}
+	if first {
+		close(a.caughtUp)
+	}
+	return entries, next, err
+}
+
 // A source that cannot be checked yet is not a source that crossed repositories.
 // The watcher must keep its cursor and look again, not end capture until the
-// daemon's slow restart pass.
+// daemon's slow restart pass, whether the uncheckable turn reaches its catch-up
+// read at start or a later poll.
 func TestClaudeWatcherKeepsPollingAfterRetryableValidationError(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: live capture checks ownership on a polling interval")
 	}
-	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	t.Setenv("OX_XDG_DISABLE", "")
-	repo, err := filepath.EvalSymlinks(t.TempDir())
-	require.NoError(t, err)
-	const repoID = "repo_watcher_retry"
-	const endpoint = "https://test.sageox.ai"
-	require.NoError(t, config.SaveProjectConfig(repo, &config.ProjectConfig{RepoID: repoID, Endpoint: endpoint}))
-	cache := filepath.Join(paths.LedgerSessionCacheBase(repoID, endpoint), "sessions", "retryable")
-	require.NoError(t, os.MkdirAll(cache, 0o700))
+	for _, tc := range []struct {
+		name          string
+		duringCatchUp bool
+	}{
+		{"turn read by the catch-up", true},
+		{"turn read by a poll", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_DATA_HOME", t.TempDir())
+			t.Setenv("XDG_CACHE_HOME", t.TempDir())
+			t.Setenv("OX_XDG_DISABLE", "")
+			repo, err := filepath.EvalSymlinks(t.TempDir())
+			require.NoError(t, err)
+			const repoID = "repo_watcher_retry"
+			const endpoint = "https://test.sageox.ai"
+			require.NoError(t, config.SaveProjectConfig(repo, &config.ProjectConfig{RepoID: repoID, Endpoint: endpoint}))
+			cache := filepath.Join(paths.LedgerSessionCacheBase(repoID, endpoint), "sessions", "retryable")
+			require.NoError(t, os.MkdirAll(cache, 0o700))
 
-	const nativeID = "77b16b24-5b7d-4598-aacf-4c9afeb4b5ca"
-	first := fmt.Sprintf("{\"type\":\"user\",\"sessionId\":%q,\"cwd\":%q}\n", nativeID, repo)
-	// a path component that is a regular file cannot be resolved, which is
-	// neither inside nor outside the repo: the turn is uncheckable for now
-	blocker := filepath.Join(repo, "node")
-	require.NoError(t, os.WriteFile(blocker, []byte("not a directory yet"), 0o600))
-	second := fmt.Sprintf("{\"type\":\"assistant\",\"sessionId\":%q,\"cwd\":%q}\n", nativeID, filepath.Join(blocker, "pkg"))
-	mgr := newTestWatcherManager(t)
-	source := filepath.Join(mgr.homeDir(), ".claude", "projects", "owned", nativeID+".jsonl")
-	require.NoError(t, os.MkdirAll(filepath.Dir(source), 0o755))
-	require.NoError(t, os.WriteFile(source, []byte(first), 0o600))
-	state := session.RecordingState{
-		AgentID: "OxWatcherRetry", WorkspacePath: repo, SessionPath: cache,
-		AdapterName: "claude-code", SessionFile: source, WatchMode: "tail",
-		SourceOffset: int64(len(first)), ParentPID: os.Getpid(),
+			const nativeID = "77b16b24-5b7d-4598-aacf-4c9afeb4b5ca"
+			first := fmt.Sprintf("{\"type\":\"user\",\"sessionId\":%q,\"cwd\":%q}\n", nativeID, repo)
+			// a path component that is a regular file cannot be resolved, which is
+			// neither inside nor outside the repo: the turn is uncheckable for now
+			blocker := filepath.Join(repo, "node")
+			require.NoError(t, os.WriteFile(blocker, []byte("not a directory yet"), 0o600))
+			second := fmt.Sprintf("{\"type\":\"assistant\",\"sessionId\":%q,\"cwd\":%q}\n", nativeID, filepath.Join(blocker, "pkg"))
+			mgr := newTestWatcherManager(t)
+			source := filepath.Join(mgr.homeDir(), ".claude", "projects", "owned", nativeID+".jsonl")
+			require.NoError(t, os.MkdirAll(filepath.Dir(source), 0o755))
+			require.NoError(t, os.WriteFile(source, []byte(first), 0o600))
+			state := session.RecordingState{
+				AgentID: "OxWatcherRetry", WorkspacePath: repo, SessionPath: cache,
+				AdapterName: "claude-code", SessionFile: source, WatchMode: "tail",
+				SourceOffset: int64(len(first)), ParentPID: os.Getpid(),
+			}
+			writeRecordingState(t, filepath.Join(cache, recordingMarker), state)
+			appendSecond := func() error {
+				f, err := os.OpenFile(source, os.O_APPEND|os.O_WRONLY, 0)
+				if err != nil {
+					return err
+				}
+				_, err = f.WriteString(second)
+				return errors.Join(err, f.Close())
+			}
+			var appendErr error
+			adapter := &readHookAdapter{testAdapter: testAdapter{name: "claude-code"}, caughtUp: make(chan struct{})}
+			if tc.duringCatchUp {
+				adapter.beforeCatchUp = func() { appendErr = appendSecond() }
+			}
+			adapters.Register(adapter)
+			t.Cleanup(func() {
+				mgr.StopAll()
+				adapters.Unregister("claude-code")
+			})
+			raw := filepath.Join(cache, "raw.jsonl")
+			require.NoError(t, mgr.StartWatch("retryable", source, "claude-code", filepath.Dir(cache), cache))
+			select {
+			case <-adapter.caughtUp:
+			case <-time.After(10 * time.Second):
+				t.Fatal("the watcher never made its catch-up read")
+			}
+			require.NoError(t, appendErr)
+			if !tc.duringCatchUp {
+				require.NoError(t, appendSecond())
+			}
+			// A second read of the turn proves the first was checked and deferred,
+			// and that the watcher kept polling with its cursor in place.
+			require.Eventually(t, func() bool { return adapter.turnReads.Load() >= 2 },
+				10*pollInterval, 10*time.Millisecond, "the watcher must read the uncheckable turn again")
+			deferred, err := session.LoadRecordingStateForAgent(repo, state.AgentID)
+			require.NoError(t, err)
+			require.NotNil(t, deferred)
+			assert.False(t, deferred.SourceRejected, "an uncheckable turn is not proof of a foreign one")
+			assert.Equal(t, int64(len(first)), deferred.SourceOffset, "the cursor must wait at the uncheckable turn")
+
+			// the directory becomes checkable; the same watcher must pick the turn up
+			require.NoError(t, os.Remove(blocker))
+			require.NoError(t, os.MkdirAll(blocker, 0o755))
+			// The property is that capture resumes at all, not how fast, so the
+			// window is generous while the poll stays tight.
+			require.Eventually(t, func() bool {
+				updated, err := session.LoadRecordingStateForAgent(repo, state.AgentID)
+				return err == nil && updated != nil && updated.SourceOffset == int64(len(first)+len(second))
+			}, 10*pollInterval+5*time.Second, 50*time.Millisecond, "capture must resume once the turn can be checked")
+			mgr.StopAll()
+			assert.Equal(t, 1, countRawJSONLEntries(t, raw))
+		})
 	}
-	writeRecordingState(t, filepath.Join(cache, recordingMarker), state)
-	adapters.Register(&testAdapter{name: "claude-code"})
-	t.Cleanup(func() {
-		mgr.StopAll()
-		adapters.Unregister("claude-code")
-	})
-	raw := filepath.Join(cache, "raw.jsonl")
-	require.NoError(t, mgr.StartWatch("retryable", source, "claude-code", filepath.Dir(cache), cache))
-	require.Eventually(t, func() bool { _, err := os.Stat(raw); return err == nil }, time.Second, 10*time.Millisecond)
-
-	f, err := os.OpenFile(source, os.O_APPEND|os.O_WRONLY, 0)
-	require.NoError(t, err)
-	_, err = f.WriteString(second)
-	require.NoError(t, err)
-	require.NoError(t, f.Close())
-	time.Sleep(pollInterval + 500*time.Millisecond) // at least one poll sees the uncheckable turn
-	deferred, err := session.LoadRecordingStateForAgent(repo, state.AgentID)
-	require.NoError(t, err)
-	require.NotNil(t, deferred)
-	assert.False(t, deferred.SourceRejected, "an uncheckable turn is not proof of a foreign one")
-	assert.Equal(t, int64(len(first)), deferred.SourceOffset, "the cursor must wait at the uncheckable turn")
-
-	// the directory becomes checkable; the same watcher must pick the turn up
-	require.NoError(t, os.Remove(blocker))
-	require.NoError(t, os.MkdirAll(blocker, 0o755))
-	// The property is that capture resumes at all, not how fast: on a loaded CI
-	// runner three polls was not always enough (two unrelated PRs failed here on
-	// 2026-10-08), so the window is generous while the poll stays tight.
-	require.Eventually(t, func() bool {
-		updated, err := session.LoadRecordingStateForAgent(repo, state.AgentID)
-		return err == nil && updated != nil && updated.SourceOffset == int64(len(first)+len(second))
-	}, 10*pollInterval+5*time.Second, 50*time.Millisecond, "capture must resume once the turn can be checked")
-	mgr.StopAll()
-	assert.Equal(t, 1, countRawJSONLEntries(t, raw))
 }

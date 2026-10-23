@@ -166,23 +166,26 @@ func runPlanLifecycleVerbOnDir(cmd *cobra.Command, gitRoot, planDir, slug string
 	fields.Reason = flags.Reason
 	fields.SupersededBy = flags.SupersededBy
 
-	changed, err := plan.AppendPlanEvent(cmd.Context(), planDir, kind, fields)
+	// Recorded, committed and pushed exactly like the browser /approve path
+	// (commitPlanEvent). Without the commit, `ox plan approve` wrote
+	// events.jsonl into the working tree and nothing else: the approval existed
+	// on one laptop until some unrelated later commit swept it up. Observed
+	// rather than best-effort-logged so the verb can say when the approval did
+	// not reach teammates.
+	changed, st, err := sharePlanEvent(cmd.Context(), gitRoot, planDir, kind, fields)
 	if err != nil {
 		return fmt.Errorf("record %s event for plan %q: %w", kind, slug, err)
 	}
+	// a no-op still commits and pushes, retrying an earlier event; it is
+	// reported only when that left the plan unshared
 	var share *planShareStatus
-	if changed {
-		// Commit + push the event exactly like the browser /approve path
-		// (commitPlanBestEffort) does. Without this, `ox plan approve` wrote
-		// events.jsonl into the working tree and nothing else: the approval
-		// existed on one laptop until some unrelated later commit swept it up.
-		// Observed rather than best-effort-logged so the verb can say when the
-		// approval did not reach teammates.
-		st := sharePlanDir(gitRoot, planDir)
+	if changed || st.Reason != "" {
 		share = &st
 		if !st.Shared {
 			cli.PrintWarningTo(cmd.ErrOrStderr(), fmt.Sprintf("NOT SHARED — %s recorded locally only: %s. Fix: `%s`", kind, st.Reason, st.Fix))
 		}
+	}
+	if changed {
 		// best-effort, off-by-default caller-driven index report — see
 		// plan_activity.go. Only on an actual change, matching the no-op
 		// re-run contract the rest of this function already honors.
@@ -235,8 +238,9 @@ func currentPlanStatus(planDir string) plan.PlanStatus {
 type planLifecycleResult struct {
 	Changed bool            `json:"changed"`
 	Status  plan.PlanStatus `json:"status,omitempty"`
-	// Share is set only when the verb changed something and so had to be
-	// committed: whether the new status reached teammates.
+	// Share is whether the plan's event reached teammates: set when the verb
+	// changed something, or when a no-op's retry of an earlier event left the
+	// plan unshared.
 	Share *planShareStatus `json:"share,omitempty"`
 }
 

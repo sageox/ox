@@ -28,6 +28,20 @@ func (s *SyncScheduler) backgroundCloneContext() context.Context {
 	return context.Background()
 }
 
+// clonesInFlight reports whether a clone is running: a checkout in progress
+// (background or over IPC), or a background clone not yet in Checkout.
+func (s *SyncScheduler) clonesInFlight() bool {
+	if s.checkouts.Load() > 0 {
+		return true
+	}
+	running := false
+	s.cloneInFlight.Range(func(_, _ any) bool {
+		running = true
+		return false
+	})
+	return running
+}
+
 // isClonePermanentError returns true if the error message indicates a failure
 // that won't resolve on its own (bad credentials, missing permissions, bad URL).
 // Transient errors (network timeout, server 503) return false.
@@ -88,6 +102,12 @@ func (s *SyncScheduler) cloneInBackground(ctx context.Context, cloneURL, repoPat
 	}, nil) // no progress writer for background clones
 
 	if err != nil {
+		// the daemon stopped mid-download: not a clone failure, so no error
+		// and no backoff; the next start clones again
+		if errors.Is(err, errCloneInterrupted) {
+			s.logger.Info("clone stopped by daemon shutdown, will retry on next start", "type", repoType, "path", repoPath)
+			return
+		}
 		s.refreshAfterAuthFailure(ctx, err)
 		s.logger.Error("background clone failed", "type", repoType, "path", repoPath, "error", err)
 
@@ -97,8 +117,9 @@ func (s *SyncScheduler) cloneInBackground(ctx context.Context, cloneURL, repoPat
 			return
 		}
 
-		// ox-baz5.6: another actor is already cloning this exact path (a
-		// concurrent trigger lost the pre-clone lock race) — same "not our
+		// A clone of this path already running comes back as
+		// result.InProgress (below), not as an error. This still catches an
+		// error that wraps a lock timeout or a context error — same "not our
 		// fault, just wait" shape as the semaphore case above, not a real
 		// clone failure worth escalating backoff over.
 		if gitutil.IsPreCloneLockBusy(err) {
@@ -162,6 +183,13 @@ func (s *SyncScheduler) cloneInBackground(ctx context.Context, cloneURL, repoPat
 		return
 	}
 
+	// another actor is already cloning this exact path (ox-baz5.6): not a
+	// clone failure, so no backoff; the next cycle sees its result
+	if result.InProgress {
+		s.logger.Info("another clone already in progress for this path, will retry next cycle", "type", repoType, "path", repoPath)
+		return
+	}
+
 	// determine repo ID for issue tracking
 	repoID := workspaceID
 	if repoType == "ledger" {
@@ -196,6 +224,9 @@ func (s *SyncScheduler) cloneInBackground(ctx context.Context, cloneURL, repoPat
 			s.logger.Warn("failed to update config last sync after clone", "type", repoType, "path", repoPath, "error", err)
 		}
 		s.recordSyncState(ctx, repoPath)
+		if repoType == "ledger" && s.config.LedgerPath == "" && s.onLedgerCloned != nil {
+			s.onLedgerCloned(repoPath)
+		}
 	}
 
 	// update exists flags so status renders correctly before next Reload()

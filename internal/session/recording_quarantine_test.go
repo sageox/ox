@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -32,35 +33,38 @@ func TestCleanupPreservesUndiscoveredClaudeHookSource(t *testing.T) {
 }
 
 func TestStartRecordingPreservesQuarantinedSource(t *testing.T) {
-	project := setupRecordingTest(t, t.TempDir())
-	native := filepath.Join(t.TempDir(), "native.jsonl")
-	if err := os.WriteFile(native, []byte(`{"type":"session"}`+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	opts := StartRecordingOptions{
-		AgentID: "OxQuarantine", AdapterName: "claude-code", Username: "testuser",
-		SessionFile: native,
-	}
-	state, err := StartRecording(project, opts)
-	if err != nil {
-		t.Fatal(err)
-	}
-	state.SourceRejected = true
-	state.StopIncomplete = true
-	if err := SaveRecordingState(project, state); err != nil {
-		t.Fatal(err)
-	}
-	_, err = StartRecording(project, opts)
-	if !errors.Is(err, ErrQuarantinedSessionPath) {
-		t.Fatalf("a start landing in the quarantined recording's folder must be refused: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(state.SessionPath, recordingFile)); err != nil {
-		t.Fatalf("quarantined marker was lost: %v", err)
-	}
-	held, err := LoadQuarantinedRecordingsForAgent(project, "OxQuarantine")
-	if err != nil || len(held) != 1 || !held[0].SourceRejected {
-		t.Fatalf("the quarantined recording must stay findable: held=%v err=%v", held, err)
-	}
+	// Both recording starts must use the same minute-granular folder name.
+	synctest.Test(t, func(t *testing.T) {
+		project := setupRecordingTest(t, t.TempDir())
+		native := filepath.Join(t.TempDir(), "native.jsonl")
+		if err := os.WriteFile(native, []byte(`{"type":"session"}`+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		opts := StartRecordingOptions{
+			AgentID: "OxQuarantine", AdapterName: "claude-code", Username: "testuser",
+			SessionFile: native,
+		}
+		state, err := StartRecording(project, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		state.SourceRejected = true
+		state.StopIncomplete = true
+		if err := SaveRecordingState(project, state); err != nil {
+			t.Fatal(err)
+		}
+		_, err = StartRecording(project, opts)
+		if !errors.Is(err, ErrQuarantinedSessionPath) {
+			t.Fatalf("a start landing in the quarantined recording's folder must be refused: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(state.SessionPath, recordingFile)); err != nil {
+			t.Fatalf("quarantined marker was lost: %v", err)
+		}
+		held, err := LoadQuarantinedRecordingsForAgent(project, "OxQuarantine")
+		if err != nil || len(held) != 1 || !held[0].SourceRejected {
+			t.Fatalf("the quarantined recording must stay findable: held=%v err=%v", held, err)
+		}
+	})
 }
 
 // A quarantined recording is held for review, not recording: it must not be the

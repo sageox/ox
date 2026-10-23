@@ -1,7 +1,10 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +12,7 @@ import (
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/constants"
+	"github.com/sageox/ox/internal/pet"
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/internal/tips"
 	"github.com/sageox/ox/internal/ui"
@@ -64,6 +68,7 @@ var (
 	integratePiFlag       bool
 	integrateOMPFlag      bool
 	integrateDroidFlag    bool
+	integrateCursorFlag   bool
 	integrateAllFlag      bool
 	integrateForceFlag    bool
 )
@@ -76,7 +81,7 @@ var integrateCmd = &cobra.Command{
 Supported agents:
   Claude Code (default)    JSON hooks in ~/.claude/settings.json
 
-Other agents (Codex, Gemini, Amp, OpenCode, Pi, OMP) can be installed with
+Other agents (Codex, Cursor Agents Window, Gemini, Amp, OpenCode, Pi, OMP) can be installed with
 their respective flags. Run 'ox init' to set up the project with appropriate
 guidance files.
 
@@ -103,7 +108,8 @@ Other agents can be installed with their respective flags:
   --opencode  OpenCode plugin
   --pi        Pi coding agent integration (AGENTS.md marker)
   --omp       OMP integration (.omp/AGENTS.md marker)
-  --droid     Factory Droid hooks`,
+  --droid     Factory Droid hooks
+  --cursor    Cursor Agents Window hooks`,
 	RunE: runIntegrateInstall,
 }
 
@@ -128,7 +134,7 @@ var integrateListCmd = &cobra.Command{
 func hasAnyAgentFlag() bool {
 	return integratePiFlag || integrateOMPFlag || integrateAmpFlag ||
 		integrateCodexFlag || integrateGeminiFlag || integrateOpenCodeFlag ||
-		integrateDroidFlag || integrateUserFlag
+		integrateDroidFlag || integrateCursorFlag || integrateUserFlag
 }
 
 // integrateAgentInfo pairs adapter metadata with its current install status.
@@ -276,6 +282,24 @@ func runIntegrateInstall(cmd *cobra.Command, args []string) error {
 	// if no agent-specific flags, show interactive multi-select
 	if !hasAnyAgentFlag() && cli.IsInteractive() {
 		return runIntegrateInteractive()
+	}
+
+	// Cursor Agents Window installation
+	if integrateCursorFlag {
+		if integrateUserFlag {
+			return fmt.Errorf("user-level Cursor Agents Window integration is unsupported")
+		}
+		if err := installExternalAdapterHooks("cursor", false); err != nil {
+			return fmt.Errorf("installing Cursor Agents Window integration: %w", err)
+		}
+		if err := installAdapterInventory(findGitRoot(), "cursor"); err != nil {
+			return fmt.Errorf("installing Cursor Agents Window assets: %w", err)
+		}
+
+		cli.PrintSuccess("Installed Cursor Agents Window project-level integration")
+		userCfg, _ := config.LoadUserConfig()
+		tips.MaybeShow("hooks", tips.WhenMinimal, false, !userCfg.AreTipsEnabled(), false)
+		return nil
 	}
 
 	// Pi installation
@@ -442,6 +466,24 @@ func runIntegrateUninstall(cmd *cobra.Command, args []string) error {
 		if err := uninstallAllIntegrations(integrateForceFlag); err != nil {
 			return fmt.Errorf("uninstalling integrations: %w", err)
 		}
+		return nil
+	}
+
+	// Cursor Agents Window uninstallation
+	if integrateCursorFlag {
+		if integrateUserFlag {
+			return fmt.Errorf("user-level Cursor Agents Window integration is unsupported")
+		}
+		if findGitRoot() == "" {
+			return fmt.Errorf("uninstalling Cursor Agents Window integration: not in a git repository")
+		}
+		if err := uninstallExternalAdapterHooks("cursor", false); err != nil {
+			return fmt.Errorf("uninstalling Cursor Agents Window integration: %w", err)
+		}
+
+		fmt.Println("✓ Cursor Agents Window project-level integration uninstalled")
+		userCfg, _ := config.LoadUserConfig()
+		tips.MaybeShow("hooks", tips.WhenMinimal, false, !userCfg.AreTipsEnabled(), false)
 		return nil
 	}
 
@@ -705,6 +747,22 @@ func uninstallAllIntegrations(force bool) error {
 		installed = append(installed, "OMP (project)")
 	}
 
+	// check Cursor Agents Window
+	cursorRemovable := hasExternalAdapterHooksToRemove("cursor", false)
+	if cursorRemovable {
+		installed = append(installed, "Cursor Agents Window (project)")
+	}
+
+	// check the Oxy pet (Claude Code, user scope)
+	petInstaller := newPetInstaller()
+	petEnabled, petErr := petPresent(petInstaller.Dir)
+	if petErr != nil {
+		return fmt.Errorf("check the Oxy pet: %w", petErr)
+	}
+	if petEnabled {
+		installed = append(installed, "Oxy pet (Claude Code, user)")
+	}
+
 	// check git commit hooks
 	gitRoot := findGitRoot()
 	if gitRoot != "" && HasGitHooks(gitRoot) {
@@ -784,6 +842,20 @@ func uninstallAllIntegrations(force bool) error {
 			errors = append(errors, fmt.Sprintf("OMP (project): %v", err))
 		}
 	}
+	if cursorRemovable {
+		if err := uninstallExternalAdapterHooks("cursor", false); err != nil {
+			errors = append(errors, fmt.Sprintf("Cursor Agents Window (project): %v", err))
+		}
+	}
+	var petSteps []string
+	if petEnabled {
+		res, err := petInstaller.Disable(context.Background())
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("Oxy pet: %v", err))
+		} else {
+			petSteps = res.ManualSteps
+		}
+	}
 	if gitRoot != "" {
 		if err := UninstallGitHooks(gitRoot); err != nil {
 			errors = append(errors, fmt.Sprintf("Git commit hooks: %v", err))
@@ -794,6 +866,12 @@ func uninstallAllIntegrations(force bool) error {
 		return fmt.Errorf("some uninstalls failed: %s", strings.Join(errors, "; "))
 	}
 
+	if len(petSteps) > 0 {
+		// Without the claude CLI ox can remove Oxy's files but not
+		// Claude Code's record of the plugin; say what is left.
+		printSteps(os.Stdout, "Integrations uninstalled. To finish removing Oxy, in Claude Code run:", petSteps)
+		return nil
+	}
 	fmt.Println(ui.PassStyle.Render("✓") + " All integrations uninstalled")
 	return nil
 }
@@ -863,6 +941,7 @@ func init() {
 	_ = integrateInstallCmd.Flags().MarkHidden("omp")
 	integrateInstallCmd.Flags().BoolVar(&integrateDroidFlag, "droid", false, "install Factory Droid hooks instead of Claude Code hooks")
 	_ = integrateInstallCmd.Flags().MarkHidden("droid")
+	integrateInstallCmd.Flags().BoolVar(&integrateCursorFlag, "cursor", false, "install Cursor Agents Window hooks instead of Claude Code hooks")
 
 	// uninstall flags
 	integrateUninstallCmd.Flags().BoolVar(&integrateUserFlag, "user", false, "uninstall from user-level config")
@@ -882,6 +961,7 @@ func init() {
 	_ = integrateUninstallCmd.Flags().MarkHidden("omp")
 	integrateUninstallCmd.Flags().BoolVar(&integrateDroidFlag, "droid", false, "uninstall Factory Droid hooks instead of Claude Code hooks")
 	_ = integrateUninstallCmd.Flags().MarkHidden("droid")
+	integrateUninstallCmd.Flags().BoolVar(&integrateCursorFlag, "cursor", false, "uninstall Cursor Agents Window hooks instead of Claude Code hooks")
 	_ = integrateUninstallCmd.Flags().MarkHidden("all")
 	_ = integrateUninstallCmd.Flags().MarkHidden("force")
 
@@ -891,4 +971,21 @@ func init() {
 
 	integrateCmd.GroupID = "agent-interface"
 	rootCmd.AddCommand(integrateCmd)
+}
+
+// petPresent reports whether the Oxy mod folder exists. Only "not there"
+// means absent: a folder ox cannot inspect is an error, so bulk uninstall
+// never reports success over a pet it could not see.
+func petPresent(dir string) (bool, error) {
+	if err := pet.RecoverSwap(dir); err != nil {
+		return false, err
+	}
+	_, err := os.Stat(dir)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	return false, err
 }

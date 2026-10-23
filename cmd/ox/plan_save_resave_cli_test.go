@@ -477,7 +477,9 @@ func TestPlanSaveFile_RevisionNeverOverwritesAnUnsnapshottedPrior(t *testing.T) 
 				if !strings.Contains(string(got), strings.TrimSpace(marker)) {
 					t.Fatal("refused save still overwrote the uncommitted prior revision")
 				}
-				if !strings.Contains(err.Error(), "NOT overwritten") {
+				// the save refuses before writing anything while the Ledger
+				// is locked, so it says nothing was saved
+				if !strings.Contains(err.Error(), "nothing was saved") {
 					t.Errorf("error does not tell the user the prior revision is intact: %v", err)
 				}
 				return

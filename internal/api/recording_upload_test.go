@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -213,4 +214,49 @@ func TestConfirmRecordingUpload_EscapesRecordingID(t *testing.T) {
 
 	assert.Equal(t, "/api/v1/teams/team_1/recordings/..%2F..%2Fadmin%3Fx=1/confirm", escapedPath)
 	assert.Empty(t, rawQuery)
+}
+
+// TestConfirmRecordingUpload_AcceptedIsPending: a 202 from confirm comes back
+// as Pending with the server's Retry-After; every other 2xx is not pending.
+// Failure prevented: a 202 ("received, still checking") decoded exactly like a
+// 200, so the caller reports a file as imported that the server may still
+// refuse.
+func TestConfirmRecordingUpload_AcceptedIsPending(t *testing.T) {
+	tests := []struct {
+		name        string
+		status      int
+		retryAfter  string
+		body        string
+		wantPending bool
+		wantWait    time.Duration
+		wantHas     bool
+	}{
+		{"202 with Retry-After", http.StatusAccepted, "5", `{"status":"verifying"}`, true, 5 * time.Second, true},
+		{"202 with Retry-After 0", http.StatusAccepted, "0", `{"status":"verifying"}`, true, 0, true},
+		{"202 with Retry-After 00", http.StatusAccepted, "00", `{"status":"verifying"}`, true, 0, true},
+		{"202 without Retry-After", http.StatusAccepted, "", `{"status":"verifying"}`, true, 0, false},
+		{"202 with an empty body", http.StatusAccepted, "3", "", true, 3 * time.Second, true},
+		{"202 with an unreadable Retry-After", http.StatusAccepted, "soon", `{}`, true, 0, false},
+		{"200 is accepted", http.StatusOK, "5", `{"id":"rec_1","status":"processing"}`, false, 0, false},
+		{"201 is accepted", http.StatusCreated, "", `{"id":"rec_1"}`, false, 0, false},
+		{"204 is accepted", http.StatusNoContent, "", "", false, 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tt.retryAfter != "" {
+					w.Header().Set("Retry-After", tt.retryAfter)
+				}
+				w.WriteHeader(tt.status)
+				_, _ = io.WriteString(w, tt.body)
+			}))
+			defer srv.Close()
+
+			resp, err := NewRepoClientWithEndpoint(srv.URL).ConfirmRecordingUpload(t.Context(), ContextTypeTeam, "team_1", "rec_1", nil)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantPending, resp.Pending, "pending")
+			assert.Equal(t, tt.wantWait, resp.RetryAfter, "retry after")
+			assert.Equal(t, tt.wantHas, resp.HasRetryAfter, "has retry after")
+		})
+	}
 }

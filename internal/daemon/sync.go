@@ -55,10 +55,6 @@ import (
 
 // Sync timing constants - extracted for clarity and testability.
 const (
-	// minTeamContextFetchAge is the minimum age before re-fetching a team context.
-	// Team contexts are shared across repos, so we use a shorter interval for fast sync.
-	minTeamContextFetchAge = 15 * time.Second
-
 	// teamDiscoveryInterval is how often we re-fetch the team list from the API,
 	// independent of credential token expiry. This ensures new teams are discovered
 	// without waiting for the next credential refresh.
@@ -178,6 +174,7 @@ type SyncScheduler struct {
 	cloneSem      chan struct{}  // semaphore limiting concurrent clones
 	cloneInFlight sync.Map       // tracks workspace IDs with clone in progress (dedup)
 	cloneWg       sync.WaitGroup // tracks in-flight background clone goroutines
+	checkouts     atomic.Int32   // Checkout calls running, background or over IPC
 
 	// cloneMu guards cloneWg.Add against a concurrent Wait during shutdown.
 	// Without this, a pullChanges goroutine still running after ctx cancel
@@ -198,12 +195,11 @@ type SyncScheduler struct {
 	configSyncSkipped sync.Map
 
 	// test hooks (nil in production)
-	onBeforeCloneSem         func()        // called just before acquiring cloneSem; tests use this to observe blocking
-	cloneSemTimeoutOverride  time.Duration // override cloneSemTimeout for tests (0 = use default)
-	preCloneLockWaitOverride time.Duration // override the pre-clone lock's wait budget for tests (0 = use gitutil.PreCloneLockTimeout+10s)
-	gcAsyncTestHook          func()        // called at the start of TriggerGCAsync's goroutine, before runTriggerGC; tests use this to hold the goroutine open deterministically
-	gcSwapWindowTestHook     func()        // called right after runBlueGreenGCOpts writes .gc-swap-lock, before the rename; tests use this to observe the lock file mid-swap
-	retractLockedTestHook    func()        // called on entry to retractOrphanedDrafts' locked closure; tests use it to prove the reaper reached locked revalidation rather than timing out on the lock
+	onBeforeCloneSem        func()        // called just before acquiring cloneSem; tests use this to observe blocking
+	cloneSemTimeoutOverride time.Duration // override cloneSemTimeout for tests (0 = use default)
+	gcAsyncTestHook         func()        // called at the start of TriggerGCAsync's goroutine, before runTriggerGC; tests use this to hold the goroutine open deterministically
+	gcSwapWindowTestHook    func()        // called right after runBlueGreenGCOpts writes .gc-swap-lock, before the rename; tests use this to observe the lock file mid-swap
+	retractLockedTestHook   func()        // called on entry to retractOrphanedDrafts' locked closure; tests use it to prove the reaper reached locked revalidation rather than timing out on the lock
 
 	// disableSymlinksTestHook replaces ledger.DisableSymlinks in
 	// pullManagedRepo; tests use it to make the protection fail.
@@ -213,6 +209,8 @@ type SyncScheduler struct {
 	onActivity   func()                                                           // called on any sync activity
 	onTelemetry  func(syncType, operation, status string, duration time.Duration) // called on sync complete for telemetry
 	getAuthToken func() string                                                    // returns cached auth token from heartbeat
+
+	onLedgerCloned func(ledgerPath string)
 
 	// issues tracker for health check system
 	issues *IssueTracker
@@ -460,6 +458,24 @@ func (s *SyncScheduler) SetTracer(t *observability.DaemonTracer) {
 // SetEventBus sets the event bus for emitting sync events.
 func (s *SyncScheduler) SetEventBus(bus *hooks.EventBus) {
 	s.eventBus = bus
+}
+
+// gcCheckInterval is how often Start checks for workspaces due a GC reclone,
+// or 0 for never. Never under disposable_machine: an hour into a job, the
+// first check would reclone the Ledger, because the daemon's first clone is a
+// full clone and GC upgrades every full clone to a partial one.
+func (s *SyncScheduler) gcCheckInterval() time.Duration {
+	if s.config.ProjectRoot == "" || s.config.DisposableMachine {
+		return 0
+	}
+	return s.config.GCCheckInterval
+}
+
+// SetLedgerClonedCallback registers fn to run when a background clone lands
+// the Ledger this scheduler started without (config.LedgerPath empty). Call it
+// before Start.
+func (s *SyncScheduler) SetLedgerClonedCallback(fn func(ledgerPath string)) {
+	s.onLedgerCloned = fn
 }
 
 // SetGlobalSyncLease wires the per-endpoint global-sync leader-election
@@ -819,7 +835,9 @@ func (s *SyncScheduler) waitClones(timeout time.Duration) {
 // Start runs the scheduler until cancellation, then joins the delayed startup
 // pull before returning. Tracked background clones receive a bounded drain period.
 func (s *SyncScheduler) Start(ctx context.Context) {
-	s.ctx = ctx
+	if s.ctx == nil { // the daemon binds it before the IPC server starts
+		s.ctx = ctx
+	}
 
 	// load initial workspace state from config
 	if err := s.workspaceRegistry.LoadFromConfig(); err != nil {
@@ -897,8 +915,8 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 	// GC reclone ticker — checks hourly if any workspace needs a fresh reclone
 	var gcTicker *time.Ticker
 	var gcChan <-chan time.Time
-	if s.config.GCCheckInterval > 0 && s.config.ProjectRoot != "" {
-		gcTicker = time.NewTicker(s.config.GCCheckInterval)
+	if every := s.gcCheckInterval(); every > 0 {
+		gcTicker = time.NewTicker(every)
 		gcChan = gcTicker.C
 		defer gcTicker.Stop()
 	}
@@ -1439,7 +1457,7 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 		// Without this, hourly directories computed at clone time go stale and
 		// new murmur files pulled from remote are not materialized on disk.
 		if refreshSparse {
-			if err := ledger.ConfigureSparseCheckout(s.config.LedgerPath); err != nil {
+			if err := ledger.RefreshSparseCheckout(ctx, s.config.LedgerPath); err != nil {
 				s.logger.Warn("failed to refresh ledger sparse checkout", "error", err)
 			}
 		}
@@ -1472,6 +1490,11 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 		}
 
 		s.clearDisprovedBySkip("ledger", result.SkipReason)
+		if s.issues != nil {
+			// a skipped pull still found a cloned ledger; a clone_failed issue
+			// from before an out-of-band repair (`ox doctor --fix`) is stale
+			s.issues.ClearIssue(IssueTypeCloneFailed, "ledger")
+		}
 
 		// remote-unchanged or recently-fetched: update sync timestamps
 		if result.SkipReason == "remote unchanged" || result.SkipReason == "recently fetched" {
@@ -2371,9 +2394,25 @@ func isValidRepoPath(path string) bool {
 	return false
 }
 
+// checkoutComplete reports whether payload's repo is already cloned: it has a
+// .git, and a team context also has the .sageox/ its two-phase clone
+// materializes last.
+func checkoutComplete(payload CheckoutPayload) bool {
+	if _, err := os.Stat(filepath.Join(payload.RepoPath, ".git")); err != nil {
+		return false
+	}
+	if payload.RepoType != "team-context" {
+		return true
+	}
+	_, err := os.Stat(filepath.Join(payload.RepoPath, ".sageox"))
+	return err == nil
+}
+
 // Checkout clones a repository if it doesn't exist.
 // Sends progress updates via ProgressWriter during long operations.
 // Uses cloneSem to bound concurrent clone operations (blocks until a slot is available).
+// Returns InProgress, at once, when another clone of the same path holds its
+// pre-clone lock.
 // After successful clone of ledger/team-context repos, creates AGENTS.md.
 // Checkout clones a repository to the specified path.
 //
@@ -2397,6 +2436,12 @@ func isValidRepoPath(path string) bool {
 // │ - Workspace registry cache invalidation                                     │
 // └─────────────────────────────────────────────────────────────────────────────┘
 func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWriter) (*CheckoutResult, error) {
+	// a running checkout is pending work for the inactivity exit (clonesInFlight):
+	// IPC traffic counts as activity only when a message arrives, not while a
+	// long clone it asked for is still downloading
+	s.checkouts.Add(1)
+	defer s.checkouts.Add(-1)
+
 	// validate path before any operations to prevent path traversal attacks
 	if !isValidRepoPath(payload.RepoPath) {
 		return nil, ErrInvalidRepoPath
@@ -2410,97 +2455,11 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 		return nil, fmt.Errorf("create parent directory: %w", err)
 	}
 
-	// check if already exists
-	info, statErr := os.Stat(payload.RepoPath)
-	if statErr == nil && info.IsDir() {
-		// directory exists - check if it's a git repo
-		gitDir := filepath.Join(payload.RepoPath, ".git")
-		if _, err := os.Stat(gitDir); err == nil {
-			// for team-context repos, detect incomplete two-phase clones
-			// (.git exists but .sageox/ never materialized)
-			incomplete := false
-			if payload.RepoType == "team-context" {
-				sageoxDir := filepath.Join(payload.RepoPath, ".sageox")
-				if _, sErr := os.Stat(sageoxDir); os.IsNotExist(sErr) {
-					incomplete = true
-					s.logger.Warn("checkout: .git exists but .sageox missing, treating as incomplete clone",
-						"path", payload.RepoPath)
-					backupPath := fmt.Sprintf("%s.bak.%d", payload.RepoPath, time.Now().Unix())
-					if rErr := os.Rename(payload.RepoPath, backupPath); rErr != nil {
-						s.logger.Error("checkout: failed to move incomplete clone aside", "error", rErr)
-					}
-				}
-			}
-			if !incomplete {
-				s.logger.Debug("checkout: repo already exists", "path", payload.RepoPath)
-				result.AlreadyExists = true
-				return result, nil
-			}
-			// fall through to clone below
-		} else if isCacheOnlyDir(payload.RepoPath) {
-			// CodeDB opened its shared index before the first clone: keep the
-			// cache in place; adoptCacheOnlyTarget carries it into the clone.
-			s.logger.Debug("checkout: target holds only a CodeDB cache, keeping it", "path", payload.RepoPath)
-		} else {
-			// directory exists but not a git repo - self-healing: move aside and clone fresh
-			// this handles corrupt/incomplete clones that need recovery
-			backupPath := fmt.Sprintf("%s.bak.%d", payload.RepoPath, time.Now().Unix())
-			s.logger.Warn("checkout: directory exists but not a git repo, moving aside for self-healing",
-				"path", payload.RepoPath, "backup", backupPath)
-			if err := os.Rename(payload.RepoPath, backupPath); err != nil {
-				// if rename fails, log and continue - git clone will fail if there's a real problem
-				s.logger.Error("checkout: failed to move directory aside, will attempt clone anyway",
-					"path", payload.RepoPath, "error", err)
-			}
-		}
-		// continue with clone below
-	}
-
-	// acquire clone slot — blocks until a slot is available (up to maxConcurrentClones)
-	// replaces the old single-boolean lock that rejected concurrent clones with an error,
-	// which triggered unnecessary exponential backoff on internal contention
-	if s.onBeforeCloneSem != nil {
-		s.onBeforeCloneSem()
-	}
-	// acquire clone slot with timeout to prevent indefinite blocking
-	semTimeout := s.cloneSemTimeoutOverride
-	if semTimeout == 0 {
-		semTimeout = cloneSemTimeout
-	}
-	select {
-	case s.cloneSem <- struct{}{}:
-		// acquired
-	case <-time.After(semTimeout):
-		return nil, fmt.Errorf("%w after %v: all %d slots busy", ErrCloneSemaphoreTimeout, semTimeout, maxConcurrentClones)
-	}
-	defer func() { <-s.cloneSem }()
-
-	// TOCTOU fix: re-verify directory state after acquiring semaphore.
-	// While waiting for a slot, another process may have completed the clone.
-	if info, statErr := os.Stat(payload.RepoPath); statErr == nil && info.IsDir() {
-		gitDir := filepath.Join(payload.RepoPath, ".git")
-		if _, err := os.Stat(gitDir); err == nil {
-			if payload.RepoType != "team-context" {
-				// non-team-context: .git exists = already cloned
-				s.logger.Debug("checkout: repo appeared while waiting for semaphore", "path", payload.RepoPath)
-				result.AlreadyExists = true
-				return result, nil
-			}
-			// team-context: check if .sageox/ now exists (clone completed by another process)
-			sageoxDir := filepath.Join(payload.RepoPath, ".sageox")
-			if _, sErr := os.Stat(sageoxDir); sErr == nil {
-				s.logger.Debug("checkout: team-context completed while waiting for semaphore", "path", payload.RepoPath)
-				result.AlreadyExists = true
-				return result, nil
-			}
-		}
-	}
-
-	// validate clone URL to prevent SSRF attacks
-	// must be done before any network operations
-	if err := isValidCloneURL(payload.CloneURL); err != nil {
-		s.logger.Warn("checkout: rejected unsafe clone URL", "url", payload.CloneURL, "error", err)
-		return nil, fmt.Errorf("invalid clone URL: %w", err)
+	// a finished clone needs no lock to recognize
+	if checkoutComplete(payload) {
+		s.logger.Debug("checkout: repo already exists", "path", payload.RepoPath)
+		result.AlreadyExists = true
+		return result, nil
 	}
 
 	// ox-baz5.6: everything from here through a completed clone runs under a
@@ -2508,50 +2467,120 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 	// same target (a background clone retry, GC self-heal, and a codedb
 	// indexing kickoff have all been observed firing within ~1-2s of each
 	// other) would otherwise both pass the exists-check above and both start
-	// cloning into the same destination — the cloneSem acquired earlier
+	// cloning into the same destination — the cloneSem acquired below
 	// bounds TOTAL concurrent clones, not clones-per-target. gitutil.
 	// WithRepoLock can't cover this phase: it keys on <clone>/.git/ox-sync,
 	// which doesn't exist until a clone has already created a .git
 	// directory. See gitutil.WithPreCloneLock's doc comment for the full
 	// reproduction.
-	lockWait := s.preCloneLockWaitOverride
-	if lockWait == 0 {
-		lockWait = gitutil.PreCloneLockTimeout + 10*time.Second
-	}
-	lockCtx, lockCancel := context.WithTimeout(context.Background(), lockWait)
-	defer lockCancel()
-	err := gitutil.WithPreCloneLock(lockCtx, payload.RepoPath, func() error {
-		// Re-verify directory state now that we hold the lock — a peer that
-		// raced us here may have finished cloning while we waited for it
-		// (or for the semaphore slot, above). Mirrors the semaphore's own
-		// TOCTOU recheck.
+	//
+	// The lock is tried, not waited on, and a clone slot is only taken once
+	// it is held. Whoever holds it is cloning this path, and a Ledger clone
+	// holds it for as long as its download runs, which can be many minutes.
+	// A caller that waited would learn nothing it is not told now (the clone
+	// lands on its own), while holding a clone slot for the whole wait: two
+	// `ox doctor --fix` runs during one Ledger download used to fill every
+	// slot, and team-context clones failed with ErrCloneSemaphoreTimeout.
+	acquired, err := gitutil.TryWithPreCloneLock(payload.RepoPath, func() error {
+		// A symlinked target is a coworker's relocation. Moving it aside or
+		// renaming a clone over it could replace the link (and the data behind
+		// it), so refuse before any rename and surface it through doctor.
+		// A symlink to a complete checkout never reaches here (AlreadyExists).
+		if symErr := gitserver.RejectSymlinkTarget(payload.RepoPath); symErr != nil && !checkoutComplete(payload) {
+			s.logger.Error("checkout: refusing symlinked clone target", "path", payload.RepoPath, "error", symErr)
+			s.recordError(filepath.Base(payload.RepoPath), fmt.Sprintf("clone %s failed: %v", payload.RepoType, symErr))
+			return symErr
+		}
+		// Re-verify directory state now that we hold the lock — a peer
+		// that held it may have finished cloning since the check above.
 		if info, statErr := os.Stat(payload.RepoPath); statErr == nil && info.IsDir() {
+			// directory exists - check if it's a git repo
 			gitDir := filepath.Join(payload.RepoPath, ".git")
 			if _, err := os.Stat(gitDir); err == nil {
-				if payload.RepoType != "team-context" {
-					s.logger.Debug("checkout: repo appeared while waiting for pre-clone lock", "path", payload.RepoPath)
+				// for team-context repos, detect incomplete two-phase clones
+				// (.git exists but .sageox/ never materialized). Nobody else
+				// is cloning it: we hold the lock.
+				if !checkoutComplete(payload) {
+					s.logger.Warn("checkout: .git exists but .sageox missing, treating as incomplete clone",
+						"path", payload.RepoPath)
+					backupPath := fmt.Sprintf("%s.bak.%d", payload.RepoPath, time.Now().Unix())
+					if rErr := os.Rename(payload.RepoPath, backupPath); rErr != nil {
+						s.logger.Error("checkout: failed to move incomplete clone aside", "error", rErr)
+					}
+				} else {
+					s.logger.Debug("checkout: repo appeared while acquiring the pre-clone lock", "path", payload.RepoPath)
 					result.AlreadyExists = true
 					return nil
 				}
-				sageoxDir := filepath.Join(payload.RepoPath, ".sageox")
-				if _, sErr := os.Stat(sageoxDir); sErr == nil {
-					s.logger.Debug("checkout: team-context completed while waiting for pre-clone lock", "path", payload.RepoPath)
-					result.AlreadyExists = true
-					return nil
+				// fall through to clone below
+			} else if gitserver.IsCacheOnlyDir(payload.RepoPath) {
+				// CodeDB opened its shared index before the first clone: keep the
+				// cache in place; MoveCloneIntoPlace carries it into the clone.
+				s.logger.Debug("checkout: target holds only a CodeDB cache, keeping it", "path", payload.RepoPath)
+			} else {
+				// directory exists but not a git repo - self-healing: move aside and clone fresh
+				// this handles corrupt/incomplete clones that need recovery
+				backupPath := fmt.Sprintf("%s.bak.%d", payload.RepoPath, time.Now().Unix())
+				s.logger.Warn("checkout: directory exists but not a git repo, moving aside for self-healing",
+					"path", payload.RepoPath, "backup", backupPath)
+				if err := os.Rename(payload.RepoPath, backupPath); err != nil {
+					// if rename fails, log and continue - git clone will fail if there's a real problem
+					s.logger.Error("checkout: failed to move directory aside, will attempt clone anyway",
+						"path", payload.RepoPath, "error", err)
 				}
 			}
+			// continue with clone below
+		}
+
+		// acquire clone slot — blocks until a slot is available (up to maxConcurrentClones)
+		// replaces the old single-boolean lock that rejected concurrent clones with an error,
+		// which triggered unnecessary exponential backoff on internal contention.
+		// Only a lock holder waits here, so at most one waiter per path.
+		// There is no recheck after the wait: another ox clone of this path
+		// would have needed this lock. (Doctor's direct team-context clone
+		// does not take it; a clone into a target that one filled fails
+		// rather than merging into it.)
+		if s.onBeforeCloneSem != nil {
+			s.onBeforeCloneSem()
+		}
+		// acquire clone slot with timeout to prevent indefinite blocking
+		semTimeout := s.cloneSemTimeoutOverride
+		if semTimeout == 0 {
+			semTimeout = cloneSemTimeout
+		}
+		select {
+		case s.cloneSem <- struct{}{}:
+			// acquired
+		case <-time.After(semTimeout):
+			return fmt.Errorf("%w after %v: all %d slots busy", ErrCloneSemaphoreTimeout, semTimeout, maxConcurrentClones)
+		}
+		defer func() { <-s.cloneSem }()
+
+		// validate clone URL to prevent SSRF attacks
+		// must be done before any network operations
+		if err := isValidCloneURL(payload.CloneURL); err != nil {
+			s.logger.Warn("checkout: rejected unsafe clone URL", "url", payload.CloneURL, "error", err)
+			return fmt.Errorf("invalid clone URL: %w", err)
 		}
 
 		// The clone's own network deadline starts HERE, only once we actually
-		// hold the lock — not before waiting for it. Starting it earlier (the
-		// original bug, flagged on review) let a long lock wait consume the
-		// budget: a waiter that acquired the lock after, say, 55s of a 60s
-		// deadline would have its `git clone` killed almost immediately by
-		// "context deadline exceeded", which IsPreCloneLockBusy then
-		// misclassifies as benign lock contention (matches
+		// hold the lock and a clone slot — not before waiting for them.
+		// Starting it earlier (the original bug, flagged on review) let a long
+		// wait consume the budget: a waiter that got through after, say, 55s
+		// of a 60s deadline would have its `git clone` killed almost
+		// immediately by "context deadline exceeded", which IsPreCloneLockBusy
+		// then misclassifies as benign lock contention (matches
 		// context.DeadlineExceeded) — masking a real clone failure as a
 		// harmless retry-next-cycle.
-		cloneCtx, cloneCancel := context.WithTimeout(context.Background(), 60*time.Second)
+		//
+		// The budget depends on what is being cloned: a team context is a
+		// small partial clone, a Ledger is its whole history. See
+		// ledgerCloneTimeout.
+		cloneBudget := teamContextCloneTimeout
+		if payload.RepoType != "team-context" {
+			cloneBudget = ledgerCloneTimeout
+		}
+		cloneCtx, cloneCancel := s.cloneContext(cloneBudget)
 		defer cloneCancel()
 
 		// send progress: connecting
@@ -2595,7 +2624,23 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 			if progress != nil {
 				_ = progress.WriteStage("cloning", "Fetching repository structure...")
 			}
-			mCfg, err := s.twoPhaseClone(cloneCtx, cloneURL, payload.RepoPath, progress)
+			// Clone into a hidden temp sibling and move it into place, like the
+			// ledger: the clone refuses a non-empty target, and a local-only
+			// skeleton (a whisper cache created before the first clone) is
+			// adopted by MoveCloneIntoPlace instead of being set aside in the
+			// teams directory where enumerators would list it as a team.
+			sweepStaleTeamCloneTemps(payload.RepoPath)
+			teamTemp := teamCloneTempPath(payload.RepoPath)
+			defer func() { _ = os.RemoveAll(teamTemp) }() // no-op once renamed away
+			if markErr := markTeamCloneStaging(teamTemp); markErr != nil {
+				// unmarked staging is never swept; the clone itself is unaffected
+				s.logger.Warn("checkout: could not mark team clone staging", "path", teamTemp, "error", markErr)
+			}
+			defer unmarkTeamCloneStaging(teamTemp)
+			mCfg, err := s.twoPhaseClone(cloneCtx, cloneURL, teamTemp, progress)
+			if err == nil {
+				err = gitserver.MoveCloneIntoPlace(teamTemp, payload.RepoPath)
+			}
 			if err != nil {
 				s.logger.Error("checkout: two-phase clone failed", "error", err)
 				// Keyed by pullTeamContext's repoName, the key clearErrors is
@@ -2666,25 +2711,22 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 			_ = os.MkdirAll(parentDir, 0755)
 			cloneCmd.Dir = parentDir
 		}
-		if output, err := cloneCmd.CombinedOutput(); err != nil {
-			sanitizedOutput := gitutil.SanitizeOutput(string(output))
-			s.logger.Error("checkout: clone failed", "error", err, "output", sanitizedOutput)
-			s.recordError(payload.RepoType, fmt.Sprintf("clone %s failed: %v", payload.RepoType, err))
-			if sanitizedOutput != "" {
-				return fmt.Errorf("git clone failed: %s", sanitizedOutput)
-			}
-			return fmt.Errorf("git clone failed: %w", err)
+		cloneStart := time.Now()
+		stopProgress := s.watchCloneProgress(tempPath, cloneStart, progress)
+		output, err := cloneCmd.CombinedOutput()
+		received := stopProgress()
+		if err != nil {
+			return s.ledgerCloneError(cloneCtx, payload.RepoType, cloneBudget, time.Since(cloneStart), received, output, err)
 		}
+		s.logger.Info("checkout: clone downloaded", "path", payload.RepoPath,
+			"elapsed", time.Since(cloneStart).Round(time.Millisecond), "size_bytes", dirSize(tempPath))
 
 		// verify the temp clone is actually complete before it ever becomes
 		// visible at payload.RepoPath — an early-EOF clone can exit non-zero
 		// (caught above) or, less commonly, leave a .git without a
 		// resolvable HEAD despite git reporting success.
-		if _, err := os.Stat(filepath.Join(tempPath, ".git")); err != nil {
-			return fmt.Errorf("clone verification failed: temp clone has no .git directory: %w", err)
-		}
-		if err := exec.CommandContext(cloneCtx, "git", "-C", tempPath, "rev-parse", "--verify", "-q", "HEAD").Run(); err != nil {
-			return fmt.Errorf("clone verification failed: temp clone's HEAD does not resolve: %w", err)
+		if err := gitserver.VerifyClone(cloneCtx, tempPath); err != nil {
+			return err
 		}
 
 		// create AGENTS.md for newly cloned ledger repos — inside the temp
@@ -2702,33 +2744,19 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 
 		// atomic swap: the only moment payload.RepoPath goes from
 		// non-existent to a complete, verified clone. If another actor
-		// somehow created it between our lock-holder recheck above and now
-		// (shouldn't happen — this whole closure runs under the pre-clone
-		// lock for this exact path — but os.Rename onto an existing
-		// directory fails safely rather than merging into it either way),
-		// this fails loudly instead of silently corrupting either side.
-		//
-		// One exception: a target holding only a .sageox/cache skeleton is
-		// not a clone. CodeDB creates its shared index at
-		// <ledger>/.sageox/cache/codedb as soon as it opens, which can be
-		// before the first clone lands. Carry that cache into the temp clone
-		// so the swap succeeds instead of failing "file exists" forever.
-		restoreCache, err := adoptCacheOnlyTarget(tempPath, payload.RepoPath)
-		if err != nil {
-			s.logger.Warn("checkout: could not adopt cache-only target", "path", payload.RepoPath, "error", err)
-		}
-		if err := os.Rename(tempPath, payload.RepoPath); err != nil {
-			// the temp clone is deleted on return; give the adopted cache back
-			restoreCache()
-			return fmt.Errorf("failed to move completed clone into place: %w", err)
-		}
-		return nil
+		// somehow created it meanwhile (shouldn't happen — this whole closure
+		// runs under the pre-clone lock for this exact path), the rename
+		// fails loudly instead of silently corrupting either side. A target
+		// holding only CodeDB's cache is adopted, not refused.
+		return gitserver.MoveCloneIntoPlace(tempPath, payload.RepoPath)
 	})
 	if err != nil {
-		if gitutil.IsPreCloneLockBusy(err) {
-			return nil, fmt.Errorf("another clone is already in progress for %s: %w", payload.RepoPath, err)
-		}
 		return nil, err
+	}
+	if !acquired {
+		s.logger.Info("checkout: another clone of this path is already running", "path", payload.RepoPath, "type", payload.RepoType)
+		result.InProgress = true
+		return result, nil
 	}
 	if result.AlreadyExists {
 		return result, nil
@@ -2777,8 +2805,8 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 	return result, nil
 }
 
-// remoteRefCheck compares the remote tracking branch SHA to the local HEAD SHA via ls-remote.
-// Returns true if they match (nothing new to pull), false if different or on error.
+// remoteRefCheck checks whether the remote tracking branch tip is already in local HEAD.
+// Returns true if equal or an ancestor (nothing new to pull), false otherwise or on error.
 // On error, returns false to fall through to the existing fetch+pull path.
 //
 // Uses the local tracking branch (e.g. refs/heads/main) rather than remote HEAD,
@@ -2832,8 +2860,15 @@ func (s *SyncScheduler) remoteRefCheck(ctx context.Context, repoPath string) boo
 	localSHA := strings.TrimSpace(string(localOut))
 
 	match := remoteSHA == localSHA
+	if !match {
+		// Unpushed local commits already contain the remote's content. Comparing
+		// only tips would fetch on every poll until those local commits are pushed.
+		// Missing objects or incomplete history fall through to the normal fetch.
+		ancestorCmd := exec.CommandContext(lsCtx, "git", "-C", repoPath, "merge-base", "--is-ancestor", remoteSHA, localSHA)
+		match = ancestorCmd.Run() == nil
+	}
 	if match {
-		s.logger.Debug("remote ref unchanged", "path", repoPath, "ref", remoteRef, "sha", localSHA[:min(8, len(localSHA))])
+		s.logger.Debug("remote ref unchanged", "path", repoPath, "ref", remoteRef, "sha", remoteSHA[:min(8, len(remoteSHA))])
 	}
 	return match
 }
@@ -3037,81 +3072,4 @@ func gitHeadSHA(ctx context.Context, repoPath string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
-}
-
-// isCacheOnlyDir reports whether dir holds nothing except
-// .sageox/cache (optionally empty), all real directories. That is what CodeDB
-// leaves when it opens its shared index before the first clone lands; it is
-// not a clone and must not be treated as one, nor moved aside as corrupt.
-func isCacheOnlyDir(dir string) bool {
-	entries, err := os.ReadDir(dir)
-	if err != nil || len(entries) != 1 || entries[0].Name() != ".sageox" || !entries[0].IsDir() {
-		return false
-	}
-	inner, err := os.ReadDir(filepath.Join(dir, ".sageox"))
-	if err != nil || len(inner) > 1 {
-		return false
-	}
-	return len(inner) == 0 || (inner[0].Name() == "cache" && inner[0].IsDir())
-}
-
-// adoptCacheOnlyTarget handles a clone target that exists but holds nothing
-// except <target>/.sageox/cache. It moves that cache into the fresh clone at
-// tempPath and removes the empty skeleton so the caller's rename can land.
-// A target with any other content, or a cache that is not a real directory,
-// is left alone and the rename fails loudly as before.
-//
-// The returned restore func (never nil) moves an adopted cache back to target;
-// call it if the rename fails, because the temp clone is then deleted with the
-// cache inside it.
-func adoptCacheOnlyTarget(tempPath, target string) (restore func(), err error) {
-	restore = func() {}
-	if !isCacheOnlyDir(target) {
-		return restore, nil
-	}
-	sageoxDir := filepath.Join(target, ".sageox")
-	inner, err := os.ReadDir(sageoxDir)
-	if err != nil {
-		return restore, err
-	}
-	if len(inner) == 1 {
-		// never move local data through a symlinked .sageox in the clone
-		tempSageox := filepath.Join(tempPath, ".sageox")
-		if fi, lerr := os.Lstat(tempSageox); lerr == nil && !fi.IsDir() {
-			return restore, fmt.Errorf("clone's .sageox is not a directory")
-		}
-		src := filepath.Join(sageoxDir, "cache")
-		dst := filepath.Join(tempSageox, "cache")
-		if _, lerr := os.Lstat(dst); lerr == nil {
-			// the clone already ships a cache dir; the old one is derived data
-			if err := os.RemoveAll(src); err != nil {
-				return restore, err
-			}
-		} else {
-			if err := os.MkdirAll(tempSageox, 0755); err != nil {
-				return restore, err
-			}
-			if err := os.Rename(src, dst); err != nil {
-				return restore, err
-			}
-			restore = func() {
-				if _, lerr := os.Lstat(src); lerr == nil {
-					return
-				}
-				if os.MkdirAll(sageoxDir, 0755) == nil {
-					_ = os.Rename(dst, src)
-				}
-			}
-		}
-	}
-	// remove only empty directories; never recurse into unexpected content
-	if err := os.Remove(sageoxDir); err != nil {
-		restore()
-		return func() {}, err
-	}
-	if err := os.Remove(target); err != nil {
-		restore()
-		return func() {}, err
-	}
-	return restore, nil
 }

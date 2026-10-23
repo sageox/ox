@@ -25,6 +25,7 @@ The following components are licensed under the MIT License:
 - github.com/cpuguy83/go-md2man - Copyright (c) Brian Goff
 - github.com/fatih/color - Copyright (c) Fatih Arslan
 - github.com/gin-gonic/gin - Copyright (c) Manu Martinez-Almeida
+- github.com/gitleaks/gitleaks (complete rule catalog) - Copyright (c) 2019 Zachary Rice
 - github.com/goccy/go-json - Copyright (c) Masaaki Goshima
 - github.com/joho/godotenv - Copyright (c) John Barton
 - github.com/json-iterator/go - Copyright (c) json-iterator

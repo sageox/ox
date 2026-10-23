@@ -675,21 +675,16 @@ func TestRawWriter_RedactsToolFieldsWithBuiltinAndTeamRules(t *testing.T) {
 	assert.NotContains(t, string(out), teamToken, "a built-in rule must apply to tool output")
 }
 
-// TestAsWriterBypassesRedactionStack documents and pins the asWriter
-// contract: bytes written through it reach the file completely unredacted.
-// If this ever changed silently, a caller relying on the documented bypass
-// for pre-redacted content could start double-processing or corrupting it.
-func TestAsWriterBypassesRedactionStack(t *testing.T) {
+// Every supported file writer must enforce redaction, including raw imports.
+func TestRawWriterHasNoUnredactedWritePath(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "raw.jsonl")
 	w, err := NewRawWriter(path, "")
 	require.NoError(t, err)
-	_, err = w.asWriter().Write([]byte("AKIAIOSFODNN7EXAMPLE unredacted\n"))
-	require.NoError(t, err)
+	require.NoError(t, w.WriteRaw(map[string]any{"content": "AKIAIOSFODNN7EXAMPLE"}))
 	require.NoError(t, w.CloseAndSync())
-
 	out, err := os.ReadFile(path)
 	require.NoError(t, err)
-	require.Contains(t, string(out), "AKIAIOSFODNN7EXAMPLE", "asWriter must bypass redaction by contract")
+	require.NotContains(t, string(out), "AKIAIOSFODNN7EXAMPLE")
 }
 
 // TestAppendRecordingBatchRejectsNonAdvancingCursor prevents a stale or
@@ -720,4 +715,24 @@ func TestAppendRecordingBatchRejectsNonAdvancingCursor(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, rawBefore, rawAfter, "rejected batch must not write any entries to raw.jsonl")
 	require.Equal(t, stateBefore, stateAfter, "rejected batch must not persist a new cursor to .recording.json")
+}
+
+func TestRawWriterScansNonContentFieldsAndTypedRawCommands(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "raw.jsonl")
+	writer, err := NewRawWriter(path, "")
+	require.NoError(t, err)
+	entry := SessionEntry{Type: EntryTypeUser, Content: "safe", CoworkerName: "oxp_" + strings.Repeat("Ab3z", 8)}
+	require.NoError(t, writer.WriteEntry(&entry))
+	require.NotContains(t, entry.CoworkerName, "Ab3z")
+	type toolInput struct {
+		Command string `json:"command"`
+	}
+	require.NoError(t, writer.WriteRaw(map[string]any{"type": "tool", "call_id": "call-safe-1", "tool_input": toolInput{Command: "gh auth token"}}))
+	require.NoError(t, writer.WriteRaw(map[string]any{"type": "tool", "call_id": "call-safe-1", "content": "opaque-result-sentinel", "tool_output": "opaque-result-sentinel", "unknown": map[string]string{"region": "us-example-1"}}))
+	require.NoError(t, writer.CloseAndSync())
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.NotContains(t, string(data), "opaque-result-sentinel")
+	require.Contains(t, string(data), "us-example-1")
+	require.Contains(t, string(data), "call-safe-1")
 }

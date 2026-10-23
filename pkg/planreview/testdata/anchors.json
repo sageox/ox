@@ -1,5 +1,5 @@
 {
-  "summary": "The review page's content anchors. anchors: goldens from running review.js fnv1a/norm in a JS engine (node); 'h' + FNV-1a over UTF-16 units with JS float64 arithmetic, of the whitespace-collapsed, lowercased heading and text joined by U+0000. labels: review.js labelFor, 70 UTF-16 units at most. page: every element the review layer makes markable on one page, in document order, with its anchor, section heading (data-ox-section, else the first h2 or h3 at any depth, else the section id) and label; a section and its one item with the same text share an anchor.",
+  "summary": "The review page's content anchors. anchors: goldens from running review.js fnv1a/norm in a JS engine (node); 'h' + FNV-1a over UTF-16 units with JS float64 arithmetic, of the whitespace-collapsed, lowercased heading and text joined by U+0000. labels: review.js labelFor, 70 UTF-16 units at most. page: every element the review layer makes markable on one page, in document order, with its anchor, section heading (data-ox-section, else the first h2 or h3 at any depth, else the section id) and label; a section and its one item with the same text share an anchor, and <style> and <script> text is not part of either.",
   "anchors": [
     {"heading": "Rollout Plan", "text": "Ship the CLI first", "anchor": "ha58cafdc"},
     {"heading": "  rollout   PLAN ", "text": "\tship the CLI\nfirst ", "anchor": "ha58cafdc"},
@@ -13,7 +13,7 @@
     {"text": "abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghij", "label": "abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghi…"}
   ],
   "page": {
-    "html": "<main><section id=\"rollout\"><h2>Rollout Plan</h2><ul><li>Ship the CLI first</li><li>Then  the\ndaemon</li></ul></section><div data-ox-section=\"Risks\"><h3>Ignored heading</h3><table><tr><td>Lost feedback</td><td>High</td></tr></table><span class=\"ox-chip\">blocking</span></div><p class=\"stat\">42 open</p><p>Not markable</p><section id=\"notes\"><header><div><h3>Notes</h3></div></header><p class=\"stat\">7 days</p></section><section id=\"appendix\"><ul><li>Extra</li></ul></section></main>",
+    "html": "<main><section id=\"rollout\"><h2>Rollout Plan<style>h2{}</style></h2><ul><li>Ship the CLI first<style>#mermaid-1{}</style><script>void 0</script></li><li>Then  the\ndaemon</li></ul></section><div data-ox-section=\"Risks\"><h3>Ignored heading</h3><table><tr><td>Lost feedback</td><td>High</td></tr></table><span class=\"ox-chip\">blocking</span></div><p class=\"stat\">42 open</p><p>Not markable</p><section id=\"notes\"><header><div><h3>Notes</h3></div></header><p class=\"stat\">7 days</p></section><section id=\"appendix\"><ul><li>Extra</li></ul></section></main>",
     "targets": [
       {"anchor": "he69273c6", "section": "Rollout Plan", "label": "Rollout PlanShip the CLI firstThen the daemon"},
       {"anchor": "ha58cafdc", "section": "Rollout Plan", "label": "Ship the CLI first"},

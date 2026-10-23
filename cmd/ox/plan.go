@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -15,6 +17,8 @@ import (
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/errkind"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/plan"
@@ -135,10 +139,43 @@ Output is JSON by default (the AI-coworker/plumbing path). Use --text for a huma
 var planListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "Browse saved ledger plans",
+	Long: `Browse saved ledger plans, newest first.
+
+Every saved plan is listed, whatever its status (abandoned and superseded
+plans included). Narrow the list the same way as 'ox session list' and
+'ox conversation list':
+
+  --limit N    show at most N plans (0 = no limit, the default)
+  --since X    only plans saved at or after X
+  --until X    only plans saved before X; a bare date includes that whole day
+
+X is a duration (30m, 2h, 7d, 1w), an RFC3339 instant, or a date (2026-10-01).
+
+Examples:
+  ox plan list                         # every saved plan
+  ox plan list --limit 5               # the five newest
+  ox plan list --since 7d              # saved in the last week
+  ox plan list --since 2026-10-01 --until 2026-10-07 --json`,
+	Annotations: map[string]string{annotationTimeOrdered: "true"},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		jsonOut, _ := cmd.Flags().GetBool("json")
 		return runPlanList(cmd, jsonOut)
 	},
+}
+
+// registerPlanListFlags binds the list flags in one place so the command and
+// its tests share the exact production surface.
+func registerPlanListFlags(cmd *cobra.Command) {
+	cmd.Flags().Bool("json", false, "emit the plan list as JSON (scripting path)")
+	cmd.Flags().Int("limit", 0, "show at most N plans, newest first (0 = no limit)")
+	cmd.Flags().String("since", "", "only plans saved at or after this time: a duration (30m, 2h, 7d, 1w), RFC3339, or YYYY-MM-DD")
+	cmd.Flags().String("until", "", "only plans saved before this time (same forms as --since; a bare date includes that whole day)")
+	// 'ox session list' hides sessions older than a week unless --all is passed,
+	// so agents carry --all over to this command. plan list has no such default
+	// view (it always shows every saved plan), so --all is an accepted no-op,
+	// hidden to keep it out of the documented surface.
+	cmd.Flags().Bool("all", false, "include everything (a no-op: plan list always shows every saved plan)")
+	_ = cmd.Flags().MarkHidden("all")
 }
 
 var planViewCmd = &cobra.Command{
@@ -305,8 +342,8 @@ func savePlanWithProvenance(gitRoot string, in plan.Input, result plan.Result, h
 
 // planLFSClient builds an LFS client for the project's ledger, or nil when one
 // can't be resolved (not logged in, offline, no configured remote). A nil client
-// makes plan.DehydrateHTML leave plan.html plain — safe, and never fatal to a
-// save: the plain render is still retrievable and pushable.
+// makes plan.UploadHTML upload nothing: a large plan.html then stays plain and
+// out of the commit, with a retry marker, and the save itself is not failed.
 func planLFSClient(gitRoot string) *lfs.Client {
 	ctx, err := config.LoadProjectContext(gitRoot)
 	if err != nil || ctx == nil {
@@ -327,19 +364,22 @@ func planLFSClient(gitRoot string) *lfs.Client {
 // not be uploaded to the LFS store and the save therefore committed nothing.
 const planHTMLUploadFailedReason = "plan.html upload failed; nothing was committed; re-run ox plan save to retry"
 
-// planLFSClientFn and planDehydrateHTML are indirected so tests can drive the
-// upload-failure path without a real ledger remote.
+// planLFSClientFn and planUploadHTML are indirected so tests can drive the
+// upload-failure path without a real ledger remote, and planPointerizeHTML so a
+// test can act between a save's writes and its commit.
 var (
-	planLFSClientFn   = planLFSClient
-	planDehydrateHTML = plan.DehydrateHTML
+	planLFSClientFn    = planLFSClient
+	planUploadHTML     = plan.UploadHTML
+	planPointerizeHTML = plan.PointerizeHTML
 )
 
 // planSaveOpts carries the optional, caller-supplied facts about a save that
 // most call sites do not have an opinion about.
 type planSaveOpts struct {
-	kind   string
-	slug   string
-	report *planSaveReport
+	kind       string
+	slug       string
+	report     *planSaveReport
+	companions []plan.CompanionFile
 }
 
 // planSaveReport is what an interactive `ox plan save` tells its caller: where
@@ -372,6 +412,12 @@ func withSlug(s string) saveOpt { return func(o *planSaveOpts) { o.slug = s } }
 
 // withReport asks savePlanArtifacts to fill r with the save's outcome.
 func withReport(r *planSaveReport) saveOpt { return func(o *planSaveOpts) { o.report = r } }
+
+// withCompanions bundles companion pages into the saved plan dir and its
+// meta.json, in the save's commit.
+func withCompanions(c []plan.CompanionFile) saveOpt {
+	return func(o *planSaveOpts) { o.companions = c }
+}
 
 // savePlanArtifacts is savePlanWithProvenance with an explicit primary artifact
 // kind: "" = markdown-primary (html, if any, is a generated render), plan.
@@ -421,107 +467,182 @@ func savePlanArtifacts(gitRoot string, in plan.Input, result plan.Result, html [
 		Collaboration:  collab,
 	}
 
-	// A revision overwrites the plan dir in place. If an earlier save of it
-	// never got committed (its push/commit failed), that prior revision exists
-	// only in the working tree — commit it locally first so it stays
-	// recoverable from ledger history. If that snapshot fails (e.g. a held
-	// index.lock), REFUSE the save: overwriting would destroy the only copy of
-	// the prior revision (Sacred tier), while refusing loses nothing — the new
-	// revision is still in its source file and saves once the ledger is fixed.
-	if target, rerr := plan.ResolveSaveDir(gitRoot, meta); rerr == nil {
-		if _, serr := os.Stat(filepath.Join(target, "meta.json")); serr == nil {
-			if err := snapshotPriorRevision(gitRoot, target); err != nil {
-				report.Err = fmt.Errorf("prior revision of %s is uncommitted and could not be snapshotted, so it was NOT overwritten (resolve the error below, then re-run `ox plan save`): %w", filepath.Base(target), err)
-				slog.Warn("plan: refused revision, prior revision could not be snapshotted", "error", err, "dir", target)
-				return ""
+	// With a Ledger checkout, everything from the prior revision's snapshot to
+	// the commit runs in one hold of its repo lock. A daemon pull between the
+	// writes and the commit autostashed the half-saved plan: that could
+	// conflict with a teammate's change to it, and a write landing mid-autostash
+	// left the new revision only in `git stash list`.
+	var ledgerPath string
+	if pctx, err := config.LoadProjectContext(gitRoot); err == nil && pctx != nil {
+		ledgerPath = pctx.DefaultLedgerPath()
+	}
+	checkout := gitutil.IsGitRepo(ledgerPath)
+	started := time.Now()
+	// uploads run before the lock (see planUploads); meta gains the plan id the
+	// uploaded page is stamped with
+	up := uploadSavePages(gitRoot, &meta, html)
+	var (
+		dir       string
+		savedKind plan.EventKind
+		slug      string
+		commitErr error
+		uploadErr error  // a reachable store did not take the page
+		ended     bool   // the save stopped early, report filled in
+		endDir    string // what savePlanArtifacts returns then
+	)
+	write := func() error {
+		ctx := context.Background()
+		if checkout {
+			if err := ledgerSafeForPlanWrite(ctx, ledgerPath); err != nil {
+				report.Err = fmt.Errorf("nothing was saved (run `%s`, then re-run `ox plan save`): %w", planDoctorFix, err)
+				slog.Warn("plan: save refused, ledger needs repair", "error", err)
+				ended = true
+				return nil
 			}
 		}
-	}
+		// A revision overwrites the plan dir in place. If an earlier save of it
+		// never got committed (its push/commit failed), that prior revision exists
+		// only in the working tree — commit it locally first so it stays
+		// recoverable from ledger history. If that snapshot fails (e.g. the prior
+		// plan.html still cannot be uploaded), REFUSE the save: overwriting would
+		// destroy the only copy of the prior revision (Sacred tier), while refusing
+		// loses nothing — the new revision is still in its source file and saves
+		// once the ledger is fixed.
+		if target, rerr := plan.ResolveSaveDir(gitRoot, meta); rerr == nil {
+			if _, serr := os.Stat(filepath.Join(target, "meta.json")); serr == nil {
+				if err := snapshotPriorRevision(ctx, ledgerPath, target, up); err != nil {
+					report.Err = fmt.Errorf("prior revision of %s is uncommitted and could not be snapshotted, so it was NOT overwritten (resolve the error below, then re-run `ox plan save`): %w", filepath.Base(target), err)
+					slog.Warn("plan: refused revision, prior revision could not be snapshotted", "error", err, "dir", target)
+					ended = true
+					return nil
+				}
+			}
+		}
 
-	dir, savedKind, err := plan.Save(gitRoot, in, result, html, meta)
-	if err != nil {
-		report.Err = err
-		slog.Warn("plan: save failed", "error", err, "slug", explicitSlug)
+		var err error
+		dir, savedKind, err = plan.Save(gitRoot, in, result, html, meta)
+		if err != nil {
+			report.Err = err
+			slog.Warn("plan: save failed", "error", err, "slug", explicitSlug)
+			ended = true
+			return nil
+		}
+
+		// plan.Save owns the final slug for the derived case, so read back what it
+		// decided rather than assuming what we passed in. Everything below names
+		// this plan by slug — the reverse link onto the live recording most of all,
+		// and an empty one there is how produced_plans goes silently unset.
+		slug = planSavedSlug(dir, explicitSlug, topic)
+
+		// The plan is in the ledger, so any pending "you drafted and never saved"
+		// nudge is now wrong. Cleared here rather than at the end of the function
+		// because everything below is best-effort decoration on an already-durable
+		// save.
+		clearUnsavedPlanStamp(gitRoot, envAgentID())
+
+		// Hero poster: a designed SVG poster of the plan (internal/planhero),
+		// generated from its structured data — NOT a browser screenshot, so this
+		// adds no headless-browser/Chromium dependency to the ox binary. Primary
+		// producer for plan gallery thumbnails. Only on an HTML-primary save (a
+		// hero only makes sense paired with a plan.html), and best-effort: a hero
+		// failure must never break `ox plan save`. Placed here (after Save, before
+		// the commit) so the commit's `git add --sparse <dir>` sweeps hero.svg into
+		// the same commit as plan.html with no separate commit path.
+		if primary == plan.PrimaryHTML && config.PlanHero(gitRoot) {
+			if err := writePlanHero(dir, in, result, meta); err != nil {
+				slog.Warn("plan: hero poster generation failed, skipping", "error", err, "dir", dir)
+			}
+		}
+
+		// Companions too: the commit's `git add --sparse <dir>` then carries
+		// companions/ with the meta.json list that names them.
+		if len(opts.companions) > 0 {
+			if names, cerr := plan.CopyCompanions(opts.companions, dir); cerr != nil {
+				cli.PrintHint("could not bundle companion(s): " + cerr.Error())
+			} else if rerr := plan.RecordCompanions(dir, names); rerr != nil {
+				cli.PrintHint("could not record companion(s) in plan meta: " + rerr.Error())
+			}
+		}
+
+		// reverse link: record the slug on the live recording so it folds into the
+		// session's meta.json at stop (no-op if there's no live recording). Passes
+		// the state resolved alongside the provenance so both links name the same
+		// session — see appendProducedPlan.
+		//
+		// Logged, not discarded. This write failing is precisely how produced_plans
+		// ended up unset on 2887 sessions, and a `_ =` here meant a recurrence would
+		// again be completely silent.
+		if err := appendProducedPlan(gitRoot, recState, slug); err != nil {
+			slog.Warn("plan: reverse link (produced_plans) failed", "error", err, "slug", slug)
+		}
+
+		// Swap a large plan.html for an LFS pointer BEFORE committing, so the
+		// commit carries a pointer and dehydrated clones stay lean — but only for
+		// the page uploaded before the lock, and only while plan.html holds exactly
+		// its bytes, so a pointer whose object is missing never reaches the remote
+		// (the GH #810 wedge). Small renders stay plain by design, and with no
+		// store reachable a large one is left out of the commit (see after
+		// sharePlanDir). When a reachable store did not take the page, nothing is
+		// committed: the plain plan.html stays on disk (the bytes are safe), the
+		// plan dir is not shared, and a retry marker has `ox agent prime` retry
+		// the save, as re-running it does. Committing the plain multi-megabyte
+		// page instead would bury the failure in ledger history.
+		if html != nil {
+			_, perr := planPointerizeHTML(dir, up.refs...)
+			if plan.HasLargePlainHTML(dir) && !up.noStore {
+				uploadErr = cmp.Or(perr, up.failure())
+				slog.Warn("plan: plan.html LFS upload failed, nothing committed", "error", uploadErr, "dir", dir)
+				planID := planIDForDir(dir)
+				*report = planSaveReport{
+					Dir:      dir,
+					Slug:     slug,
+					PlanID:   planID,
+					URL:      planShareURL(gitRoot, planID),
+					Event:    savedKind,
+					Revision: planRevisionCount(dir),
+					Share: planShareStatus{
+						Reason: planHTMLUploadFailedReason,
+						Fix:    "ox plan save",
+					},
+				}
+				ended, endDir = true, dir
+				return nil
+			}
+		}
+
+		if checkout {
+			commitErr = commitPlanDirLocked(ctx, ledgerPath, dir, "")
+		}
+		return nil
+	}
+	if !checkout {
+		_ = write()
+		// nothing was committed; a clone that finished meanwhile must get a
+		// retry marker, not a push of a commit that does not exist
+		commitErr = fmt.Errorf("ledger %s was not a git checkout when the plan was saved", ledgerPath)
+	} else if err := gitutil.WithRepoLock(context.Background(), ledgerPath, write); err != nil {
+		report.Err = fmt.Errorf("the Ledger stayed busy, so nothing was saved; re-run `ox plan save`: %w", err)
+		slog.Warn("plan: save skipped, ledger lock unavailable", "error", err)
 		return ""
 	}
-
-	// plan.Save owns the final slug for the derived case, so read back what it
-	// decided rather than assuming what we passed in. Everything below names
-	// this plan by slug — the reverse link onto the live recording most of all,
-	// and an empty one there is how produced_plans goes silently unset.
-	slug := planSavedSlug(dir, explicitSlug, topic)
-
-	// The plan is in the ledger, so any pending "you drafted and never saved"
-	// nudge is now wrong. Cleared here rather than at the end of the function
-	// because everything below is best-effort decoration on an already-durable
-	// save.
-	clearUnsavedPlanStamp(gitRoot, envAgentID())
-
-	// Hero poster: a designed SVG poster of the plan (internal/planhero),
-	// generated from its structured data — NOT a browser screenshot, so this
-	// adds no headless-browser/Chromium dependency to the ox binary. Primary
-	// producer for plan gallery thumbnails. Only on an HTML-primary save (a
-	// hero only makes sense paired with a plan.html), and best-effort: mirrors
-	// commitPlanToLedger below — a hero failure must never break `ox plan
-	// save`. Placed here (after Save, before commitPlanToLedger) so the
-	// existing `git add --sparse <dir>` sweeps hero.svg into the same commit
-	// as plan.html with no separate commit path.
-	if primary == plan.PrimaryHTML && config.PlanHero(gitRoot) {
-		if err := writePlanHero(dir, in, result, meta); err != nil {
-			slog.Warn("plan: hero poster generation failed, skipping", "error", err, "dir", dir)
+	if ended {
+		if uploadErr != nil && checkout {
+			recordPlanPushOutcome(context.Background(), ledgerPath, endDir, started, uploadErr)
 		}
+		return endDir
 	}
 
-	// reverse link: record the slug on the live recording so it folds into the
-	// session's meta.json at stop (no-op if there's no live recording). Passes
-	// the state resolved alongside the provenance so both links name the same
-	// session — see appendProducedPlan.
-	//
-	// Logged, not discarded. This write failing is precisely how produced_plans
-	// ended up unset on 2887 sessions, and a `_ =` here meant a recurrence would
-	// again be completely silent — while the structurally identical best-effort
-	// call twelve lines down logs at Warn.
-	if err := appendProducedPlan(gitRoot, recState, slug); err != nil {
-		slog.Warn("plan: reverse link (produced_plans) failed", "error", err, "slug", slug)
-	}
-
-	// Dehydrate a large plan.html to an LFS pointer BEFORE committing, so the
-	// commit carries a pointer and dehydrated clones stay lean — but only after
-	// the blob is uploaded, so a pointer whose object is missing never reaches the
-	// remote (the GH #810 wedge). Small renders and offline saves stay plain by
-	// design. When the upload of a large render FAILS, nothing is committed: the
-	// plain plan.html stays on disk (the bytes are safe), the plan dir is not
-	// shared, and re-running the save retries the upload. Committing the plain
-	// multi-megabyte page instead would bury the failure in ledger history.
-	if html != nil {
-		// DehydrateHTML reads the on-disk (stamped) plan.html itself, so the
-		// uploaded blob's OID matches the committed file — see its doc comment.
-		if pointerized, derr := planDehydrateHTML(dir, planLFSClientFn(gitRoot)); derr != nil {
-			slog.Warn("plan: plan.html LFS upload failed, nothing committed", "error", derr, "dir", dir)
-			planID := planIDForDir(dir)
-			*report = planSaveReport{
-				Dir:      dir,
-				Slug:     slug,
-				PlanID:   planID,
-				URL:      planShareURL(gitRoot, planID),
-				Event:    savedKind,
-				Revision: planRevisionCount(dir),
-				Share: planShareStatus{
-					Reason: planHTMLUploadFailedReason,
-					Fix:    "ox plan save",
-				},
-			}
-			return dir
-		} else if pointerized {
-			slog.Debug("plan: plan.html dehydrated to LFS pointer", "dir", dir)
-		}
-	}
-
-	// durability: commit + push the plan dir now (sync), and OBSERVE the
-	// outcome. Still best-effort — a push failure leaves the local commit for
+	// durability: push the plan dir the save committed now (sync), and OBSERVE
+	// the outcome. Still best-effort — a push failure leaves the local commit for
 	// the next push / `ox doctor` — but no longer silent: the verdict goes back
 	// to the caller, which tells the human whether teammates can see the plan.
-	share := sharePlanDir(gitRoot, dir)
+	share := sharePlanDir(ledgerPath, dir, started, commitErr)
+	// with no store reachable the page was left out of the commit; it stays
+	// owed until a retry stores it
+	if checkout && plan.HasLargePlainHTML(dir) {
+		recordPlanPushOutcome(context.Background(), ledgerPath, dir, started,
+			fmt.Errorf("%s is awaiting upload: %w", planHTMLFileName, up.failure()))
+	}
 	if !share.Shared {
 		slog.Warn("plan: saved but not shared", "dir", dir, "reason", share.Reason, "ahead", share.Ahead, "behind", share.Behind)
 	}
@@ -571,6 +692,32 @@ func savePlanArtifacts(gitRoot string, in plan.Input, result plan.Result, html [
 		"duration_s", collabCount(collab, "duration_seconds"))
 
 	return dir
+}
+
+// uploadSavePages uploads, before a save takes the repo lock, the plan.html the
+// save writes and, when an earlier save left the plan's page awaiting upload,
+// that page too: the snapshot of the prior revision stores it. meta gains the
+// plan id the new page is stamped with, so Save stamps the same one.
+func uploadSavePages(gitRoot string, meta *plan.Meta, html []byte) planUploads {
+	var pages [][]byte
+	if html != nil {
+		page, m, err := plan.SavedHTML(gitRoot, *meta, html)
+		if err != nil {
+			return planUploads{err: err}
+		}
+		*meta = m
+		pages = append(pages, page)
+	}
+	if dir, err := plan.ResolveSaveDir(gitRoot, *meta); err == nil && plan.HasLargePlainHTML(dir) {
+		// a retry of the same page finds its own bytes there
+		if prior, err := os.ReadFile(filepath.Join(dir, planHTMLFileName)); err == nil && (len(pages) == 0 || !bytes.Equal(prior, pages[0])) {
+			pages = append(pages, prior)
+		}
+	}
+	if len(pages) == 0 {
+		return planUploads{}
+	}
+	return uploadPlanPages(gitRoot, pages...)
 }
 
 // planSavedSlug reports the slug plan.Save actually recorded for a save. The
@@ -1056,8 +1203,8 @@ func writePlanHuman(cmd *cobra.Command, result plan.Result, savedDir string) err
 }
 
 // openSavedPlanHTML backs `ox plan render --open`: it opens the render of the plan the
-// porcelain path just saved, mirroring `ox plan view --open` but off the saved
-// directory. Best-effort — enrichment already succeeded, so a missing render or
+// porcelain path just saved, resolved from the saved directory rather than a
+// slug argument. Best-effort — enrichment already succeeded, so a missing render or
 // a headless shell prints a hint instead of erroring.
 func openSavedPlanHTML(cmd *cobra.Command, savedDir string) {
 	if savedDir == "" {
@@ -1157,17 +1304,10 @@ func runPlanRenderFresh(cmd *cobra.Command, file, outPath string, open, artifact
 			cli.PrintHint(fmt.Sprintf("plan-artifact [%s]: %s", f.Rule, f.Message))
 		}
 	} else if gitRoot != "" && config.PlanSave(gitRoot) {
-		// Persist into the ledger when capture is on, so the render is re-openable.
-		savedDir = savePlanWithProvenance(gitRoot, in, result, htmlBytes)
-		// Bundle companions into the saved plan dir + meta so the plan CARRIES
-		// its interactive deep-dives (re-opens, review loop, teammate clones).
-		if savedDir != "" && len(companions) > 0 {
-			if names, cerr := plan.CopyCompanions(companions, savedDir); cerr != nil {
-				cli.PrintHint("could not bundle companion(s): " + cerr.Error())
-			} else if rerr := plan.RecordCompanions(savedDir, names); rerr != nil {
-				cli.PrintHint("could not record companion(s) in plan meta: " + rerr.Error())
-			}
-		}
+		// Persist into the ledger when capture is on, so the render is
+		// re-openable, with its companions bundled so the plan CARRIES its
+		// interactive deep-dives (re-opens, review loop, teammate clones).
+		savedDir = savePlanArtifacts(gitRoot, in, result, htmlBytes, "", withCompanions(companions))
 	}
 	name := "plan"
 	if in.Path != "" {
@@ -1223,15 +1363,8 @@ func runPlanRenderFreshHTML(cmd *cobra.Command, in plan.Input, outPath string, o
 		// The AUTHORED bytes are canonical in the ledger (plan.md is the derived
 		// projection); chrome is injected per render/serve, never stored — that
 		// is what keeps injection idempotent and --artifact verbatim.
-		if dir := savePlanArtifacts(gitRoot, mdIn, result, authored, plan.PrimaryHTML, withKind(kind)); dir != "" {
+		if dir := savePlanArtifacts(gitRoot, mdIn, result, authored, plan.PrimaryHTML, withKind(kind), withCompanions(companions)); dir != "" {
 			cli.PrintHint("Saved HTML-primary " + savedNoun(kind) + " (markdown derived from the page) — live review loop: `ox plan review " + filepath.Base(dir) + "`.")
-			if len(companions) > 0 {
-				if names, cerr := plan.CopyCompanions(companions, dir); cerr != nil {
-					cli.PrintHint("could not bundle companion(s): " + cerr.Error())
-				} else if rerr := plan.RecordCompanions(dir, names); rerr != nil {
-					cli.PrintHint("could not record companion(s) in plan meta: " + rerr.Error())
-				}
-			}
 		}
 	}
 	emitRenderedHTML(cmd, injected, "", outPath, open, name, companions)
@@ -1296,13 +1429,13 @@ func runPlanRenderSaved(cmd *cobra.Command, slug, outPath string, open, artifact
 		}
 	}
 	in := plan.Parse(planMD)
-	review, _ := plan.AssembleReview(info.Dir)
+	rev := plan.ReadReview(info.Dir)
 	companions := savedCompanionFiles(info.Dir)
 	var companionNames []string
 	for _, c := range companions {
 		companionNames = append(companionNames, c.Name)
 	}
-	htmlBytes, err := plan.RenderHTMLOpts(in, res, plan.RenderOptions{Slug: slug, Review: review, PriorArtURL: priorArtURLResolver(gitRoot), Artifact: artifact, Companions: plan.CompanionRefs(companionNames)})
+	htmlBytes, err := plan.RenderHTMLOpts(in, res, plan.RenderOptions{Slug: slug, ReviewPlan: filepath.Base(info.Dir), Review: rev.Items, ReviewProblems: rev.Problems(), PriorArtURL: priorArtURLResolver(gitRoot), Artifact: artifact, Companions: plan.CompanionRefs(companionNames)})
 	if err != nil {
 		return fmt.Errorf("render plan: %w", err)
 	}
@@ -1342,11 +1475,13 @@ func runPlanRenderSavedHTML(cmd *cobra.Command, gitRoot, slug string, info plan.
 		emitRenderedHTML(cmd, authored, "", outPath, open, slug, nil)
 		return nil
 	}
-	review, _ := plan.AssembleReview(info.Dir)
+	rev := plan.ReadReview(info.Dir)
 	opts := plan.RenderOptions{
-		Slug:        slug,
-		Review:      review,
-		PriorArtURL: priorArtURLResolver(gitRoot),
+		Slug:           slug,
+		ReviewPlan:     filepath.Base(info.Dir),
+		Review:         rev.Items,
+		ReviewProblems: rev.Problems(),
+		PriorArtURL:    priorArtURLResolver(gitRoot),
 	}
 	if meta.Provenance != nil && meta.Provenance.SessionID != "" {
 		cfg, _ := config.LoadProjectConfig(gitRoot)
@@ -1458,9 +1593,27 @@ func runPlanList(cmd *cobra.Command, jsonOut bool) error {
 	out := cmd.OutOrStdout()
 	gitRoot := findGitRoot()
 
-	plans, err := plan.List(gitRoot)
+	// the flags are read leniently: callers that build a bare command (no list
+	// flags registered) get the unfiltered, unlimited list.
+	limit, _ := cmd.Flags().GetInt("limit")
+	sinceRaw, _ := cmd.Flags().GetString("since")
+	untilRaw, _ := cmd.Flags().GetString("until")
+	if limit < 0 {
+		return errkind.Errorf(errkind.Usage, "invalid --limit value %d: use 0 for no limit, or a positive count like --limit 10", limit)
+	}
+	since, until, err := resolveTimeWindow(sinceRaw, untilRaw)
+	if err != nil {
+		return err
+	}
+
+	saved, err := plan.List(gitRoot)
 	if err != nil {
 		return fmt.Errorf("list plans: %w", err)
+	}
+	plans := filterPlansByWindow(saved, since, until)
+	matched := len(plans)
+	if limit > 0 && matched > limit {
+		plans = plans[:limit]
 	}
 	if jsonOut {
 		if plans == nil {
@@ -1469,6 +1622,10 @@ func runPlanList(cmd *cobra.Command, jsonOut bool) error {
 		return cli.PrintJSONTo(out, plans)
 	}
 	if len(plans) == 0 {
+		if len(saved) > 0 {
+			fmt.Fprintf(out, "No saved plans match that window (%d saved). Widen --since/--until.\n", len(saved))
+			return nil
+		}
 		fmt.Fprintln(out, "No saved plans yet. Run 'ox plan enrich --text' on a plan to capture one.")
 		// Deliberately NOT a bare return: a project whose only plan-shaped
 		// artifact is an authored page nobody saved is precisely the shape the
@@ -1480,19 +1637,19 @@ func runPlanList(cmd *cobra.Command, jsonOut bool) error {
 
 	tw := tabwriter.NewWriter(out, 0, 2, 2, ' ', 0)
 	fmt.Fprintln(tw, cli.StyleDim.Render("SLUG\tDATE\tKIND\tSTATUS\tHTML\tREVIEW\tAUTHORS\tTOPIC"))
-	anyOpen := false
+	anyOpen, anyIncomplete := false, false
 	for _, p := range plans {
-		open := openReviewCount(p.Dir)
-		if open > 0 {
-			anyOpen = true
-		}
+		rev := plan.ReadReview(p.Dir)
+		open := rev.OpenCount()
+		anyOpen = anyOpen || open > 0
+		anyIncomplete = anyIncomplete || rev.Problems() > 0
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			p.Slug,
 			planDate(p.CreatedAt),
 			string(plan.KindOrDefault(p.Kind)),
 			statusMark(p.Status),
 			htmlMark(p.HasHTML),
-			reviewMark(open),
+			reviewMark(open, rev.Problems() == 0),
 			authorsLabel(p.Authors),
 			truncate(p.Topic, 60),
 		)
@@ -1500,11 +1657,33 @@ func runPlanList(cmd *cobra.Command, jsonOut bool) error {
 	if err := tw.Flush(); err != nil {
 		return err
 	}
+	if matched > len(plans) {
+		fmt.Fprintln(out, cli.StyleDim.Render(fmt.Sprintf("%d of %d plans shown (--limit %d; use --limit 0 for all)", len(plans), matched, limit)))
+	}
 	if anyOpen {
 		cli.PrintHint("Plans with open review items — `ox plan feedback show <slug>`, address, then `ox plan feedback resolve`.")
 	}
+	if anyIncomplete {
+		cli.PrintHint("An incomplete review could not be fully read or holds conflicting copies — `ox plan feedback show <slug>` lists them.")
+	}
 	printUnsavedArtifactHint(gitRoot)
 	return nil
+}
+
+// filterPlansByWindow keeps the plans saved in [since, until); a zero bound is
+// open. plan.List already orders newest-first and the filter preserves that
+// order, so --limit afterwards keeps the newest matches.
+func filterPlansByWindow(plans []plan.PlanInfo, since, until time.Time) []plan.PlanInfo {
+	if since.IsZero() && until.IsZero() {
+		return plans
+	}
+	kept := make([]plan.PlanInfo, 0, len(plans))
+	for _, p := range plans {
+		if inTimeWindow(p.CreatedAt, since, until) {
+			kept = append(kept, p)
+		}
+	}
+	return kept
 }
 
 // printUnsavedArtifactHint is the second surface for the artifact gap. The
@@ -1525,17 +1704,11 @@ func printUnsavedArtifactHint(gitRoot string) {
 		len(arts), filepath.Base(arts[0]), plan.KindsHint()))
 }
 
-// openReviewCount returns the number of OPEN, actionable review items for a plan
-// dir (approvals don't count). Thin delegate to the ledger-side counter so the
-// list table and the discovery aggregator can't drift.
-func openReviewCount(planDir string) int {
-	return plan.CountOpenFeedback(planDir)
-}
-
 // countOpenPlanFeedback returns how many saved plans have open human review
-// feedback — the count `ox agent prime` surfaces so a NEW session (any agent)
-// discovers waiting feedback even when the push task missed. Best-effort: 0 on
-// any error (outside a project, no ledger, unreadable plans).
+// feedback, or a review that may be incomplete — the count `ox agent
+// prime` surfaces so a NEW session (any agent) discovers waiting feedback even
+// when the push task missed. Best-effort: 0 when the plans cannot be listed
+// (outside a project, no ledger).
 func countOpenPlanFeedback(gitRoot string) int {
 	if gitRoot == "" {
 		return 0
@@ -1547,9 +1720,16 @@ func countOpenPlanFeedback(gitRoot string) int {
 	return len(plans)
 }
 
-// reviewMark renders the open-review count for the list table.
-func reviewMark(open int) string {
-	if open == 0 {
+// reviewMark renders a plan's review for the list table. A review that is not
+// complete (a record it could not read, or an operation stored with differing
+// content) is never shown as "—": what it does not show may hold open feedback.
+func reviewMark(open int, complete bool) string {
+	switch {
+	case !complete && open > 0:
+		return fmt.Sprintf("%d open, incomplete", open)
+	case !complete:
+		return "incomplete"
+	case open == 0:
 		return "—"
 	}
 	return fmt.Sprintf("%d open", open)
@@ -1748,7 +1928,7 @@ func init() {
 	planRenderCmd.Flags().Bool("artifact", false, "render a strictly self-contained, CSP-safe page for publishing as a Claude Code Artifact (no external fonts/scripts, no review loop; enrichment links preserved)")
 	planRenderCmd.Flags().StringSlice("companion", nil, "bundle a rich self-contained HTML companion with the plan (repeatable; relative .html links in the plan markdown are auto-detected)")
 
-	planListCmd.Flags().Bool("json", false, "emit the plan list as JSON (scripting path)")
+	registerPlanListFlags(planListCmd)
 
 	planSaveCmd.Flags().String("file", "", "the plan of record: an authored self-contained .html page (preferred; saved as canonical, markdown derived) or a .md quick plan; annotations optional (ox self-enriches)")
 	planLintCmd.Flags().String("file", "", "lint an UNSAVED authored page before the first save (authoring-time checks)")

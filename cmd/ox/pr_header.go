@@ -229,7 +229,7 @@ func prResolveEndpoint(cfg *config.ProjectConfig) string {
 // omits the pending check (it stamps plan artifacts, a different contract) and
 // would link an unconfirmed session into a public PR body.
 func autoSessionURL(gitRoot string, allowUnconfirmed bool) (url string, unconfirmed bool) {
-	if attr := loadResolvedAttribution(); attr.Session == "" {
+	if attr := loadResolvedAttributionFor(gitRoot); attr.Session == "" {
 		return "", false // session attribution disabled — no link expected
 	}
 	cfg, err := config.LoadProjectConfig(gitRoot)
@@ -245,7 +245,10 @@ func autoSessionURL(gitRoot string, allowUnconfirmed bool) (url string, unconfir
 	if u == "" {
 		return "", false // no valid ses_ id (older binary) — nothing to link
 	}
-	if effectiveSessionPublishing() == config.SessionPublishingManual {
+	if stopHoldsSession(gitRoot, state) {
+		// Held on this machine: the mode saved at start or the setting now
+		// says manual, so the session was never registered.
+		//
 		// Checked BEFORE the pending branch on purpose. A session can be both
 		// pending and manual, and reporting unconfirmed=true there makes the
 		// caller suggest --allow-unconfirmed — a flag that then yields no URL,

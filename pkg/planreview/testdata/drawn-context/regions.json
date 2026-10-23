@@ -1,0 +1,42 @@
+{
+  "summary": "What every host accepts as a drawn region (docs/specs/plan-review-drawn-context.md sections 1, 5 and 6). Every record in captures.json is well-formed. Each refused case changes one record (record: its id; default the first) by setting value at path, or deleting the field at path, and must be refused. limits are section 5's bounds: text in UTF-16 code units, sizes in bytes of compact UTF-8 JSON; a region at each bound is accepted, and one past it refused. pkg/planreview (region_test.go) and packages/plan-review (test/region.test.mjs) both run this file.",
+  "limits": {
+    "region_bytes": 65536,
+    "context_bytes": 16384,
+    "path_points": 512,
+    "targets": 16,
+    "context_items": 48,
+    "item_labels": 32,
+    "target_text": 2000,
+    "neighbor_text": 600,
+    "label_text": 80,
+    "layout_keys": 128
+  },
+  "refused": [
+    {"why": "not an object", "path": [], "value": ["region"]},
+    {"why": "another version", "path": ["v"], "value": 2},
+    {"why": "another kind", "path": ["kind"], "value": "circle"},
+    {"why": "another coordinate frame", "path": ["frame"], "value": "viewport"},
+    {"why": "an id that names a path", "path": ["id"], "value": "r1/../../x"},
+    {"why": "a revision that is not a SHA-256", "path": ["plan_revision"], "value": "sha256:95eb8bed"},
+    {"why": "a creation time with an offset", "path": ["created_at"], "value": "2026-10-10T20:00:00+02:00"},
+    {"why": "a path of two points", "path": ["path"], "value": [[302.9, 576.2], [306.3, 575.9]]},
+    {"why": "a point holding a string", "path": ["path", 1, 0], "value": "306.3"},
+    {"why": "an ellipse with a zero radius", "path": ["ellipse", "radii", 1], "value": 0},
+    {"why": "an ellipse without a direction", "path": ["ellipse", "dir"], "value": 0},
+    {"why": "a bbox with a negative width", "path": ["bbox", 2], "value": -1},
+    {"why": "a layout without a viewport", "path": ["layout", "viewport"], "delete": true},
+    {"why": "an open key that is not a string", "path": ["layout", "open"], "value": [7]},
+    {"why": "no targets", "path": ["targets"], "value": []},
+    {"why": "a target anchored like a highlight", "path": ["targets", 0, "anchor"], "value": "q59e210da"},
+    {"why": "a target covered more than whole", "path": ["targets", 0, "cover"], "value": 1.5},
+    {"why": "a target with of but no nth", "path": ["targets", 0, "of"], "value": 2},
+    {"why": "a target that is the third of two", "path": ["targets", 0], "value": {"anchor": "h59e210da", "tag": "p", "section": "Risks", "box": [284, 576, 712, 24], "cover": 1, "nth": 2, "of": 2}},
+    {"why": "a context that is a list", "path": ["context"], "value": []},
+    {"why": "a context without truncated", "path": ["context", "truncated"], "delete": true},
+    {"why": "a context item without text", "path": ["context", "items", 0, "text"], "delete": true},
+    {"why": "a context item anchored on the whole plan", "path": ["context", "items", 1, "anchor"], "value": "plan"},
+    {"why": "an empty label list", "record": "r7-figure", "path": ["context", "items", 0, "labels"], "value": []},
+    {"why": "a label without a box", "record": "r7-figure", "path": ["context", "items", 0, "labels", 0, "box"], "delete": true}
+  ]
+}

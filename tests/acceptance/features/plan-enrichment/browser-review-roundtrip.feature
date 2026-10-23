@@ -127,3 +127,32 @@ Feature: The Browser Review Round-Trip
       Given Quinn opened the review page and left an unsent highlight
       When the review server stops and Quinn reloads the page
       Then the plan still shows, marked offline, with the phrase still highlighted
+
+  Rule: A reviewer's feedback is sent once, as theirs, whatever happens on the way
+
+    Scenario: Devon's answer is lost and his feedback still arrives once
+      Given Devon submitted his marks and the answer never reached his page
+      When his page reconnects to the review loop
+      Then Avery receives Devon's marks once, as one round
+
+    Scenario: Devon edits a note while his feedback is on its way
+      Given Devon submitted his marks and they have not been confirmed yet
+      When Devon edits one of the notes
+      Then the edit stays on his page as unsent, for his next Submit
+
+    Scenario: Devon's browser cannot store his feedback
+      Given Devon's browser refuses to store anything more
+      When Devon saves a note and submits
+      Then the page says the note is not saved and that nothing was sent
+      And once his browser can store it again, his Submit sends it
+
+    Scenario: Devon reviews in two tabs
+      Given Devon has the plan open in two tabs and marks it up in both
+      When he submits in one tab and then in the other before the first is confirmed
+      Then Avery receives the marks from both tabs once, as one round
+
+    Scenario: Riley signs in on a browser where Devon's feedback is still waiting
+      Given Devon submitted feedback in a viewer where reviewers sign in, and it has not reached the server
+      When Riley signs in on the same browser
+      Then Riley sees none of Devon's feedback and sends none of it
+      And when Devon is back his feedback goes out once, as his

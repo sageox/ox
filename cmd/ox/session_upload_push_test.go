@@ -128,6 +128,29 @@ func TestCommitAndPushLedger_Success(t *testing.T) {
 	assert.Equal(t, fmt.Sprintf("session: %s", sessionName), msg)
 }
 
+// TestCommitAndPushLedger_LeavesAStagedPlanFileStaged: a session's commit,
+// from session stop or `ox doctor`'s upload retry, never carries a plan file
+// someone else staged; the file stays staged for the plan's own save. Failure
+// prevented: an unsaved plan edit reaches the team in a `session:` commit
+// (#1409).
+func TestCommitAndPushLedger_LeavesAStagedPlanFileStaged(t *testing.T) {
+	barePath, clonePath := createBareAndClone(t)
+	isolatePushEnv(t, clonePath)
+	const plan = "data/plans/2026-10-01-p/plan.md"
+	require.NoError(t, os.MkdirAll(filepath.Join(clonePath, "data", "plans", "2026-10-01-p"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(clonePath, filepath.FromSlash(plan)), []byte("# unsaved\n"), 0o644))
+	runGit(t, clonePath, "add", plan)
+	sessionName := "2026-01-01T00-00-testuser-OxAbc1"
+	writeSessionFiles(t, clonePath, sessionName)
+
+	require.NoError(t, commitAndPushLedger(clonePath, sessionName))
+
+	verifyClone := cloneBare(t, barePath)
+	assert.FileExists(t, filepath.Join(verifyClone, "sessions", sessionName, "meta.json"))
+	assert.NoFileExists(t, filepath.Join(verifyClone, filepath.FromSlash(plan)), "the session commit published a staged plan file")
+	assert.Equal(t, plan, runGit(t, clonePath, "diff", "--cached", "--name-only"), "the plan file must stay staged")
+}
+
 func TestCommitAndPushLedger_NothingToCommit(t *testing.T) {
 	_, clonePath := createBareAndClone(t)
 
@@ -421,8 +444,8 @@ func TestCommitAndPushLedgerWithExtras_IncludesPointerFiles(t *testing.T) {
 	sessionName := "2026-01-01T00-00-testuser-OxPtr2"
 	sessionDir := writeSessionFiles(t, clonePath, sessionName)
 
-	// write summary.json
-	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "summary.json"), []byte(`{"key":"value"}`), 0644))
+	// write summary.json (not a field named "key": the secret guard treats that as a credential name)
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "summary.json"), []byte(`{"topic":"value"}`), 0644))
 
 	err := commitAndPushLedgerWithExtras(clonePath, sessionName, true)
 	require.NoError(t, err)

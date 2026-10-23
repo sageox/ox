@@ -552,9 +552,11 @@ def cmd_envelope(a) -> int:
 
     Writes the payload (structured_output under --json-schema) to --output, or a
     {"verdict": "error"} stub, and prints
-    "<cost>\\t<subtype>\\t<is_error>\\t<denials>\\t<rate_limited>". An absent subtype
-    prints as "-": the orchestrator reads the fields with IFS=tab, and bash merges
-    adjacent tabs, so an empty field would shift every field after it.
+    "<cost>\\t<subtype>\\t<is_error>\\t<denials>\\t<rate_limited>\\t<detail>". An absent
+    subtype prints as "-": the orchestrator reads the fields with IFS=tab, and bash
+    merges adjacent tabs, so an empty field would shift every field after it.
+    <detail> is the CLI's own error message on one line ("Prompt is too long"), or
+    "-": a failed call used to log only "claude CLI failed (exit 1, success)".
     The CLI reports spend in `total_cost_usd`; the orchestrator used to read
     `.usage.cost_usd // .cost_usd`, which never exist, so the cap never counted.
     """
@@ -570,10 +572,10 @@ def cmd_envelope(a) -> int:
         # code or a finding about rate limiting, so it is never read as a limit.
         if not raw.lstrip().startswith("{") and RATE_LIMIT_RE.search(raw):
             out.write_text(json.dumps({"verdict": "rate-limited", "reason": "claude CLI hit a rate or usage limit"}) + "\n")
-            print("0.000000\tno-envelope\ttrue\t0\ttrue")
+            print("0.000000\tno-envelope\ttrue\t0\ttrue\t-")
         else:
             out.write_text(json.dumps({"verdict": "error", "reason": "claude CLI printed no JSON envelope"}) + "\n")
-            print("0.000000\tno-envelope\ttrue\t0\tfalse")
+            print("0.000000\tno-envelope\ttrue\t0\tfalse\t-")
         return 0
     cost = first_number(env.get("total_cost_usd"), env.get("cost_usd"), (env.get("usage") or {}).get("cost_usd"))
     subtype = str(env.get("subtype") or "")
@@ -583,10 +585,12 @@ def cmd_envelope(a) -> int:
     rate_limited = is_error and (
         subtype in RATE_LIMIT_SUBTYPES or bool(RATE_LIMIT_RE.search(result_text) or OVERLOADED_RE.search(result_text))
     )
+    detail = " ".join(result_text.split())[:200] if is_error else ""
     if rate_limited:
         out.write_text(json.dumps({"verdict": "rate-limited", "reason": f"claude CLI {subtype or 'error'}: rate or usage limit"}) + "\n")
     elif is_error:
-        out.write_text(json.dumps({"verdict": "error", "reason": f"claude CLI {subtype or 'error'}"}) + "\n")
+        reason = f"claude CLI {subtype or 'error'}" + (f": {detail}" if detail else "")
+        out.write_text(json.dumps({"verdict": "error", "reason": reason}) + "\n")
     else:
         payload = env.get("structured_output") if a.structured else None
         if payload is None:
@@ -599,7 +603,7 @@ def cmd_envelope(a) -> int:
         if payload is None:
             payload = {"verdict": "error", "reason": "claude CLI returned no result"}
         out.write_text((payload if isinstance(payload, str) else json.dumps(payload)) + "\n")
-    print(f"{cost:.6f}\t{subtype or '-'}\t{'true' if is_error else 'false'}\t{denials}\t{'true' if rate_limited else 'false'}")
+    print(f"{cost:.6f}\t{subtype or '-'}\t{'true' if is_error else 'false'}\t{denials}\t{'true' if rate_limited else 'false'}\t{detail or '-'}")
     return 0
 
 

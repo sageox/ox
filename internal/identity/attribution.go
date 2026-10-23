@@ -6,6 +6,7 @@ import (
 
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/repotools"
+	"github.com/sageox/ox/internal/runtime"
 )
 
 // Attribution holds user identity for attributing work.
@@ -122,6 +123,14 @@ func ResolveAttribution(ep, configDisplayName string) Attribution {
 		}
 	}
 
+	// 1b. A personal SAGEOX_TOKEN carries no UserInfo; the server names its owner.
+	if ep != "" && email == "" && name == "" {
+		if u := auth.PersonalTokenUser(ep); u != nil {
+			email, name = u.Email, u.Name
+		}
+	}
+	verified := &repotools.GitIdentity{Email: email, Name: name}
+
 	// 2. Try git config identity (local, no network)
 	if gitIdent, err := repotools.DetectGitIdentity(); err == nil && gitIdent != nil {
 		if email == "" {
@@ -133,6 +142,16 @@ func ResolveAttribution(ep, configDisplayName string) Attribution {
 		if slug := gitIdent.Slug(); slug != "" {
 			username = slug
 		}
+	}
+
+	// In an Amp orb, git's identity is the orb's, not the person's: an Amp
+	// project orb commits as its project's commit author, "Amp", which named
+	// and credited every session "amp" (sageox/ox#1425). There the verified
+	// SageOx identity names the work. Only Amp orbs: the other hosts that end
+	// with the agent (Claude Code cloud, Devin) were not seen to have this
+	// problem, and elsewhere the slug stays git's so session names don't move.
+	if (verified.Email != "" || verified.Name != "") && runtime.IsAmpOrb() {
+		username = verified.Slug()
 	}
 
 	// 3. Fallback: OS username for username/slug

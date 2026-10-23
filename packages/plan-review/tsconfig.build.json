@@ -8,5 +8,5 @@
     "outDir": "dist"
   },
   "include": [],
-  "files": ["src/index.ts", "src/document-tools.ts"]
+  "files": ["src/index.ts", "src/document-tools.ts", "src/frame-plan.ts"]
 }

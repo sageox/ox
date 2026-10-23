@@ -89,9 +89,12 @@ func TestReadSyncColdFailureReportsTheStageItKept(t *testing.T) {
 			defer cancel()
 			finished := make(chan ReadSyncResult, 1)
 			go func() { finished <- ReadSync(ctx, f.opts) }()
-			// a sorts first in its batch, so ending the attempt there — after b
-			// and c are on disk — leaves progress only an honest result reports.
-			require.Eventually(t, func() bool { return landed("b") && landed("c") }, 30*time.Second, 5*time.Millisecond)
+			// a sorts first in its batch, but concurrent downloads can land b and
+			// c before a reaches the server. Wait for a to start so cancellation
+			// interrupts that transfer and the resume must request it again.
+			require.Eventually(t, func() bool {
+				return transfers["a"].Load() > 0 && landed("b") && landed("c")
+			}, 30*time.Second, 5*time.Millisecond)
 			if tc.status == 0 {
 				cancel()
 			} else {

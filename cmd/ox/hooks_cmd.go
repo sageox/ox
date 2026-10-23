@@ -7,8 +7,8 @@ import (
 // hooksCmd is the parent command for event hooks and git/CI hooks.
 //
 // User-facing subcommands (list, add, test, log) manage daemon event hooks.
-// Git/CI subcommands (pre-commit, post-commit, etc.) are called by agent
-// integrations — prefer "ox agent hooks" for new integrations.
+// The git subcommands (pre-push, post-commit, post-rewrite, commit-msg) are run
+// by the git hooks ox installs, not typed by hand.
 var hooksCmd = &cobra.Command{
 	Use:   "hooks",
 	Short: "Manage event hooks for daemon notifications",
@@ -17,13 +17,13 @@ var hooksCmd = &cobra.Command{
 Event hook subcommands:
   ox hooks list              List registered event hooks
   ox hooks add <event> <cmd> Register a new event hook
-  ox hooks test <event>      Fire a synthetic event to test hooks
   ox hooks log               Show how to view hook execution logs
 
-Git/CI hooks (backward compat, prefer 'ox agent hooks'):
-  ox hooks pre-commit        Run pre-commit checks
+Git hooks (run by the git hooks ox installs):
+  ox hooks pre-push          Record PR/issue linkage on push
   ox hooks post-commit       Run post-commit actions
-  ox hooks commit-msg        Validate commit messages`,
+  ox hooks post-rewrite      Keep recorded commit SHAs current after a rebase
+  ox hooks commit-msg        Append configured commit trailers`,
 }
 
 func init() {

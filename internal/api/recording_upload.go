@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -99,6 +100,15 @@ type ConfirmRecordingUploadResponse struct {
 	ID          string `json:"id,omitempty"`
 	RecordingID string `json:"recording_id,omitempty"`
 	Status      string `json:"status"`
+
+	// Pending is set when confirm answered 202 Accepted: the upload was
+	// received but not yet accepted, and the caller confirms again later.
+	Pending bool `json:"-"`
+	// RetryAfter is the answer's Retry-After in whole seconds. HasRetryAfter
+	// is false when the header was absent or unreadable, so a caller can tell
+	// "ask again at once" (0) from "no advice" and apply its own default.
+	RetryAfter    time.Duration `json:"-"`
+	HasRetryAfter bool          `json:"-"`
 }
 
 // HTTPStatusError is a non-2xx answer from a SageOx API route. Code and
@@ -135,7 +145,7 @@ func (c *RepoClient) RequestRecordingUpload(ctx context.Context, contextType, co
 	}
 	reqURL := strings.TrimSuffix(c.baseURL, "/") + base + "/upload"
 
-	status, body, err := c.postRecordingJSON(ctx, reqURL, idempotencyKey, req)
+	status, _, body, err := c.postRecordingJSON(ctx, reqURL, idempotencyKey, req)
 	if err != nil {
 		return nil, err
 	}
@@ -176,7 +186,7 @@ func (c *RepoClient) ConfirmRecordingUpload(ctx context.Context, contextType, co
 	if req != nil {
 		payload = req
 	}
-	status, body, err := c.postRecordingJSON(ctx, reqURL, "", payload)
+	status, header, body, err := c.postRecordingJSON(ctx, reqURL, "", payload)
 	if err != nil {
 		return nil, err
 	}
@@ -192,19 +202,26 @@ func (c *RepoClient) ConfirmRecordingUpload(ctx context.Context, contextType, co
 			return nil, fmt.Errorf("decode confirm response: %w", err)
 		}
 	}
+	if status == http.StatusAccepted {
+		out.Pending = true
+		out.RetryAfter = parseRetryAfter(header)
+		// parseRetryAfter reads both "0" and a missing header as 0
+		secs, convErr := strconv.Atoi(strings.TrimSpace(header.Get("Retry-After")))
+		out.HasRetryAfter = out.RetryAfter > 0 || (convErr == nil && secs == 0)
+	}
 	return &out, nil
 }
 
-// postRecordingJSON sends an authenticated POST and returns the status and
-// body. A nil payload sends an empty body; an empty idempotencyKey sends no
-// Idempotency-Key. The body is never logged: the upload response carries
-// presigned URLs, which are bearer credentials.
-func (c *RepoClient) postRecordingJSON(ctx context.Context, reqURL, idempotencyKey string, payload any) (int, []byte, error) {
+// postRecordingJSON sends an authenticated POST and returns the status,
+// headers and body. A nil payload sends an empty body; an empty
+// idempotencyKey sends no Idempotency-Key. The body is never logged: the
+// upload response carries presigned URLs, which are bearer credentials.
+func (c *RepoClient) postRecordingJSON(ctx context.Context, reqURL, idempotencyKey string, payload any) (int, http.Header, []byte, error) {
 	var reqBody io.Reader
 	if payload != nil {
 		b, err := json.Marshal(payload)
 		if err != nil {
-			return 0, nil, fmt.Errorf("marshal request: %w", err)
+			return 0, nil, nil, fmt.Errorf("marshal request: %w", err)
 		}
 		reqBody = bytes.NewReader(b)
 	}
@@ -214,7 +231,7 @@ func (c *RepoClient) postRecordingJSON(ctx context.Context, reqURL, idempotencyK
 
 	httpReq, err := useragent.NewRequest(ctx, http.MethodPost, reqURL, reqBody)
 	if err != nil {
-		return 0, nil, fmt.Errorf("create request: %w", err)
+		return 0, nil, nil, fmt.Errorf("create request: %w", err)
 	}
 	if payload != nil {
 		httpReq.Header.Set("Content-Type", "application/json")
@@ -230,7 +247,7 @@ func (c *RepoClient) postRecordingJSON(ctx context.Context, reqURL, idempotencyK
 	duration := time.Since(start)
 	if err != nil {
 		logger.LogHTTPError(http.MethodPost, reqURL, err, duration)
-		return 0, nil, fmt.Errorf("network error: %w", err)
+		return 0, nil, nil, fmt.Errorf("network error: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -238,7 +255,7 @@ func (c *RepoClient) postRecordingJSON(ctx context.Context, reqURL, idempotencyK
 
 	if resp.StatusCode == http.StatusUnauthorized {
 		_, _ = io.Copy(io.Discard, resp.Body)
-		return 0, nil, ErrUnauthorized
+		return 0, nil, nil, ErrUnauthorized
 	}
 
 	limit := int64(1 << 20)
@@ -247,9 +264,9 @@ func (c *RepoClient) postRecordingJSON(ctx context.Context, reqURL, idempotencyK
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, limit))
 	if err != nil {
-		return resp.StatusCode, nil, fmt.Errorf("read response body: %w", err)
+		return resp.StatusCode, nil, nil, fmt.Errorf("read response body: %w", err)
 	}
-	return resp.StatusCode, body, nil
+	return resp.StatusCode, resp.Header, body, nil
 }
 
 // isAPIErrorEnvelope reports whether body is api-go's handler error envelope,

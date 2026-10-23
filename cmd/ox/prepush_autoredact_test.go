@@ -17,9 +17,8 @@ import (
 )
 
 // Failure prevented across this file (ox-y3ok): the pre-push secret gate
-// must never block the push. Auto-redact what it can, quarantine what it
-// can't, but always return nil so unrelated commits and other sessions
-// keep flowing.
+// repairs content before publication. Auto-redact what it can, quarantine what it
+// cannot safely rewrite. Publication proceeds only after clean verification.
 
 // seedSessionMeta writes a minimal valid meta.json at sessions/<name>/.
 // Required because the canonical RedactionPass writer
@@ -47,8 +46,8 @@ func seedSessionMeta(t *testing.T, sessionDir, sessionName string) {
 // and the gate returns nil so the push proceeds.
 //
 // Failure prevented: a single session with a chokepoint-recoverable
-// finding holds up the entire push — defeating both the "never block"
-// directive and the canonical chokepoint's idempotency guarantee.
+// finding blocks an otherwise repairable push. The repair must remain
+// idempotent while preserving the final verification requirement.
 func TestRunPrePushSecretGate_AutoRedactsJSONLAndAllowsPush(t *testing.T) {
 	t.Setenv("OX_ALLOW_SECRETS", "") // ensure no override
 	const sessionName = "2026-05-12-autoredact"
@@ -63,7 +62,7 @@ func TestRunPrePushSecretGate_AutoRedactsJSONLAndAllowsPush(t *testing.T) {
 	mustGit(t, work, "commit", "--amend", "--no-edit", "--no-verify")
 
 	err := runPrePushSecretGate(context.Background(), work)
-	require.NoError(t, err, "gate must NEVER block the push")
+	require.NoError(t, err, "verified repaired content must pass")
 
 	// raw.jsonl on disk must no longer contain the canary bytes.
 	rawAbs := filepath.Join(work, "sessions", sessionName, "raw.jsonl")
@@ -131,7 +130,7 @@ func TestRunPrePushSecretGate_QuarantinesNonJSONLAndAllowsPush(t *testing.T) {
 	mustGit(t, work, "commit", "--amend", "--no-edit", "--no-verify")
 
 	err := runPrePushSecretGate(context.Background(), work)
-	require.NoError(t, err, "gate must NEVER block, even on non-JSONL findings")
+	require.NoError(t, err, "verified quarantine must permit safe publication")
 
 	// Original in-place path must be gone (moved aside).
 	_, statErr := os.Stat(filepath.Join(work, relMD))
@@ -295,27 +294,21 @@ func TestQuarantineBeforeUpload_PartialFailureRemainsDiscoverable(t *testing.T) 
 	}
 }
 
-// TestRunPrePushSecretGate_OverrideStillSkipsRecovery confirms
-// OX_ALLOW_SECRETS=1 still short-circuits the recovery pipeline.
-// Required so emergency overrides don't get auto-redacted or
-// auto-quarantined — when a user explicitly says "publish as-is," the
-// gate must respect that, not silently rewrite their bytes.
-func TestRunPrePushSecretGate_OverrideStillSkipsRecovery(t *testing.T) {
+// A legacy override environment cannot suppress automatic redaction.
+func TestRunPrePushSecretGate_OverrideCannotSkipRecovery(t *testing.T) {
 	t.Setenv("OX_ALLOW_SECRETS", "1")
 	const sessionName = "2026-05-12-override"
 	const canary = "AKIAIOSFODNN7EXAMPLE"
 	relJSONL := filepath.ToSlash(filepath.Join("sessions", sessionName, "raw.jsonl"))
 	rec := `{"type":"text","value":"` + canary + `"}` + "\n"
-
 	work := makeLedgerWithCommit(t, map[string]string{relJSONL: rec})
-	err := runPrePushSecretGate(context.Background(), work)
+	seedSessionMeta(t, filepath.Join(work, "sessions", sessionName), sessionName)
+	mustGit(t, work, "add", "--sparse", filepath.Join("sessions", sessionName, "meta.json"))
+	mustGit(t, work, "commit", "--amend", "--no-edit", "--no-verify")
+	require.NoError(t, runPrePushSecretGate(context.Background(), work))
+	data, err := os.ReadFile(filepath.Join(work, relJSONL))
 	require.NoError(t, err)
-
-	// With override, raw.jsonl must NOT have been rewritten.
-	bytes, readErr := os.ReadFile(filepath.Join(work, relJSONL))
-	require.NoError(t, readErr)
-	assert.Contains(t, string(bytes), canary,
-		"override must NOT auto-redact; bytes go to cloud as-is")
+	assert.NotContains(t, string(data), canary, "legacy override must not publish sensitive bytes")
 }
 
 // mustGitCapture runs git and returns trimmed stdout. Helper for tests

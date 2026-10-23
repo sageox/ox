@@ -1,0 +1,74 @@
+{
+  "spec": "walkthrough-playback/1",
+  "recording_id": "rec_019ffe10-0000-7000-8000-000000000011",
+  "generated_at": "2026-10-14T18:00:00Z",
+  "duration_ms": 252000,
+  "video": {"width_px": 3086, "height_px": 2098},
+  "target": {"kind": "window", "app": "Google Chrome", "title": "Pricing · Acme", "size_pt": {"w": 1543, "h": 1049}, "backing_scale": 2},
+  "capabilities": {"pointer": true, "ax_tree": true, "keyframe_hints": true, "ax_events": true, "navigation": true, "edit_activity": true, "selection": true, "scroll": false, "geometry": true},
+  "focus": [
+    {"id": "f1", "start_ms": 40700, "end_ms": 46500, "zoom": 2.0, "seed": "click",
+     "targets": [{"t_ms": 41000, "cx": 0.5, "cy": 0.75}]}
+  ],
+  "moments": [
+    {"id": "m1", "t_ms": 41000, "kind": "click", "cue": 7, "said": "So when I land here, make this bigger.", "deixis": true,
+     "deixis_word": {"text": "this", "at_ms": 40120}, "strength": "strong",
+     "element": {"role": "AXButton", "subrole": null, "name": "Start free trial", "dom_id": "cta-trial", "frame": {"x": 0.43, "y": 0.85, "w": 0.14, "h": 0.05}, "within": false},
+     "pointer": {"x": 0.51, "y": 0.88}, "cursor": "pointing-hand",
+     "focus_image": {"key": "focus/m1.jpg", "width": 1543, "height": 1049, "box": {"x": 0.25, "y": 0.5, "w": 0.5, "h": 0.5}, "url": "https://objects.example.test/focus/m1.jpg?X-Signature=TOPSECRET-m1-focus"},
+     "overview_image": {"key": "overview/m1.jpg", "width": 1280, "height": 870, "url": "https://objects.example.test/overview/m1.jpg?X-Signature=TOPSECRET-m1-overview"},
+     "then": {"after_ms": 400, "label": "sheet “Start your trial”"}},
+    {"id": "m2", "t_ms": 95210, "kind": "selection", "cue": 8, "said": "And this line should say billing instead.", "deixis": true,
+     "deixis_word": {"text": "this", "at_ms": 95700}, "strength": "strong",
+     "element": {"role": "AXTextArea", "subrole": null, "name": "Annual billing saves 20%", "dom_id": null, "frame": {"x": 0.33, "y": 0.32, "w": 0.12, "h": 0.015}, "within": false},
+     "pointer": {"x": 0.4, "y": 0.33}, "cursor": "ibeam",
+     "focus_image": {"key": "focus/m2.jpg", "width": 1543, "height": 1049, "box": {"x": 0.2, "y": 0.1, "w": 0.5, "h": 0.5}, "url": "https://objects.example.test/focus/m2.jpg?X-Signature=TOPSECRET-m2-focus"},
+     "overview_image": {"key": "overview/m2.jpg", "width": 1280, "height": 870, "url": "https://objects.example.test/overview/m2.jpg?X-Signature=TOPSECRET-m2-overview"},
+     "then": null},
+    {"id": "m3", "t_ms": 120000, "kind": "dwell", "cue": 9, "said": "Look at how crowded this table is.", "deixis": true,
+     "deixis_word": {"text": "this", "at_ms": 121000}, "strength": "strong",
+     "element": {"role": "AXGroup", "subrole": null, "name": "Plan comparison", "dom_id": null, "frame": {"x": 0.1, "y": 0.4, "w": 0.8, "h": 0.5}, "within": true},
+     "pointer": {"x": 0.5, "y": 0.6}, "cursor": "arrow",
+     "focus_image": {"key": "focus/m3.jpg", "width": 1543, "height": 1049, "box": {"x": 0.25, "y": 0.3, "w": 0.5, "h": 0.5}, "url": "https://objects.example.test/focus/m3.jpg?X-Signature=TOPSECRET-m3-focus"},
+     "overview_image": {"key": "overview/m3.jpg", "width": 1280, "height": 870, "url": "https://objects.example.test/overview/m3.jpg?X-Signature=TOPSECRET-m3-overview"},
+     "then": null},
+    {"id": "m4", "t_ms": 150000, "kind": "focus-change", "cue": 0, "said": "", "deixis": false, "strength": "weak",
+     "element": {"role": "AXTextField", "subrole": null, "name": "Search plans", "dom_id": "plan-search", "frame": {"x": 0.6, "y": 0.1, "w": 0.3, "h": 0.04}, "within": false},
+     "pointer": null, "cursor": null,
+     "focus_image": null, "overview_image": null, "then": null},
+    {"id": "m5", "t_ms": 200000, "kind": "click", "cue": 11, "said": "These two plans should match.", "deixis": true,
+     "deixis_word": {"text": "These", "at_ms": 200100}, "strength": "strong",
+     "element": {"role": "AXButton", "subrole": null, "name": "Pro plan", "dom_id": "plan-pro", "frame": {"x": 0.2, "y": 0.5, "w": 0.1, "h": 0.05}, "within": false},
+     "elements": [
+       {"role": "AXButton", "subrole": null, "name": "Pro plan", "dom_id": "plan-pro", "frame": {"x": 0.2, "y": 0.5, "w": 0.1, "h": 0.05}, "within": false},
+       {"role": "AXButton", "subrole": null, "name": "Team plan", "dom_id": "plan-team", "frame": {"x": 0.4, "y": 0.5, "w": 0.1, "h": 0.05}, "within": false},
+       {"role": "AXButton", "subrole": null, "name": "Enterprise plan", "dom_id": "plan-ent", "frame": {"x": 0.6, "y": 0.5, "w": 0.1, "h": 0.05}, "within": false}
+     ],
+     "pointer": {"x": 0.25, "y": 0.52}, "cursor": "pointing-hand",
+     "focus_image": {"key": "focus/m5.jpg", "width": 1543, "height": 1049, "box": {"x": 0.15, "y": 0.3, "w": 0.5, "h": 0.5}, "url": "https://objects.example.test/focus/m5.jpg?X-Signature=TOPSECRET-m5-focus"},
+     "overview_image": {"key": "overview/m5.jpg", "width": 1280, "height": 870, "url": "https://objects.example.test/overview/m5.jpg?X-Signature=TOPSECRET-m5-overview"},
+     "then": {"after_ms": 700, "label": "screen changed", "box": {"x": 0.55, "y": 0.05, "w": 0.4, "h": 0.3}}}
+  ],
+  "chapters": [
+    {"id": "c1", "start_ms": 0, "title": "Pricing", "url": "https://acme.example/pricing"},
+    {"id": "c2", "start_ms": 41400, "title": "Checkout", "url": "https://acme.example/checkout"},
+    {"id": "c3", "start_ms": 120000, "title": "Plan comparison", "url": null}
+  ],
+  "shortcuts": [
+    {"t_ms": 61000, "label": "⌘K", "count": 2},
+    {"t_ms": 125000, "label": "Esc", "count": 1}
+  ],
+  "audio": {"key": "narration.v1.m4a", "loudness_lufs": -16, "url": "https://objects.example.test/narration.v1.m4a?X-Signature=TOPSECRET-audio"},
+  "camera": {"key": "camera.v1.mp4", "offset_ms": 312, "width": 1280, "height": 720, "shape": "circle", "mirror": false,
+    "layout": [{"t_ms": 0, "x": 1, "y": 1, "size": 0.25, "visible": true}],
+    "url": "https://objects.example.test/camera.v1.mp4?X-Signature=TOPSECRET-camera"},
+  "ticks": [{"t_ms": 41000, "kind": "click", "strength": "strong"}, {"t_ms": 91000, "kind": "mark", "strength": "strong"}],
+  "spans": [
+    {"kind": "quiet", "start_ms": 52150, "end_ms": 89850, "skip": true, "label": "Skip 38 s"},
+    {"kind": "typing", "start_ms": 130150, "end_ms": 143850, "speed": 3, "label": "3× typing", "element": {"role": "AXTextField", "name": "Search plans"}}
+  ],
+  "pages": [
+    {"t_ms": 500, "url": "https://acme.example/pricing", "title": "Pricing · Acme"},
+    {"t_ms": 41400, "url": "https://acme.example/checkout", "title": "Checkout · Acme"}
+  ]
+}

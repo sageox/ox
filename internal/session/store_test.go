@@ -1043,7 +1043,7 @@ func TestStore_ReadSession_EmptyFile(t *testing.T) {
 	// create empty session
 	writer, _ := store.CreateRaw("empty-session")
 	// close without writing anything
-	err := writer.file.Close()
+	err := writer.raw.Close()
 	require.NoError(t, err, "failed to close")
 
 	sess, err := store.ReadSession("empty-session")

@@ -1,10 +1,15 @@
 package main
 
 import (
+	"cmp"
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
@@ -38,7 +43,6 @@ type planShareStatus struct {
 type planShareFacts struct {
 	LedgerPath    string
 	NoLedger      bool
-	UnsafeErr     error // mid-rebase / lock files: nothing was staged
 	CommitErr     error // add or commit failed: files left in the working tree
 	PushErr       error // commit landed locally, push failed
 	Dirty         bool  // plan dir still has uncommitted changes after the attempt
@@ -67,9 +71,6 @@ func classifyPlanShare(f planShareFacts) planShareStatus {
 	switch {
 	case f.NoLedger:
 		st.Reason = "no ledger configured for this repo"
-		st.Fix = planDoctorFix
-	case f.UnsafeErr != nil:
-		st.Reason = fmt.Sprintf("ledger is mid-rebase or locked, nothing was committed: %v", f.UnsafeErr)
 		st.Fix = planDoctorFix
 	case f.CommitErr != nil:
 		st.Reason = fmt.Sprintf("ledger commit failed, plan files left uncommitted: %v", f.CommitErr)
@@ -104,35 +105,90 @@ func classifyPlanShare(f planShareFacts) planShareStatus {
 // daemonRunningFn is indirected so tests never probe a real daemon socket.
 var daemonRunningFn = daemon.IsRunning
 
-// sharePlanDir commits and pushes one plan dir and reports whether it is now
-// visible to teammates. It is commitPlanToLedger with the outcome observed
-// instead of collapsed into a single logged error.
-func sharePlanDir(gitRoot, planDir string) planShareStatus {
-	f := planShareFacts{DaemonRunning: daemonRunningFn()}
-	ctx, err := config.LoadProjectContext(gitRoot)
-	if err != nil || ctx == nil || ctx.DefaultLedgerPath() == "" {
+// sharePlanDir pushes the plan dir a save committed and reports whether
+// teammates can see it. ledgerPath is the save's Ledger ("" for none),
+// commitErr its commit's outcome, and started when the save began.
+func sharePlanDir(ledgerPath, planDir string, started time.Time, commitErr error) planShareStatus {
+	f := planShareFacts{DaemonRunning: daemonRunningFn(), LedgerPath: ledgerPath}
+	if ledgerPath == "" {
 		f.NoLedger = true
 		return classifyPlanShare(f)
 	}
-	f.LedgerPath = ctx.DefaultLedgerPath()
-
-	if err := gitutil.IsSafeForGitOps(f.LedgerPath); err != nil {
-		f.UnsafeErr = err
-	} else if err := commitPlanLocal(f.LedgerPath, planDir, ""); err != nil {
-		f.CommitErr = err
-	} else if err := pushLedger(context.Background(), f.LedgerPath); err != nil {
-		f.PushErr = err
+	// git run in a directory that is not a checkout reads any enclosing
+	// repository, and a retry marker would create a .git dir the daemon reads
+	// as a corrupt clone
+	if !gitutil.IsGitRepo(ledgerPath) {
+		f.CommitErr = fmt.Errorf("ledger %s is not a git checkout", ledgerPath)
+		return classifyPlanShare(f)
 	}
-	f.Dirty = planDirDirty(f.LedgerPath, planDir)
-	f.Ahead, f.Behind, f.UpstreamKnown = gitAheadBehind(f.LedgerPath)
+
+	f.CommitErr = commitErr
+	if commitErr == nil {
+		f.PushErr = pushLedger(context.Background(), ledgerPath)
+	}
+	// the save's files are already written: a failed attempt leaves a marker
+	// for `ox agent prime` to retry
+	recordPlanPushOutcome(context.Background(), ledgerPath, planDir, started, cmp.Or(f.CommitErr, f.PushErr))
+	f.Dirty = planDirDirty(ledgerPath, planDir)
+	f.Ahead, f.Behind, f.UpstreamKnown = gitAheadBehind(ledgerPath)
 	return classifyPlanShare(f)
 }
 
-// planDirDirty reports whether the plan dir has staged or unstaged changes in
-// the ledger. An unreadable status reads as dirty: "could not look" must not
-// be reported as "shared".
-func planDirDirty(ledgerPath, planDir string) bool {
-	out, err := exec.Command("git", "-C", ledgerPath, "status", "--porcelain", "--", planDir).Output()
+// sharePlanEvent is the lifecycle verbs' and the review page's Approve write:
+// the event committed alone (commitPlanEvent), pushed, and the outcome
+// classified like a save's, with only the event's own files checked for
+// uncommitted changes. The push runs even when the event changes nothing:
+// re-running a verb is how a coworker retries an event an earlier run could
+// not share. An error means nothing was recorded. With no Ledger checkout the
+// event is recorded and reported not shared, since nothing pulls or pushes
+// that dir; a no-op there reports nothing (a zero status).
+func sharePlanEvent(ctx context.Context, gitRoot, planDir string, kind plan.EventKind, fields plan.PlanEventFields) (bool, planShareStatus, error) {
+	f := planShareFacts{DaemonRunning: daemonRunningFn()}
+	ledgerPath, err := planLedgerPathFor(gitRoot)
+	if err != nil || !gitutil.IsGitRepo(ledgerPath) {
+		if err != nil {
+			f.NoLedger = true
+		} else {
+			f.CommitErr = fmt.Errorf("ledger %s is not a git checkout", ledgerPath)
+		}
+		changed, err := plan.AppendPlanEvent(ctx, planDir, kind, fields)
+		if !changed {
+			return false, planShareStatus{}, err // nothing new, and nothing to push it
+		}
+		return true, classifyPlanShare(f), err
+	}
+	f.LedgerPath = ledgerPath
+	started := time.Now()
+	planCommitMu.Lock()
+	defer planCommitMu.Unlock()
+	changed, err := commitPlanEvent(ctx, ledgerPath, planDir, kind, fields)
+	switch {
+	case errors.Is(err, errEventNotCommitted):
+		f.CommitErr = err
+	case err != nil:
+		return false, planShareStatus{}, err
+	default:
+		f.PushErr = pushLedger(ctx, ledgerPath)
+	}
+	recordPlanPushOutcome(ctx, ledgerPath, planDir, started, cmp.Or(f.CommitErr, f.PushErr), planEventFiles...)
+	var paths []string
+	for _, name := range planEventFiles {
+		paths = append(paths, filepath.Join(planDir, name))
+	}
+	f.Dirty = planDirDirty(ledgerPath, paths...)
+	f.Ahead, f.Behind, f.UpstreamKnown = gitAheadBehind(ledgerPath)
+	return changed, classifyPlanShare(f), nil
+}
+
+// planDirDirty reports whether paths (a plan dir or files in one) have staged
+// or unstaged changes in the ledger. An unreadable status reads as dirty:
+// "could not look" must not be reported as "shared".
+func planDirDirty(ledgerPath string, paths ...string) bool {
+	cmd := exec.Command("git", append([]string{"-C", ledgerPath, "status", "--porcelain", "--"}, paths...)...)
+	// without it, status refreshes the index under index.lock, and a concurrent
+	// ox commit's `git add` fails on that lock
+	cmd.Env = append(os.Environ(), "GIT_OPTIONAL_LOCKS=0")
+	out, err := cmd.Output()
 	if err != nil {
 		return true
 	}
@@ -144,33 +200,30 @@ func planDirDirty(ledgerPath, planDir string) bool {
 // commits, so this is a no-op; it matters exactly when an earlier save's commit
 // failed, which is when the prior revision would otherwise exist nowhere but
 // the working tree the new save is about to overwrite. Sacred tier: a revision
-// must stay recoverable from ledger history.
-func snapshotPriorRevision(gitRoot, planDir string) error {
-	ctx, err := config.LoadProjectContext(gitRoot)
-	if err != nil || ctx == nil || ctx.DefaultLedgerPath() == "" {
+// must stay recoverable from ledger history. The caller holds the repo lock, and
+// up is what it uploaded before taking it.
+func snapshotPriorRevision(ctx context.Context, ledgerPath, planDir string, up planUploads) error {
+	if ledgerPath == "" {
 		return nil // nowhere to snapshot to; Save will fail on the same condition
 	}
-	ledgerPath := ctx.DefaultLedgerPath()
+	// git run outside a checkout finds any enclosing repository; there is no
+	// history here to keep the prior revision in, so it must not be overwritten
+	if !gitutil.IsGitRepo(ledgerPath) {
+		return fmt.Errorf("ledger %s is not a git checkout", ledgerPath)
+	}
 	if !planDirDirty(ledgerPath, planDir) {
 		return nil
 	}
-	if err := gitutil.IsSafeForGitOps(ledgerPath); err != nil {
-		return fmt.Errorf("ledger not safe to snapshot prior revision: %w", err)
-	}
-	// a failed upload left a large plain plan.html behind; finish the upload before
-	// the snapshot, and refuse the save if it still fails rather than lose or
-	// commit that render
+	// a failed upload left a large plain plan.html behind; store it as the pointer
+	// the save uploaded for it, and refuse the save when there is none rather
+	// than lose or commit that render
 	if plan.HasLargePlainHTML(planDir) {
-		client := planLFSClientFn(gitRoot)
-		if client == nil {
-			// a nil client makes dehydration a no-op, which is not an upload
-			return fmt.Errorf("prior plan.html is awaiting upload and no content store is reachable")
-		}
-		if _, err := planDehydrateHTML(planDir, client); err != nil {
-			return fmt.Errorf("prior plan.html is awaiting upload: %w", err)
+		_, perr := plan.PointerizeHTML(planDir, up.refs...)
+		if plan.HasLargePlainHTML(planDir) {
+			return fmt.Errorf("prior plan.html is awaiting upload: %w", cmp.Or(perr, up.failure()))
 		}
 	}
-	return commitPlanLocal(ledgerPath, planDir, "plan: prior revision of ")
+	return commitPlanDirLocked(ctx, ledgerPath, planDir, "plan: prior revision of ")
 }
 
 // planShareURL is the web link for a saved plan: the same endpoint `ox status`
@@ -204,11 +257,5 @@ func planRevisionCount(planDir string) int {
 	if err != nil {
 		return 0
 	}
-	n := 0
-	for _, ev := range events {
-		if ev.Kind == plan.EventCreated || ev.Kind == plan.EventRevised {
-			n++
-		}
-	}
-	return n
+	return plan.Fold(events).Revisions
 }

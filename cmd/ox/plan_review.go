@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -22,6 +24,7 @@ import (
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/plan"
+	"github.com/sageox/ox/pkg/planreview"
 	"github.com/spf13/cobra"
 )
 
@@ -91,16 +94,8 @@ func reviewSaveDraft(cmd *cobra.Command, file string) (string, error) {
 		return "", fmt.Errorf("review --file needs a ledger with plan capture enabled (run `ox init`)")
 	}
 	result := plan.Enrich(context.Background(), in, gitRoot)
-	dir := savePlanWithProvenance(gitRoot, in, result, nil)
-	if dir == "" {
+	if savePlanArtifacts(gitRoot, in, result, nil, "", withCompanions(gatherCompanions(cmd, in))) == "" {
 		return "", fmt.Errorf("could not save draft to the ledger")
-	}
-	if companions := gatherCompanions(cmd, in); len(companions) > 0 {
-		if names, cerr := plan.CopyCompanions(companions, dir); cerr != nil {
-			cli.PrintHint("could not bundle companion(s): " + cerr.Error())
-		} else if rerr := plan.RecordCompanions(dir, names); rerr != nil {
-			cli.PrintHint("could not record companion(s) in plan meta: " + rerr.Error())
-		}
 	}
 	return plan.Slugify(planTopic(in)), nil
 }
@@ -113,9 +108,7 @@ func runPlanReview(cmd *cobra.Command, slug string, noServe bool, idleTimeout ti
 	}
 
 	if noServe || cli.IsHeadless() {
-		in := plan.Parse(planMD)
-		review, _ := plan.AssembleReview(info.Dir)
-		return reviewStaticFallback(cmd, gitRoot, slug, info.Dir, in, res, review)
+		return reviewStaticFallback(cmd, gitRoot, slug, info.Dir, plan.Parse(planMD), res, plan.ReadReview(info.Dir))
 	}
 
 	// Bind a STABLE address for this plan (persisted last port, then the
@@ -148,9 +141,7 @@ func runPlanReview(cmd *cobra.Command, slug string, noServe bool, idleTimeout ti
 		l, lerr := net.Listen("tcp", "127.0.0.1:0")
 		if lerr != nil {
 			cli.PrintHint("could not start review server, falling back to file export: " + lerr.Error())
-			in := plan.Parse(planMD)
-			review, _ := plan.AssembleReview(info.Dir)
-			return reviewStaticFallback(cmd, gitRoot, slug, info.Dir, in, res, review)
+			return reviewStaticFallback(cmd, gitRoot, slug, info.Dir, plan.Parse(planMD), res, plan.ReadReview(info.Dir))
 		}
 		ln = l
 		cli.PrintHint("Stable review ports are busy — serving on an ephemeral port; a previously open tab won't auto-reconnect to this one.")
@@ -206,12 +197,10 @@ func runPlanReview(cmd *cobra.Command, slug string, noServe bool, idleTimeout ti
 		select {
 		case n := <-rounds:
 			fmt.Fprintf(out, "\n%s %d item(s).\n", cli.StyleBold.Render("Review round —"), n)
-			if _, derr := printPlanReviewDigest(cmd, info.Dir); derr != nil {
-				cli.PrintHint("could not read review state: " + derr.Error())
-			}
+			printPlanReviewDigest(cmd, info.Dir)
 			idle.Reset(idleTimeout) // idle, not total: a live session can run long
 		case <-activity:
-			// any accepted POST (accept/reopen too, not just rounds) is a
+			// any accepted POST (an accept too, not just rounds) is a
 			// reviewer at work — never close the loop under them
 			idle.Reset(idleTimeout)
 		case <-approved:
@@ -237,16 +226,16 @@ func runPlanReview(cmd *cobra.Command, slug string, noServe bool, idleTimeout ti
 // reportReviewSession records, for this command's usage event, how the review
 // session ended and what reviewers submitted during it: the command exits 0
 // whether the plan was approved or the page was abandoned. Rounds are counted
-// from the ledger, where each is saved with its time; when the feedback dir
-// cannot be read the counts are left out rather than reported as zero.
+// from the ledger, where each is saved with its time; when the review cannot
+// be fully read the counts are left out rather than reported short.
 func reportReviewSession(planDir string, since time.Time, ending string) {
 	cliCtx.SetOutcome("review_outcome", ending)
-	sets, err := plan.LoadAllFeedback(planDir)
-	if err != nil {
+	rev := plan.ReadReview(planDir)
+	if !rev.Complete() {
 		return
 	}
 	rounds, items, highlights := 0, 0, 0
-	for _, set := range sets {
+	for _, set := range rev.Rounds {
 		if set.CreatedAt.Before(since) {
 			continue
 		}
@@ -264,7 +253,7 @@ func reportReviewSession(planDir string, since time.Time, ending string) {
 }
 
 // liveReviewHandler serves the plan (re-rendered live from the ledger on every
-// GET, so reloads show the latest state) and the round/accept/reopen/approve
+// GET, so reloads show the latest state) and the round/accept/approve
 // endpoints, plus an SSE stream that pushes reloads.
 func liveReviewHandler(gitRoot, slug, planDir, base, token string, bc *broadcaster, rounds chan<- int, approved chan<- struct{}) http.Handler {
 	return liveReviewHandlerWithActivity(gitRoot, slug, planDir, base, token, bc, rounds, approved, nil)
@@ -276,13 +265,9 @@ func liveReviewHandler(gitRoot, slug, planDir, base, token string, bc *broadcast
 // truncated round would fail to parse and surface as a misleading 400.
 const reviewBodyLimit = 1 << 20
 
-// saveReviewFeedback and notifyReviewFeedback are the persistence and agent
-// notification legs of /feedback, as variables so tests can drive the
-// duplicate-round and no-renotify paths without a real task queue.
-var (
-	saveReviewFeedback   = plan.SaveFeedback
-	notifyReviewFeedback = enqueuePlanFeedbackTask
-)
+// notifyReviewFeedback is the agent-notification leg of /feedback, a
+// variable so tests can count notifications without a real task queue.
+var notifyReviewFeedback = enqueuePlanFeedbackTask
 
 // liveReviewHandlerWithActivity is liveReviewHandler plus an activity signal:
 // every successfully handled POST does a non-blocking send on activity (when
@@ -447,102 +432,86 @@ func liveReviewHandlerWithActivity(gitRoot, slug, planDir, base, token string, b
 	}
 
 	// /feedback response: {"saved","round_id","duplicate","committed","pushed","notified"}.
-	// A duplicate is a client retry of a round already stored (same id): it is
-	// still a success (saved=true) and still attempts the commit — the first
-	// attempt's commit or push may be what failed — but it never re-notifies the
-	// agent or re-signals a round, so notified=false there by construction and
-	// clients must read duplicate before notified.
+	// The body is the frozen request: its bytes, digest and id are what a retry
+	// is matched on. A duplicate is a client retry of a round already stored
+	// (same id, same marks): still a success (saved=true) that still commits
+	// and publishes — the first attempt's commit or push may be what failed —
+	// but it never re-notifies the agent or re-signals a round, so
+	// notified=false there by construction and clients must read duplicate
+	// before notified. The same id with different marks is a 409 and nothing
+	// is saved.
 	post("/feedback", func(ctx context.Context, body []byte) (map[string]any, int, error) {
-		set, err := plan.ParseFeedback(body)
+		q, err := planreview.ParseRoundRequest(body)
 		if err != nil {
 			return nil, http.StatusBadRequest, err
 		}
-		set.Slug = slug
-		duplicate := false
-		if _, err := saveReviewFeedback(planDir, set, time.Now()); err != nil {
-			if !errors.Is(err, plan.ErrDuplicateRound) {
+		if q.ID == "" {
+			if q.ID, err = randomToken(); err != nil {
 				return nil, http.StatusInternalServerError, err
 			}
-			duplicate = true
 		}
-		resp := planCommitFields(commitPlanForReview(ctx, gitRoot, planDir))
-		resp["round_id"] = set.ID
+		rec, err := q.Record(slug, q.Reviewer, time.Now())
+		if err != nil {
+			return nil, http.StatusBadRequest, err
+		}
+		st, receipt, err := publishReviewRecord(ctx, gitRoot, planDir, rec)
+		if err != nil {
+			return nil, reviewWriteErrorCode(err), err
+		}
+		duplicate := receipt.State == planreview.ReceiptAlreadyPublished
+		resp := planCommitFields(st)
+		resp["round_id"] = q.ID
 		resp["duplicate"] = duplicate
 		resp["notified"] = false
 		if duplicate {
 			return resp, 0, nil
 		}
-		resp["notified"] = notifyReviewFeedback(gitRoot, planDir, slug, len(set.Items)) == nil
+		resp["notified"] = notifyReviewFeedback(gitRoot, planDir, slug, len(q.Items)) == nil
 		select {
-		case rounds <- len(set.Items):
+		case rounds <- len(q.Items):
 		default:
 		}
 		return resp, 0, nil
 	})
 
+	// /accept: the reviewer verifies an item the author addressed. The body is
+	// the frozen resolution request the page's outbox minted its id for, so a
+	// retry is the same operation; a reviewer may only verify, never mark an
+	// item addressed or won't-fix. A reopen is a round, sent to /feedback.
+	// Response: {"saved","resolution_id","duplicate","committed","pushed"}.
 	post("/accept", func(ctx context.Context, body []byte) (map[string]any, int, error) {
-		anchor, err := anchorFromBody(body)
+		q, err := planreview.ParseResolutionRequest(body)
 		if err != nil {
 			return nil, http.StatusBadRequest, err
 		}
-		r := plan.Resolution{Anchor: anchor, State: plan.ResolutionVerified, Note: "accepted by reviewer"}
-		if err := plan.AppendResolution(planDir, r, time.Now()); err != nil {
-			return nil, http.StatusInternalServerError, err
+		if q.State != planreview.StateVerified {
+			return nil, http.StatusBadRequest, fmt.Errorf("a reviewer can only verify an item, not mark it %q", q.State)
 		}
-		return planCommitFields(commitPlanForReview(ctx, gitRoot, planDir)), 0, nil
-	})
-
-	post("/reopen", func(ctx context.Context, body []byte) (map[string]any, int, error) {
-		var in struct {
-			Anchor string `json:"anchor"`
-			Note   string `json:"note"`
+		rec, err := q.Record(q.Reviewer, time.Now())
+		if err != nil {
+			return nil, http.StatusBadRequest, err
 		}
-		if err := json.Unmarshal(body, &in); err != nil || in.Anchor == "" {
-			return nil, http.StatusBadRequest, fmt.Errorf("reopen needs an anchor")
+		st, receipt, err := publishReviewRecord(ctx, gitRoot, planDir, rec)
+		if err != nil {
+			return nil, reviewWriteErrorCode(err), err
 		}
-		note := in.Note
-		if note == "" {
-			note = "reopened by reviewer"
-		}
-		item := plan.FeedbackItem{Anchor: in.Anchor, Status: plan.FeedbackRequestChange, Note: note}
-		// carry what is being reopened — its section, label, and a highlight's
-		// words — or the agent's digest names it by anchor alone, and a
-		// highlight's anchor cannot be turned back into its words
-		if prior, perr := plan.AssembleReview(planDir); perr == nil {
-			for _, p := range prior {
-				if p.Anchor == in.Anchor && (p.Label != "" || p.Quote != "") {
-					item.Section, item.Label, item.Quote = p.Section, p.Label, p.Quote
-					break
-				}
-			}
-		}
-		set := plan.FeedbackSet{Slug: slug, Items: []plan.FeedbackItem{item}}
-		if _, err := plan.SaveFeedback(planDir, set, time.Now()); err != nil {
-			return nil, http.StatusInternalServerError, err
-		}
-		resp := planCommitFields(commitPlanForReview(ctx, gitRoot, planDir))
-		// a reopen is a fresh open item — re-notify, so feedback isn't stranded if
-		// the authoring coworker's session already ended between rounds.
-		resp["notified"] = notifyReviewFeedback(gitRoot, planDir, slug, 1) == nil
-		select {
-		case rounds <- 1:
-		default:
-		}
+		resp := planCommitFields(st)
+		resp["resolution_id"] = q.ID
+		resp["duplicate"] = receipt.State == planreview.ReceiptAlreadyPublished
 		return resp, 0, nil
 	})
 
 	post("/approve", func(ctx context.Context, body []byte) (map[string]any, int, error) {
-		// Same engine `ox plan approve` uses (internal/plan/lifecycle.go) — a
-		// browser Approve click and the CLI verb are one mechanism, never two.
+		// Same engine `ox plan approve` uses (sharePlanEvent) — a browser
+		// Approve click and the CLI verb are one mechanism, never two.
 		// changed is only used to gate the best-effort activity notify below;
 		// the response here always reports success regardless of its value —
 		// an already-approved plan re-approving via a stale/duplicate click
-		// must still report success, matching SetStatus's prior
-		// always-succeeds contract.
-		fields := planEventFieldsFromProvenance(gitRoot)
-		eventCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		defer cancel()
-		changed, err := plan.AppendPlanEvent(eventCtx, planDir, plan.EventApproved, fields)
+		// must still report success.
+		changed, st, err := sharePlanEvent(ctx, gitRoot, planDir, plan.EventApproved, planEventFieldsFromProvenance(gitRoot))
+		if errors.Is(err, errLedgerNotSafe) {
+			return nil, http.StatusServiceUnavailable, err
+		}
 		if err != nil {
 			return nil, http.StatusInternalServerError, err
 		}
@@ -553,7 +522,7 @@ func liveReviewHandlerWithActivity(gitRoot, slug, planDir, base, token string, b
 			// unreachable activity-index endpoint.
 			go postPlanActivityBestEffort(gitRoot, planDir, plan.EventApproved)
 		}
-		resp := planCommitFields(commitPlanForReview(ctx, gitRoot, planDir))
+		resp := planCommitFields(planCommitStatus{Committed: st.Committed, Pushed: st.Pushed})
 		select {
 		case approved <- struct{}{}:
 		default:
@@ -572,21 +541,23 @@ func renderLive(gitRoot, slug, base, token string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	review, _ := plan.AssembleReview(info.Dir)
-	in := plan.Parse(planMD)
-	return renderSavedReviewPage(gitRoot, slug, info.Dir, in, res, review, plan.RenderOptions{
-		Slug: slug, Review: review, ReviewEndpoint: base, ReviewToken: token,
-		PriorArtURL: priorArtURLResolver(gitRoot),
+	return renderSavedReviewPage(gitRoot, slug, info.Dir, plan.Parse(planMD), res, plan.ReadReview(info.Dir), plan.RenderOptions{
+		ReviewEndpoint: base, ReviewToken: token,
 	})
 }
 
 // renderSavedReviewPage is the one artifact-selection path for live and static
 // review. It preserves legacy authored HTML that old --plan + --html saves did
 // not mark primary, while continuing to regenerate known markdown projections.
-func renderSavedReviewPage(gitRoot, slug, planDir string, in plan.Input, res plan.Result, review []plan.MergedItem, opts plan.RenderOptions) ([]byte, error) {
+func renderSavedReviewPage(gitRoot, slug, planDir string, in plan.Input, res plan.Result, rev plan.Review, opts plan.RenderOptions) ([]byte, error) {
 	opts.Slug = slug
-	opts.Review = review
+	opts.ReviewPlan = filepath.Base(planDir)
+	opts.Review = rev.Items
+	opts.ReviewProblems = rev.Problems()
 	opts.PriorArtURL = priorArtURLResolver(gitRoot)
+	// every drawing made on the page names the bytes it was rendered from:
+	// the plan's markdown, or the authored page served instead below
+	opts.ReviewRevision = planRevision([]byte(in.Raw))
 	meta, metaErr := plan.LoadMeta(planDir)
 	if metaErr == nil {
 		if meta.Provenance != nil && meta.Provenance.SessionID != "" {
@@ -595,6 +566,7 @@ func renderSavedReviewPage(gitRoot, slug, planDir string, in plan.Input, res pla
 		}
 		authored, ok, readErr := readStoredAuthoredPlanHTML(planDir, meta)
 		if readErr == nil && ok {
+			opts.ReviewRevision = planRevision(authored)
 			return plan.InjectChrome(authored, plan.BuildChromeData(res, opts)), nil
 		}
 		if meta.Primary == plan.PrimaryHTML {
@@ -605,27 +577,21 @@ func renderSavedReviewPage(gitRoot, slug, planDir string, in plan.Input, res pla
 	return plan.RenderHTMLOpts(in, res, opts)
 }
 
-func anchorFromBody(body []byte) (string, error) {
-	var in struct {
-		Anchor string `json:"anchor"`
-	}
-	if err := json.Unmarshal(body, &in); err != nil || in.Anchor == "" {
-		return "", fmt.Errorf("missing anchor")
-	}
-	return in.Anchor, nil
+// planRevision is the revision a drawing names: "sha256:" and the hex SHA-256
+// of the stored bytes a page was rendered from, with CRLF read as LF so that a
+// Windows checkout (core.autocrlf) of the same commit names the same revision.
+func planRevision(stored []byte) string {
+	sum := sha256.Sum256(bytes.ReplaceAll(stored, []byte("\r\n"), []byte("\n")))
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
-// commitPlanForReview commits + pushes after a review write and returns the
-// outcome for the response. Non-fatal by design: the round/resolution is
-// already on disk, a failure leaves a pending marker that `ox agent prime`
-// retries, and the page is told committed/pushed=false instead of a silent 200.
-func commitPlanForReview(ctx context.Context, gitRoot, planDir string) planCommitStatus {
-	st := commitPlanToLedgerStatus(ctx, gitRoot, planDir)
-	if !st.Pushed {
-		slog.WarnContext(ctx, "plan review: feedback saved locally, ledger commit/push deferred",
-			"dir", planDir, "committed", st.Committed, "error", st.Err)
+// reviewWriteErrorCode is the status for a review write that saved nothing: a
+// conflicting operation is the client's to resolve (409), anything else ours.
+func reviewWriteErrorCode(err error) int {
+	if errors.Is(err, errReviewConflict) {
+		return http.StatusConflict
 	}
-	return st
+	return http.StatusInternalServerError
 }
 
 // planCommitFields is the durability half of every review POST response.
@@ -723,10 +689,10 @@ func (b *broadcaster) broadcast() {
 
 // reviewStaticFallback renders to a file and prints the clipboard-export path for
 // environments with no browser/server.
-func reviewStaticFallback(cmd *cobra.Command, gitRoot, slug, planDir string, in plan.Input, res plan.Result, review []plan.MergedItem) error {
+func reviewStaticFallback(cmd *cobra.Command, gitRoot, slug, planDir string, in plan.Input, res plan.Result, rev plan.Review) error {
 	cliCtx.SetOutcome("review_outcome", "static")
 	companions := savedCompanionFiles(planDir)
-	html, err := renderSavedReviewPage(gitRoot, slug, planDir, in, res, review, plan.RenderOptions{})
+	html, err := renderSavedReviewPage(gitRoot, slug, planDir, in, res, rev, plan.RenderOptions{})
 	if err != nil {
 		return fmt.Errorf("render plan: %w", err)
 	}

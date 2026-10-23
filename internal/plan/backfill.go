@@ -248,7 +248,9 @@ func ApplyBackfillMeta(ctx context.Context, dir, newTopic, newSlug string) error
 // fresh pln_ id only for a plan dir with a genuinely EMPTY events.jsonl (a
 // legacy plan saved before the event-log foundation shipped) and records
 // that as a `created` event — the same firstSave/reuse decision Save() makes
-// for a brand-new directory (store.go).
+// for a brand-new directory (store.go). That event carries the status the
+// legacy meta.json held: once a plan has events, its status is folded from
+// them (CurrentStatus), so a draft here would undo a legacy approval.
 //
 // A LoadEvents ERROR is deliberately NOT treated the same as "empty",
 // despite Save() doing exactly that on its own read failure: Save is
@@ -275,6 +277,9 @@ func appendBackfillRevisedEvent(ctx context.Context, dir, newTopic string) (stri
 			planID = planid.GeneratePlanID()
 			ev.Kind = EventCreated
 			ev.Status = PlanStatusDraft
+			if meta, err := readMeta(dir); err == nil && meta.Status != "" {
+				ev.Status = meta.Status
+			}
 		} else {
 			planID = existing[0].PlanID
 		}

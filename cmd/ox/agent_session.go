@@ -31,6 +31,7 @@ import (
 	"github.com/sageox/ox/internal/plan"
 	"github.com/sageox/ox/internal/proc"
 	"github.com/sageox/ox/internal/repotools"
+	"github.com/sageox/ox/internal/runtime"
 	"github.com/sageox/ox/internal/selfexec"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
@@ -134,8 +135,44 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 	adapterName := ""          // canonical adapter name for GetAdapter() lookup
 	agentTypeName := agentType // original type for metadata
 	sessionFile := ""
+	var startOffset int64
+	var startOffsetKnown bool
+	var sourcePrefixSHA256 string
 
-	if isManualSessionAgent(agentType) {
+	if agentType == string(agentx.AgentTypeCursor) {
+		// Cursor does not expose its native conversation ID through environment
+		// variables. Resolve only the marker belonging to this exact AI coworker;
+		// never infer a chat from Cursor's shared desktop PID.
+		marker := FindUnambiguousSessionMarkerByAgentID(inst.AgentID)
+		if marker == nil || marker.AgentSessionID == "" {
+			return fmt.Errorf("missing-native-identity: Cursor manual recording requires a completed Cursor prime for this AI coworker")
+		}
+		if marker.CursorSourceBoundary == nil {
+			return session.ErrCursorBoundaryUnavailable
+		}
+		workspace, workspaceErr := canonicalCursorWorkspace(projectRoot)
+		if workspaceErr != nil {
+			return workspaceErr
+		}
+		markerWorkspace, workspaceErr := canonicalCursorWorkspace(marker.CursorSourceBoundary.WorkspacePath)
+		if workspaceErr != nil || markerWorkspace != workspace {
+			return fmt.Errorf("workspace-mismatch: Cursor conversation is bound to another workspace")
+		}
+		agentSessionID = marker.AgentSessionID
+		if _, adapterErr := adapters.GetAdapter(string(agentx.AgentTypeCursor)); adapterErr != nil {
+			return fmt.Errorf("adapter-missing: Cursor adapter unavailable: %w", adapterErr)
+		}
+		var boundaryErr error
+		sessionFile, startOffset, sourcePrefixSHA256, boundaryErr = cursorManualStartBoundary(projectRoot, agentSessionID)
+		if boundaryErr != nil {
+			return boundaryErr
+		}
+		if marker.CursorSourceBoundary.SourcePath != sessionFile {
+			return fmt.Errorf("invalid-source-path: Cursor marker does not match the conversation export")
+		}
+		startOffsetKnown = true
+		adapterName = string(agentx.AgentTypeCursor)
+	} else if isManualSessionAgent(agentType) {
 		// Codex: use the codex adapter to find its session file.
 		// Codex stores plans inline in session files (no separate plan.md).
 		adapterName = string(agentx.AgentTypeCodex)
@@ -221,40 +258,64 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 
 	// capture file size before recording starts — entries before this offset are pre-session
 	// (e.g., buffered messages from before ox agent session start was called)
-	var startOffset int64
-	if sessionFile != "" {
+	if sessionFile != "" && !startOffsetKnown {
 		if fi, err := os.Stat(sessionFile); err == nil {
 			startOffset = fi.Size()
+			startOffsetKnown = true
 		}
 	}
 
 	// determine parent PID for liveness detection.
 	// prefer OX_PARENT_PID env (set by prime, stable) over FindAgentAncestorPID()
 	// which can return a transient shell PID if the process tree walk fails.
-	parentPID := proc.FindAgentAncestorPID()
-	if envPID := os.Getenv("OX_PARENT_PID"); envPID != "" {
-		if parsed, parseErr := strconv.Atoi(envPID); parseErr == nil && parsed > 0 {
-			parentPID = parsed
+	parentPID := 0
+	if agentType != "cursor" {
+		parentPID = proc.FindAgentAncestorPID()
+		if envPID := os.Getenv("OX_PARENT_PID"); envPID != "" {
+			if parsed, parseErr := strconv.Atoi(envPID); parseErr == nil && parsed > 0 {
+				parentPID = parsed
+			}
 		}
 	}
 
 	// start recording with agent ID from session
+	attribution := identity.ResolveAttribution(endpoint.GetForProject(projectRoot), config.GetDisplayName())
 	opts := session.StartRecordingOptions{
-		AgentID:        inst.AgentID,
-		AgentSessionID: agentSessionID,
-		AdapterName:    adapterName,
-		AgentType:      agentTypeName,
-		SessionFile:    sessionFile,
-		Title:          title,
-		Username:       identity.AttributionUsername(endpoint.GetForProject(projectRoot), config.GetDisplayName()),
-		WorkspacePath:  projectRoot,
-		Branch:         repotools.GetCurrentBranch(projectRoot),
-		ParentPID:      parentPID,
-		StartOffset:    startOffset,
-		WatchMode:      sessionWatchMode(adapterName),
+		AgentID:            inst.AgentID,
+		AgentSessionID:     agentSessionID,
+		AdapterName:        adapterName,
+		AgentType:          agentTypeName,
+		SessionFile:        sessionFile,
+		Title:              title,
+		Username:           attribution.Username,
+		WorkspacePath:      projectRoot,
+		Branch:             repotools.GetCurrentBranch(projectRoot),
+		ParentPID:          parentPID,
+		StartOffset:        startOffset,
+		StartOffsetKnown:   startOffsetKnown,
+		SourcePrefixSHA256: sourcePrefixSHA256,
+		WatchMode:          sessionWatchMode(adapterName),
 	}
 
-	state, err := session.StartRecording(projectRoot, opts)
+	var state *session.RecordingState
+	if adapterName == "cursor" {
+		opts.PreparedIdentity, err = session.PrepareRecordingIdentity(projectRoot)
+		if err != nil {
+			return fmt.Errorf("prepare Cursor recording identity: %w", err)
+		}
+		opts.BeforePublish = func(s *session.RecordingState) error {
+			return writeRawHeaderWithAttribution(projectRoot, s, &attribution)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		err = fileutil.WithFileLock(ctx, markerPath(agentSessionID)+".recording-start", func() error {
+			var startErr error
+			state, startErr = session.StartRecording(projectRoot, opts)
+			return startErr
+		})
+	} else {
+		state, err = session.StartRecording(projectRoot, opts)
+	}
 	if err != nil {
 		if errors.Is(err, session.ErrAlreadyRecording) {
 			return fmt.Errorf("a session is already being recorded\nRun 'ox agent %s session stop' first, then start a new session", inst.AgentID)
@@ -265,9 +326,11 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 		return fmt.Errorf("failed to start recording: %w", err)
 	}
 	// write raw.jsonl header immediately so incremental hooks can append entries
-	if writeErr := writeRawHeader(projectRoot, state); writeErr != nil {
-		slog.Warn("failed to write raw.jsonl header at start", "error", writeErr)
-		// non-fatal: processAgentSession will write header at stop time as fallback
+	if adapterName != "cursor" {
+		if writeErr := writeRawHeader(projectRoot, state); writeErr != nil {
+			slog.Warn("failed to write raw.jsonl header at start", "error", writeErr)
+			// non-fatal: processAgentSession will write header at stop time as fallback
+		}
 	}
 
 	// register-at-start so /c/<session_id> resolves from t=0 (fire-and-forget)
@@ -340,7 +403,8 @@ func printSessionStartText(agentID, adapterName, title, notice string, startedAt
 // isManualSessionAgent returns true for agent types that require explicit
 // adapter selection instead of generic/deep autodetection.
 func isManualSessionAgent(agentType string) bool {
-	return canonicalAgentType(agentType) == string(agentx.AgentTypeCodex)
+	canonical := canonicalAgentType(agentType)
+	return canonical == string(agentx.AgentTypeCodex) || canonical == string(agentx.AgentTypeCursor)
 }
 
 // ensurePrimeBeforeSession checks if `ox agent prime` has run for the current
@@ -462,9 +526,11 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 			Type:          "session_stop_retry",
 			AgentID:       inst.AgentID,
 			SessionFile:   state.SessionFile,
-			RetryGuidance: fmt.Sprintf("No session data captured. Use 'ox agent %s session log --stdin' to write your conversation, then re-run this command.", inst.AgentID),
+			RetryGuidance: fmt.Sprintf("No session data captured. Record your conversation with 'ox agent %s session log --role user --content \"...\"' (one entry per call) or pipe a JSON array of entries to 'ox agent %s session record', then re-run this command.", inst.AgentID, inst.AgentID),
 			NextActions: []string{
-				fmt.Sprintf("Dump conversation as JSONL: ox agent %s session log --role user --stdin", inst.AgentID),
+				// session log requires --role and writes ONE entry per call; the
+				// batch form is session record, which takes a JSON array.
+				fmt.Sprintf("Record many entries at once: echo '[{\"type\":\"user\",\"content\":\"...\"}]' | ox agent %s session record", inst.AgentID),
 				fmt.Sprintf("Re-run: ox agent %s session stop", inst.AgentID),
 			},
 		}
@@ -485,6 +551,21 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 		}
 	}
 	traceAtStop := state.Trace
+	if state.AdapterName == "cursor" {
+		held := stopHoldsSession(projectRoot, state)
+		now := time.Now().UTC()
+		if err := session.UpdateRecordingStateForAgent(projectRoot, inst.AgentID, func(current *session.RecordingState) {
+			if current.StoppedAt == nil {
+				current.StoppedAt = &now
+			}
+			current.CursorFinalDrainPending = true
+			if held {
+				current.PublishingMode = config.SessionPublishingManual
+			}
+		}); err != nil {
+			return fmt.Errorf("preserve pending Cursor final drain: %w", err)
+		}
+	}
 	if err := session.MarkExplicitStop(projectRoot, inst.AgentID); err != nil {
 		return fmt.Errorf("mark session stopped: %w", err)
 	}
@@ -502,7 +583,7 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 
 	// re-discover session file if it was empty at start time
 	// (Claude Code session JSONL may not have existed yet when recording started)
-	if state.SessionFile == "" && state.AdapterName != "" && state.AdapterName != "generic" {
+	if state.SessionFile == "" && state.AdapterName != "" && state.AdapterName != "generic" && state.AdapterName != "cursor" {
 		if adapter, adapterErr := adapters.GetAdapter(state.AdapterName); adapterErr == nil {
 			// use state.WorkspacePath (persisted at start) as the single source of truth
 			// for repoRoot -- never derive from ambient cwd/env at stop time
@@ -559,7 +640,7 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 
 	// process session: read, redact secrets, extract events, save
 	var processResult *agentSessionResult
-	if state.SessionFile != "" {
+	if state.SessionFile != "" || state.AdapterName == "cursor" {
 		processStart := time.Now()
 		// Serialize with the raw.jsonl writer's file lock so processAgentSession
 		// (RecoverRawAppend + drain) never runs concurrently with a hook or
@@ -830,8 +911,8 @@ func sessionStopLocation(projectRoot string, state *session.RecordingState) sess
 		info.RepoID = projCfg.RepoID
 	}
 
-	attribution := loadResolvedAttribution()
-	info.SessionURL, _ = sessionLinkOutputs(projCfg, state, attribution.Session)
+	attribution := loadResolvedAttributionFor(projectRoot)
+	info.SessionURL, _ = sessionLinkOutputs(projectRoot, projCfg, state, attribution.Session)
 	return info
 }
 
@@ -982,6 +1063,12 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	if err != nil {
 		return nil, fmt.Errorf("adapter not found: %w", err)
 	}
+	if state.AdapterName == "cursor" {
+		// Even a header-only pending session uses its saved byte boundary.
+		// Full Read plus timestamp filtering would replay old JSONL and drop
+		// Cursor's entries, whose timestamps are explicitly unknown.
+		return finalizeIncrementalSession(projectRoot, state, filepath.Join(state.SessionPath, "raw.jsonl"), adapter, result)
+	}
 
 	// read session metadata (agent version, model)
 	sessionMeta, _ := adapter.ReadMetadata(state.SessionFile)
@@ -1037,7 +1124,11 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	// offset it is validated from: entries before it are never imported, so a
 	// foreign turn in that window can neither condemn nor ride along.
 	var rawEntries []adapters.RawEntry
-	if reader, ok := adapter.(adapters.IncrementalReader); ok && state.AdapterName == "claude-code" && state.StartOffset > 0 {
+	reader, incremental := adapter.(adapters.IncrementalReader)
+	// An Amp recording's offset is the line of the prompt that began it, which
+	// ox-bridge.ts wrote before the prime: the offset alone bounds it.
+	startsAtPrompt := incremental && state.AmpStartsAtPrompt()
+	if incremental && (startsAtPrompt || (state.AdapterName == "claude-code" && state.StartOffset > 0)) {
 		rawEntries, _, err = reader.ReadFromOffset(state.SessionFile, state.StartOffset)
 	} else {
 		rawEntries, err = adapter.Read(state.SessionFile)
@@ -1065,7 +1156,7 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	// filter out entries from before session recording started.
 	// the adapter reads ALL entries from the JSONL file, but we only want
 	// entries created after ox session start was called.
-	if !state.StartedAt.IsZero() {
+	if !state.StartedAt.IsZero() && !startsAtPrompt {
 		rawEntries = pipeline.FilterEntriesAfterStart(rawEntries, state.StartedAt)
 	}
 
@@ -1096,9 +1187,8 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	// create redactor for secret scrubbing
 	redactor, parseErrs := session.NewRedactorWithCustomRules(projectRoot)
 	if len(parseErrs) > 0 {
-		for _, pe := range parseErrs {
-			slog.Warn("redaction rule parse error", "file", pe.Path, "line", pe.Line, "error", pe.Message)
-		}
+		// A partial policy cannot authorize publishing any reconstructed session.
+		return nil, fmt.Errorf("invalid redaction policy (%d errors)", len(parseErrs))
 	}
 
 	// convert raw entries to session entries and redact secrets
@@ -1134,7 +1224,7 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	}
 
 	// write raw session (with secrets redacted)
-	rawWriter, err := store.CreateRaw(filename)
+	rawWriter, err := store.CreateRawForProject(filename, projectRoot)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create raw session: %w", err)
 	}
@@ -1194,7 +1284,7 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 		Summary: localSummary,
 	}
 
-	result.Summary = localSummary
+	result.Summary = publishableSummary(localSummary)
 
 	// use the session name from recording state (generated at start time)
 	// to ensure cache and ledger directories always match
@@ -1328,7 +1418,8 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	// `agent.summarizer` user-config key, and finally the inline default.
 	// Route sync-vs-async through the capability-aware dispatcher in
 	// internal/session. When the daemon isn't viable (sandbox / ephemeral
-	// / OX_NO_DAEMON), the dispatcher forces sync even if the user opted
+	// / OX_NO_DAEMON) or won't outlive the agent (an Amp orb, which pauses
+	// once the agent is idle), the dispatcher forces sync even if the user opted
 	// into `delegated` — otherwise the daemon RPC silently no-ops and
 	// the session sits in the cache until `ox doctor` sweeps it. Prior
 	// to this dispatcher, `delegated` + no daemon = lost upload
@@ -1379,7 +1470,9 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 		}
 	} else {
 		uploadStart := time.Now()
-		uploadErr := uploadSessionToLedger(projectRoot, result, state, ledgerPath, sessionName)
+		uploadErr := uploadSessionBeforeHostEnds(sessionName, daemonOutlivesSession(), func() error {
+			return uploadSessionToLedger(projectRoot, result, state, ledgerPath, sessionName)
+		}, time.Sleep)
 		result.UploadMs = time.Since(uploadStart).Milliseconds()
 		if uploadErr != nil {
 			if errors.Is(uploadErr, api.ErrReadOnly) {
@@ -1420,7 +1513,32 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 // runtime capability probe catches sandboxes / OX_NO_DAEMON, while the
 // historical SAGEOX_DAEMON=false off-switch is enforced in daemon.IsDaemonDisabled.
 func finalizeModeForSessionStop(userPrefersAsync bool) session.FinalizeDispatchMode {
-	return session.ChooseFinalizeMode(!daemon.IsDaemonDisabled(), userPrefersAsync)
+	return session.ChooseFinalizeMode(daemonOutlivesSession(), userPrefersAsync)
+}
+
+// daemonOutlivesSession reports whether work handed to the daemon at session
+// end gets to run: the daemon must be enabled, and the machine must keep
+// running after the coding agent finishes. An Amp orb passes the first test
+// and fails the second — its daemon is frozen when the orb pauses, minutes
+// after the agent goes idle — so session end there uploads before returning
+// (sageox/ox#1314).
+func daemonOutlivesSession() bool {
+	return !daemon.IsDaemonDisabled() && !runtime.Caps().HostEndsWithAgent
+}
+
+// publishableSummary drops a local summary that is only a stats line. With no
+// user message to name a topic, session.LocalSummary returns just "0 user
+// messages, 1 assistant responses. ...", which meta.json's writer rejects as
+// a leaked failure stub (ox-qqka). That failed every upload of an Amp orb
+// session, whose recording starts after the thread's first prompt
+// (sageox/ox#1318, #1425). The stop result carries the normalized value, so
+// the stop's JSON and the team-memory observation don't repeat the stub
+// either. An empty summary is legal, and the summarizer fills it later.
+func publishableSummary(summary string) string {
+	if lfs.IsLeakySummaryString(summary) {
+		return ""
+	}
+	return summary
 }
 
 // uploadSessionToLedger uploads cached blobs to LFS, then commits and pushes
@@ -1602,11 +1720,11 @@ func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionRe
 	}
 	_ = os.Remove(filepath.Join(sourceCacheDir, sessionUploadRetryPendingFile))
 
-	// reverse-link reconciliation: the session now has a canonical ses_ id and
-	// is committed, so backfill it + outcome=stopped onto every plan this
-	// session produced (slugs in hand — no directory scan), then commit those
-	// plan dirs. Best-effort; any miss falls to `ox doctor`.
-	effects.reconcilePlans(projectRoot, state.ProducedPlans, sessionName, meta.EffectiveSessionID())
+	// reverse-link reconciliation: the session is committed, so record its
+	// ses_ id + outcome=stopped in the meta.json of every plan it produced
+	// (slugs in hand — no directory scan), then commit those plan dirs.
+	// Best-effort; see reconcileProducedPlansAtStop.
+	effects.reconcilePlans(projectRoot, state.ProducedPlans, meta.EffectiveSessionID())
 
 	// M5: the push succeeded — the session URL is now viewable. Transition
 	// LinkageStatus to uploaded and best-effort notify the SageOx server so
@@ -1662,14 +1780,15 @@ func writeInitialSessionMeta(sessionDir, agentID string, builder *lfs.SessionMet
 	return meta, nil
 }
 
-// reconcileProducedPlansAtStop backfills the canonical session id + a
-// "stopped" outcome onto every plan a just-stopped session produced — both
-// on meta.json's Provenance (plan.ReconcileSessionOutcome) AND on any of the
-// session's own events.jsonl lines that still carry an empty session_id
-// (plan.BackfillSessionID) — then commits each updated plan dir (data/plans/
-// is not covered by the session commit). Slug-driven — no directory scan —
-// and fully best-effort: any miss is reconciled later by `ox doctor`.
-func reconcileProducedPlansAtStop(projectRoot string, slugs []string, sessionName, sessionID string) {
+// reconcileProducedPlansAtStop records the session id + a "stopped" outcome
+// in the meta.json Provenance of every plan a just-stopped session produced
+// (plan.ReconcileSessionOutcome), then commits each plan's events.jsonl and
+// meta.json, never the rest of its dir (commitPlanToLedger; data/plans/ is not
+// covered by the session commit). It leaves events.jsonl alone: those lines
+// are never edited (internal/plan/events.go). Slug-driven — no directory scan
+// — and best-effort: a meta.json write that fails is logged at debug and
+// skipped; a commit that fails is retried by the next `ox agent prime`.
+func reconcileProducedPlansAtStop(projectRoot string, slugs []string, sessionID string) {
 	for _, slug := range slugs {
 		if err := plan.ReconcileSessionOutcome(projectRoot, slug, sessionID, plan.SessionOutcomeStopped); err != nil {
 			slog.Debug("plan reconcile at stop failed", "slug", slug, "error", err)
@@ -1679,16 +1798,6 @@ func reconcileProducedPlansAtStop(projectRoot string, slugs []string, sessionNam
 		if err != nil {
 			slog.Debug("plan reconcile load failed", "slug", slug, "error", err)
 			continue
-		}
-		// event-log backfill: this session's earlier events (created/worked/
-		// etc.) were appended before the canonical ses_ id existed, so they
-		// still carry only session_name. sessionID is only known now.
-		if sessionID != "" {
-			if n, berr := plan.BackfillSessionID(context.Background(), info.Dir, sessionName, sessionID); berr != nil {
-				slog.Debug("plan event session_id backfill failed", "slug", slug, "error", berr)
-			} else if n > 0 {
-				slog.Debug("plan event session_id backfilled", "slug", slug, "count", n)
-			}
 		}
 		if cerr := commitPlanToLedger(projectRoot, info.Dir); cerr != nil {
 			slog.Debug("plan reconcile commit failed", "slug", slug, "error", cerr)
@@ -1855,12 +1964,20 @@ func runAgentSessionSummarize(inst *agentinstance.Instance, args []string) error
 			if err != nil {
 				return fmt.Errorf("adapter not found: %w", err)
 			}
-			rawEntries, err := adapter.Read(state.SessionFile)
+			// an Amp recording reads from its prompt's line, as the stop does
+			var rawEntries []adapters.RawEntry
+			reader, incremental := adapter.(adapters.IncrementalReader)
+			startsAtPrompt := incremental && state.AmpStartsAtPrompt()
+			if startsAtPrompt {
+				rawEntries, _, err = reader.ReadFromOffset(state.SessionFile, state.StartOffset)
+			} else {
+				rawEntries, err = adapter.Read(state.SessionFile)
+			}
 			if err != nil {
 				return fmt.Errorf("failed to read session: %w", err)
 			}
 			// filter out entries from before session recording started
-			if !state.StartedAt.IsZero() {
+			if !state.StartedAt.IsZero() && !startsAtPrompt {
 				rawEntries = pipeline.FilterEntriesAfterStart(rawEntries, state.StartedAt)
 			}
 			entries = convertRawEntries(rawEntries)
@@ -2348,6 +2465,9 @@ func parseRecordEntries(args []string) ([]sessionRecordInput, error) {
 func recordEntriesToSession(projectRoot string, state *session.RecordingState, entries []sessionRecordInput) (int, error) {
 	if state == nil || state.SessionPath == "" {
 		return 0, fmt.Errorf("invalid recording state")
+	}
+	if state.AdapterName == "cursor" {
+		return 0, fmt.Errorf("unsupported-scope: session record cannot add entries to a native Cursor recording")
 	}
 
 	rawPath := filepath.Join(state.SessionPath, ledgerFileRaw)

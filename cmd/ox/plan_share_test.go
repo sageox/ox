@@ -10,8 +10,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/gitutil"
+	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/plan"
 )
 
@@ -33,7 +36,6 @@ func TestClassifyPlanShare(t *testing.T) {
 	}{
 		{"clean push", planShareFacts{DaemonRunning: true, UpstreamKnown: true}, true, true, "", false},
 		{"no ledger", planShareFacts{NoLedger: true, DaemonRunning: true}, false, false, "no ledger", false},
-		{"mid-rebase", planShareFacts{UnsafeErr: boom, DaemonRunning: true}, false, false, "mid-rebase", false},
 		{"commit failed", planShareFacts{CommitErr: boom, DaemonRunning: true}, false, false, "commit failed", false},
 		{"push failed", planShareFacts{PushErr: boom, DaemonRunning: true}, false, true, "push failed", false},
 		{"push failed on a diverged ledger", planShareFacts{PushErr: boom, Ahead: 18, Behind: 3538, UpstreamKnown: true, DaemonRunning: true}, false, true, "18 ahead / 3538 behind", false},
@@ -156,6 +158,278 @@ func TestSavePlanArtifacts_ShareReport(t *testing.T) {
 				t.Errorf("not-shared verdict must carry reason+fix: %+v", r.Share)
 			}
 		})
+	}
+}
+
+// TestSavePlanArtifacts_AFailedCommitIsRetried: a save whose commit fails (a
+// git process holds the Ledger index) has already written its files. Failure
+// prevented: nothing retries it, so the plan never reaches the team and its
+// files sit uncommitted until the plan is saved again.
+func TestSavePlanArtifacts_AFailedCommitIsRetried(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git clone + push")
+	}
+	root := newPlanCaptureTestRepo(t)
+	ledger, remote := newSharedLedger(t, root, true)
+	prev := commitPlanSnapshot
+	t.Cleanup(func() { commitPlanSnapshot = prev })
+	commitPlanSnapshot = func(context.Context, string, string, ...string) (bool, error) {
+		return false, errors.New("disk full")
+	}
+
+	var r planSaveReport
+	in := plan.Parse(plan.ExtractMarkdown([]byte(shareTestPage)))
+	dir := savePlanArtifacts(root, in, plan.Result{}, []byte(shareTestPage), plan.PrimaryHTML, withReport(&r))
+	if dir == "" || r.Share.Committed {
+		t.Fatalf("want the save written but not committed, got dir=%q %+v", dir, r.Share)
+	}
+	commitPlanSnapshot = prev
+
+	// the retry `ox agent prime` starts
+	if ok, failed, err := flushPendingPlanPushes(context.Background(), ledger); err != nil || ok != 1 || failed != 0 {
+		t.Fatalf("flush: ok=%d failed=%d err=%v", ok, failed, err)
+	}
+	rel, _ := filepath.Rel(ledger, dir)
+	if out := runGitInDir(t, remote, "log", "--oneline", "main", "--", filepath.ToSlash(rel)); out == "" {
+		t.Fatal("the retried save is not on the team's remote")
+	}
+}
+
+// TestSavePlanArtifacts_CommitsItsCompanions: a render's companion pages are
+// in the save's commit, beside the meta.json list that names them. Failure
+// prevented: the companions sit uncommitted after the save, and a later
+// Approve, which commits meta.json alone, publishes a list naming pages
+// teammates do not have.
+func TestSavePlanArtifacts_CommitsItsCompanions(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git clone + push")
+	}
+	root := newPlanCaptureTestRepo(t)
+	ledger, remote := newSharedLedger(t, root, true)
+	src := filepath.Join(t.TempDir(), "deep-dive.html")
+	if err := os.WriteFile(src, []byte("<p>deep dive</p>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var r planSaveReport
+	in := plan.Parse(plan.ExtractMarkdown([]byte(shareTestPage)))
+	dir := savePlanArtifacts(root, in, plan.Result{}, []byte(shareTestPage), plan.PrimaryHTML, withReport(&r),
+		withCompanions([]plan.CompanionFile{{Name: "deep-dive.html", SrcPath: src}}))
+	if dir == "" || !r.Share.Shared {
+		t.Fatalf("want the save shared, got dir=%q %+v", dir, r.Share)
+	}
+	rel, _ := filepath.Rel(ledger, dir)
+	tree := "main:" + filepath.ToSlash(rel)
+	if got := runGitInDir(t, remote, "show", tree+"/companions/deep-dive.html"); got != "<p>deep dive</p>" {
+		t.Fatalf("the remote's companion holds %q", got)
+	}
+	if meta := runGitInDir(t, remote, "show", tree+"/meta.json"); !strings.Contains(meta, `"deep-dive.html"`) {
+		t.Fatalf("the remote's meta.json does not name the companion:\n%s", meta)
+	}
+}
+
+// TestSavePlanArtifacts_WaitsForASyncInProgress: a save while another ox
+// process holds the Ledger (the daemon mid-pull, git's index.lock present)
+// waits for it. Failure prevented: the save checks before taking the repo
+// lock, fails on the sync's index.lock, and leaves its files uncommitted.
+func TestSavePlanArtifacts_WaitsForASyncInProgress(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git clone + push")
+	}
+	root := newPlanCaptureTestRepo(t)
+	ledger, _ := newSharedLedger(t, root, true)
+	lock := filepath.Join(ledger, ".git", "index.lock")
+	held, release, syncDone := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	go func() {
+		syncDone <- gitutil.WithRepoLock(context.Background(), ledger, func() error {
+			if err := os.WriteFile(lock, nil, 0o644); err != nil {
+				return err
+			}
+			close(held)
+			<-release
+			return os.Remove(lock)
+		})
+	}()
+	<-held
+
+	saved := make(chan planSaveReport, 1)
+	go func() {
+		var r planSaveReport
+		in := plan.Parse(plan.ExtractMarkdown([]byte(shareTestPage)))
+		savePlanArtifacts(root, in, plan.Result{}, []byte(shareTestPage), plan.PrimaryHTML, withReport(&r))
+		saved <- r
+	}()
+	select {
+	case r := <-saved:
+		close(release)
+		t.Fatalf("the save returned while the sync held the Ledger: %+v", r.Share)
+	case <-time.After(500 * time.Millisecond):
+	}
+	close(release)
+	if err := <-syncDone; err != nil {
+		t.Fatal(err)
+	}
+	if r := <-saved; !r.Share.Shared {
+		t.Fatalf("the save must be shared once the sync ends, got %+v", r.Share)
+	}
+}
+
+// TestSavePlanArtifacts_WritesNothingMidRebase: a save while the Ledger is
+// mid-rebase writes and stages nothing, the .gitignore guard included, and
+// says the Ledger needs repair. Failure prevented: the rebase's abort reverts
+// the saved revision, or refuses over its new files and leaves the Ledger
+// stuck; a `git add` during a conflicted rebase marks the conflict resolved.
+func TestSavePlanArtifacts_WritesNothingMidRebase(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git clone + push")
+	}
+	root := newPlanCaptureTestRepo(t)
+	ledger, _ := newSharedLedger(t, root, true)
+	if err := os.MkdirAll(filepath.Join(ledger, ".git", "rebase-merge"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var r planSaveReport
+	in := plan.Parse(plan.ExtractMarkdown([]byte(shareTestPage)))
+	if dir := savePlanArtifacts(root, in, plan.Result{}, []byte(shareTestPage), plan.PrimaryHTML, withReport(&r)); dir != "" || !errors.Is(r.Err, errLedgerNotSafe) {
+		t.Fatalf("want the save refused for repair, got dir=%q err=%v", dir, r.Err)
+	}
+	if st := runGitInDir(t, ledger, "status", "--porcelain"); st != "" {
+		t.Fatalf("the save wrote or staged %q mid-rebase", st)
+	}
+}
+
+// TestSavePlanArtifacts_HoldsTheLedgerFromWriteToCommit: a daemon pull must
+// not land between a save's writes and its commit. Failure prevented: the
+// pull autostashes the half-saved plan, which conflicts with a teammate's
+// change to it or strands the new revision in `git stash list`.
+func TestSavePlanArtifacts_HoldsTheLedgerFromWriteToCommit(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git clone + push")
+	}
+	root := newPlanCaptureTestRepo(t)
+	ledger, _ := newSharedLedger(t, root, true)
+	prev := planPointerizeHTML
+	t.Cleanup(func() { planPointerizeHTML = prev })
+	var probeErr error
+	planPointerizeHTML = func(dir string, uploaded ...lfs.UploadedRef) (bool, error) {
+		// runs after the save's writes and before its commit: the daemon's pull
+		// takes this same lock
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		probeErr = gitutil.WithRepoLock(ctx, ledger, func() error { return nil })
+		return prev(dir, uploaded...)
+	}
+
+	var r planSaveReport
+	in := plan.Parse(plan.ExtractMarkdown([]byte(shareTestPage)))
+	if dir := savePlanArtifacts(root, in, plan.Result{}, []byte(shareTestPage), plan.PrimaryHTML, withReport(&r)); dir == "" || !r.Share.Shared {
+		t.Fatalf("save: dir=%q %+v", dir, r.Share)
+	}
+	if !gitutil.IsRepoLockBusy(probeErr) {
+		t.Fatalf("a pull could take the Ledger between the save's writes and its commit (probe: %v)", probeErr)
+	}
+}
+
+// TestPlanDirDirty_LeavesTheIndexAlone: ox reads a plan dir's status after
+// its commits, while another ox commit may be staging. Failure prevented: the
+// status refreshes the index, taking index.lock to rewrite it, and that
+// commit's `git add` fails on the lock.
+func TestPlanDirDirty_LeavesTheIndexAlone(t *testing.T) {
+	repo := t.TempDir()
+	runGitInDir(t, repo, "init", "-q")
+	file := filepath.Join(repo, "f.txt")
+	if err := os.WriteFile(file, []byte("f\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitInDir(t, repo, "add", "f.txt")
+	runGitInDir(t, repo, "commit", "-q", "-m", "f")
+	// a stat change that only an index refresh records
+	later := time.Now().Add(time.Hour)
+	if err := os.Chtimes(file, later, later); err != nil {
+		t.Fatal(err)
+	}
+	index := filepath.Join(repo, ".git", "index")
+	before, err := os.ReadFile(index)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planDirDirty(repo, "f.txt")
+	if after, err := os.ReadFile(index); err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("the status read rewrote the index (err %v)", err)
+	}
+}
+
+// TestSavePlanArtifacts_LedgerNotYetClonedGetsNoGitDir: a save before the
+// Ledger is cloned writes its files where the clone will go. Failure
+// prevented: the save's retry marker creates <ledger>/.git, and the daemon
+// moves the Ledger aside as a corrupt clone, the plan with it.
+func TestSavePlanArtifacts_LedgerNotYetClonedGetsNoGitDir(t *testing.T) {
+	root := newPlanCaptureTestRepo(t)
+	pctx, err := config.LoadProjectContext(root)
+	if err != nil || pctx == nil || pctx.DefaultLedgerPath() == "" {
+		t.Fatalf("no ledger path for test repo: %v", err)
+	}
+	ledger := pctx.DefaultLedgerPath()
+
+	var r planSaveReport
+	in := plan.Parse(plan.ExtractMarkdown([]byte(shareTestPage)))
+	if dir := savePlanArtifacts(root, in, plan.Result{}, []byte(shareTestPage), plan.PrimaryHTML, withReport(&r)); dir == "" || r.Share.Committed {
+		t.Fatalf("want the save written but not committed, got dir=%q %+v", dir, r.Share)
+	}
+	if _, err := os.Stat(filepath.Join(ledger, ".git")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the save created %s (stat err %v)", filepath.Join(ledger, ".git"), err)
+	}
+}
+
+// TestSavePlanArtifacts_CloneThatFinishesMidSaveGetsARetry: the daemon's first
+// Ledger clone lands while a save is writing into the Ledger dir. Failure
+// prevented: the save skipped its commit, pushed as if it had committed, and
+// left no retry marker, so nothing ever committed the plan.
+func TestSavePlanArtifacts_CloneThatFinishesMidSaveGetsARetry(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git clone")
+	}
+	root := newPlanCaptureTestRepo(t)
+	pctx, err := config.LoadProjectContext(root)
+	if err != nil || pctx == nil || pctx.DefaultLedgerPath() == "" {
+		t.Fatalf("no ledger path for test repo: %v", err)
+	}
+	ledger := pctx.DefaultLedgerPath()
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	initBareRemote(t, remote, "-b", "main")
+	clone := filepath.Join(t.TempDir(), "clone")
+	mustRunGit(t, filepath.Dir(clone), "clone", "-q", remote, clone)
+	gitConfig(t, clone, "user.name", "Person A")
+	gitConfig(t, clone, "user.email", "person@test.sageox.ai")
+	gitConfig(t, clone, "commit.gpgsign", "false")
+	if err := os.WriteFile(filepath.Join(clone, "README.md"), []byte("ledger\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustRunGit(t, clone, "add", "README.md")
+	mustRunGit(t, clone, "commit", "-q", "-m", "init")
+	mustRunGit(t, clone, "push", "-q", "-u", "origin", "main")
+
+	prev := planUploadHTML
+	t.Cleanup(func() { planUploadHTML = prev })
+	planUploadHTML = func(c *lfs.Client, page []byte) (lfs.UploadedRef, bool, error) {
+		// mid-save, after the checkout was checked: the clone lands
+		if err := os.MkdirAll(ledger, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(filepath.Join(clone, ".git"), filepath.Join(ledger, ".git")); err != nil {
+			t.Fatal(err)
+		}
+		return prev(c, page)
+	}
+
+	var r planSaveReport
+	in := plan.Parse(plan.ExtractMarkdown([]byte(shareTestPage)))
+	if dir := savePlanArtifacts(root, in, plan.Result{}, []byte(shareTestPage), plan.PrimaryHTML, withReport(&r)); dir == "" || r.Share.Committed {
+		t.Fatalf("want the save written but not committed, got dir=%q %+v", dir, r.Share)
+	}
+	if markers, err := listPlanPushPending(ledger); err != nil || len(markers) != 1 {
+		t.Fatalf("the save must leave a retry marker, got %+v (err %v)", markers, err)
 	}
 }
 
@@ -324,7 +598,7 @@ func TestSharePlanDir_NoLedgerIsNotShared(t *testing.T) {
 	daemonRunningFn = func() bool { return true }
 	t.Cleanup(func() { daemonRunningFn = prev })
 
-	st := sharePlanDir(t.TempDir(), filepath.Join(t.TempDir(), "plan"))
+	st := sharePlanDir("", filepath.Join(t.TempDir(), "plan"), time.Now(), nil)
 	if st.Shared || st.Committed || st.Fix != planDoctorFix || !strings.Contains(st.Reason, "no ledger") {
 		t.Errorf("verdict = %+v, want not shared / no ledger / doctor fix", st)
 	}
