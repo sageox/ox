@@ -53,6 +53,45 @@ func insideFrame(sel string) string {
 		`return (r.left>=f.left&&r.right<=f.right&&r.top>=f.top&&r.bottom<=f.bottom)+' '+JSON.stringify({el:[r.left,r.top,r.right,r.bottom],frame:[f.left,f.top,f.right,f.bottom]})})()`
 }
 
+// Dragging across the plan's frame must keep moving the bar, not consume button clicks.
+func TestBrowser_ReviewBarDrag(t *testing.T) {
+	ctx := frameBrowser(t)
+	base := serveFrameHost(t, []byte(`<!doctype html><html><body><p>A plan</p></body></html>`), framedHost(`committed: [], reviewing: true`))
+	var start box
+	if err := chromedp.Run(ctx,
+		chromedp.Navigate(base),
+		chromedp.WaitVisible(".rev-bar", chromedp.ByQuery),
+		chromedp.Evaluate(`window.bar=document.querySelector('.rev-bar');window.before=bar.getBoundingClientRect();
+			const r=bar.querySelector('.rev-conn').getBoundingClientRect();({X:r.left+r.width/2,Y:r.top+r.height/2})`, &start),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if got := evalString(t, ctx, `getComputedStyle(bar).cursor+'|'+getComputedStyle(bar.querySelector('button')).cursor`); got != "grab|pointer" {
+		t.Fatalf("hover cursors: %q", got)
+	}
+	if err := chromedp.Run(ctx,
+		chromedp.MouseEvent("mouseMoved", start.X, start.Y),
+		chromedp.MouseEvent("mousePressed", start.X, start.Y, chromedp.ButtonLeft, chromedp.ClickCount(1)),
+		chromedp.MouseEvent("mouseMoved", start.X+120, start.Y-100, chromedp.ButtonLeft),
+	); err != nil {
+		t.Fatal(err)
+	}
+	const position = `Math.round(bar.getBoundingClientRect().left-before.left)+','+Math.round(bar.getBoundingClientRect().top-before.top)`
+	if got := evalString(t, ctx, position+`+'|'+getComputedStyle(bar).cursor`); got != "120,-100|grabbing" {
+		t.Fatalf("drag position and cursor: %q", got)
+	}
+	if err := chromedp.Run(ctx,
+		chromedp.MouseEvent("mouseReleased", start.X+120, start.Y-100, chromedp.ButtonLeft, chromedp.ClickCount(1)),
+		chromedp.MouseEvent("mouseMoved", 900, 200),
+		chromedp.Click(".rev-toggle", chromedp.ByQuery),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if got := evalString(t, ctx, position+`+'|'+getComputedStyle(bar).cursor+'|'+bar.querySelector('.rev-toggle').textContent`); got != "120,-100|grab|Review" {
+		t.Fatalf("release and button click: %q", got)
+	}
+}
+
 // TestBrowser_FramedControlsStayOverTheFrame mounts the controls around a
 // plan framed beside a host's own navigation, as a hosted viewer does, at a
 // laptop width and a desktop one. The bar and the comments rail sit over the
