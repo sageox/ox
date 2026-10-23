@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/plan"
+	"github.com/stretchr/testify/require"
 )
 
 // plan_commit_test.go covers commitPlanBackfillToLedger's failure routing:
@@ -209,6 +211,57 @@ func TestPlanBackfillInPlaceLeavesOtherFilesStaged(t *testing.T) {
 	}
 	if got := strings.TrimSpace(runGitInDir(t, ledger, "diff", "--cached", "--name-only")); got != "data/plans/2026-05-01-in-place/plan.md\nsessions/example/notes.md" {
 		t.Errorf("unrelated changes must stay staged:\n%s", got)
+	}
+}
+
+func TestPlanBackfillLeavesLargePlainHTMLLocal(t *testing.T) {
+	for _, rename := range []bool{false, true} {
+		for _, tracked := range []bool{false, true} {
+			for _, staged := range []bool{false, true} {
+				t.Run(fmt.Sprintf("rename=%t/tracked=%t/staged=%t", rename, tracked, staged), func(t *testing.T) {
+					ledger := t.TempDir()
+					old := writeBackfillPlanFixture(t, ledger, "2026-05-01-old", backfillTestRaw, "Old", time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC))
+					pointer := "version https://git-lfs.github.com/spec/v1\noid sha256:" + strings.Repeat("a", 64) + "\nsize 2000000\n"
+					if tracked {
+						require.NoError(t, os.WriteFile(filepath.Join(old, planHTMLFileName), []byte(pointer), 0o644))
+					}
+					initGitLedger(t, ledger)
+					pending := strings.Repeat("pending HTML\n", 100000)
+					require.NoError(t, os.WriteFile(filepath.Join(old, planHTMLFileName), []byte(pending), 0o644))
+					if staged {
+						runGitInDir(t, ledger, "add", "--", "data/plans/2026-05-01-old/plan.html")
+					}
+					// Hydration caches need not contain the pointer's literal bytes.
+					cache := filepath.Join(ledger, ".sageox", "cache", "data", "plans", filepath.Base(old), planHTMLFileName)
+					require.NoError(t, os.MkdirAll(filepath.Dir(cache), 0o700))
+					require.NoError(t, os.WriteFile(cache, []byte("hydrated old HTML"), 0o600))
+					require.NoError(t, plan.ApplyBackfillMeta(context.Background(), old, "Corrected title", "new"))
+					dest := old
+					var renames [][2]string
+					touched := []string{old}
+					if rename {
+						dest = old + "-renamed"
+						renames = [][2]string{{old, dest}}
+						touched = nil
+					}
+					err := commitPlanBackfillToLedger(ledger, renames, touched, nil)
+					require.NotErrorIs(t, err, errBackfillCommitFailed, "only the missing remote may fail")
+					rel := "data/plans/" + filepath.Base(dest)
+					require.Contains(t, runGitInDir(t, ledger, "show", "HEAD:"+rel+"/meta.json"), "Corrected title")
+					if tracked {
+						require.Equal(t, strings.TrimSpace(pointer), runGitInDir(t, ledger, "show", "HEAD:"+rel+"/plan.html"))
+					} else {
+						require.Empty(t, runGitInDir(t, ledger, "ls-tree", "--name-only", "HEAD", "--", rel+"/plan.html"))
+					}
+					working, err := os.ReadFile(filepath.Join(dest, planHTMLFileName))
+					require.NoError(t, err)
+					require.Equal(t, pending, string(working), "pending HTML must survive the backfill")
+					cached, err := os.ReadFile(cache)
+					require.NoError(t, err)
+					require.Equal(t, "hydrated old HTML", string(cached))
+				})
+			}
+		}
 	}
 }
 

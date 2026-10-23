@@ -744,9 +744,13 @@ func commitPlanBackfillToLedger(ledgerPath string, renames [][2]string, touchedP
 			if err != nil {
 				return fmt.Errorf("list original plan files: %w", err)
 			}
+			pendingHTML := plan.HasLargePlainHTML(pair[0])
 			for _, path := range strings.Split(strings.TrimSuffix(string(tracked), "\x00"), "\x00") {
 				if path == "" {
 					continue
+				}
+				if pendingHTML && path == oldRel+"/"+planHTMLFileName {
+					continue // git mv will retain HEAD's HTML, not the pending working copy
 				}
 				blob, err := gitStdout(ctx, ledgerPath, nil, "cat-file", "blob", "HEAD:"+path)
 				if err != nil {
@@ -773,7 +777,11 @@ func commitPlanBackfillToLedger(ledgerPath string, renames [][2]string, touchedP
 			if err != nil {
 				return err
 			}
+			pendingHTML := plan.HasLargePlainHTML(dir)
 			for _, file := range []string{"meta.json", "events.jsonl", planHTMLFileName} {
+				if pendingHTML && file == planHTMLFileName {
+					continue
+				}
 				if _, err := os.Lstat(filepath.Join(dir, file)); err == nil {
 					addPaths = append(addPaths, rel+"/"+file)
 				}
@@ -788,13 +796,23 @@ func commitPlanBackfillToLedger(ledgerPath string, renames [][2]string, touchedP
 		}
 		commitPaths = append(commitPaths, addPaths...)
 		commitPaths = append(commitPaths, gitserver.EnsureGitignoreBeforeCommitCtx(ctx, ledgerPath)...)
+		var excludes []string
 		for _, pair := range moves {
+			if plan.HasLargePlainHTML(filepath.Join(ledgerPath, pair[0])) {
+				// Reset only the index: git mv carries the committed HTML to the
+				// new path while the pending page stays as a local working edit.
+				if out, err := gitutil.RunGit(ctx, ledgerPath, "reset", "-q", "--", pair[0]+"/"+planHTMLFileName); err != nil {
+					return fmt.Errorf("unstage pending %s: %s: %w", planHTMLFileName, gitutil.SanitizeOutput(out), err)
+				}
+				excludes = append(excludes, ":(exclude,literal)"+pair[1]+"/"+planHTMLFileName)
+			}
 			if out, err := gitutil.RunGit(ctx, ledgerPath, "mv", "--sparse", "--", pair[0], pair[1]); err != nil {
 				return fmt.Errorf("git mv %s -> %s failed: %s: %w", pair[0], pair[1], gitutil.SanitizeOutput(out), err)
 			}
 		}
 		if len(addPaths) > 0 {
-			if out, err := gitutil.RunGit(ctx, ledgerPath, append([]string{"add", "--sparse", "--"}, addPaths...)...); err != nil {
+			args := append([]string{"add", "--sparse", "--"}, addPaths...)
+			if out, err := gitutil.RunGit(ctx, ledgerPath, append(args, excludes...)...); err != nil {
 				return fmt.Errorf("git add failed: %s: %w", gitutil.SanitizeOutput(out), err)
 			}
 		}
