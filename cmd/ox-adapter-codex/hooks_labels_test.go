@@ -208,3 +208,41 @@ func TestHookLabels_DoctorDistinguishesMalformedFromMissing(t *testing.T) {
 		}
 	}
 }
+
+// Commands that merely mention ox must survive label refresh and uninstall.
+func TestHookLabels_PreserveCommandsMentioningOx(t *testing.T) {
+	for _, scope := range []string{"project", "user"} {
+		for _, command := range []string{`echo "ox agent hook"`, `echo "ox agent prime"`, "echo " + hookCommand("Stop"), hookCommand("Stop") + "; scan-changes"} {
+			t.Run(scope+"/"+command, func(t *testing.T) {
+				fakeCodexOnPath(t)
+				params := adapterprotocol.HookParams{RepoRoot: t.TempDir(), Scope: scope}
+				path := resolveHooksPath(params.RepoRoot, scope)
+				custom, err := json.Marshal(map[string]any{"type": "command", "command": command, "statusMessage": "User hook", "timeout": 17, "async": true})
+				require.NoError(t, err)
+				original := `{"hooks":{"Stop":[{"matcher":"Bash","hooks":[` + string(custom) + `]}]}}`
+				require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+				require.NoError(t, os.WriteFile(path, []byte(original), 0o600))
+				hooks, _, err := readHooksFile(path)
+				require.NoError(t, err)
+				assert.False(t, eventHasOxHook(hooks["Stop"]))
+				assert.False(t, hookLabelsOutdated(hooks))
+				diagnosis, err := handleDiagnose(adapterprotocol.DiagnoseParams{RepoRoot: params.RepoRoot, Scope: scope})
+				require.NoError(t, err)
+				for _, issue := range diagnosis.Issues {
+					assert.NotContains(t, issue.Slug, "hook-labels-outdated")
+				}
+				_, err = handleInstallHooks(params)
+				require.NoError(t, err)
+				hooks, _, err = readHooksFile(path)
+				require.NoError(t, err)
+				require.Len(t, hooks["Stop"], 2, "install must append an owned hook instead of replacing the user's command")
+				assert.JSONEq(t, string(custom), string(hooks["Stop"][0].Hooks[0].raw))
+				_, err = handleUninstallHooks(params)
+				require.NoError(t, err)
+				remaining, err := os.ReadFile(path)
+				require.NoError(t, err)
+				assert.JSONEq(t, original, string(remaining))
+			})
+		}
+	}
+}

@@ -394,7 +394,14 @@ func eventHasOxHook(entries []codexHookEntry) bool {
 }
 
 func isOxCommand(cmd string) bool {
-	return strings.Contains(cmd, "ox agent hook") || strings.Contains(cmd, "ox agent prime")
+	// Only commands emitted by this adapter are safe to refresh or remove.
+	// Substring matches can claim another integration that merely mentions ox.
+	for _, event := range codexHookEvents {
+		if cmd == hookCommand(event) {
+			return true
+		}
+	}
+	return false
 }
 
 // --- config.toml legacy feature migration ---
