@@ -763,6 +763,20 @@ func uninstallAllIntegrations(force bool) error {
 		installed = append(installed, "Oxy pet (Claude Code, user)")
 	}
 
+	// check the Oxy pet (Codex, user scope)
+	codexPetInstaller := newCodexPetInstaller()
+	codexPetEnabled := false
+	if codexPetInstaller.Home != "" {
+		var err error
+		codexPetEnabled, err = codexPetPresent(pet.CodexDir(codexPetInstaller.Home))
+		if err != nil {
+			return fmt.Errorf("check the Oxy pet for Codex: %w", err)
+		}
+	}
+	if codexPetEnabled {
+		installed = append(installed, "Oxy pet (Codex, user)")
+	}
+
 	// check git commit hooks
 	gitRoot := findGitRoot()
 	if gitRoot != "" && HasGitHooks(gitRoot) {
@@ -854,6 +868,11 @@ func uninstallAllIntegrations(force bool) error {
 			errors = append(errors, fmt.Sprintf("Oxy pet: %v", err))
 		} else {
 			petSteps = res.ManualSteps
+		}
+	}
+	if codexPetEnabled {
+		if _, err := codexPetInstaller.Disable(context.Background()); err != nil {
+			errors = append(errors, fmt.Sprintf("Oxy pet (Codex): %v", err))
 		}
 	}
 	if gitRoot != "" {
@@ -980,6 +999,23 @@ func petPresent(dir string) (bool, error) {
 	if err := pet.RecoverSwap(dir); err != nil {
 		return false, err
 	}
+	return dirPresent(dir)
+}
+
+// codexPetPresent reports whether Oxy's Codex pet folder exists, or a
+// complete copy an interrupted refresh left beside it. Like petPresent, only
+// "not there" means absent.
+func codexPetPresent(dir string) (bool, error) {
+	if present, err := dirPresent(dir); present || err != nil {
+		return present, err
+	}
+	if _, err := pet.CodexWrittenVersion(dir + ".old"); err == nil {
+		return true, nil
+	}
+	return false, nil
+}
+
+func dirPresent(dir string) (bool, error) {
 	_, err := os.Stat(dir)
 	if err == nil {
 		return true, nil
