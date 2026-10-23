@@ -110,6 +110,7 @@ same prime fallback.
 | `status` | no | `active` \| `draft` \| `superseded-by:<other-name>` | Default `active`. |
 | `valid-through` | no | `YYYY-MM-DD` | Shelf life. Empty means evergreen. Parsed and reported, never enforced by deletion — see below. |
 | `from-discussion` | no | discussion id | Optional provenance link into `<team-context>/discussions/`. |
+| `requires` | no (skills only) | list of `shell`, `ox-cli` | What a skill needs to run. See below. |
 
 ### Visibility tiers
 
@@ -144,6 +145,27 @@ Two clocks are worth keeping distinct:
 - **A dated entry inside a skill** — the skill is evergreen but its `references/` rot
   individually. ox does not read those; the skill's own body should tell an agent to
   check them and say so when one has passed.
+
+### `requires:` — skills that need a terminal (skills only)
+
+A team skill can also reach coworkers who have no terminal: AI chat through the SageOx
+connector, and Claude, when an admin connects the team's Claude organization. A skill
+that runs commands is no use there, so say so:
+
+```yaml
+requires: [shell]    # runs shell commands
+requires: [ox-cli]   # runs ox commands
+requires: []         # runs anywhere; the commands in its body are only examples
+```
+
+Without the key, SageOx infers it: a skill whose body runs `` `ox <verb>` `` (or has an
+`ox` line inside a code block) or opens a `bash`/`sh`/`shell`/`zsh` code block stays with
+coding agents. `ox skills publish` warns when it makes that inference, so you can make it
+explicit. A block list (`requires:` followed by `  - shell` lines) is read too.
+
+When your Claude organization already delivers a skill, ox stops copying it into
+`.claude/skills` so Claude Code does not list it twice. Codex, Cursor and every other
+agent keep ox's copy. `ox skills status` shows which source each skill comes from.
 
 ### One source, one delivery path
 

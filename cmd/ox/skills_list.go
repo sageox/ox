@@ -17,6 +17,7 @@ import (
 	"github.com/sageox/ox/internal/adapterstamp"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/skillmanager"
+	"github.com/sageox/ox/internal/teamdocs"
 	"github.com/sageox/ox/pkg/adapterprotocol"
 	"github.com/spf13/cobra"
 )
@@ -590,12 +591,13 @@ func manifestDescription(content []byte) (description string, folded bool) {
 	for line := 0; scanner.Scan() && line < 30; line++ {
 		text := strings.TrimRight(scanner.Text(), "\r")
 		if line == 0 {
-			if text != "---" {
+			// One leading BOM, matching the Team Context reader (teamdocs trimBOM).
+			if !teamdocs.IsFrontmatterFence(strings.TrimPrefix(text, "\ufeff")) {
 				return "", false // no frontmatter
 			}
 			continue
 		}
-		if text == "---" {
+		if teamdocs.IsFrontmatterFence(text) {
 			break
 		}
 		if folding {

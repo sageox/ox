@@ -2,6 +2,7 @@ package teamdocs
 
 import (
 	"bufio"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -304,34 +305,29 @@ func readRuleBody(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	s := string(data)
-	if !strings.HasPrefix(s, "---\n") && !strings.HasPrefix(s, "---\r\n") {
-		return s, nil
+	return ManifestBody(string(data)), nil
+}
+
+// ManifestBody returns a rule or skill manifest's markdown with any leading
+// YAML frontmatter stripped. An unterminated frontmatter returns everything
+// after the opening fence, so no part of the document is ever silently dropped
+// from what a reader (or a body scan) sees.
+func ManifestBody(s string) string {
+	s = trimBOM(s)
+	first, rest, found := strings.Cut(s, "\n")
+	if !found || !IsFrontmatterFence(first) {
+		return s
 	}
-	// find the closing --- on its own line
-	rest := s
-	// drop opening fence
-	if strings.HasPrefix(rest, "---\r\n") {
-		rest = rest[5:]
-	} else {
-		rest = rest[4:]
-	}
-	// look for closing fence at start of a line
-	for {
-		i := strings.Index(rest, "\n---")
-		if i < 0 {
-			return strings.TrimLeft(rest, "\r\n"), nil
+	// The closing fence is the next line IsFrontmatterFence accepts; a line
+	// such as "---something" is content, not a fence.
+	for offset := 0; offset <= len(rest); {
+		line, _, _ := strings.Cut(rest[offset:], "\n")
+		if IsFrontmatterFence(line) {
+			return strings.TrimLeft(rest[offset+len(line):], "\r\n")
 		}
-		// must be followed by end-of-line (or EOF)
-		after := i + 4
-		if after >= len(rest) || rest[after] == '\n' || rest[after] == '\r' {
-			rest = rest[after:]
-			rest = strings.TrimLeft(rest, "\r\n")
-			return rest, nil
-		}
-		// not a real fence (e.g. "---something"), keep looking
-		rest = rest[i+1:]
+		offset += len(line) + 1
 	}
+	return strings.TrimLeft(rest, "\r\n")
 }
 
 // ReadRuleBody returns a Team Rule's markdown body without YAML frontmatter.
@@ -361,6 +357,11 @@ type ruleFrontmatter struct {
 	Status         string
 	FromDiscussion string
 	ValidThrough   string
+	// Requires and RequiresDeclared carry a skill's `requires:` key (rules
+	// ignore it). See SkillRequirements for the semantics.
+	Requires         []string
+	RequiresDeclared bool
+	requiresBlock    bool // inside a `requires:` block list (`  - shell` lines)
 }
 
 // parseRuleFrontmatter does minimal YAML extraction sufficient for the rule
@@ -373,9 +374,14 @@ func parseRuleFrontmatter(path string) ruleFrontmatter {
 		return ruleFrontmatter{}
 	}
 	defer f.Close()
+	return parseRuleFrontmatterFrom(f)
+}
 
-	scanner := bufio.NewScanner(f)
-	inFrontmatter := false
+// parseRuleFrontmatterFrom is parseRuleFrontmatter over any reader, so a
+// manifest held in memory (`ox skills publish` reads the repository copy
+// before it exists in any Team Context) parses with exactly the same rules.
+func parseRuleFrontmatterFrom(r io.Reader) ruleFrontmatter {
+	scanner := bufio.NewScanner(r)
 	lineCount := 0
 	var fm ruleFrontmatter
 
@@ -384,17 +390,40 @@ func parseRuleFrontmatter(path string) ruleFrontmatter {
 		line := scanner.Text()
 
 		if lineCount == 1 {
-			if line != "---" {
+			if !IsFrontmatterFence(trimBOM(line)) {
 				return ruleFrontmatter{}
 			}
-			inFrontmatter = true
 			continue
 		}
-		if inFrontmatter && line == "---" {
+		if IsFrontmatterFence(line) {
 			break
 		}
-		if !inFrontmatter {
-			break
+
+		// A `requires:` block list is the one multi-line form read here.
+		if fm.requiresBlock {
+			if item, isItem := blockListItem(line); isItem {
+				if item != "" {
+					fm.Requires = append(fm.Requires, item)
+					fm.RequiresDeclared = true
+				}
+				continue
+			}
+			fm.requiresBlock = false
+		}
+
+		// requires: is read on EVERY frontmatter line, not only inside the
+		// window below (trust contract v2, R4). It is the one key where a miss
+		// fails open: a declaration pushed past line 30 by a long folded
+		// description: read as "undeclared", so a skill whose author said it
+		// needs a shell could be offered where there is none. Every other key
+		// keeps the window, and with it the behavior teams already rely on.
+		if strings.HasPrefix(line, "requires:") {
+			fm.applyRequires(stripYAMLComment(strings.TrimSpace(strings.TrimPrefix(line, "requires:"))))
+			continue
+		}
+		// The window: the 30 lines after the opening fence.
+		if lineCount > 31 {
+			continue
 		}
 
 		switch {
@@ -417,13 +446,51 @@ func parseRuleFrontmatter(path string) ruleFrontmatter {
 		case strings.HasPrefix(line, "globs:"):
 			fm.Globs = parseGlobs(stripYAMLComment(strings.TrimSpace(strings.TrimPrefix(line, "globs:"))))
 		}
-
-		if lineCount > 30 {
-			break
-		}
 	}
 
 	return fm
+}
+
+// applyRequires records a `requires:` value. An empty value opens a block list.
+//
+// The block form is read here, unlike for repos:, because the safe default
+// points the other way. A block-form repos: read as absent means "every repo",
+// which only widens where prose lands. A block-form requires: read as absent
+// would let a skill whose author SAID it needs a shell be offered to chat hosts
+// that have none. Mirrors packages/teamskills applyRequires in sageox-mono, so
+// the server and the CLI classify the same manifest the same way.
+func (fm *ruleFrontmatter) applyRequires(value string) {
+	if value == "" {
+		fm.requiresBlock = true
+		return
+	}
+	fm.RequiresDeclared = true
+	fm.Requires = parseInlineList(value)
+}
+
+// blockListItem parses one line of a YAML block sequence. The second return is
+// false for any line that is not an item, which ends the list.
+//
+// Both indentations count (trust contract v2, R3). `requires:\n- shell`, with
+// the dash at column 0, is what PyYAML and most formatters emit; reading it as
+// "no declaration" let a skill whose author declared a shell requirement pass
+// for portable. At column 0 only `-` or `- …` is an item, so a line such as
+// "-foo" still ends the list; indented items keep the looser historical rule.
+// An empty item (`-` alone) yields "" and keeps the list open.
+func blockListItem(line string) (string, bool) {
+	if line == "" {
+		return "", false
+	}
+	trimmed := strings.TrimSpace(line)
+	if line[0] == ' ' || line[0] == '\t' {
+		if !strings.HasPrefix(trimmed, "-") {
+			return "", false
+		}
+	} else if trimmed != "-" && !strings.HasPrefix(line, "- ") {
+		return "", false
+	}
+	item := stripYAMLComment(strings.TrimSpace(strings.TrimPrefix(trimmed, "-")))
+	return strings.Trim(item, `"'`), true
 }
 
 // parseGlobs parses the globs: field, accepting both the inline-list form that

@@ -48,7 +48,7 @@ func parseFrontmatter(path string) docFrontmatter {
 
 		// frontmatter must start on line 1 with ---
 		if lineCount == 1 {
-			if line == "---" {
+			if IsFrontmatterFence(trimBOM(line)) {
 				inFrontmatter = true
 				continue
 			}
@@ -56,7 +56,7 @@ func parseFrontmatter(path string) docFrontmatter {
 		}
 
 		// closing delimiter
-		if inFrontmatter && line == "---" {
+		if inFrontmatter && IsFrontmatterFence(line) {
 			break
 		}
 
@@ -107,6 +107,31 @@ func parseFrontmatter(path string) docFrontmatter {
 	}
 
 	return fm
+}
+
+// trimBOM drops one leading UTF-8 byte-order mark.
+//
+// Every frontmatter reader here applies it to the first line, because editors,
+// YAML loaders and coding agents all do: a reader that did not would see "no
+// frontmatter" in a file every consumer reads WITH frontmatter, silently
+// dropping repos:, audience:, status: and requires: — widening where a skill
+// lands, and publishing drafts. Mirrors teamskills normalizeManifest, which
+// closes the same gap on the trust side.
+func trimBOM(s string) string {
+	return strings.TrimPrefix(s, "\ufeff")
+}
+
+// IsFrontmatterFence reports whether line opens or closes YAML frontmatter:
+// `---` once trailing spaces and tabs are removed, with nothing before it
+// (trust contract v2, R2). YAML loaders accept "--- ", so a reader demanding
+// the exact bytes saw no frontmatter where every consumer sees one — which hid
+// an allowed-tools grant from the trust check and dropped repos:/status: here.
+//
+// The ONE definition: teamskills' trust check and every reader in this package
+// call it, so they cannot disagree about where a manifest's frontmatter is.
+// line excludes its newline; a stray "\r" counts as trailing whitespace.
+func IsFrontmatterFence(line string) bool {
+	return strings.TrimRight(line, " \t\r") == "---"
 }
 
 // extractValue gets the trimmed value after a "key:" prefix, stripping quotes.

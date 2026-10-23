@@ -37,7 +37,8 @@ func checkClaudeSkills(fix bool) checkResult {
 			return WarningCheck("AI coworker assets", describeWithheldTeamSkills(withheld),
 				teamSkillApprovalHint(withheld))
 		}
-		return PassedCheck("AI coworker assets", fmt.Sprintf("%d managed files across %d native target(s)", plan.DesiredFileCount, plan.TargetCount))
+		return PassedCheck("AI coworker assets", fmt.Sprintf("%d managed files across %d native target(s)", plan.DesiredFileCount, plan.TargetCount)+
+			claudeOrgDoctorSummary(gitRoot, plan))
 	}
 
 	problem := describeSkillPlan(plan)
@@ -65,7 +66,30 @@ func checkClaudeSkills(fix bool) checkResult {
 				len(plan.Creates)+len(plan.Updates)+len(plan.Removes), describeWithheldTeamSkills(withheld)),
 			teamSkillApprovalHint(withheld))
 	}
-	return PassedCheck("AI coworker assets", fmt.Sprintf("reconciled %d file change(s) across %d native target(s)", len(plan.Creates)+len(plan.Updates)+len(plan.Removes), plan.TargetCount))
+	return PassedCheck("AI coworker assets", fmt.Sprintf("reconciled %d file change(s) across %d native target(s)", len(plan.Creates)+len(plan.Updates)+len(plan.Removes), plan.TargetCount)+
+		claudeOrgDoctorSummary(gitRoot, plan))
+}
+
+// claudeOrgDoctorSummary is the clause doctor appends while Claude Code gets
+// some team skills from the team's Claude organization instead of from ox, so
+// a coworker who sees fewer `-team` skills in .claude/skills learns why. ""
+// whenever nothing about Claude Code's sources has changed.
+func claudeOrgDoctorSummary(gitRoot string, plan *skillmanager.ReconcilePlan) string {
+	if claudeSkillRoot(gitRoot) == "" {
+		return ""
+	}
+	orgSync, err := skillmanager.ClaudeOrgSyncForRepo(gitRoot)
+	if err != nil || !orgSync.Active() {
+		return ""
+	}
+	copies := 0
+	for _, d := range plan.TeamSkills {
+		if d.InstalledAs != "" && !d.ClaudeOrgDelivered {
+			copies++
+		}
+	}
+	return " · claude org sync connected · " + skillsArriveAs(len(orgSync.Skills), orgSync.TeamSlug) +
+		" · ox copies " + pluralSkills(copies)
 }
 
 // describeSkillConflicts renders each preserved conflict as "<path> —

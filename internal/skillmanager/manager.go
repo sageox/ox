@@ -703,7 +703,7 @@ func planWithCatalogs(repoRoot, version string, desired DesiredSkills, targets [
 			}
 			continue
 		}
-		if err := planSkillTarget(repoRoot, target, selectedSkills, oldFiles, journalFiles, trackedDirs, desiredPaths, plan, &next); err != nil {
+		if err := planSkillTarget(repoRoot, target, skillsForTarget(source, key, selectedSkills), oldFiles, journalFiles, trackedDirs, desiredPaths, plan, &next); err != nil {
 			return nil, err
 		}
 	}
