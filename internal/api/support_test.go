@@ -6,12 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/sageox/ox/internal/useragent"
@@ -26,6 +28,44 @@ type supportRoundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f supportRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
+}
+
+// TestSupportSubmission_ClassifiesReceiptReadFailures prevents a response-body
+// timeout or cancellation from being reported as an unrelated receipt failure.
+func TestSupportSubmission_ClassifiesReceiptReadFailures(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		readError error
+		cancel    bool
+		message   string
+	}{
+		{name: "timeout after headers", readError: &net.DNSError{IsTimeout: true, Err: "private-response-sentinel"}, message: "support submission timed out"},
+		{name: "cancellation after headers", readError: context.Canceled, cancel: true, message: "support submission interrupted: context canceled"},
+		{name: "truncated receipt", readError: io.ErrUnexpectedEOF, message: "could not read the support receipt"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var calls atomic.Int32
+			client := NewRepoClientWithEndpoint("http://support.invalid")
+			client.httpClient.Transport = supportRoundTripFunc(func(*http.Request) (*http.Response, error) {
+				calls.Add(1)
+				if tc.cancel {
+					cancel()
+				}
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(iotest.ErrReader(tc.readError))}, nil
+			})
+			caseID, err := client.SubmitSupportCase(ctx, []byte(`{"description":"private-report-sentinel"}`))
+			require.EqualError(t, err, tc.message)
+			assert.Empty(t, caseID)
+			assert.EqualValues(t, 1, calls.Load())
+			if tc.cancel {
+				assert.ErrorIs(t, err, context.Canceled)
+			}
+		})
+	}
 }
 
 // TestSupportSubmission_PreservesGuardedBytes prevents sending a different body

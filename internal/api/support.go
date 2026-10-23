@@ -95,6 +95,13 @@ func (c *RepoClient) SubmitSupportCase(ctx context.Context, payload []byte) (str
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxSupportResponseBytes+1))
 	if err != nil {
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("support submission interrupted: %w", ctx.Err())
+		}
+		var networkError net.Error
+		if errors.As(err, &networkError) && networkError.Timeout() {
+			return "", errors.New("support submission timed out")
+		}
 		return "", errors.New("could not read the support receipt")
 	}
 	if len(body) > maxSupportResponseBytes {
