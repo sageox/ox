@@ -81,6 +81,52 @@ func TestRunInit_CodexTrustStepRequiresInstalledHooks(t *testing.T) {
 	}
 }
 
+func TestRunInit_ClaudeAliasInstallsClaudeHooks(t *testing.T) {
+	env := newOxE2E(t)
+	withInitFlags(t, env.TeamID)
+	initAgentsFlag = "claude"
+	t.Setenv("OX_ADAPTER_PATH", t.TempDir())
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+
+	require.NoError(t, runInit())
+	assert.FileExists(t, filepath.Join(env.Root, ".claude", "settings.json"))
+	assert.Contains(t, env.Requested(), "/api/v1/repo/init")
+}
+
+func TestRunInit_UnknownAgentFailsBeforeInitialization(t *testing.T) {
+	env := newOxE2E(t)
+	withInitFlags(t, env.TeamID)
+	initAgentsFlag = "unknown-agent"
+	t.Setenv("OX_ADAPTER_PATH", t.TempDir())
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+
+	err := runInit()
+	require.ErrorContains(t, err, `invalid agent "unknown-agent" in --agents`)
+	require.ErrorContains(t, err, "valid values:")
+	require.ErrorContains(t, err, "claude-code")
+	require.ErrorContains(t, err, "gemini")
+	assert.NoDirExists(t, filepath.Join(env.Root, ".sageox"))
+	assert.Empty(t, env.Requested(), "invalid input must fail before any API request")
+}
+
+func TestRunInit_ExplicitEmptyAgentFailsBeforeInitialization(t *testing.T) {
+	env := newOxE2E(t)
+	withInitFlags(t, env.TeamID)
+	initAgentsFlag = ""
+	previousExplicit := initAgentsFlagExplicit
+	initAgentsFlagExplicit = false
+	t.Cleanup(func() { initAgentsFlagExplicit = previousExplicit })
+	require.NoError(t, initCmd.ParseFlags([]string{"--agents="}))
+	t.Setenv("OX_ADAPTER_PATH", t.TempDir())
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+
+	err := initCmd.RunE(initCmd, nil)
+	require.ErrorContains(t, err, "--agents must include at least one agent")
+	require.ErrorContains(t, err, "valid values:")
+	assert.NoDirExists(t, filepath.Join(env.Root, ".sageox"))
+	assert.Empty(t, env.Requested(), "an explicitly empty selection must fail before any API request")
+}
+
 // TestRunInit_WritesScopedIgnoreAndNeverStagesReservedArtifacts drives runInit
 // end to end for the first time.
 //
