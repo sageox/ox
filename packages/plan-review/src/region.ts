@@ -1,4 +1,4 @@
-// A drawn region: a reviewer's freehand ellipse around part of a plan, kept
+// A drawn region: a reviewer's ellipse around part of a plan, kept
 // with what it encloses and a bounded copy of what lay under it, so it can be
 // shown again after the plan changes. docs/specs/plan-review-drawn-context.md
 // is the format. pkg/planreview (region.go) checks the same rules on the
@@ -68,7 +68,7 @@ export interface Capture {
   v: 1;
   kind: 'region';
   frame: 'document';
-  /** The stroke as drawn. */
+  /** Sampled oval outline; older captures retain their freehand stroke. */
   path: Point[];
   /** What the reviewer sees, and what decides the targets. */
   ellipse: Ellipse;

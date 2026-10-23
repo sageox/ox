@@ -44,7 +44,7 @@ and fonts as `expect.json`'s `environment`.
   "plan_revision": "sha256:95eb8bed…", // SHA-256 of the plan-of-record bytes the page displayed
   "created_at": "2026-10-10T20:00:02Z",
   "frame": "document",                // coordinate frame of every point, box and the ellipse
-  "path": [[478.7, 339.9], …],        // the stroke as drawn, in order
+  "path": [[478.7, 339.9], …],        // sampled oval outline, or a legacy freehand stroke
   "ellipse": {"center": [597.6, 373.4], "radii": [155.5, 67.1],
               "rotation": 0, "start": -146.9, "dir": 1},  // what the reviewer sees (degrees)
   "bbox": [442.1, 306.3, 311, 134.2], // of the ellipse
@@ -77,13 +77,15 @@ and fonts as `expect.json`'s `environment`.
   stub still knows which revision a drawing names. A framed
   document is untrusted, so the host stamps the revision of the instance it
   framed and ignores any claim from the document (section 6).
-- **Shape:** a reviewer draws freehand and sees a perfect ellipse: the one
-  with the stroke's area, centre and second moments (the stroke closed back to
-  its start), squared to the page when within 10° of it, starting where the pen
-  landed (`start`) and running the way it moved (`dir`). A stroke that encloses
-  almost nothing, such as a line, gets the ellipse inscribed in its bounding
-  box. The record keeps both: `ellipse` is what the reviewer saw and what
-  decides the targets; `path` is the evidence it was fitted from.
+- **Shape:** dragging between opposite corners shows the oval immediately.
+  Before submitting, a reviewer can drag a draft's outline to move it or use
+  its eight corner and edge handles to resize it. Each completed edit keeps
+  the drawing's identity and note, and recaptures its targets, context and
+  layout. `ellipse` is what the reviewer sees and what decides the targets;
+  `path` samples that outline. Older records keep their freehand stroke and
+  fitted ellipse and render unchanged.
+  Geometry freezes when a submission enters the outbox and stays frozen once
+  the host owns it. A refusal unlocks the draft; newer note edits are retained.
 - **Identity:** `id` is minted once by whoever freezes the drawing — the
   trusted host when framed, the local review chrome when top-level — never
   derived from the targets. Two drawings around one paragraph are two
@@ -113,8 +115,8 @@ and fonts as `expect.json`'s `environment`.
   a 12 px broad nib held at −12° (a hairline along the top and bottom,
   swelling where the ellipse turns through the vertical), tapered where the
   pen lands and lifts, and run 17° past its start so it closes like a pen-drawn
-  O. While the pen is down the raw stroke shows faintly, then settles into the
-  ellipse. Painting changes no record: retuning the nib left the regenerated
+  O. The live oval uses the same ink while the pointer is down. Painting
+  changes no record: retuning the nib left the regenerated
   `captures.json` byte-identical.
 
 ## 2. Scroll, zoom, resize, expanded sections

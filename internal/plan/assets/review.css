@@ -35,11 +35,17 @@ body.rev-on [data-rev],body.rev-on section[id]:hover,body.rev-on li:hover,body.r
    then draws instead of scrolling. */
 .rev-ink{position:absolute;left:0;top:0;overflow:visible;pointer-events:none;z-index:calc(var(--rev-z, 2147483000) - 1)}
 .rev-ink.rev-drawing{pointer-events:auto;cursor:crosshair;touch-action:none}
+.rev-ink:focus{outline:none}
 .rev-ink-sage{color:var(--sage, #99c693)} .rev-ink-amber{color:var(--amber, #c6a23c)} .rev-ink-red{color:var(--red, #d77e6c)}
 .rev-ink-gold{color:var(--gold, #d9b654)} .rev-ink-faint{color:var(--faint, #8c8e7e)}
-/* a drawing's ink, committed or unsent; and the faint line of a stroke still being drawn */
+/* A live oval uses the same ink as its saved shape. Draft outlines can be
+   grabbed; the selected oval has corner and edge handles. */
 .rev-ink>g>g{opacity:.92} .rev-ink>g>g.rev-ink-unsent{opacity:.7}
-.rev-ink-live{fill:none;stroke:var(--gold, #d9b654);stroke-width:2;stroke-linecap:round;stroke-linejoin:round;opacity:.5}
+.rev-ink>g>g.rev-ink-live{opacity:.7}
+.rev-ink-hit{fill:none;stroke:transparent;stroke-width:16;pointer-events:stroke;cursor:grab}
+.rev-ink-bounds{fill:none;stroke:var(--gold, #d9b654);stroke-width:1;stroke-dasharray:4 4;pointer-events:none}
+.rev-ink-handle{fill:var(--bg, #111411);stroke:var(--gold, #d9b654);stroke-width:1.5;pointer-events:all}
+.rev-ink.rev-dragging,.rev-ink.rev-dragging *{cursor:grabbing!important}
 /* a drawing whose targets reflowed: a thin dashed outline of them, never the drawing */
 .rev-ink-reflowed{fill:none;stroke:currentColor;stroke-width:1.2;stroke-dasharray:5 5}
 /* while a capture reads the text the reader saw, glyphs review marks painted in are not part of it */

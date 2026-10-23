@@ -113,10 +113,10 @@ const HL_TINT: Record<string, Tint> = { 'approve': 'sage', 'request-change': 'am
 const stateTint = (state: string): Tint => (state === 'addressed' || state === 'verified' ? 'sage' : state === 'wontfix' ? 'faint' : 'amber');
 // why a stroke made no drawing, said to the reviewer; a cancel says nothing
 const DRAW_REFUSED: Record<string, string> = {
-  'no-target': 'Nothing in that loop can take a comment. Draw around a paragraph, an item, a row or part of a diagram.',
-  'too-large': 'That loop holds too much of the plan to keep. Draw around less of it.',
-  'too-small': 'Draw a loop around what you mean.',
-  'layout-changed': 'The page changed while you drew. Draw the loop again.',
+  'no-target': 'Nothing in that oval can take a comment. Draw around a paragraph, an item, a row or part of a diagram.',
+  'too-large': 'That oval holds too much of the plan to keep. Draw around less of it.',
+  'too-small': 'Drag to draw a larger oval around what you mean.',
+  'layout-changed': 'The page changed while you drew. Draw the oval again.',
 };
 const REVISION = /^sha256:[0-9a-f]{64}$/;
 // a comment on the plan as a whole: WholePlanAnchor in pkg/planreview, with
@@ -203,6 +203,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
   const revision = opts.revision && REVISION.test(opts.revision) ? opts.revision : '';
   let tool = false; // the Draw tool is selected
   let pending: Region | null = null; // a capture whose note is open, kept only on Save
+  const ownedDrawings = new Set<string>(); // receipts may arrive before the host refreshes committed
   // a drawing's record: the capture being noted, else your draft's, else the Ledger's
   function regionOf(a: string): Region | undefined {
     if (pending && 'q-' + pending.id === a) return pending;
@@ -248,13 +249,14 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
   // Its geometry and targets only: who drew it, and their note, stay here.
   function paintDrawings(): DrawingPaint[] {
     const out: DrawingPaint[] = [];
+    const waiting = store.entries();
     Object.keys(committed).concat(Object.keys(ds), pending ? ['q-' + pending.id] : []).forEach((a, i, all) => {
       const r = all.indexOf(a) === i && DRAWING.test(a) ? regionOf(a) : undefined;
       if (!r) return;
       const m = ds[a], carr = committed[a] || [];
       const d = drawingPaint({
         anchor: a,
-        kind: m || !carr.length ? 'unsent' : 'committed',
+        kind: carr.length || ownedDrawings.has(a) || waiting.some((e) => e.stamps[a] !== undefined) ? 'committed' : 'unsent',
         tint: m ? HL_TINT[m.status] || 'gold' : carr.length ? stateTint(repOf(carr).state) : 'gold',
         ellipse: r.ellipse,
         targets: r.targets.map((t) => ({ anchor: t.anchor, box: t.box, nth: t.nth, of: t.of })),
@@ -433,6 +435,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
   }
 
   let pop: HTMLElement | null = null;
+  let popAbout: About | null = null;
   let popNote = ''; // the open note's text when it opened
   let popByHost = false; // opened from the rail, not by a pick in the plan's frame
   function sendMode() { port.send({ type: 'mode', on, open: !!pop, draw: tool }); }
@@ -449,6 +452,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
     popByHost = false;
     if (pop) {
       pop.remove(); pop = null; sendMode();
+      popAbout = null;
       // a capture is kept only by Save
       if (pending) { pending = null; paint(); }
     }
@@ -460,6 +464,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
   // fresh: a new comment, which never resolves the marks already there.
   function openPop(t: About, rect: { left: number; bottom: number }, fresh?: boolean) {
     closePop(true);
+    popAbout = t;
     const a = t.a;
     const cstate = committedState(a);
     const p = pop = document.createElement('div'); p.className = 'rev-pop';
@@ -587,6 +592,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
       return;
     }
     closePop();
+    paint();
     flush();
   }
   // Submit freezes the marks no entry carries yet as one round and sends
@@ -630,6 +636,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
   }
   function report(e: Entry, r: Receipt) {
     if (destroyed) return;
+    if (r.state === 'owned') Object.keys(e.stamps).forEach((a) => { if (DRAWING.test(a)) ownedDrawings.add(a); });
     paint();
     // any answer but offline came from the host, so it is reachable
     setOffline(r.state === 'offline');
@@ -800,7 +807,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
   bar.className = 'rev-bar';
   bar.innerHTML = (live ? '<span class="rev-conn"></span>' : '') +
     '<button class="rev-toggle" title="Toggle review mode">Review</button>' +
-    (revision ? '<button class="rev-draw" aria-pressed="false" title="Draw a loop around part of the plan to comment on it">Draw</button>' : '') +
+    (revision ? '<button class="rev-draw" aria-pressed="false" title="Drag to draw an oval around part of the plan to comment on it">Draw</button>' : '') +
     '<span class="rev-count"></span>' +
     (live && !opts.reviewer ? '<button class="rev-who" title="Set the name teammates see on your comments"></button>' : '') +
     '<button class="rev-submit" title="Send feedback to the agent">' + (live ? 'Submit' : 'Export') + '</button>' +
@@ -834,7 +841,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
     tool = next;
     if (drawEl) { drawEl.classList.toggle('on', tool); drawEl.setAttribute('aria-pressed', String(tool)); }
     sendMode();
-    if (tool && !drawTaught) { drawTaught = true; toast('Draw a loop around what you mean: a paragraph, rows, part of a diagram. Esc puts the pen down.'); }
+    if (tool && !drawTaught) { drawTaught = true; toast('Drag to draw an oval. Drag its outline to move it, or its handles to resize it before submitting. Esc puts the pen down.'); }
   }
   function setReview(next: boolean, silent?: boolean) {
     on = next; toggleEl.classList.toggle('on', on);
@@ -927,6 +934,28 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
         // Only the reviewer's stroke in the Draw tool makes a capture; any
         // other came from the plan's own scripts.
         if (!on || !tool) break;
+        const anchor = m.anchor;
+        if (anchor) {
+          // A document may propose geometry for an existing draft, never
+          // rewrite a submitted drawing or mint its own identity.
+          if (committed[anchor]?.length || ownedDrawings.has(anchor) || store.entries().some((e) => e.stamps[anchor] !== undefined)) break;
+          const old = pending && 'q-' + pending.id === anchor ? pending : ds[anchor]?.region;
+          if (!old) break;
+          const r: Region = { ...m.capture, id: old.id, plan_revision: revision, created_at: old.created_at };
+          if (checkRegion(r)) break;
+          const label = drawingLabel(r), section = r.targets[0].section;
+          if (pending && pending.id === r.id) pending = r;
+          else if (!store.save({ ...ds[anchor], region: r, label, section })) toast('This browser could not save the updated drawing. It is kept in this tab only.');
+          if (pop && popAbout?.a === anchor) {
+            popAbout.label = label;
+            popAbout.section = section;
+            const about = pop.querySelector('.rev-about');
+            if (about) about.textContent = label;
+            placePop(toHost(m.rect));
+          }
+          paint();
+          break;
+        }
         if (held()) { toast('Save or delete the open note, then draw again.'); break; }
         // what the document proposed, with the identity, revision and time
         // only this host can give it
@@ -941,7 +970,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
       }
       case 'refused':
         if (m.reason === 'cancelled') break;
-        if (!held()) closePop();
+        if (!held() && !pending) closePop();
         if (m.reason === 'repeated') toast('“' + clip(m.quote, 40) + '” appears ' + m.count + ' times in this section — highlight a longer phrase so the comment points at one place.');
         else toast(DRAW_REFUSED[m.reason] || 'Highlight text within one section to comment on it.');
         break;

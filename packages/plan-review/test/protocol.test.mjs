@@ -94,6 +94,11 @@ test('captures, outcomes and drawing paints parse to their known fields only', (
   const want = { ...r };
   for (const k of ['id', 'plan_revision', 'created_at']) delete want[k];
   assert.deepEqual(parseDocumentMessage(doc({ type: 'capture', capture: { ...r, reviewer: 'mallory' }, rect: { left: 1, bottom: 2 }, submit: true }), I), { type: 'capture', capture: want, rect: { left: 1, bottom: 2 } });
+  const edit = { type: 'capture', capture: want, rect: { left: 1, bottom: 2 }, anchor: 'q-r1-double-fire' };
+  assert.deepEqual(parseDocumentMessage(doc(edit), I), edit);
+  for (const anchor of ['h1234abcd', 'q-short', '', 1, null]) {
+    assert.equal(parseDocumentMessage(doc({ ...edit, anchor }), I), null, 'invalid drawing identity ' + anchor);
+  }
   for (const bad of [{ type: 'capture', capture: { ...r, v: 2 }, rect: { left: 1, bottom: 2 } }, { type: 'capture', capture: r }]) {
     assert.equal(parseDocumentMessage(doc(bad), I), null, JSON.stringify(bad).slice(0, 60));
   }
