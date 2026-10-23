@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### New
 
 - **Send private feedback from the terminal** — `ox feedback --file report.txt` sends a report to SageOx Support and returns a receipt. Preview the exact request with `--dry-run`, use `--anonymous` without login or a reply email, or supply `--email` for replies. Choose `bug`, `feature-request`, or `feedback`. Local secret checks run before sending; no logs or session content are collected automatically.
+- **`/oxy` is Oxy's command** — in Claude Code, `/oxy` shows him, `/oxy off` hides him, `/oxy small|medium|large` sizes him, and `/oxy <animation>` pins one. It replaces `/hatch-pet`.
 
 ### Improved
 

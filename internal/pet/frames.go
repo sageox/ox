@@ -47,7 +47,7 @@ type SizeSpec struct {
 	Rows int
 }
 
-// Sizes are the boxes `/hatch-pet small|medium|large` draw in, small first.
+// Sizes are the boxes `/oxy small|medium|large` draw in, small first.
 var Sizes = []SizeSpec{{"small", 8}, {"medium", 12}, {"large", 16}}
 
 // Codepoints and colors of the Raster cell encoding (Claude Code RasterProps).
