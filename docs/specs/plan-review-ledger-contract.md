@@ -205,7 +205,11 @@ The CLI reads and writes review records only through `pkg/planreview`.
   session deletion constructs HEAD minus the exact selected session roots;
   it cannot include another staged deletion. Automatic snapshots still refuse
   mass deletion. Backfill preserves changed source blobs in the existing cache;
-  byte-identical relocations do not count as lost content.
+  byte-identical relocations within the same protected prefix do not count as
+  lost content. These scoped publishers require a clean index before a retry
+  fetches or restores autostash, retaining any staged draft's separate working
+  copy until its owner saves it. Legacy metadata recovery keeps its existing
+  autostash policy; publication-history validation does not select either policy.
 - **Plan changes no retry owns** (`ox doctor`, just before
   `plan-pending-writes`): a plan dir with uncommitted changes, no plan retry
   marker, and changes outside the review records an entry lands. If its

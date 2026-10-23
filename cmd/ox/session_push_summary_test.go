@@ -181,6 +181,37 @@ func TestPushSummaryToLedger_PreservesUnrelatedStaging(t *testing.T) {
 	require.True(t, result.Success, result.Error)
 	assert.Equal(t, localHead, runGit(t, ledger, "rev-parse", "HEAD"), "an identical retry needs no new commit")
 	assert.Equal(t, localHead, runGit(t, bare, "rev-parse", "HEAD"), "an identical retry still owes publication")
+
+	// Another clone advances the remote. A retry must not autostash the
+	// unrelated staged draft over its different working copy.
+	other := filepath.Join(t.TempDir(), "teammate")
+	runGit(t, bare, "clone", bare, other)
+	runGit(t, other, "config", "user.name", "Teammate")
+	runGit(t, other, "config", "user.email", "teammate@example.com")
+	require.NoError(t, os.WriteFile(filepath.Join(other, "remote.txt"), []byte("teammate change\n"), 0644))
+	runGit(t, other, "add", "remote.txt")
+	runGit(t, other, "commit", "-m", "advance remote")
+	runGit(t, other, "push")
+	remoteHead := runGit(t, bare, "rev-parse", "HEAD")
+	result = pushSummaryToLedger(summaryFile, sessionDir)
+	require.False(t, result.Success)
+	assert.Contains(t, result.Error, "staged changes remain untouched")
+	assert.Equal(t, localHead, runGit(t, ledger, "rev-parse", "HEAD"))
+	assert.Equal(t, remoteHead, runGit(t, bare, "rev-parse", "HEAD"))
+	assert.Equal(t, stagedPlan, runGit(t, ledger, "rev-parse", ":"+plan))
+	worktreePlan, err = os.ReadFile(filepath.Join(ledger, plan))
+	require.NoError(t, err)
+	assert.Equal(t, "later unstaged plan\n", string(worktreePlan))
+
+	// Once its owner explicitly saves the staged draft, normal retry can
+	// rebase and publish while retaining the later unstaged working copy.
+	runGit(t, ledger, "commit", "-m", "owner saves staged plan")
+	result = pushSummaryToLedger(summaryFile, sessionDir)
+	require.True(t, result.Success, result.Error)
+	assert.Equal(t, "staged plan", runGit(t, bare, "show", "HEAD:"+plan))
+	worktreePlan, err = os.ReadFile(filepath.Join(ledger, plan))
+	require.NoError(t, err)
+	assert.Equal(t, "later unstaged plan\n", string(worktreePlan))
 }
 
 // Failure prevented: git add during a rebase consumes conflict resolution state
