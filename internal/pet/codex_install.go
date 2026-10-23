@@ -257,7 +257,7 @@ func CodexWrittenVersion(dir string) (string, error) {
 
 // --- the $oxy skill ---
 
-// codexSkill is a thin relay to `ox pet`; behaviour lives in the command's
+// codexSkill is a thin relay to `ox pet`; behavior lives in the command's
 // guidance. Codex requires the frontmatter to open the file, so the version
 // stamp is the first line after it.
 const codexSkill = `---
