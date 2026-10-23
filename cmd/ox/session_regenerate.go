@@ -1065,5 +1065,5 @@ func commitAndPushLedgerBatch(ledgerPath string, sessionNames []string) error {
 
 	// A no-op snapshot can still owe the remote a prior commit. Push outside
 	// the lock so the retry path can acquire it to reconcile divergent history.
-	return pushLedger(context.Background(), ledgerPath)
+	return pushLedgerWithRetryPolicy(context.Background(), ledgerPath, true)
 }

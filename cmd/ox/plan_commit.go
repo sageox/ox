@@ -813,5 +813,5 @@ func commitPlanBackfillToLedger(ledgerPath string, renames [][2]string, touchedP
 	// Everything from here down is push-only: the commit above already
 	// landed locally, so a failure past this point must NOT match
 	// errBackfillCommitFailed — see the caller's best-effort push contract.
-	return pushLedger(context.Background(), ledgerPath)
+	return pushLedgerWithRetryPolicy(context.Background(), ledgerPath, true)
 }

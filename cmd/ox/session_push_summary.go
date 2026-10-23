@@ -384,7 +384,7 @@ func pushSummaryToLedger(filePath, sessionDir string) *pushSummaryOutput {
 	// Push outside the repo lock: retry may acquire it for a pull/rebase.
 	// An identical retry still owes publication if its earlier push failed.
 	slog.Info("pushing summary to ledger", "session", sessionName)
-	if err := pushLedger(context.Background(), ledgerPath); err != nil {
+	if err := pushLedgerWithRetryPolicy(context.Background(), ledgerPath, true); err != nil {
 		return &pushSummaryOutput{
 			Success: false,
 			Type:    "push_summary",

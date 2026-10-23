@@ -340,7 +340,7 @@ func removedLocationLabel(local, ledger bool) string {
 
 // batchDeleteSessionsFromLedger removes multiple sessions from the ledger in a
 // single git commit + push. Returns the count of successfully published removals.
-// Uses pushLedger() for push with pull --rebase retry on conflict.
+// Uses a guarded push retry so another writer's staged draft stays intact.
 func batchDeleteSessionsFromLedger(ledgerPath string, sessionNames []string) (int, error) {
 	for _, name := range sessionNames {
 		if err := session.ValidateDraftSessionName(name); err != nil {
@@ -382,7 +382,7 @@ func batchDeleteSessionsFromLedger(ledgerPath string, sessionNames []string) (in
 	}
 
 	// push with retry (pull --rebase --autostash on conflict)
-	if err := pushLedger(ctx, ledgerPath); err != nil {
+	if err := pushLedgerWithRetryPolicy(ctx, ledgerPath, true); err != nil {
 		return 0, fmt.Errorf("push: %w", err)
 	}
 
