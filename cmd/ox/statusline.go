@@ -264,7 +264,17 @@ func buildOxStatusline(in statuslineInput, dir string, opts statuslineOptions) (
 // statuslineRecMark is appended while the session is being recorded.
 const statuslineRecMark = "  ● rec"
 
-var statuslineDimStyle = lipgloss.NewStyle().Foreground(theme.AdaptTo(colorprofile.ANSI256, theme.ColorDim))
+var (
+	statuslineDimStyle    = lipgloss.NewStyle().Foreground(theme.AdaptTo(colorprofile.ANSI256, theme.ColorDim))
+	statuslineRecDotStyle = lipgloss.NewStyle().Foreground(ansi.IndexedColor(196)) // theme.AnsiError
+)
+
+// renderRecMark draws the recording mark with a red dot, the universal
+// "recording" signal, and a dim label. It uses the palette's pure ANSI red:
+// ColorError downsamples to a salmon that reads as orange in a status bar.
+func renderRecMark() string {
+	return "  " + statuslineRecDotStyle.Render("●") + statuslineDimStyle.Render(" rec")
+}
 
 // composeStatusline puts ox's segment on the chained output's last line.
 func composeStatusline(chained string, line oxStatusline, show bool, opts statuslineOptions) string {
@@ -297,7 +307,7 @@ func composeStatusline(chained string, line oxStatusline, show bool, opts status
 			width -= ansi.StringWidth(rec)
 		}
 		if opts.color {
-			rec = statuslineDimStyle.Render(rec)
+			rec = renderRecMark()
 		}
 	}
 

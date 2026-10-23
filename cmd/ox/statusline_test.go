@@ -455,6 +455,15 @@ func TestComposeStatusline_RecordingMark(t *testing.T) {
 	assert.Equal(t, "● ox  p…\n", composeStatusline("", line, true, opts))
 }
 
+// TestComposeStatusline_RecordingDotIsRed colors only the dot red, keeping the
+// label dim. Failure prevented: recording that doesn't read as recording.
+func TestComposeStatusline_RecordingDotIsRed(t *testing.T) {
+	line := oxStatusline{seg: oxactivity.Segment{Action: "posted murmur"}, recording: true}
+	got := composeStatusline("", line, true, statuslineOptions{color: true})
+	assert.Contains(t, got, statuslineRecDotStyle.Render("●")+statuslineDimStyle.Render(" rec"))
+	assert.Equal(t, "● ox  posted murmur  ● rec\n", ansi.Strip(got))
+}
+
 // TestIsStatuslineFastPath routes only the bare command around cobra, so
 // `ox statusline --help` still gets help. Failure prevented: help text in the bar.
 func TestIsStatuslineFastPath(t *testing.T) {
