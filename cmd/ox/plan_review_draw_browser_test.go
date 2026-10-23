@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -494,7 +495,8 @@ func drawHost(doc, revision, committed, extra string) string {
 		`const frame = document.getElementById('doc'); window.sent = [];` +
 		`window.addEventListener('message', (e) => { const d = e.data || {}; if (d.rect) window.rect = d.rect; if (d.input) window.input = true; if (d.connected) window.connected = true; if (d.ink) window.ink = d.ink; });` +
 		`window.ask = (m) => frame.contentWindow.postMessage(m, '*');` +
-		`mountHostControls(connectFrame(frame, 'draw-host-0001'), { account: 'acct-devon', plan: 'pln_draw', slug: 'retry-budget-rollout', reviewer: 'Devon',` +
+		`const port = connectFrame(frame, 'draw-host-0001'); window.got = [];` +
+		`mountHostControls({ send: port.send, listen: (fn) => port.listen((m) => { window.got.push(m); fn(m); }) }, { account: 'acct-devon', plan: 'pln_draw', slug: 'retry-budget-rollout', reviewer: 'Devon',` +
 		` frame, reviewing: true, revision: '` + revision + `', committed: ` + committed + `,` + extra +
 		` transport: { send: (op) => { window.sent.push(op); return Promise.resolve({ state: 'owned', id: op.id, synced: true }); } } });` +
 		`frame.src = '/doc/` + doc + `#i=draw-host-0001';</script></body></html>`
@@ -732,14 +734,14 @@ func TestBrowser_ViewOriginalAfterAnEdit(t *testing.T) {
 // and reopens the addressed one; each operation carries only its own drawing,
 // whole, under marks.
 // Failure prevented: editing or reopening one drawing changes the other, or
-// sends the drawing without its region, so it can no longer be placed.
+// changes submitted geometry, or sends a drawing without its region.
 func TestBrowser_DrawingsStayIndependentThroughEditAndReopen(t *testing.T) {
 	ctx := drawBrowser(t)
 	recs := fixtureDrawings(t)
 	addressed := committedDrawing(recs["r1-double-fire"], "addressed", "Both retries fire here.")
 	addressed["resolutionNote"] = "Bounded the retries."
 	committed, _ := json.Marshal([]any{addressed, committedDrawing(recs["r2-double-fire-again"], "open", "And again on requeue.")})
-	base := serveDrawFixture(t, drawHost("a", revisionDigest(t, "a"), string(committed), " resolve: true,"))
+	base := serveDrawFixture(t, drawHost("a?forge=1", revisionDigest(t, "a"), string(committed), " resolve: true,"))
 	if err := chromedp.Run(ctx, chromedp.Navigate(base), chromedp.WaitVisible(".rev-rail-orig", chromedp.ByQuery)); err != nil {
 		t.Fatalf("open the host: %v", err)
 	}
@@ -755,6 +757,19 @@ func TestBrowser_DrawingsStayIndependentThroughEditAndReopen(t *testing.T) {
 	if err := chromedp.Run(ctx, chromedp.SendKeys(".rev-pop .rev-note", "Still fires twice.", chromedp.ByQuery), chromedp.Click(".rev-pop .rev-save", chromedp.ByQuery)); err != nil {
 		t.Fatal(err)
 	}
+	// A new note on a submitted drawing must not unlock its geometry, even
+	// when the framed plan proposes an edit directly on the tools' channel.
+	forged := map[string]any{}
+	for k, v := range recs["r2-double-fire-again"] {
+		forged[k] = v
+	}
+	forged["ellipse"] = map[string]any{"center": []int{10, 10}, "radii": []int{111, 111}, "rotation": 0, "start": 0, "dir": 1}
+	msg, _ := json.Marshal(map[string]any{"type": "capture", "anchor": "q-r2-double-fire-again", "capture": forged, "rect": map[string]any{"left": 10, "bottom": 121}})
+	if err := chromedp.Run(ctx, chromedp.Click(".rev-draw", chromedp.ByQuery), chromedp.Evaluate(`window.ask({forge:`+string(msg)+`})`, nil)); err != nil {
+		t.Fatal(err)
+	}
+	var ignored struct{}
+	gotMessage(t, ctx, 0, "capture", &ignored)
 	row("Bounded the retries.")
 	if err := chromedp.Run(ctx, chromedp.SendKeys(".rev-pop .rev-note", "Not bounded yet.", chromedp.ByQuery), chromedp.Click(".rev-pop .rev-reopen", chromedp.ByQuery)); err != nil {
 		t.Fatalf("Reopen: %v", err)
@@ -770,7 +785,10 @@ func TestBrowser_DrawingsStayIndependentThroughEditAndReopen(t *testing.T) {
 	}
 	type mark struct {
 		Anchor, Status, Note string
-		Region               struct{ ID string }
+		Region               struct {
+			ID      string
+			Ellipse json.RawMessage
+		}
 	}
 	var sent []struct{ Items, Marks []mark }
 	for i := range 2 {
@@ -791,6 +809,13 @@ func TestBrowser_DrawingsStayIndependentThroughEditAndReopen(t *testing.T) {
 		got := sent[i].Marks[0]
 		if got.Anchor != w.Anchor || got.Status != w.Status || got.Note != w.Note || "q-"+got.Region.ID != w.Anchor {
 			t.Errorf("operation %d sent %+v, want %+v with its own region", i, got, w)
+		}
+		var ellipse any
+		if err := json.Unmarshal(got.Region.Ellipse, &ellipse); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(ellipse, recs[got.Region.ID]["ellipse"]) {
+			t.Errorf("operation %d changed submitted drawing geometry: %s", i, got.Region.Ellipse)
 		}
 	}
 }

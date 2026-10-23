@@ -113,8 +113,8 @@ and fonts as `expect.json`'s `environment`.
   a 12 px broad nib held at −12° (a hairline along the top and bottom,
   swelling where the ellipse turns through the vertical), tapered where the
   pen lands and lifts, and run 17° past its start so it closes like a pen-drawn
-  O. While the pen is down the raw stroke shows faintly, then settles into the
-  ellipse. Painting changes no record: retuning the nib left the regenerated
+  O. The live oval uses the same ink while the pointer is down. Painting
+  changes no record: retuning the nib left the regenerated
   `captures.json` byte-identical.
 
 ## 2. Scroll, zoom, resize, expanded sections

@@ -254,7 +254,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
       const m = ds[a], carr = committed[a] || [];
       const d = drawingPaint({
         anchor: a,
-        kind: m || !carr.length ? 'unsent' : 'committed',
+        kind: carr.length ? 'committed' : 'unsent',
         tint: m ? HL_TINT[m.status] || 'gold' : carr.length ? stateTint(repOf(carr).state) : 'gold',
         ellipse: r.ellipse,
         targets: r.targets.map((t) => ({ anchor: t.anchor, box: t.box, nth: t.nth, of: t.of })),
@@ -933,6 +933,7 @@ export function mountHostControls(port: HostPort, opts: HostControlsOptions): Ho
         if (m.anchor) {
           // A document may propose geometry for an existing draft, never
           // rewrite a submitted drawing or mint its own identity.
+          if (committed[m.anchor]?.length) break;
           const old = pending && 'q-' + pending.id === m.anchor ? pending : ds[m.anchor]?.region;
           if (!old) break;
           const r: Region = { ...m.capture, id: old.id, plan_revision: revision, created_at: old.created_at };
