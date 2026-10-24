@@ -61,6 +61,9 @@ func WithTitle(title string) SessionOpt    { return func(m *lfs.SessionMeta) { m
 func WithSummary(s string) SessionOpt      { return func(m *lfs.SessionMeta) { m.Summary = s } }
 func WithCreatedAt(t time.Time) SessionOpt { return func(m *lfs.SessionMeta) { m.CreatedAt = t } }
 
+// WithDraft makes the session an ADR-029 draft placeholder (meta.json only).
+func WithDraft() SessionOpt { return func(m *lfs.SessionMeta) { m.Draft = true } }
+
 // WriteSession writes a realistic meta.json for session `name` under the
 // fixture ledger and returns its directory. Defaults produce a valid
 // session belonging to the fixture's default identity (see defaultIdentity);

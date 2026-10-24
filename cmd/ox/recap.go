@@ -133,6 +133,12 @@ func resolveRecapIdentity(cmd *cobra.Command, projectRoot string) recap.Identity
 	if u, _ := cmd.Flags().GetString("user"); u != "" {
 		return recap.Identity{DisplayName: u, Slug: u}
 	}
+	return currentRecapIdentity(projectRoot)
+}
+
+// currentRecapIdentity is the signed-in coworker: stable id, then
+// privacy-safe display name, then username slug.
+func currentRecapIdentity(projectRoot string) recap.Identity {
 	ep := endpoint.GetForProject(projectRoot)
 	display := config.GetDisplayName()
 	return recap.Identity{
