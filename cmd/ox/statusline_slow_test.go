@@ -30,7 +30,7 @@ func TestStatuslineBinary_ColorReachesClaudeCode(t *testing.T) {
 	oxBin := testguard.BuildOxBinary(t, slowTestProjectRoot(t))
 	f := newStatuslineFixture(t)
 	now := time.Now()
-	require.NoError(t, oxactivity.SaveState(f.root, f.agentID, oxactivity.State{LastAction: "posted murmur", LastActionAt: now}))
+	require.NoError(t, oxactivity.SaveState(f.root, f.key(), oxactivity.State{LastAction: "posted murmur", LastActionAt: now}))
 	f.writeMurmur(t, f.ledgerDir, ledger.MurmurFile{AgentID: "OxTm10", PrincipalID: "ryan", Topic: "wip", Content: "hello", Timestamp: now})
 
 	run := func(extra ...string) (string, time.Duration) {

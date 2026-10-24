@@ -589,7 +589,11 @@ func handlePrompt(ctx *HookContext) error {
 		armUnsavedPlanFromPrompt(ctx.ProjectRoot, agentID, rawPrompt)
 	}
 
-	stdout.whispers = writeWhispers(stdout, agentID)
+	sessionID := ""
+	if ctx.Input != nil {
+		sessionID = ctx.Input.SessionID
+	}
+	stdout.whispers = writeWhispersFor(stdout, agentID, sessionID)
 
 	// Surface any scheduled agent tasks (throttled). This is the sole channel
 	// into the model's context for the task queue — see agent_tasks_surface.go.
