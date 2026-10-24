@@ -161,7 +161,9 @@ func (p claudeOrgProbe) run() ClaudeCodeOrgPlugin {
 			filepath.Join(p.repoRoot, ".claude", "settings.local.json"))
 	}
 	for _, file := range settings {
-		if why := claudeSettingsStopPlugin(file, p.teamSlug); why != "" {
+		// Claude Code keys a synced plugin's on/off switch by the plugin's own
+		// directory name (<name>@synced), which need not equal the team slug.
+		if why := claudeSettingsStopPlugin(file, filepath.Base(pluginDir)); why != "" {
 			return claudePluginNotHere(why)
 		}
 	}

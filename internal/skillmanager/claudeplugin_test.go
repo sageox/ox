@@ -59,6 +59,15 @@ func writeSyncedPlugin(t *testing.T, bucket, dir, marketplace string, skillNames
 	require.NoError(t, os.WriteFile(filepath.Join(bucket, dir+claudeSyncedMetaSuffix), []byte(meta), 0o644))
 }
 
+// renameSyncedPlugin moves a staged plugin and its sidecar to another
+// directory name, the way Claude Code may name a plugin apart from its
+// marketplace.
+func renameSyncedPlugin(t *testing.T, bucket, from, to string) {
+	t.Helper()
+	require.NoError(t, os.Rename(filepath.Join(bucket, from), filepath.Join(bucket, to)))
+	require.NoError(t, os.Rename(filepath.Join(bucket, from+claudeSyncedMetaSuffix), filepath.Join(bucket, to+claudeSyncedMetaSuffix)))
+}
+
 // stageClaudeHome writes a Claude Code config dir signed in to the fixture
 // account, whose bucket holds the slug's org plugin carrying skillNames.
 func stageClaudeHome(t *testing.T, configDir, accountFile, slug string, skillNames ...string) (bucket string) {
@@ -172,6 +181,18 @@ func TestClaudeOrgPluginProbe(t *testing.T) {
 				writeJSONFile(t, filepath.Join(m.configDir, "settings.json"), `{"enabledPlugins":{"acme@synced":false}}`)
 			},
 			why: "acme@synced is turned off"},
+		{name: "plugin directory named apart from the slug, disabled by its own name",
+			mutate: func(t *testing.T, m *machine) {
+				renameSyncedPlugin(t, m.bucket, slug, "acme-plugin")
+				writeJSONFile(t, filepath.Join(m.configDir, "settings.json"), `{"enabledPlugins":{"acme-plugin@synced":false}}`)
+			},
+			why: "acme-plugin@synced is turned off"},
+		{name: "plugin directory named apart from the slug; the slug's switch is another plugin's",
+			mutate: func(t *testing.T, m *machine) {
+				renameSyncedPlugin(t, m.bucket, slug, "acme-plugin")
+				writeJSONFile(t, filepath.Join(m.configDir, "settings.json"), `{"enabledPlugins":{"acme@synced":false}}`)
+			},
+			skills: []string{"grill-me", "notes"}},
 		{name: "plugin disabled in the repository's local settings",
 			mutate: func(t *testing.T, m *machine) {
 				writeJSONFile(t, filepath.Join(m.repo, ".claude", "settings.local.json"), `{"enabledPlugins":{"acme@synced":false}}`)
