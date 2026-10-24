@@ -32,6 +32,7 @@ import (
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/contexttrace"
 	"github.com/sageox/ox/internal/status"
+	"github.com/sageox/ox/internal/tokens"
 	whisperstore "github.com/sageox/ox/internal/whisper/store"
 	"github.com/spf13/cobra"
 )
@@ -1383,11 +1384,12 @@ func traceWhisperDelivery(projectRoot, agentID string, entries []whisperstore.Wh
 			// recap can place "teammate's murmur reached your work" on the right
 			// turn. Additive — the event stays a `provided` whisper for existing
 			// consumers.
-			Mechanism: contexttrace.MechanismInjection,
-			WhisperID: e.ID,
-			Ref:       e.ID,
-			RefType:   "murmur",
-			Seq:       state.EntryCount,
+			Mechanism:    contexttrace.MechanismInjection,
+			InlineTokens: tokens.EstimateTokens(e.Content),
+			WhisperID:    e.ID,
+			Ref:          e.ID,
+			RefType:      "murmur",
+			Seq:          state.EntryCount,
 		})
 	}
 }

@@ -129,12 +129,15 @@ func viewContextTraceText(w io.Writer, events []contexttrace.Event, sessionName 
 	printShowField(w, "Events", fmt.Sprintf("%d", len(events)))
 	fmt.Fprintln(w)
 
-	// partition events
-	var provided, influenced []contexttrace.Event
+	// partition events. invoked events are ox calls the AI coworker made —
+	// counted on their own, never as provided context.
+	var provided, influenced, invoked []contexttrace.Event
 	for _, ev := range events {
 		switch ev.Type {
 		case contexttrace.EventInfluenced:
 			influenced = append(influenced, ev)
+		case contexttrace.EventInvoked:
+			invoked = append(invoked, ev)
 		default:
 			provided = append(provided, ev)
 		}
@@ -164,11 +167,24 @@ func viewContextTraceText(w io.Writer, events []contexttrace.Event, sessionName 
 		fmt.Fprintln(w)
 	}
 
+	// ox calls
+	if len(invoked) > 0 {
+		fmt.Fprintln(w, showSectionStyle.Render("ox Calls"))
+		fmt.Fprintln(w, showSeparatorStyle.Render(strings.Repeat("-", 40)))
+		fmt.Fprintln(w)
+
+		for _, ev := range invoked {
+			printInvokedEvent(w, ev)
+		}
+		fmt.Fprintln(w)
+	}
+
 	// summary
 	fmt.Fprintln(w, showSeparatorStyle.Render(strings.Repeat("-", 60)))
-	fmt.Fprintf(w, "  %s provided, %s influenced decisions\n",
+	fmt.Fprintf(w, "  %s provided, %s influenced decisions, %s\n",
 		showHighlightStyle.Render(fmt.Sprintf("%d sources", len(provided))),
-		showHighlightStyle.Render(fmt.Sprintf("%d", len(influenced))))
+		showHighlightStyle.Render(fmt.Sprintf("%d", len(influenced))),
+		showHighlightStyle.Render(fmt.Sprintf("%d ox calls", len(invoked))))
 	fmt.Fprintln(w)
 }
 
@@ -215,6 +231,34 @@ func printProvidedEvent(w io.Writer, ev contexttrace.Event) {
 	}
 }
 
+// printInvokedEvent renders one ox call: its label (or command words), size,
+// and whether it failed. Never prints argv — the event does not carry it.
+func printInvokedEvent(w io.Writer, ev contexttrace.Event) {
+	name := ev.Label
+	if name == "" {
+		name = ev.Command
+	}
+	line := "  " + ctxDocNameStyle.Render(name)
+	if ev.Command != "" && ev.Label != "" {
+		line += " " + cli.StyleDim.Render("(ox "+ev.Command+")")
+	}
+	if ts := formatTraceTimestamp(ev.Timestamp); ts != "" {
+		line += " " + showEntryTimestampStyle.Render(ts)
+	}
+	fmt.Fprintln(w, line)
+
+	var details []string
+	if ev.InlineTokens > 0 {
+		details = append(details, ctxTokenStyle.Render(fmt.Sprintf("~%d tokens", ev.InlineTokens)))
+	}
+	if ev.Failed {
+		details = append(details, cli.StyleDim.Render("failed"))
+	}
+	if len(details) > 0 {
+		fmt.Fprintf(w, "    %s\n", strings.Join(details, " "+cli.StyleDim.Render("|")+" "))
+	}
+}
+
 func printInfluencedEvent(w io.Writer, ev contexttrace.Event) {
 	ts := formatTraceTimestamp(ev.Timestamp)
 	style := sourceStyle(ev.Source)
@@ -250,16 +294,19 @@ type contextTraceJSONOutput struct {
 	EventCount  int                  `json:"event_count"`
 	Provided    int                  `json:"provided"`
 	Influenced  int                  `json:"influenced"`
+	Invoked     int                  `json:"invoked"`
 	Events      []contexttrace.Event `json:"events"`
 }
 
 // viewContextTraceJSON renders context-trace events as structured JSON.
 func viewContextTraceJSON(w io.Writer, events []contexttrace.Event, sessionName string, limit int) error {
-	var provided, influenced int
+	var provided, influenced, invoked int
 	for _, ev := range events {
 		switch ev.Type {
 		case contexttrace.EventInfluenced:
 			influenced++
+		case contexttrace.EventInvoked:
+			invoked++
 		default:
 			provided++
 		}
@@ -271,9 +318,10 @@ func viewContextTraceJSON(w io.Writer, events []contexttrace.Event, sessionName 
 
 	out := contextTraceJSONOutput{
 		SessionName: sessionName,
-		EventCount:  provided + influenced,
+		EventCount:  provided + influenced + invoked,
 		Provided:    provided,
 		Influenced:  influenced,
+		Invoked:     invoked,
 		Events:      events,
 	}
 

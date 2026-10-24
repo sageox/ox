@@ -26,6 +26,12 @@ const (
 	EventConsulted EventType = "consulted"
 	// EventInfluenced is emitted when the agent attributes a decision to specific context.
 	EventInfluenced EventType = "influenced"
+	// EventInvoked is emitted for an ox call the AI coworker made (recorded
+	// deterministically by the post-tool hook, or by prime for itself). It
+	// measures volume — what ox put in front of the model — and is NOT a
+	// consultation: posting a murmur is not reading team knowledge. Readers
+	// that switch on Type (recap, knowledgeflow) ignore it by construction.
+	EventInvoked EventType = "invoked"
 )
 
 // Mechanism records HOW a consulted/influenced tag was established — i.e. the
@@ -58,6 +64,8 @@ const (
 	SourceTeamWhisper    SourceType = "team-whisper"
 	SourceProjectWhisper SourceType = "project-whisper"
 	SourceOnDemand       SourceType = "on-demand"
+	// SourceOxCLI marks an invoked event: an ox CLI/MCP call.
+	SourceOxCLI SourceType = "ox-cli"
 )
 
 // Event is a single context-trace entry.
@@ -93,6 +101,17 @@ type Event struct {
 	Query     string    `json:"query,omitempty"`      // the query text, for retrieval-command consults
 	Score     float64   `json:"score,omitempty"`      // retrieval score, when applicable
 	WhisperID string    `json:"whisper_id,omitempty"` // joins a whisper delivery to its murmur
+
+	// invoked: an ox call and the volume it returned. Command holds the matched
+	// subcommand WORDS only ("murmur list") — never the argv, a murmur body, or
+	// prompt text (ADR-027 rule 4: refs, not content).
+	Command        string         `json:"command,omitempty"`
+	Label          string         `json:"label,omitempty"`            // human label: "checked murmurs"
+	OutputBytes    int            `json:"output_bytes,omitempty"`     // bytes returned into model context (0 = unknown)
+	FullBytes      int            `json:"full_bytes,omitempty"`       // prime: pre-hook-cap size, set only when trimmed
+	TokensBySource map[string]int `json:"tokens_by_source,omitempty"` // prime: tokens per context source
+	Deferred       []string       `json:"deferred,omitempty"`         // prime: sections withheld by the hook cap
+	Failed         bool           `json:"failed,omitempty"`
 }
 
 // Now returns the current time formatted for context-trace timestamps.
