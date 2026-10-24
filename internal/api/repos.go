@@ -65,6 +65,15 @@ type TeamMembership struct {
 	// "insufficient_role". Empty when CanInvite is true, and also empty on
 	// servers that predate this field.
 	InviteBlockedReason string `json:"invite_blocked_reason,omitempty"`
+
+	// ClaudeOrgSyncedSkills names the team skills this team's Claude
+	// organization already delivers as a plugin. The server sends it only once
+	// org sync is enabled AND Claude has actually pulled; ox then stops copying
+	// those skills into .claude/skills so Claude Code does not list them twice.
+	//
+	// Absent (an older server, or org sync not connected) and empty mean the
+	// same thing: ox copies every skill, exactly as before the field existed.
+	ClaudeOrgSyncedSkills []string `json:"claude_org_synced_skills,omitempty"`
 }
 
 // Invite-capability reasons reported by the server.
@@ -325,12 +334,21 @@ func (c *RepoClient) getRepos(ctx context.Context) (*ReposResponse, error) {
 
 // GetGitCredentials binds the Git PAT returned by discovery to this client's bearer.
 func (c *RepoClient) GetGitCredentials(ctx context.Context) (*gitserver.GitCredentials, error) {
+	_, creds, err := c.GetReposAndGitCredentials(ctx)
+	return creds, err
+}
+
+// GetReposAndGitCredentials is GetGitCredentials that also returns the
+// discovery response it was derived from, so a caller that needs the team list
+// too (the daemon's team discovery records each team's Claude org sync) makes
+// one request instead of two.
+func (c *RepoClient) GetReposAndGitCredentials(ctx context.Context) (*ReposResponse, *gitserver.GitCredentials, error) {
 	resp, err := c.getRepos(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if resp.Token == "" {
-		return nil, fmt.Errorf("git credential discovery returned an empty token")
+		return nil, nil, fmt.Errorf("git credential discovery returned an empty token")
 	}
 	creds := &gitserver.GitCredentials{
 		BearerTokenHash: gitserver.BearerTokenFingerprint(c.authToken),
@@ -349,7 +367,7 @@ func (c *RepoClient) GetGitCredentials(ctx context.Context) (*gitserver.GitCrede
 			Slug:   repo.Slug,
 		})
 	}
-	return creds, nil
+	return resp, creds, nil
 }
 
 // GetTeamInfo calls GET /api/v1/teams/{id} to fetch team information

@@ -9,6 +9,7 @@ import (
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitserver"
+	"github.com/sageox/ox/internal/teamskills"
 )
 
 // credentialRefreshThreshold is how close to expiry credentials must be
@@ -146,7 +147,7 @@ func (s *SyncScheduler) discoverTeams(ctx context.Context) {
 	}
 
 	client := api.NewRepoClientWithEndpoint(projectEndpoint).WithAuthToken(token.AccessToken)
-	newCreds, err := client.GetGitCredentials(ctx)
+	reposResp, newCreds, err := client.GetReposAndGitCredentials(ctx)
 	if err != nil {
 		s.logger.Warn("failed to fetch repos for team discovery", "error", err)
 		if errors.Is(err, api.ErrUnauthorized) && s.issues != nil {
@@ -160,6 +161,10 @@ func (s *SyncScheduler) discoverTeams(ctx context.Context) {
 	if s.issues != nil {
 		s.issues.ClearIssue(IssueTypeAuthExpiring, "")
 	}
+	// Before the unchanged-credentials early return below: org sync state moves
+	// independently of the PAT, and this hourly call is the only place it is
+	// refreshed.
+	s.recordClaudeOrgSync(projectEndpoint, reposResp)
 	if creds.Token == newCreds.Token && creds.BearerTokenHash == newCreds.BearerTokenHash &&
 		creds.ExpiresAt.Equal(newCreds.ExpiresAt) && creds.ServerURL == newCreds.ServerURL &&
 		creds.Username == newCreds.Username && reposEqual(creds.Repos, newCreds.Repos) {
@@ -170,6 +175,32 @@ func (s *SyncScheduler) discoverTeams(ctx context.Context) {
 		return
 	}
 	s.logger.Info("team discovery found updated team list", "repo_count", len(newCreds.Repos))
+}
+
+// recordClaudeOrgSync caches which team skills each team's Claude organization
+// already delivers, for the skill planner to read offline. Best effort: a
+// failed write leaves the previous record to age out, and the planner's answer
+// to "no record" is to copy every skill, as it always has.
+func (s *SyncScheduler) recordClaudeOrgSync(ep string, resp *api.ReposResponse) {
+	if resp == nil {
+		return
+	}
+	// resp.Teams, not TeamMembershipsFromRepos: memberships derived from the
+	// repos map come from servers that predate the teams array, and so carry no
+	// org sync either.
+	teams := make([]teamskills.ClaudeOrgTeam, 0, len(resp.Teams))
+	synced := 0
+	for _, team := range resp.Teams {
+		teams = append(teams, teamskills.ClaudeOrgTeam{
+			TeamID: team.ID, TeamSlug: team.Slug, SyncedSkills: team.ClaudeOrgSyncedSkills,
+		})
+		synced += len(team.ClaudeOrgSyncedSkills)
+	}
+	if err := teamskills.RecordClaudeOrgSync(ep, teams, time.Now()); err != nil {
+		s.logger.Warn("claude org sync: failed to record team skill delivery", "error", err)
+		return
+	}
+	s.logger.Debug("claude org sync: recorded team skill delivery", "teams", len(teams), "synced_skills", synced)
 }
 
 // reposEqual checks if two repo maps have identical entries.

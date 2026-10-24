@@ -437,6 +437,28 @@ func HeartbeatCacheDir(ep string) string {
 	return filepath.Join(CacheDir(), slug, "heartbeats")
 }
 
+// ClaudeOrgSyncFile returns the cached server report of which team skills each
+// of the user's teams already delivers through a Claude organization plugin:
+//
+//	~/.cache/sageox/<endpoint>/claude-org-sync.json
+//
+// A cache in the strict sense: deleting it only makes ox copy those skills into
+// .claude/skills again until the daemon's next team discovery rewrites it.
+//
+// Unlike HeartbeatCacheDir, an empty endpoint returns "" rather than panicking:
+// this is read on the prime hot path, where "no record" is a safe answer and a
+// panic is a failed session.
+func ClaudeOrgSyncFile(ep string) string {
+	if ep == "" {
+		return ""
+	}
+	slug := endpoint.NormalizeSlug(ep)
+	if slug == "" {
+		slug = "unknown"
+	}
+	return filepath.Join(CacheDir(), slug, "claude-org-sync.json")
+}
+
 // -----------------------------------------------------------------------------
 // Data Paths
 // -----------------------------------------------------------------------------

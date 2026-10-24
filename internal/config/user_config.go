@@ -356,6 +356,10 @@ type UserConfig struct {
 	// pull-request visuals. Pointer preserves inheritance from repo/team.
 	PRVisuals *PRVisualsConfig `yaml:"pr_visuals,omitempty"`
 
+	// Skills holds the user-level `skills.*` settings. Pointer so an absent
+	// block stays distinct from explicit values.
+	Skills *SkillsConfig `yaml:"skills,omitempty"`
+
 	// Ephemeral is the persisted user preference for ephemeral mode (no
 	// daemon, no local ledger clone, HTTP-only reads). Pointer so we can
 	// distinguish unset (nil) from explicit false. When non-nil, the value
@@ -387,6 +391,22 @@ type UserConfig struct {
 
 	// TelemetryNoticeShown records that the one-time telemetry notice was shown.
 	TelemetryNoticeShown *bool `yaml:"telemetry_notice_shown,omitempty"`
+}
+
+// SkillsConfig holds the user-level `skills.*` settings.
+type SkillsConfig struct {
+	// ClaudeOrgDedupe lets ox skip copying a team skill into .claude/skills
+	// when this machine's Claude Code already gets it from the team's Claude
+	// organization plugin. Unset means on. Per user, because whether Claude
+	// Code loads org plugins depends on how THIS coworker signs in: off is for
+	// sessions ox cannot see from disk, such as an API key or Bedrock exported
+	// only in the shell.
+	ClaudeOrgDedupe *bool `yaml:"claude_org_dedupe,omitempty"`
+}
+
+// ClaudeOrgDedupeEnabled reports skills.claude_org_dedupe: on unless set off.
+func (c *UserConfig) ClaudeOrgDedupeEnabled() bool {
+	return c == nil || c.Skills == nil || c.Skills.ClaudeOrgDedupe == nil || *c.Skills.ClaudeOrgDedupe
 }
 
 // PATExpiryWarningDefaults returns the default warning threshold (5%) and

@@ -1,6 +1,7 @@
 package teamdocs
 
 import (
+	"bytes"
 	"fmt"
 	"log/slog"
 	"os"
@@ -42,6 +43,12 @@ type TeamSkill struct {
 	// a timer would be the same unexplained-disappearance failure NameError exists
 	// to prevent.
 	ValidThrough string `json:"valid_through,omitempty"`
+	// Requires is what the author declared the skill needs to run, from
+	// `requires:` (known values: shell, ox-cli). RequiresDeclared separates
+	// `requires: []`, which says "runs anywhere", from no key at all, where the
+	// body is inspected instead. See SkillRequirements.
+	Requires         []string `json:"requires,omitempty"`
+	RequiresDeclared bool     `json:"requires_declared,omitempty"`
 	// Files are the skill's own files, relative to AbsDir, sorted. Populated so a
 	// caller can classify and materialize without re-walking the tree.
 	Files []string `json:"files,omitempty"`
@@ -355,20 +362,42 @@ func walkSkillsDir(absRoot string) ([]TeamSkill, error) {
 		}
 
 		skills = append(skills, TeamSkill{
-			Name:         name,
-			NameError:    nameErr,
-			Description:  fm.Description,
-			RelPath:      filepath.ToSlash(filepath.Join(e.Name(), skillManifestName)),
-			AbsDir:       dir,
-			Repos:        fm.Repos,
-			Audience:     fm.Audience,
-			Visibility:   defaultString(fm.Visibility, DefaultRuleVisibility),
-			Status:       fm.Status,
-			ValidThrough: fm.ValidThrough,
-			Files:        files,
+			Name:             name,
+			NameError:        nameErr,
+			Description:      fm.Description,
+			RelPath:          filepath.ToSlash(filepath.Join(e.Name(), skillManifestName)),
+			AbsDir:           dir,
+			Repos:            fm.Repos,
+			Audience:         fm.Audience,
+			Visibility:       defaultString(fm.Visibility, DefaultRuleVisibility),
+			Status:           fm.Status,
+			ValidThrough:     fm.ValidThrough,
+			Requires:         fm.Requires,
+			RequiresDeclared: fm.RequiresDeclared,
+			Files:            files,
 		})
 	}
 	return skills, nil
+}
+
+// Known `requires:` values. Anything else is still a declaration, and
+// SageOx keeps such a skill to coding agents rather than guess what it meant.
+const (
+	RequiresShell = "shell"
+	RequiresOxCLI = "ox-cli"
+)
+
+// SkillRequirements reads `requires:` from a SKILL.md held in memory, with the
+// same line-based rules discovery uses on disk.
+//
+// declared is true only when the key carried a value: an inline list
+// (`requires: [shell]`, including the explicit `requires: []`), a bare scalar
+// (`requires: shell`), or a block list with at least one item. A bare
+// `requires:` with nothing under it is NOT a declaration, because reading it as
+// "requires nothing" would make a skill that runs commands look portable.
+func SkillRequirements(manifest []byte) (values []string, declared bool) {
+	fm := parseRuleFrontmatterFrom(bytes.NewReader(manifest))
+	return fm.Requires, fm.RequiresDeclared
 }
 
 // skillFiles lists a skill's regular files, relative to its directory.
