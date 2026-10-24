@@ -211,6 +211,55 @@ func TestUsage_SelfReportRoundTrip(t *testing.T) {
 	assert.True(t, after.Used.SelfReported[0].MatchedSurfaced)
 }
 
+// TestUsage_RecentFlagListsEveryCall drives `ox usage --json --recent N`
+// through the root command over a recorded trace of 25 ox calls. Failure
+// prevented: a coworker asks for the full call list and still gets the newest
+// 10, or the flag changes the human display.
+func TestUsage_RecentFlagListsEveryCall(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want int
+	}{
+		{"default lists the newest 10", nil, 10},
+		{"--recent 0 lists every call", []string{"--recent", "0"}, 25},
+		{"--recent 5 lists the newest 5", []string{"--recent", "5"}, 5},
+	}
+	var display string
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := usageTraceEnv(t, nil)
+			state := startUsageRecording(t, root)
+			events := make([]contexttrace.Event, 0, 25)
+			for i := range 25 {
+				events = append(events, contexttrace.Event{Type: contexttrace.EventInvoked, Source: contexttrace.SourceOxCLI,
+					Label: "checked murmurs", Command: "murmur list", InlineTokens: 10, Seq: i + 1})
+			}
+			require.NoError(t, contexttrace.NewWriter(state.SessionPath).AppendAll(events))
+
+			r := runOxUsageJSON(t, tt.args...)
+
+			assert.Equal(t, 25, r.Calls.Total)
+			require.Len(t, r.Calls.Recent, tt.want)
+			assert.Equal(t, 25, r.Calls.Recent[0].Seq, "newest first")
+			if display == "" {
+				display = r.Display
+			}
+			assert.Equal(t, display, r.Display, "--recent never changes the display")
+		})
+	}
+}
+
+// TestUsage_RecentFlagRejectsNegative: a negative --recent is a usage error.
+func TestUsage_RecentFlagRejectsNegative(t *testing.T) {
+	usageTraceEnv(t, nil)
+	resetUsageFlags(t)
+	t.Setenv("SAGEOX_AGENT_ID", usageAgentID)
+	_, err := executeRootCLI(t, "usage", "--json", "--recent", "-1")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--recent")
+}
+
 // --- C. --team and --me through the real command ---
 
 // TestUsage_TeamViewThroughRealCommand drives `ox usage --team --json` over a
