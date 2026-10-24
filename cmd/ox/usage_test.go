@@ -2,8 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/assert"
@@ -11,6 +14,8 @@ import (
 
 	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/agentinstance"
+	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session/contexttrace"
 	"github.com/sageox/ox/internal/usage"
 )
@@ -204,4 +209,48 @@ func TestUsage_SelfReportRoundTrip(t *testing.T) {
 	require.Len(t, after.Used.SelfReported, 1)
 	assert.Equal(t, "MEMORY.md", after.Used.SelfReported[0].Ref)
 	assert.True(t, after.Used.SelfReported[0].MatchedSurfaced)
+}
+
+// --- C. --team and --me through the real command ---
+
+// TestUsage_TeamViewThroughRealCommand drives `ox usage --team --json` over a
+// real Ledger checkout. Failure prevented: the team view is wired to the wrong
+// ledger, or a teammate's identity reaches the payload.
+func TestUsage_TeamViewThroughRealCommand(t *testing.T) {
+	root := usageTraceEnv(t, nil)
+	ledgerPath := t.TempDir()
+	require.NoError(t, config.SaveLocalConfig(root, &config.LocalConfig{Ledger: &config.LedgerConfig{Path: ledgerPath}}))
+	name := time.Now().Add(-time.Hour).UTC().Format("2006-01-02T15-04") + "-casey-teammate-OxCc33"
+	dir := filepath.Join(ledgerPath, "sessions", name)
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	require.NoError(t, lfs.WriteSessionMetaOnly(dir, &lfs.SessionMeta{
+		Version: "1.0", SessionName: name, Username: "Casey Teammate", UserID: "user_casey33", AgentID: "OxCc33",
+		AgentType: "codex", SessionID: "ses_" + name, CreatedAt: time.Now().Add(-time.Hour), Files: map[string]lfs.FileRef{},
+	}))
+	require.NoError(t, contexttrace.NewWriter(dir).AppendAll([]contexttrace.Event{
+		{Type: contexttrace.EventInvoked, Source: contexttrace.SourceOxCLI, Label: "checked murmurs", Command: "murmur list", InlineTokens: 250},
+	}))
+
+	resetUsageFlags(t)
+	t.Setenv("SAGEOX_AGENT_ID", usageAgentID)
+	out, err := executeRootCLI(t, "usage", "--team", "--json")
+	require.NoError(t, err)
+
+	var r usage.TeamReport
+	require.NoError(t, json.Unmarshal([]byte(out), &r), out)
+	assert.Equal(t, usage.ViewTeam, r.View)
+	assert.Equal(t, 1, r.Traced)
+	assert.Equal(t, []usage.LabelStat{{Label: "checked murmurs", Count: 1, Tokens: 250}}, r.Calls)
+	for _, leak := range []string{"Casey", "casey", "user_casey33", "OxCc33", name} {
+		assert.NotContains(t, out, leak)
+	}
+}
+
+// TestUsage_ViewFlagsAreExclusive: --me, --team and --session pick one view.
+func TestUsage_ViewFlagsAreExclusive(t *testing.T) {
+	usageTraceEnv(t, nil)
+	resetUsageFlags(t)
+	_, err := executeRootCLI(t, "usage", "--me", "--team")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "none of the others can be")
 }

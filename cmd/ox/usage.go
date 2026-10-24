@@ -10,6 +10,7 @@ import (
 
 	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/cli"
+	"github.com/sageox/ox/internal/glance"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/recap"
 	"github.com/sageox/ox/internal/session"
@@ -26,9 +27,12 @@ much context ox put in front of the model (estimated tokens), which team items
 were surfaced by name, and which of those the AI coworker reports it used.
 
 When called by an AI coworker it emits JSON with a pre-rendered display and
-guidance; in a bare terminal it prints the same report.`,
+guidance; in a bare terminal it prints the same report. --me rolls up your
+recent sessions; --team shows a team-wide aggregate only — never who did what.`,
 	Example: `  ox usage                     # this session
   ox usage --session <name>    # a recorded session in the Ledger
+  ox usage --me --since 14d    # your recent sessions, one row each
+  ox usage --team              # team-wide aggregate (no per-person data)
   ox usage --json              # structured report for AI coworkers`,
 	Args: cobra.NoArgs,
 	RunE: runUsage,
@@ -36,7 +40,12 @@ guidance; in a bare terminal it prints the same report.`,
 
 func init() {
 	usageCmd.Flags().String("session", "", "report a recorded session by name instead of the current one")
+	usageCmd.Flags().Bool("me", false, "roll up your recent sessions, one row each")
+	usageCmd.Flags().Bool("team", false, "team-wide aggregate across all coworkers' sessions (no per-person data)")
+	usageCmd.Flags().String("since", "7d", "window for --me and --team (e.g. 7d, 24h, or an ISO date)")
+	usageCmd.Flags().Int("limit", 10, "maximum sessions for --me")
 	usageCmd.Flags().Bool("json", false, "structured JSON report for AI coworkers")
+	usageCmd.MarkFlagsMutuallyExclusive("session", "me", "team")
 }
 
 func runUsage(cmd *cobra.Command, _ []string) error {
@@ -49,6 +58,12 @@ func runUsage(cmd *cobra.Command, _ []string) error {
 	projectRoot, err := findProjectRoot()
 	if err != nil {
 		return fmt.Errorf("not in a SageOx project: %w", err)
+	}
+
+	me, _ := cmd.Flags().GetBool("me")
+	team, _ := cmd.Flags().GetBool("team")
+	if me || team {
+		return runUsageRollup(cmd, projectRoot, team, jsonOut, width)
 	}
 
 	name, _ := cmd.Flags().GetString("session")
@@ -66,6 +81,34 @@ func runUsage(cmd *cobra.Command, _ []string) error {
 	r := usage.Build(in)
 
 	return writeUsageReport(cmd.OutOrStdout(), jsonOut, r, func() string { return usage.Human(r, width) })
+}
+
+// runUsageRollup renders the --me rollup or the aggregate --team view.
+func runUsageRollup(cmd *cobra.Command, projectRoot string, team, jsonOut bool, width int) error {
+	ledgerPath, err := resolveLedgerPath()
+	if err != nil {
+		return err
+	}
+	window, _ := cmd.Flags().GetString("since")
+	since, err := glance.ParseTimeFlag(window)
+	if err != nil {
+		return fmt.Errorf("invalid --since %q: %w", window, err)
+	}
+	limit, _ := cmd.Flags().GetInt("limit")
+	if limit <= 0 {
+		return fmt.Errorf("--limit must be positive, got %d", limit)
+	}
+	in := usage.RollupInput{
+		LedgerPath: ledgerPath, Since: since, Until: time.Now(),
+		Window: window, Limit: limit, Width: width,
+	}
+	if team {
+		r := usage.BuildTeam(in)
+		return writeUsageReport(cmd.OutOrStdout(), jsonOut, r, func() string { return usage.HumanTeam(r, width) })
+	}
+	in.Identity = currentRecapIdentity(projectRoot)
+	r := usage.BuildMe(in)
+	return writeUsageReport(cmd.OutOrStdout(), jsonOut, r, func() string { return usage.HumanMe(r, width) })
 }
 
 // writeUsageReport prints the JSON payload or the human text and charges the
