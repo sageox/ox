@@ -26,6 +26,7 @@ import (
 	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/observability"
+	"github.com/sageox/ox/internal/oxactivity"
 	"github.com/sageox/ox/internal/prime"
 	"github.com/sageox/ox/internal/proc"
 	"github.com/sageox/ox/internal/repotools"
@@ -1353,6 +1354,12 @@ func emitWhispers(w io.Writer, agentID string) { writeWhispers(w, agentID) }
 // writeWhispers is emitWhispers, returning the entries it wrote (nil when none)
 // so a hook can tell coworkers who whispered.
 func writeWhispers(w io.Writer, agentID string) []whisperstore.WhisperEntry {
+	return writeWhispersFor(w, agentID, "")
+}
+
+// writeWhispersFor is writeWhispers for a known harness session, so the
+// status line shows the whisper in the window it was delivered to.
+func writeWhispersFor(w io.Writer, agentID, sessionID string) []whisperstore.WhisperEntry {
 	// best-effort delivery — 100ms allows for daemon startup/load
 	client := daemon.NewClientForCurrentRepoWithTimeout(100 * time.Millisecond)
 	resp, err := client.Whispers(agentID, "normal", nil)
@@ -1373,7 +1380,7 @@ func writeWhispers(w io.Writer, agentID string) []whisperstore.WhisperEntry {
 	}
 
 	formatWhispersWithEdits(w, entries, checkoutEditedFiles(projectRoot))
-	recordStatuslineWhisper(projectRoot, agentID, entries)
+	recordStatuslineWhisper(projectRoot, oxactivity.StateKey(agentID, sessionID), entries)
 
 	// best-effort context-trace for whisper delivery observability
 	traceWhisperDelivery(projectRoot, agentID, entries)

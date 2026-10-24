@@ -34,15 +34,18 @@ func recordStatuslineAction(projectRoot, agentID string, input *agentx.HookInput
 	if input == nil || projectRoot == "" || agentID == "" {
 		return
 	}
-	recordStatuslineToolCall(projectRoot, agentID, input.ToolName, input.ToolInput, time.Now())
+	recordStatuslineToolCall(projectRoot, oxactivity.StateKey(agentID, input.SessionID), input.ToolName, input.ToolInput, time.Now())
 }
 
-func recordStatuslineToolCall(projectRoot, agentID, toolName string, toolInput json.RawMessage, now time.Time) {
+// recordStatuslineToolCall writes under key, which scopes the state to the
+// harness session the hook ran in (oxactivity.StateKey), so each Claude Code
+// or Codex window shows only what ox did for it.
+func recordStatuslineToolCall(projectRoot, key, toolName string, toolInput json.RawMessage, now time.Time) {
 	act, ok := oxactivity.Classify(toolName, toolInput)
 	if !ok || !statuslineEnabled() {
 		return
 	}
-	err := oxactivity.UpdateState(projectRoot, agentID, func(state *oxactivity.State) bool {
+	err := oxactivity.UpdateState(projectRoot, key, func(state *oxactivity.State) bool {
 		if now.Before(state.LastActionAt) {
 			return false // an overlapping hook already recorded a newer action
 		}
@@ -51,15 +54,17 @@ func recordStatuslineToolCall(projectRoot, agentID, toolName string, toolInput j
 		return true
 	})
 	if err != nil {
-		slog.Debug("statusline: save action failed", "agent_id", agentID, "err", err)
+		slog.Debug("statusline: save action failed", "key", key, "err", err)
 	}
 }
 
 // recordStatuslineWhisper saves the newest teammate murmur among the whispers
 // just delivered, so the status line can show who said what. It only reads
 // entries already selected for delivery; it never touches the whisper cursor.
-func recordStatuslineWhisper(projectRoot, agentID string, entries []whisperstore.WhisperEntry) {
-	if projectRoot == "" || agentID == "" {
+// key is an oxactivity.StateKey: the whisper is shown in the session it was
+// delivered to.
+func recordStatuslineWhisper(projectRoot, key string, entries []whisperstore.WhisperEntry) {
+	if projectRoot == "" || key == "" {
 		return
 	}
 	var newest *whisperstore.WhisperEntry
@@ -79,7 +84,7 @@ func recordStatuslineWhisper(projectRoot, agentID string, entries []whisperstore
 	if from == "" {
 		from = newest.AgentID
 	}
-	err := oxactivity.UpdateState(projectRoot, agentID, func(state *oxactivity.State) bool {
+	err := oxactivity.UpdateState(projectRoot, key, func(state *oxactivity.State) bool {
 		if !newest.CreatedAt.After(state.LastWhisperAt) {
 			return false // already showing this one or a newer one
 		}
@@ -90,6 +95,6 @@ func recordStatuslineWhisper(projectRoot, agentID string, entries []whisperstore
 		return true
 	})
 	if err != nil {
-		slog.Debug("statusline: save whisper failed", "agent_id", agentID, "err", err)
+		slog.Debug("statusline: save whisper failed", "key", key, "err", err)
 	}
 }
