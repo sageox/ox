@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -344,5 +345,40 @@ func TestAppend_SequentialSafe(t *testing.T) {
 	}
 	if len(events) != n {
 		t.Errorf("got %d events, want %d", len(events), n)
+	}
+}
+
+// TestInvokedEvent_RoundTripAndLegacyBytesUnchanged checks the additive
+// usage fields. Failure prevented: an ox-call event loses its volume fields on
+// read-back, or the new fields leak into (and change the bytes of) every
+// legacy event written to the team Ledger.
+func TestInvokedEvent_RoundTripAndLegacyBytesUnchanged(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	w := NewWriter(dir)
+	in := Event{
+		Type: EventInvoked, Timestamp: "2026-06-01T00:00:00Z", Source: SourceOxCLI,
+		Command: "agent prime", Label: "loaded team context", InlineTokens: 2000,
+		OutputBytes: 8000, FullBytes: 14000, TokensBySource: map[string]int{"team": 1500, "sageox": 500},
+		Deferred: []string{"team-docs"}, Failed: true,
+	}
+	if err := w.Append(in); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadEvents(w.Path())
+	if err != nil || len(got) != 1 {
+		t.Fatalf("ReadEvents = %v, %v", got, err)
+	}
+	if !reflect.DeepEqual(got[0], in) {
+		t.Errorf("round trip mismatch:\n got %+v\nwant %+v", got[0], in)
+	}
+
+	legacy, err := json.Marshal(Event{Type: EventProvided, Timestamp: "2026-06-01T00:00:00Z", Source: SourceTeamDocs, Doc: "a.md"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = `{"type":"provided","ts":"2026-06-01T00:00:00Z","source":"team-docs","doc":"a.md"}`
+	if string(legacy) != want {
+		t.Errorf("legacy event bytes changed:\n got %s\nwant %s", legacy, want)
 	}
 }
