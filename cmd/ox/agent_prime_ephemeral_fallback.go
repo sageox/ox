@@ -9,13 +9,33 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/paths"
 )
+
+// ephemeralMaterializeLockTimeout bounds how long a prime waits for another
+// prime writing the same team context. A write lands at most a 4 MiB bundle
+// and takes well under a second; 15s absorbs a slow disk without letting one
+// stuck prime stall every later one.
+const ephemeralMaterializeLockTimeout = 15 * time.Second
+
+// materializeTeamContext is fetchTeamContextViaAPI behind a seam so a test can
+// observe the lock held around it.
+var materializeTeamContext = fetchTeamContextViaAPI
+
+// writeTeamContextLocked runs the whole materialization under a lock keyed by
+// teamCtxDir.
+func writeTeamContextLocked(ctx context.Context, teamCtxDir string, resp *api.TeamContextContentResponse) error {
+	return fileutil.WithFileLockTimeout(ctx, teamCtxDir, ephemeralMaterializeLockTimeout, func() error {
+		return materializeTeamContext(teamCtxDir, resp)
+	})
+}
 
 // tryHTTPTeamContextFallback fetches a team's context over HTTP and writes
 // it to the canonical team-context directory, then re-invokes the normal
@@ -63,7 +83,15 @@ func tryHTTPTeamContextFallback(ctx context.Context, projectRoot, teamID string)
 		return nil, fmt.Errorf("could not resolve team-context dir for team_id=%s", teamID)
 	}
 
-	if err := fetchTeamContextViaAPI(teamCtxDir, resp); err != nil {
+	// Two primes on one machine share teamCtxDir. The whole write is one
+	// transaction under a lock keyed by that directory, so one prime never
+	// clears a stage or .old directory the other is still using.
+	if err := writeTeamContextLocked(ctx, teamCtxDir, resp); err != nil {
+		// Warn, not debug: the caller still falls back to whatever is on disk,
+		// which may now be only part of this response.
+		slog.Warn("ephemeral team-context fallback: team context only partly written",
+			"team_id", teamID, "dir", teamCtxDir,
+			"impact", "prime may read a partial team context from disk", "err", err)
 		return nil, fmt.Errorf("failed to write team context: %w", err)
 	}
 

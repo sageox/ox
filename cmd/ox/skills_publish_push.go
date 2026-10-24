@@ -75,11 +75,22 @@ func pushTeamPublish(repoRoot, teamPath string) teamPublishPush {
 	opts.OpTimeout = teamPublishPushOpTimeout
 	if err := gitutil.PushWithRetry(context.Background(), teamPath, opts); err != nil {
 		slog.Warn("team skill publish push failed", "team_context", teamPath, "error", err)
-		return teamPublishPush{reason: strings.Join(strings.Fields(err.Error()), " "), retried: true}
+		reason := strings.Join(strings.Fields(err.Error()), " ")
+		// Only the daemon retries a failed publish push; with it disabled,
+		// promising "ox retries" would leave the skill local forever.
+		if !teamPublishDaemonRetries() {
+			return teamPublishPush{reason: reason + "; the ox daemon is disabled here, so nothing retries the push"}
+		}
+		return teamPublishPush{reason: reason, retried: true}
 	}
 	slog.Info("team skill publish pushed", "team_context", teamPath)
 	return teamPublishPush{pushed: true}
 }
+
+// teamPublishDaemonRetries reports whether a daemon will retry a failed
+// publish push. A var so tests do not depend on the host's runtime
+// capabilities, which can disable the daemon on their own.
+var teamPublishDaemonRetries = func() bool { return !daemon.IsDaemonDisabled() }
 
 // teamPublishGuidance tells the publisher where the skills actually are. It
 // never says distribution happened unless the push did.

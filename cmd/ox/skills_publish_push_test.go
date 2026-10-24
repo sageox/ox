@@ -63,6 +63,7 @@ func TestSkillsPublish_PushesThePublishCommit(t *testing.T) {
 // A failed push leaves a correct local commit: the publish succeeds, says the
 // commit is local only, and names the retry the daemon will also run.
 func TestSkillsPublish_ReportsAFailedPushTruthfully(t *testing.T) {
+	withTeamPublishDaemon(t, true)
 	repo, team, bare, branch := stageTeamPublishRepoWithRemote(t)
 	stageLocalPublishableSkill(t, repo, teamPublishSkill)
 	before := strings.TrimSpace(gitOutput(t, bare, "rev-parse", branch))
@@ -102,4 +103,29 @@ func TestSkillsPublish_DoesNotPushACoworkersOwnCommit(t *testing.T) {
 	require.NotContains(t, got.Guidance, "retries the push", "ox must not promise a push its own rule refuses")
 	require.Equal(t, before, strings.TrimSpace(gitOutput(t, bare, "rev-parse", branch)),
 		"publish pushed a commit that was not ox's")
+}
+
+// With the daemon disabled nothing retries a failed publish push, so the
+// publisher must get the manual command, never a promise that ox retries.
+func TestSkillsPublish_FailedPushWithDaemonDisabledGivesTheManualPush(t *testing.T) {
+	withTeamPublishDaemon(t, false)
+	repo, team, bare, _ := stageTeamPublishRepoWithRemote(t)
+	stageLocalPublishableSkill(t, repo, teamPublishSkill)
+	require.NoError(t, os.RemoveAll(bare))
+
+	got := publishJSON(t, teamPublishSkill)
+
+	require.False(t, got.Pushed)
+	require.Contains(t, got.NotPushedReason, "daemon is disabled")
+	require.Contains(t, got.Guidance, "git -C "+team+" push")
+	require.NotContains(t, got.Guidance, "ox retries the push")
+}
+
+// withTeamPublishDaemon pins whether a daemon retries failed publish pushes,
+// so the guidance under test does not depend on this host.
+func withTeamPublishDaemon(t *testing.T, retries bool) {
+	t.Helper()
+	orig := teamPublishDaemonRetries
+	t.Cleanup(func() { teamPublishDaemonRetries = orig })
+	teamPublishDaemonRetries = func() bool { return retries }
 }
