@@ -73,23 +73,23 @@ func TestHandleAfterTool_RecordsOxActivityForStatusline(t *testing.T) {
 	}
 }
 
-// TestRecordStatuslineAction_RespectsOffAndKeepsWhisper turns the line off
+// TestRecordOxToolCall_StatuslineRespectsOffAndKeepsWhisper turns the line off
 // and checks an action update keeps the stored whisper. Failure prevented:
 // `statusline off` still writes on every tool call, or a new action erases
 // the teammate whisper the line was showing.
-func TestRecordStatuslineAction_RespectsOffAndKeepsWhisper(t *testing.T) {
+func TestRecordOxToolCall_StatuslineRespectsOffAndKeepsWhisper(t *testing.T) {
 	root := newStatuslineHookProject(t)
 	const agentID = "OxHk02"
 	whisperAt := time.Now().Add(-time.Minute).UTC()
 	require.NoError(t, oxactivity.SaveState(root, agentID, oxactivity.State{LastWhisperFrom: "ryan", LastWhisperAt: whisperAt}))
 
-	recordStatuslineAction(root, agentID, bashInput(t, "ox murmur list"))
+	recordOxToolCall(root, agentID, bashInput(t, "ox murmur list"))
 	state := oxactivity.LoadState(root, agentID)
 	assert.Equal(t, "checked murmurs", state.LastAction)
 	assert.Equal(t, "ryan", state.LastWhisperFrom)
 
 	require.NoError(t, SetConfigValue("statusline", "off", ConfigLevelUser, ""))
-	recordStatuslineAction(root, agentID, bashInput(t, `ox query "x"`))
+	recordOxToolCall(root, agentID, bashInput(t, `ox query "x"`))
 	assert.Equal(t, "checked murmurs", oxactivity.LoadState(root, agentID).LastAction, "off means no writes")
 }
 

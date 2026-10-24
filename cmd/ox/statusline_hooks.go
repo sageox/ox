@@ -1,11 +1,9 @@
 package main
 
 import (
-	"encoding/json"
 	"log/slog"
 	"time"
 
-	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/oxactivity"
 	whisperstore "github.com/sageox/ox/internal/whisper/store"
@@ -27,19 +25,12 @@ func statuslineEnabled() bool {
 	return cfg.IsStatuslineEnabled()
 }
 
-// recordStatuslineAction saves the activity a tool call represents ("posted
-// murmur") when the call is ox doing coworker-visible work. Anything else —
-// non-ox commands, ox plumbing like heartbeats — writes nothing.
-func recordStatuslineAction(projectRoot, agentID string, input *agentx.HookInput) {
-	if input == nil || projectRoot == "" || agentID == "" {
-		return
-	}
-	recordStatuslineToolCall(projectRoot, agentID, input.ToolName, input.ToolInput, time.Now())
-}
-
-func recordStatuslineToolCall(projectRoot, agentID, toolName string, toolInput json.RawMessage, now time.Time) {
-	act, ok := oxactivity.Classify(toolName, toolInput)
-	if !ok || !statuslineEnabled() {
+// recordStatuslineActivity saves an already-classified ox activity ("posted
+// murmur") as the AI coworker's latest action. The caller classifies the tool
+// call once (recordOxToolCall); this writer only gates on the statusline
+// setting.
+func recordStatuslineActivity(projectRoot, agentID string, act oxactivity.Activity, now time.Time) {
+	if projectRoot == "" || agentID == "" || !statuslineEnabled() {
 		return
 	}
 	state := oxactivity.LoadState(projectRoot, agentID)

@@ -129,6 +129,13 @@ func NewWriter(sessionDir string) *Writer {
 	return &Writer{path: filepath.Join(sessionDir, FileName)}
 }
 
+// NewFileWriter creates a Writer that appends to the file at path. Use it for
+// traces kept outside a session dir (e.g. a per-agent cache file); session
+// traces use NewWriter so the canonical FileName is never misspelled.
+func NewFileWriter(path string) *Writer {
+	return &Writer{path: path}
+}
+
 // Path returns the full path to the context-trace.jsonl file.
 func (w *Writer) Path() string {
 	return w.path
