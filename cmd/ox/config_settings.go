@@ -249,6 +249,27 @@ Turn it off to keep those surfaces free of ox output.`,
 		Levels:      []ConfigLevel{ConfigLevelUser},
 	},
 	{
+		Key:         "recap.trace_consultations",
+		Label:       "Trace consultations",
+		Description: "Record what your AI coworker read and which ox calls it made.",
+		LongDescription: `Controls whether ox records, in your own session trace, which team
+knowledge your AI coworker consulted and which ox commands it ran (with the
+size of what each returned). The trace syncs to your team's Ledger with the
+session, so this is the switch for whether your reads reach the team.
+
+  on  - Record consultations and ox calls (default). Powers ox recap and
+        the per-session usage report.
+  off - Record neither. Context ox delivered (team context at prime,
+        teammate whispers) is still noted, since that is ox's own output.
+
+Only refs are ever recorded — a command's subcommand words, a doc path, a
+query subject — never a murmur body, prompt text, or command output.`,
+		Category:    "Privacy",
+		ValidValues: []string{"on", "off"},
+		Default:     "on",
+		Levels:      []ConfigLevel{ConfigLevelUser},
+	},
+	{
 		Key:         "context_git.auto_commit",
 		Label:       "Auto-commit sessions (deprecated)",
 		Description: "DEPRECATED — never had any effect; use session_publishing",
@@ -787,6 +808,12 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 			cv.UserVal = boolToOnOff(*userCfg.StatuslineEnabled)
 		}
 
+	case "recap.trace_consultations":
+		// only an explicit value counts as a user layer (see statusline)
+		if userCfg != nil && userCfg.Recap != nil && userCfg.Recap.TraceConsultations != nil {
+			cv.UserVal = boolToOnOff(*userCfg.Recap.TraceConsultations)
+		}
+
 	case "disposable_machine":
 		if userCfg != nil && userCfg.DisposableMachine != nil {
 			cv.UserVal = boolToOnOff(*userCfg.DisposableMachine)
@@ -1078,6 +1105,13 @@ func setUserConfig(key, value string) error {
 	case "statusline":
 		enabled := value == "on"
 		cfg.StatuslineEnabled = &enabled
+
+	case "recap.trace_consultations":
+		enabled := value == "on"
+		if cfg.Recap == nil {
+			cfg.Recap = &config.RecapConfig{}
+		}
+		cfg.Recap.TraceConsultations = &enabled
 
 	case "disposable_machine":
 		enabled := value == "on"
@@ -1398,6 +1432,14 @@ func unsetUserConfig(key string) error {
 
 	case "statusline":
 		cfg.StatuslineEnabled = nil
+
+	case "recap.trace_consultations":
+		if cfg.Recap != nil {
+			cfg.Recap.TraceConsultations = nil
+			if *cfg.Recap == (config.RecapConfig{}) {
+				cfg.Recap = nil
+			}
+		}
 
 	case "disposable_machine":
 		cfg.DisposableMachine = nil
