@@ -179,7 +179,7 @@ func readStatuslineStdin(stdin io.Reader, wait time.Duration) []byte {
 }
 
 // renderStatusline returns the full status-line output for Claude Code's
-// JSON: the coworker's chained line(s) first, then ox's on the last line.
+// JSON: ox's line first, then the coworker's chained line(s) beneath it.
 func renderStatusline(raw []byte, opts statuslineOptions) string {
 	var in statuslineInput
 	if len(raw) > 0 {
@@ -233,7 +233,9 @@ func buildOxStatusline(in statuslineInput, dir string, opts statuslineOptions) (
 
 	var state oxactivity.State
 	if agentID != "" {
-		state = oxactivity.LoadState(root, agentID)
+		// Keyed by this harness session, not the agent ID alone: another
+		// window's ox activity must not show up on this bar.
+		state = oxactivity.LoadState(root, oxactivity.StateKey(agentID, in.SessionID))
 	}
 	if state.LastActionAt.IsZero() || opts.now.Sub(state.LastActionAt) > statuslineActionTTL {
 		state.LastAction, state.LastActionAt = "", time.Time{}
@@ -276,7 +278,11 @@ func renderRecMark() string {
 	return "  " + statuslineRecDotStyle.Render("●") + statuslineDimStyle.Render(" rec")
 }
 
-// composeStatusline puts ox's segment on the chained output's last line.
+// composeStatusline puts ox's segment on the first line and the chained
+// output on its own line(s) beneath, so ox is always in the same place and a
+// coworker's status bar keeps its shape. Without a chained command ox's line
+// is the whole output. The ox line is always present while the status line is
+// on, even when nothing has happened: an idle session reads "● ox  ● rec".
 func composeStatusline(chained string, line oxStatusline, show bool, opts statuslineOptions) string {
 	chained = strings.TrimRight(chained, "\r\n")
 	if !show {
@@ -286,19 +292,9 @@ func composeStatusline(chained string, line oxStatusline, show bool, opts status
 		return chained + "\n"
 	}
 
-	lines := []string{""}
-	if chained != "" {
-		lines = strings.Split(chained, "\n")
-	}
-	last := lines[len(lines)-1]
-	sep := ""
-	if chained != "" {
-		sep = "  "
-	}
-
 	width := 0 // unlimited
 	if opts.width > 0 {
-		width = max(opts.width-ansi.StringWidth(last)-len(sep), ansi.StringWidth("● ox"))
+		width = max(opts.width, ansi.StringWidth("● ox"))
 	}
 	rec := ""
 	if line.recording && (width == 0 || width >= ansi.StringWidth("● ox")+ansi.StringWidth(statuslineRecMark)) {
@@ -311,8 +307,11 @@ func composeStatusline(chained string, line oxStatusline, show bool, opts status
 		}
 	}
 
-	lines[len(lines)-1] = last + sep + oxactivity.RenderWidth(line.seg, opts.color, width) + rec
-	return strings.Join(lines, "\n") + "\n"
+	ox := oxactivity.RenderWidth(line.seg, opts.color, width) + rec
+	if chained == "" {
+		return ox + "\n"
+	}
+	return ox + "\n" + chained + "\n"
 }
 
 // statuslineProjectRoot walks up from dir to the initialized SageOx project,
