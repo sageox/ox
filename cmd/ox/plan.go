@@ -107,7 +107,7 @@ Output is JSON by default (the AI-coworker/plumbing path). Use --text for a huma
 			// the save writes only to logs/ledger so stdout JSON stays clean.
 			saved := ""
 			if persist {
-				saved = maybeSavePlan(gitRoot, in, result, authored)
+				saved, _ = maybeSavePlan(gitRoot, in, result, authored)
 			}
 			// Nothing persisted this plan, so the agent is about to implement
 			// from a document no teammate will ever see. Stamp it for the
@@ -122,14 +122,14 @@ Output is JSON by default (the AI-coworker/plumbing path). Use --text for a huma
 		}
 
 		// --text: human porcelain — auto-save (if enabled), metric, summary.
-		savedDir := maybeSavePlan(gitRoot, in, result, authored)
+		savedDir, pageSaved := maybeSavePlan(gitRoot, in, result, authored)
 		if savedDir == "" {
 			if err := armUnsavedPlanStamp(gitRoot, envAgentID(), in, result); err != nil {
 				slog.Debug("plan: could not arm unsaved-plan stamp", "error", err)
 			}
 		}
 		plan.RecordPlanGenerated(result, savedDir != "")
-		return writePlanHuman(cmd, result, savedDir, savedDir != "" && authored != nil)
+		return writePlanHuman(cmd, result, savedDir, pageSaved)
 	},
 }
 
@@ -320,12 +320,19 @@ mark must be self-contained (no live remote avatar). Advisory by default; pass
 // never renders HTML just to save it (that's a skill-side, opt-in action).
 // Returns the saved directory, or "" when nothing was saved (disabled, no
 // ledger, or a write error — capture is best-effort and never aborts the
-// command).
-func maybeSavePlan(gitRoot string, in plan.Input, result plan.Result, authored []byte) string {
+// command). The directory is also returned when a large authored page failed
+// its LFS upload: the files are on disk with a retry marker but nothing was
+// committed. pageSaved is true only when an authored page was saved and that
+// upload did not fail, so callers never claim the page is the plan of record
+// when it is not.
+func maybeSavePlan(gitRoot string, in plan.Input, result plan.Result, authored []byte) (dir string, pageSaved bool) {
 	if gitRoot == "" || !config.PlanSave(gitRoot) {
-		return ""
+		return "", false
 	}
-	return saveEnrichedPlan(gitRoot, in, result, authored)
+	var report planSaveReport
+	dir = saveEnrichedPlan(gitRoot, in, result, authored, withReport(&report))
+	pageSaved = dir != "" && authored != nil && report.Share.Reason != planHTMLUploadFailedReason
+	return dir, pageSaved
 }
 
 // splitAuthoredHTML returns in unchanged and a nil page for a markdown plan.
@@ -1218,7 +1225,7 @@ func writePlanHuman(cmd *cobra.Command, result plan.Result, savedDir string, pag
 		}
 		next := "Author a visual `plan.html`, save it as canonical with `ox plan save --file plan.html`, and present it with `ox plan render --file plan.html --open`; keep exact edits in a closed Implementation notes appendix."
 		if pageSaved {
-			next = "The page is saved as the plan of record; present it with `ox plan render --file plan.html --open`."
+			next = "The page is saved as the plan of record; present it with `ox plan render " + filepath.Base(savedDir) + " --open`."
 		}
 		fmt.Fprintf(&b, "\n%s %s Then start a live review loop with `ox plan review <slug>` — the human marks it up in the browser and the AI coworker receives it in-turn via `ox plan review await <slug>`, addressing each item live. `await` BLOCKS for feedback, so the coworker should confirm with the user before entering that loop (or use a short --timeout and poll).\n", lead, next)
 	}

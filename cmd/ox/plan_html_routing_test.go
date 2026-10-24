@@ -438,7 +438,7 @@ func TestWritePlanHuman_NextStepFollowsWhatWasSaved(t *testing.T) {
 		want      string
 		notWant   string
 	}{
-		{"page saved", true, "The page is saved as the plan of record", "Author a visual `plan.html`"},
+		{"page saved", true, "present it with `ox plan render x --open`", "Author a visual `plan.html`"},
 		{"markdown saved", false, "Author a visual `plan.html`", "The page is saved as the plan of record"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
