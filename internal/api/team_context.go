@@ -38,6 +38,47 @@ type TeamContextContentResponse struct {
 	AgentsMD string           `json:"agents_md"`
 	ClaudeMD string           `json:"claude_md"`
 	Memory   string           `json:"memory"`
+
+	// Skills and Rules are additive: a server that predates them omits the
+	// keys, which decodes as nil, and ox then leaves skills and rules on disk
+	// exactly as an older ox would. A non-nil slice — even an empty one — is
+	// the server's complete set, unless SkillsTruncated says it is not: the
+	// server dropped skills to stay under its payload cap, or could not read
+	// the Team Context at all. Rules carry no flag of their own.
+	//
+	// No omitempty: re-encoding must keep "the team has none" ([]) distinct
+	// from "not reported" (null), or a fixture or proxy turns one into the other.
+	Skills          []TeamContextSkill `json:"skills"`
+	SkillsTruncated bool               `json:"skills_truncated"`
+	Rules           []TeamContextRule  `json:"rules"`
+}
+
+// TeamContextSkill is one servable team skill, carried as the files a Team
+// Context checkout would hold at Root/Dir. Refused skills are never sent; a
+// binary or oversize file is omitted while the skill is still listed.
+type TeamContextSkill struct {
+	Name   string                 `json:"name"`
+	Root   string                 `json:"root"`
+	Dir    string                 `json:"dir"`
+	Digest string                 `json:"digest"`
+	Files  []TeamContextSkillFile `json:"files"`
+}
+
+// TeamContextSkillFile is one text file of a served skill. Path is relative to
+// the skill directory. Executable is the server's verdict for the file — the
+// same predicate ox applies to it.
+type TeamContextSkillFile struct {
+	Path       string `json:"path"`
+	Content    string `json:"content"`
+	Executable bool   `json:"executable"`
+}
+
+// TeamContextRule is one team rule file. Path is Team Context-relative, e.g.
+// "agents/rules/team-rules.md".
+type TeamContextRule struct {
+	Name    string `json:"name"`
+	Path    string `json:"path"`
+	Content string `json:"content"`
 }
 
 // TeamContextDoc is a single team-context document fetched over HTTP.

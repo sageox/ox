@@ -193,3 +193,42 @@ func TestQuery_EmptyResults(t *testing.T) {
 	assert.Empty(t, resp.Results)
 	assert.Equal(t, int64(15), resp.LatencyMs.Total)
 }
+
+// TestQuery_SkillResultKeepsNameAndLink: `ox query` re-encodes the decoded
+// response, so any field QueryResult lacks is silently dropped from its output.
+// A team skill hit is only actionable with its name and its console link.
+// Failure prevented: "how do I unwedge the ledger" ranked the ledger skill first
+// and `ox query` printed it with neither the skill's name nor where to read it.
+func TestQuery_SkillResultKeepsNameAndLink(t *testing.T) {
+	t.Parallel()
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"results":[{
+			"score": 0.91,
+			"text": "Diagnose a wedged SageOx ledger clone without touching it.",
+			"doc_type": "skill",
+			"file_path": "agents/skills/ledger-wedge-triage/SKILL.md",
+			"source_type": "skill",
+			"source_id": "ledger-wedge-triage",
+			"title": "ledger-wedge-triage",
+			"url": "https://sageox.ai/team/team-1/settings/skills/ledger-wedge-triage"
+		}],"latency_ms":{"embed":1,"search":2,"total":3}}`))
+	}))
+	defer mockServer.Close()
+	client := &RepoClient{baseURL: mockServer.URL, httpClient: &http.Client{Timeout: 10 * time.Second}}
+
+	resp, err := client.Query(&QueryRequest{Query: "how do I unwedge the ledger", Mode: "hybrid", K: 5})
+	require.NoError(t, err)
+
+	emitted, err := json.Marshal(resp) // what writeQueryResponse prints
+	require.NoError(t, err)
+	var out struct {
+		Results []map[string]any `json:"results"`
+	}
+	require.NoError(t, json.Unmarshal(emitted, &out))
+	require.Len(t, out.Results, 1)
+	assert.Equal(t, "skill", out.Results[0]["source_type"])
+	assert.Equal(t, "ledger-wedge-triage", out.Results[0]["source_id"], "a skill hit names the skill in source_id")
+	assert.Equal(t, "ledger-wedge-triage", out.Results[0]["title"], "the skill's name must survive into ox query output")
+	assert.Equal(t, "https://sageox.ai/team/team-1/settings/skills/ledger-wedge-triage", out.Results[0]["url"],
+		"the console link must survive into ox query output")
+}

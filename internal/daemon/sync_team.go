@@ -731,6 +731,13 @@ func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) (teamP
 		if result.SkipReason == skipReasonRebaseInProgress {
 			return outcome, fmt.Errorf("team context not synced: rebase in progress (resolve the rebase, then re-run)")
 		}
+		// "Remote unchanged" is also how a clone AHEAD of its remote reads
+		// (remoteRefCheck accepts a remote tip that is an ancestor of HEAD), so
+		// this skip is exactly where an unpushed publish waits. The busy and
+		// lock-file skips are not: something else holds the clone.
+		if result.SkipReason == skipReasonRemoteUnchanged || result.SkipReason == skipReasonRecentlyFetched {
+			s.pushTeamPublishCommits(ctx, path)
+		}
 		return outcome, nil
 	}
 
@@ -766,6 +773,11 @@ func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) (teamP
 		s.issues.ClearIssue(IssueTypeRepoIntegrity, repoName)
 	}
 	s.clearErrors(repoName)
+
+	// The one push leg a team context has on the daemon side, deliberately
+	// narrow: only `ox skills publish` commits, and only when nothing else is
+	// ahead (see ShouldPushTeamPublishes). Best-effort; it never fails the pull.
+	s.pushTeamPublishCommits(ctx, path)
 
 	return outcome, nil
 }

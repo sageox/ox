@@ -16,6 +16,22 @@ import (
 	"github.com/sageox/ox/pkg/adapterprotocol"
 )
 
+// ErrSessionHold matches (errors.Is) a convergence that automatic mode deferred
+// because a live AI coworker session is using the current projection. That is
+// the designed steady state while anyone is working, so callers report it as a
+// deferral, never as a failure (ox#1242).
+var ErrSessionHold = errors.New("active AI coworker session holds the current snapshot")
+
+// sessionHoldError keeps the message every report and pending record already
+// carries while letting callers recognize the hold without parsing it.
+type sessionHoldError struct{ snapshot string }
+
+func (e sessionHoldError) Error() string {
+	return "active AI coworker session keeps the current " + e.snapshot + " snapshot stable"
+}
+
+func (sessionHoldError) Is(target error) bool { return target == ErrSessionHold }
+
 // indexForPrime records delivery through prime's existing discovery path. It
 // does not copy content into agent-native roots, preventing the same artifact
 // from being delivered both natively and through prime. It is the delivery
@@ -45,7 +61,7 @@ func convergeSkills(_ context.Context, request Request, snapshot Snapshot, artif
 			return nil, fmt.Errorf("inspect active sessions: %w", err)
 		}
 		if live {
-			return nil, errors.New("active AI coworker session keeps the current skill snapshot stable")
+			return nil, sessionHoldError{snapshot: "skill"}
 		}
 	}
 	configured := config.FindRepoTeamContext(request.ProjectRoot)
@@ -147,7 +163,7 @@ func convergeRules(ctx context.Context, request Request, snapshot Snapshot, arti
 			return nil, fmt.Errorf("inspect active sessions: %w", err)
 		}
 		if live {
-			return nil, errors.New("active AI coworker session keeps the current rule snapshot stable")
+			return nil, sessionHoldError{snapshot: "rule"}
 		}
 	}
 

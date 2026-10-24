@@ -166,9 +166,15 @@ func classify(snapshot Snapshot, items []Artifact, outcomes []Outcome, err error
 	if errors.As(err, &settled) {
 		state = settled.State
 	}
+	deferral := ""
+	if state == StatePending && errors.Is(err, ErrSessionHold) {
+		deferral = DeferralActiveSession
+	}
 	result := make([]Outcome, 0, len(items))
 	for _, artifact := range items {
-		result = append(result, outcomeFor(snapshot, artifact, state, "", err.Error()))
+		outcome := outcomeFor(snapshot, artifact, state, "", err.Error())
+		outcome.Deferral = deferral
+		result = append(result, outcome)
 	}
 	return result
 }

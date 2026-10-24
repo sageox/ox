@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -221,21 +222,78 @@ func TestConverge_RejectsEveryInvalidArtifactIdentity(t *testing.T) {
 	}
 }
 
-func TestReport_ConvergedTreatsOptionalUnsupportedAsSuccessButRequiredAsFailure(t *testing.T) {
-	optional := Report{Outcomes: []Outcome{{State: StateUnsupported, Required: false}}}
-	require.True(t, optional.Converged())
-	required := Report{Outcomes: []Outcome{{State: StateUnsupported, Required: true}}}
-	require.False(t, required.Converged())
+// An unsupported artifact is one this repository cannot receive at all, so it is
+// skipped, never a convergence failure — Required or not.
+// Failure prevented (ox#1270): one skill a repository could never take made the
+// whole `ox sync` exit non-zero, reading as "sync is broken".
+func TestReport_UnsupportedIsSkippedNotAFailure(t *testing.T) {
+	for _, required := range []bool{false, true} {
+		report := Report{Outcomes: []Outcome{
+			{Kind: KindRule, Name: "review", State: StateIndexed, Required: true},
+			{Kind: KindSkill, Name: "deploy", State: StateUnsupported, Required: required},
+		}}
+		require.True(t, report.Converged(), "required=%v", required)
+		require.Equal(t, []Outcome{report.Outcomes[1]}, report.Skipped())
+	}
+	failed := Report{Outcomes: []Outcome{
+		{Kind: KindSkill, Name: "deploy", State: StateUnsupported, Required: true},
+		{Kind: KindSkill, Name: "clash", State: StateConflict, Required: true},
+	}}
+	require.False(t, failed.Converged(), "a skip must not hide a real failure beside it")
 }
 
 func TestWriteText_ExplainsDeliveryAndFailure(t *testing.T) {
 	report := Report{Snapshot: Snapshot{Commit: "0123456789abcdef"}, Outcomes: []Outcome{
 		{Kind: KindRule, Name: "security", State: StateIndexed, Delivery: "prime-inline"},
+		{Kind: KindSkill, Name: "clash", State: StateConflict, Detail: "projected skill conflicts"},
 		{Kind: KindSkill, Name: "deploy", State: StateUnsupported, Detail: "no native skill target"},
 	}}
 	var out bytes.Buffer
 	require.NoError(t, WriteText(&out, report))
 	require.Contains(t, out.String(), "0123456789ab")
 	require.Contains(t, out.String(), "rule/security: indexed via prime-inline")
-	require.Contains(t, out.String(), "skill/deploy: unsupported — no native skill target")
+	require.Contains(t, out.String(), "skill/clash: conflict — projected skill conflicts")
+	require.Contains(t, out.String(), "Skipped 1 artifact — no native skill target:\n    skill/deploy\n")
+}
+
+// Every skill a repository cannot receive for the same reason is ONE warning
+// naming them all, not a row each.
+// Failure prevented (ox#1270): dozens of identical "unsupported" rows buried the
+// single fix (`ox init`) the operator needed to see.
+func TestWriteText_GroupsSkippedArtifactsByReason(t *testing.T) {
+	report := Report{Snapshot: Snapshot{Commit: "abc"}, Outcomes: []Outcome{
+		{Kind: KindSkill, Name: "deploy", State: StateUnsupported, Detail: "no native skill target; run `ox init`"},
+		{Kind: KindSkill, Name: "publish-design-mockups", State: StateUnsupported, Detail: "no native skill target; run `ox init`"},
+		{Kind: KindSkill, Name: "Deploy", State: StateUnsupported, Detail: "unusable name"},
+	}}
+	var out bytes.Buffer
+	require.NoError(t, WriteText(&out, report))
+	require.Equal(t, "Team Context convergence at abc\n"+
+		"  Skipped 2 artifacts — no native skill target; run `ox init`:\n"+
+		"    skill/deploy, skill/publish-design-mockups\n"+
+		"  Skipped 1 artifact — unusable name:\n"+
+		"    skill/Deploy\n", out.String())
+	require.Equal(t, 1, strings.Count(out.String(), "ox init"), "the shared reason must be printed once")
+}
+
+// Only a live-session hold is a designed deferral; any other pending reason is
+// still a wait something may need to explain.
+// Failure prevented (ox#1242): a reader that cannot tell the two apart either
+// warns on every session-held skill or hides a real stall among them.
+func TestClassify_MarksOnlySessionHoldsAsDeferrals(t *testing.T) {
+	items := []Artifact{{Kind: KindSkill, Name: "deploy", SourcePath: "agents/skills/deploy"}}
+	held := classify(Snapshot{}, items, nil, sessionHoldError{snapshot: "skill"})
+	require.Len(t, held, 1)
+	require.Equal(t, StatePending, held[0].State)
+	require.Equal(t, DeferralActiveSession, held[0].Deferral)
+	require.Equal(t, "active AI coworker session keeps the current skill snapshot stable", held[0].Detail,
+		"the message every report and pending record carries must not change")
+
+	busy := classify(Snapshot{}, items, nil, errors.New("projection lock is busy"))
+	require.Equal(t, StatePending, busy[0].State)
+	require.Empty(t, busy[0].Deferral)
+
+	settled := classify(Snapshot{}, items, nil, &settledError{State: StateError, Err: errors.New("broken")})
+	require.Equal(t, StateError, settled[0].State)
+	require.Empty(t, settled[0].Deferral)
 }

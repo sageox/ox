@@ -400,7 +400,7 @@ func teamRevision(teamPath string) string {
 	}
 	head, err := os.ReadFile(filepath.Join(teamPath, ".git", "HEAD"))
 	if err != nil {
-		return ""
+		return httpSnapshotRevision(teamPath)
 	}
 	line := strings.TrimSpace(string(head))
 	ref, isSymbolic := strings.CutPrefix(line, "ref: ")
@@ -414,6 +414,22 @@ func teamRevision(teamPath string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(sha))
+}
+
+// HTTPSnapshotFile is where ephemeral-mode prime records which skill set it
+// materialized into a Team Context directory fetched over HTTP. That directory
+// has no git HEAD, so without this its revision is a constant "" and a skill the
+// team changed or retired would never re-plan in a long-lived environment.
+const HTTPSnapshotFile = ".sageox/http-snapshot"
+
+// httpSnapshotRevision is teamRevision for a directory with no git checkout.
+// Prefixed so it can never equal a commit SHA.
+func httpSnapshotRevision(teamPath string) string {
+	snapshot, err := os.ReadFile(filepath.Join(teamPath, filepath.FromSlash(HTTPSnapshotFile)))
+	if err != nil {
+		return ""
+	}
+	return "http:" + strings.TrimSpace(string(snapshot))
 }
 
 // anySkillRootOnDisk reports whether any directory discovery would walk exists.

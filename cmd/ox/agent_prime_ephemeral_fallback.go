@@ -171,7 +171,7 @@ func fetchTeamContextViaAPI(teamCtxDir string, resp *api.TeamContextContentRespo
 			"dir", docsRoot, "err", openErr.Error())
 	}
 
-	return nil
+	return materializeTeamSkillsAndRules(teamCtxDir, resp)
 }
 
 // atomicWriteFile writes content to path via a temp file in the same

@@ -515,12 +515,13 @@ func TestSkillsPublish_SeedsThePublishedCopyExactlyOnce(t *testing.T) {
 	require.FileExists(t, filepath.Join(published, "references", "AUTHORING.md"),
 		"publishing copied the manifest but dropped the skill's bundled references")
 
-	// Recorded in the Team Context's own history, so a teammate's next sync sees
-	// it. The fixture has no remote, so this also proves the command does not try
-	// to push — a push would fail the command outright.
+	// Recorded in the Team Context's own history. The fixture has no remote, so
+	// the push cannot happen: the publish must still succeed, and must say the
+	// commit is local rather than claim it was distributed.
 	require.Empty(t, gitOutput(t, team, "status", "--porcelain"),
 		"the published files were left unrecorded in the Team Context")
 	require.Contains(t, gitOutput(t, team, "log", "-1", "--pretty=%s"), teamPublishSkill)
+	require.Contains(t, out, "NOT pushed")
 
 	// The team's copy is theirs now. A hand edit must survive a second publish.
 	manifest := filepath.Join(published, "SKILL.md")
