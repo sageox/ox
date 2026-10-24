@@ -496,9 +496,11 @@ func checkSharedHookValues(fix bool) checkResult {
 		strings.Join(stale, ", ")+"\n       Run `ox doctor` to update")
 }
 
-// checkClaudeStatusLine verifies .claude/settings.json runs the ox status
-// line wherever ox's Claude Code hooks are installed. Missing or stale is
-// repaired by the installer; a coworker's own statusLine is kept and reported.
+// checkClaudeStatusLine verifies the coworker's Claude Code status line in a
+// project with ox hooks matches their statusline setting: on means ox's
+// statusLine is current in settings.local.json, off means it is absent. An ox
+// statusLine in the shared settings.json (where earlier builds put it) is
+// moved out. A coworker's own statusLine is kept and reported.
 func checkClaudeStatusLine(fix bool) checkResult {
 	gitRoot := findGitRoot()
 	if gitRoot == "" {
@@ -514,7 +516,7 @@ func checkClaudeStatusLineAt(gitRoot string, fix bool) checkResult {
 	if _, err := os.Stat(settingsPath); os.IsNotExist(err) {
 		return SkippedCheck(claudeStatusLineCheckName, "no settings.json", "")
 	}
-	settings, rawMap, err := readSharedClaudeSettings(gitRoot)
+	settings, sharedMap, err := readSharedClaudeSettings(gitRoot)
 	if err != nil {
 		return WarningCheck(claudeStatusLineCheckName, "read error", err.Error())
 	}
@@ -531,24 +533,45 @@ func checkClaudeStatusLineAt(gitRoot string, fix bool) checkResult {
 		return SkippedCheck(claudeStatusLineCheckName, "no ox hooks in settings.json", "")
 	}
 
-	state := claude.ClassifyStatusLine(rawMap)
-	switch state {
-	case claude.StatusLineCurrent:
-		return PassedCheck(claudeStatusLineCheckName, "ox status line installed")
-	case claude.StatusLineForeign:
+	localPath := getLocalClaudeSettingsPath(gitRoot)
+	_, localMap, err := readSettingsFileRaw(localPath)
+	if err != nil {
+		return WarningCheck(claudeStatusLineCheckName, "read error", err.Error())
+	}
+	shared := claude.ClassifyStatusLine(sharedMap)
+	local := claude.ClassifyStatusLine(localMap)
+	enabled := statuslineEnabled()
+
+	var problem, detail string
+	switch {
+	case shared == claude.StatusLineCurrent || shared == claude.StatusLineStale:
+		problem = "status line in shared settings.json"
+		detail = "ox's status line is a per-coworker setting and belongs in " + localPath + ", not the committed " + settingsPath
+	case local == claude.StatusLineForeign:
 		return PassedCheck(claudeStatusLineCheckName,
 			"custom statusLine kept; ox activity is not shown in the status bar")
+	case !enabled && local == claude.StatusLineMissing:
+		return PassedCheck(claudeStatusLineCheckName, "status line off (ox config set statusline on to show it)")
+	case !enabled:
+		problem = "status line off but still installed"
+		detail = "`ox config set statusline off` is set, yet " + localPath + " still runs it, so Claude Code keeps a blank row"
+	case local == claude.StatusLineCurrent:
+		return PassedCheck(claudeStatusLineCheckName, "ox status line installed")
+	default:
+		problem = fmt.Sprintf("status line %s", local)
+		detail = "ox's live activity line is not in " + localPath
 	}
 
 	if fix {
-		if err := InstallProjectClaudeHooks(gitRoot); err != nil {
+		if _, err := syncProjectStatusLine(gitRoot); err != nil {
 			return FailedCheck(claudeStatusLineCheckName, "repair failed", err.Error())
 		}
-		return PassedCheck(claudeStatusLineCheckName, "installed ox status line")
+		if enabled {
+			return PassedCheck(claudeStatusLineCheckName, "installed ox status line")
+		}
+		return PassedCheck(claudeStatusLineCheckName, "removed ox status line (setting is off)")
 	}
-	return FailedCheck(claudeStatusLineCheckName,
-		fmt.Sprintf("status line %s", state),
-		"ox's live activity line is not in "+settingsPath+"\n       Run `ox doctor` to install it")
+	return FailedCheck(claudeStatusLineCheckName, problem, detail+"\n       Run `ox doctor` to fix it")
 }
 
 // checkStaleLocalHooks detects ox hooks still present in settings.local.json

@@ -11,6 +11,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	claude "github.com/sageox/ox/internal/hooks/claude"
 )
 
 // TestAllInstalledHooksHaveOxGuard verifies that every ox hook command installed
@@ -723,6 +725,7 @@ func TestMigrationCleansUpLocalSettings(t *testing.T) {
 // TestMigrationDeletesEmptyLocalSettings verifies that settings.local.json is
 // deleted entirely when it only contained ox hooks.
 func TestMigrationDeletesEmptyLocalSettings(t *testing.T) {
+	isolateUserConfig(t)
 	tmpDir := t.TempDir()
 	claudeDir := filepath.Join(tmpDir, ".claude")
 	require.NoError(t, os.MkdirAll(claudeDir, 0755))
@@ -751,7 +754,17 @@ func TestMigrationDeletesEmptyLocalSettings(t *testing.T) {
 	err := InstallProjectClaudeHooks(tmpDir)
 	require.NoError(t, err)
 
-	// local file should be deleted (was empty after removing ox hooks)
+	// the migrated hooks are gone from the local file; what remains is the
+	// per-coworker ox statusLine the installer puts there on purpose
+	_, localMap, err := readSettingsFileRaw(localPath)
+	require.NoError(t, err)
+	assert.NotContains(t, localMap, "hooks", "ox hooks were migrated out of settings.local.json")
+	assert.Equal(t, claude.StatusLineCurrent, claude.ClassifyStatusLine(localMap))
+
+	// with the status line off, nothing is left and the file goes away
+	require.NoError(t, SetConfigValue("statusline", "off", ConfigLevelUser, ""))
+	require.NoError(t, os.WriteFile(localPath, data, 0644))
+	require.NoError(t, InstallProjectClaudeHooks(tmpDir))
 	_, statErr := os.Stat(localPath)
 	assert.True(t, os.IsNotExist(statErr), "empty local settings should be deleted")
 }
