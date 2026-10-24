@@ -458,6 +458,31 @@ values).`,
 		Levels:      []ConfigLevel{ConfigLevelUser, ConfigLevelRepo},
 	},
 	{
+		Key:         "skills.claude_org_dedupe",
+		Label:       "Skip skills your Claude org delivers",
+		Description: "Stop copying team skills into .claude/skills when your Claude organization's plugin already gives them to Claude Code here.",
+		LongDescription: `Controls whether ox skips its own copy of a team skill in .claude/skills
+when Claude Code on this machine already gets that skill from your team's
+Claude organization plugin, so Claude Code does not list it twice.
+
+  on  - Skip a team skill only when Claude Code here is signed in to the
+        claude.ai account that has your organization's plugin, and that
+        plugin carries the skill. Anything ox cannot confirm keeps its
+        copy. (default)
+  off - Always copy every team skill into .claude/skills.
+
+Turn this off if your Claude Code sessions sign in some way ox cannot see
+from Claude Code's files, such as an API key, Bedrock or Vertex set only in
+your shell. Those sessions never load organization plugins, so without
+ox's copy they would have no team skills at all.
+
+Other AI coworkers (Codex, Cursor, ...) always get ox's copies.`,
+		Category:    "Skills",
+		ValidValues: []string{"on", "off"},
+		Default:     "on",
+		Levels:      []ConfigLevel{ConfigLevelUser},
+	},
+	{
 		Key:         "pr_visuals.rich",
 		Label:       "Rich PR visuals",
 		Description: "Guide AI coworkers to make rich images for pull requests.",
@@ -769,6 +794,11 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 			cv.UserVal = boolToOnOff(*userCfg.DisposableMachine)
 		}
 
+	case "skills.claude_org_dedupe":
+		if userCfg != nil && userCfg.Skills != nil && userCfg.Skills.ClaudeOrgDedupe != nil {
+			cv.UserVal = boolToOnOff(*userCfg.Skills.ClaudeOrgDedupe)
+		}
+
 	case "view_format":
 		if userCfg != nil && userCfg.ViewFormat != "" {
 			cv.UserVal = userCfg.ViewFormat
@@ -1055,6 +1085,13 @@ func setUserConfig(key, value string) error {
 	case "disposable_machine":
 		enabled := value == "on"
 		cfg.DisposableMachine = &enabled
+
+	case "skills.claude_org_dedupe":
+		if cfg.Skills == nil {
+			cfg.Skills = &config.SkillsConfig{}
+		}
+		enabled := value == "on"
+		cfg.Skills.ClaudeOrgDedupe = &enabled
 
 	case "view_format":
 		cfg.ViewFormat = value
@@ -1371,6 +1408,14 @@ func unsetUserConfig(key string) error {
 
 	case "disposable_machine":
 		cfg.DisposableMachine = nil
+
+	case "skills.claude_org_dedupe":
+		if cfg.Skills != nil {
+			cfg.Skills.ClaudeOrgDedupe = nil
+			if *cfg.Skills == (config.SkillsConfig{}) {
+				cfg.Skills = nil
+			}
+		}
 
 	case "view_format":
 		cfg.ViewFormat = ""

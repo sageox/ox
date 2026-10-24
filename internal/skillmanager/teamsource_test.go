@@ -322,7 +322,7 @@ func TestTeamSkillSource_ResolvedMatchesFreshDiscovery(t *testing.T) {
 	}
 	require.Len(t, applicable, 2, "fixture invariant: both skills apply here")
 
-	got, gotDecisions, err := teamSkillSourceResolved(nil, team, "ox", project, applicable)
+	got, gotDecisions, err := teamSkillSourceResolved(nil, team, "ox", project, applicable, teamskills.ClaudeOrgSync{})
 	require.NoError(t, err)
 
 	require.Equal(t, selectedNames(t, fresh), selectedNames(t, got),
@@ -346,7 +346,7 @@ func TestTeamSkillSource_ResolvedStillBlindToUnmaterializedCheckout(t *testing.T
 	require.True(t, ok, "an unmaterialized checkout must still report an IncompleteReason")
 	require.NotEmpty(t, freshCatalog.IncompleteReason())
 
-	got, gotDecisions, err := teamSkillSourceResolved(nil, team, "ox", project, nil)
+	got, gotDecisions, err := teamSkillSourceResolved(nil, team, "ox", project, nil, teamskills.ClaudeOrgSync{})
 	require.NoError(t, err)
 	require.Equal(t, freshDecisions, gotDecisions)
 	gotCatalog, ok := got.(interface{ IncompleteReason() string })
