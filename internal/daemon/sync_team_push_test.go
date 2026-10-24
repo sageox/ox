@@ -269,3 +269,47 @@ func TestValidateTeamPublishPush_RefusesACommitThatLandsAfterTheCheck(t *testing
 	require.NoError(t, err)
 	require.True(t, already, "nothing ahead means a concurrent sync already pushed it")
 }
+
+// A commit that borrows the publish subject while changing a file outside the
+// skills root must stop the push: the subject is a claim, the paths are proof.
+// Failure prevented: any reachable commit subjected "add team skill: ..." could
+// push unrelated Team Context changes out with the daemon's credential.
+func TestValidateTeamPublishPush_RefusesAPublishSubjectOutsideTheSkillsRoot(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
+	ctx := context.Background()
+	bare := t.TempDir()
+	gitCmd(t, bare, "init", "--bare", "-q")
+	clone := t.TempDir()
+	gitCmd(t, clone, "clone", "-q", bare, ".")
+	commitLocal(t, clone, "README.md", "init")
+	gitCmd(t, clone, "push", "-q", "-u", "origin", "HEAD")
+
+	commitLocal(t, clone, "agents/skills/deploy/SKILL.md", TeamPublishCommitPrefix+"deploy")
+	already, err := ValidateTeamPublishPush(ctx, clone)
+	require.NoError(t, err)
+	require.False(t, already, "a publish that stays under the skills root is ox's to push")
+
+	commitLocal(t, clone, "docs/onboarding.md", TeamPublishCommitPrefix+"onboarding")
+	before := strings.TrimSpace(gitCmd(t, bare, "rev-parse", "HEAD"))
+	err = gitutil.PushWithRetry(ctx, clone, gitutil.PushOpts{ValidatePush: ValidateTeamPublishPush, MaxRetries: 1})
+	require.ErrorIs(t, err, ErrForeignCommitAhead)
+	require.Contains(t, err.Error(), "docs/onboarding.md")
+	require.Equal(t, before, strings.TrimSpace(gitCmd(t, bare, "rev-parse", "HEAD")), "a disguised commit reached the remote")
+}
+
+func TestFirstPathOutsidePublishRoot(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct{ name, out, want string }{
+		{name: "none", out: "", want: ""},
+		{name: "all under the root", out: "agents/skills/a/SKILL.md\x00agents/skills/a/notes.md\x00", want: ""},
+		{name: "one outside", out: "agents/skills/a/SKILL.md\x00agents/rules/team.md\x00", want: "agents/rules/team.md"},
+		{name: "prefix look-alike", out: "agents/skillset/x.md\x00", want: "agents/skillset/x.md"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, firstPathOutsidePublishRoot(tt.out))
+		})
+	}
+}

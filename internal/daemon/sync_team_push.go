@@ -70,13 +70,46 @@ func ValidateTeamPublishPush(ctx context.Context, repoPath string) (alreadyPubli
 	}
 	blocker, ok := ShouldPushTeamPublishes(out)
 	switch {
-	case ok:
-		return false, nil
 	case blocker != "":
 		return false, fmt.Errorf("%w: %q", ErrForeignCommitAhead, blocker)
-	default:
+	case !ok:
 		return true, nil // a concurrent sync already pushed it
 	}
+	// The subject is only a claim. Every path a pushed commit touches must sit
+	// under the skills root, so a commit that borrowed the publish subject while
+	// changing other Team Context files cannot ride the push out.
+	paths, err := gitutil.RunGit(ctx, repoPath, teamPublishPathLogArgs...)
+	if err != nil {
+		return false, fmt.Errorf("list paths of unpushed commits: %w", err)
+	}
+	if outside := firstPathOutsidePublishRoot(paths); outside != "" {
+		return false, fmt.Errorf("%w: a publish commit changes %q, outside %s", ErrForeignCommitAhead, outside, TeamPublishPathRoot)
+	}
+	return false, nil
+}
+
+// TeamPublishPathRoot is the only directory `ox skills publish` writes in a
+// Team Context.
+const TeamPublishPathRoot = "agents/skills/"
+
+// teamPublishPathLogArgs lists every path each unpushed commit touches,
+// NUL-separated. --no-renames reports a rename as a delete plus an add, so a
+// file moved out of another directory still shows its source path.
+var teamPublishPathLogArgs = []string{"log", "--format=", "--name-only", "--no-renames", "-z", "@{upstream}..HEAD"}
+
+// firstPathOutsidePublishRoot returns the first path in NUL-separated git
+// output that is not under TeamPublishPathRoot, or "" when every path is.
+func firstPathOutsidePublishRoot(out string) string {
+	for _, p := range strings.Split(out, "\x00") {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if !strings.HasPrefix(p, TeamPublishPathRoot) {
+			return p
+		}
+	}
+	return ""
 }
 
 // pushTeamPublishCommits is the daemon's leg of `ox skills publish`: it pushes a
