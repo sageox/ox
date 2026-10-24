@@ -166,6 +166,38 @@ func (w *Writer) Append(event Event) error {
 	return nil
 }
 
+// AppendAll appends events in one write, so a batch lands whole or (on an
+// I/O error before the write) not at all. Validation is the caller's job:
+// AppendAll writes nothing when any event fails to marshal.
+func (w *Writer) AppendAll(events []Event) error {
+	if len(events) == 0 {
+		return nil
+	}
+	var buf []byte
+	for _, event := range events {
+		if event.Timestamp == "" {
+			event.Timestamp = Now()
+		}
+		line, err := json.Marshal(event)
+		if err != nil {
+			return fmt.Errorf("marshal context-trace event: %w", err)
+		}
+		buf = append(buf, line...)
+		buf = append(buf, '\n')
+	}
+
+	f, err := os.OpenFile(w.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return fmt.Errorf("open context-trace file: %w", err)
+	}
+	defer f.Close()
+
+	if _, err := f.Write(buf); err != nil {
+		return fmt.Errorf("write context-trace events: %w", err)
+	}
+	return nil
+}
+
 // ReadEvents reads all events from a context-trace.jsonl file.
 // Malformed lines are skipped. Returns nil, nil for a missing file.
 func ReadEvents(path string) ([]Event, error) {

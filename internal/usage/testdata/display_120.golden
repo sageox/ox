@@ -1,0 +1,7 @@
+ox usage · this session  OxAb12 · codex · ● recording · 31 turns
+calls      6  checked murmurs ×3  loaded team context ×1  searched team memory ×1  pulled plan ×1
+injected   ~6.7k tok  prime:team 3.1k ▇▇▇▇▇  ox calls 2.5k ▇▇▇▇  prime:sageox 0.9k ▇  whispers 0.2k
+           prime trimmed 14.2k→8.1k B (deferred: team-docs)
+           not metered: recall preamble, plan nudges, agent-task surface
+surfaced   AGENTS.md · MEMORY.md · query "auth token refresh" · murmur OxR9a1 [wip]
+used       you reported: MEMORY.md ("kept token TTL") · ran 5 retrievals · score: moderate · 2 commits

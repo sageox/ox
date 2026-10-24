@@ -53,8 +53,8 @@ func TestTraceReaders_IgnoreInvokedEvents(t *testing.T) {
 		assert.Equal(t, dr.SessionSet, mixedScan.docs[doc].SessionSet)
 	}
 
-	oldEvents, _ := readTrace(f.Ledger, "old")
-	mixedEvents, _ := readTrace(f.Ledger, "mixed")
+	oldEvents, _ := ReadTrace(f.Ledger, "old")
+	mixedEvents, _ := ReadTrace(f.Ledger, "mixed")
 	require.Len(t, mixedEvents, len(oldEvents)+len(invokedTraceEvents()), "new lines decode, nothing dropped")
 	assert.Equal(t, influenceEvents(oldEvents), influenceEvents(mixedEvents), "influenceEvents")
 	assert.Equal(t, knowledgeflow.Build("T", oldEvents), knowledgeflow.Build("T", mixedEvents), "knowledgeflow.Build")
