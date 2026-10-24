@@ -1,11 +1,16 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"testing"
 
+	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/teamconverge"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -127,4 +132,63 @@ func TestLogConvergenceError_SessionHoldIsInfo(t *testing.T) {
 	failed := h.byMessage("team context convergence failed")
 	require.Len(t, failed, 1)
 	assert.Equal(t, slog.LevelWarn, failed[0].Level)
+}
+
+// A Team Context snapshot another ox process holds is a failed pass, not a
+// silent one: it warns and records a durable retry, so the next daemon cycle
+// converges the change even with no new Team Context commit to trigger it.
+func TestReconcileTeamSkills_BusySnapshotWarnsAndPersistsARetry(t *testing.T) {
+	project := t.TempDir()
+	runTeamGit(t, project, "init", "-q")
+	team := t.TempDir()
+	runTeamGit(t, team, "init", "-q")
+	runTeamGit(t, team, "config", "user.email", "test@sageox.ai")
+	runTeamGit(t, team, "config", "user.name", "test")
+	runTeamGit(t, team, "config", "commit.gpgsign", "false")
+	manifest := filepath.Join(team, "agents", "skills", "deploy", "SKILL.md")
+	require.NoError(t, os.MkdirAll(filepath.Dir(manifest), 0o755))
+	require.NoError(t, os.WriteFile(manifest, []byte("---\nname: deploy\ndescription: deploy safely\n---\n\nDeploy.\n"), 0o644))
+	runTeamGit(t, team, "add", "-A")
+	runTeamGit(t, team, "commit", "-q", "-m", "team skill")
+	require.NoError(t, config.SaveProjectConfig(project, &config.ProjectConfig{
+		ConfigVersion: config.CurrentConfigVersion, RepoID: "repo_test", TeamID: "team_test", TeamName: "Test",
+	}))
+	require.NoError(t, config.SaveLocalConfig(project, &config.LocalConfig{TeamContexts: []config.TeamContext{{
+		TeamID: "team_test", TeamName: "Test", Path: team,
+	}}}))
+
+	held := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- gitutil.WithRepoLock(context.Background(), team, func() error {
+			close(held)
+			<-release
+			return nil
+		})
+	}()
+	<-held
+	t.Cleanup(func() {
+		close(release)
+		require.NoError(t, <-done)
+	})
+
+	h := &recordingHandler{}
+	scheduler := newTestScheduler(project)
+	scheduler.logger = slog.New(h)
+	scheduler.reconcileTeamSkills([]string{"agents/skills/deploy/SKILL.md"})
+
+	failed := h.byMessage("team context convergence failed")
+	require.Len(t, failed, 1)
+	assert.Equal(t, slog.LevelWarn, failed[0].Level)
+	assert.Equal(t, project, attrsOf(failed[0])["repo"])
+	assert.Contains(t, attrsOf(failed[0])["error"], "snapshot is busy")
+	assert.Empty(t, h.byMessage("team context convergence completed"), "a pass that never ran must not report completion")
+
+	pending, err := teamconverge.LoadPending(project)
+	require.NoError(t, err)
+	require.NotNil(t, pending, "a busy snapshot was forgotten instead of retried")
+	assert.Equal(t, teamconverge.PendingRetry, pending.Status)
+	assert.Equal(t, 1, pending.Attempts)
+	assert.Contains(t, pending.Reason, "snapshot is busy")
 }

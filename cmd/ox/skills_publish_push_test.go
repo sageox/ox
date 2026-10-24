@@ -129,3 +129,60 @@ func withTeamPublishDaemon(t *testing.T, retries bool) {
 	t.Cleanup(func() { teamPublishDaemonRetries = orig })
 	teamPublishDaemonRetries = func() bool { return retries }
 }
+
+// pushTeamPublish reads what is ahead of the remote before it runs git push.
+// Nothing ahead means a concurrent sync already carried the commit, which is
+// published, not a failure; a branch with no upstream is a human's to fix.
+func TestPushTeamPublish_DecidesFromWhatIsAheadOfTheRemote(t *testing.T) {
+	tests := []struct {
+		name       string
+		stage      func(t *testing.T) (repo, team string)
+		wantPushed bool
+		wantReason string
+	}{
+		{
+			name: "nothing ahead of the remote",
+			stage: func(t *testing.T) (string, string) {
+				repo, team, _, _ := stageTeamPublishRepoWithRemote(t)
+				return repo, team
+			},
+			wantPushed: true,
+		},
+		{
+			name: "no upstream branch",
+			stage: func(t *testing.T) (string, string) {
+				team := t.TempDir()
+				gitInitRepo(t, team)
+				require.NoError(t, os.WriteFile(filepath.Join(team, "README.md"), []byte("team\n"), 0o644))
+				gitOutput(t, team, "add", "README.md")
+				gitOutput(t, team, "commit", "-q", "-m", "add team skill: deploy")
+				return team, team
+			},
+			wantReason: "tracks no remote branch",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo, team := tt.stage(t)
+			head := strings.TrimSpace(gitOutput(t, team, "rev-parse", "HEAD"))
+
+			got := pushTeamPublish(repo, team)
+
+			require.Equal(t, tt.wantPushed, got.pushed)
+			require.False(t, got.retried, "nothing here is a failed attempt for the daemon to retry")
+			if tt.wantReason == "" {
+				require.Empty(t, got.reason)
+			} else {
+				require.Contains(t, got.reason, tt.wantReason)
+			}
+			require.Equal(t, head, strings.TrimSpace(gitOutput(t, team, "rev-parse", "HEAD")), "deciding must not move the branch")
+		})
+	}
+}
+
+// The default predicate is wired to the real daemon switch: with the daemon
+// turned off, nothing retries a failed publish push, so none may be promised.
+func TestTeamPublishDaemonRetries_FollowsTheDaemonSwitch(t *testing.T) {
+	t.Setenv("SAGEOX_DAEMON", "false")
+	require.False(t, teamPublishDaemonRetries())
+}

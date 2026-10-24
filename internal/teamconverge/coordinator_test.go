@@ -276,6 +276,57 @@ func TestWriteText_GroupsSkippedArtifactsByReason(t *testing.T) {
 	require.Equal(t, 1, strings.Count(out.String(), "ox init"), "the shared reason must be printed once")
 }
 
+// A skip with no recorded detail still tells the operator why, and groups with
+// any other skip that has none.
+func TestWriteText_SkippedWithoutADetailStillGivesAReason(t *testing.T) {
+	report := Report{Snapshot: Snapshot{Commit: "abc"}, Outcomes: []Outcome{
+		{Kind: KindSkill, Name: "deploy", State: StateUnsupported},
+		{Kind: KindRule, Name: "review", State: StateUnsupported},
+	}}
+	var out bytes.Buffer
+	require.NoError(t, WriteText(&out, report))
+	require.Equal(t, "Team Context convergence at abc\n"+
+		"  Skipped 2 artifacts — this repository cannot receive it:\n"+
+		"    skill/deploy, rule/review\n", out.String())
+}
+
+// failAfterWriter accepts ok writes, then fails every write after them.
+type failAfterWriter struct {
+	ok  int
+	err error
+}
+
+func (w *failAfterWriter) Write(p []byte) (int, error) {
+	if w.ok == 0 {
+		return 0, w.err
+	}
+	w.ok--
+	return len(p), nil
+}
+
+// `ox sync` prints this report to a terminal or pipe; a write that fails at any
+// line must reach the caller rather than truncate the report silently.
+func TestWriteText_ReturnsTheWriterErrorFromEveryLine(t *testing.T) {
+	report := Report{Snapshot: Snapshot{Commit: "abc"}, Outcomes: []Outcome{
+		{Kind: KindRule, Name: "security", State: StateIndexed},
+		{Kind: KindSkill, Name: "deploy", State: StateUnsupported, Detail: "no native skill target"},
+	}}
+	for _, tt := range []struct {
+		name string
+		ok   int
+	}{
+		{name: "header", ok: 0},
+		{name: "outcome line", ok: 1},
+		{name: "skipped group", ok: 2},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			broken := errors.New("broken pipe")
+			require.ErrorIs(t, WriteText(&failAfterWriter{ok: tt.ok, err: broken}, report), broken)
+		})
+	}
+	require.NoError(t, WriteText(&failAfterWriter{ok: 3}, report), "three lines is the whole report")
+}
+
 // Only a live-session hold is a designed deferral; any other pending reason is
 // still a wait something may need to explain.
 // Failure prevented (ox#1242): a reader that cannot tell the two apart either
