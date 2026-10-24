@@ -144,8 +144,7 @@ func publishRepoSkillsToTeam(repoRoot string, names []string) (skillsChangeOutpu
 		return published, err
 	}
 	published.Warnings = append(published.Warnings, warnings...)
-	published.Guidance = fmt.Sprintf("%s published to your Team Context without changing the repository copies. Their `repos:` metadata controls where they arrive; without `repos:` they reach every team repository. Distribution is automatic; run `ox sync` only if you need it immediately, verify with `ox skills status`, then remove any redundant repository copy.",
-		strings.Join(names, ", "))
+	published.Guidance = teamPublishGuidance(names, published)
 	return published, nil
 }
 
@@ -461,6 +460,12 @@ type skillChangeRow struct {
 type skillsChangeOutput struct {
 	Skills  []skillChangeRow `json:"skills"`
 	Written []string         `json:"written"`
+	// Pushed is true only once the publish commit is on the Team Context's
+	// remote, which is where every coworker's sync reads it from.
+	Pushed bool `json:"pushed"`
+	// NotPushedReason says why the commit is still only local; empty when pushed.
+	NotPushedReason string `json:"not_pushed_reason,omitempty"`
+	pushRetried     bool
 	// TeamContext is the checkout this publish wrote into, and empty otherwise.
 	// Always present, so a reader can tell "published nowhere" from "this ox
 	// does not report where."
@@ -607,6 +612,8 @@ func publishTeamSkillSeeds(repoRoot string, names []string, seeds []teamSkillSee
 		}
 		return out, lockErr
 	}
+	// After the lock is released, not under it: the push takes it itself.
+	out.applyPush(pushTeamPublish(repoRoot, tc.Path))
 	return out, nil
 }
 
@@ -666,14 +673,13 @@ func rollbackTeamSeeds(teamPath string, relDirs []string) {
 	}
 }
 
-// recordTeamPublish writes the new files into the Team Context's own history so
-// a teammate's next sync sees them. The caller holds the repository lock and owns
-// the deadline; this takes neither.
+// recordTeamPublish writes the new files into the Team Context's own history.
+// The caller holds the repository lock and owns the deadline; this takes neither.
 //
-// Deliberately does NOT push. Nothing in cmd/ox pushes a team context; the
-// daemon owns that leg, and a command that pushed here would fail on every
-// machine whose credentials are not loaded — after having already written the
-// files, leaving the human with a half-finished publish and a git error.
+// It does not push: the push needs the repository lock this caller holds, and a
+// push failure must not undo a commit that is already correct. The caller pushes
+// once the lock is released (pushTeamPublish), and reports a failed push as
+// "committed, not pushed" rather than as a failed publish.
 //
 // NOT gitutil.CommitLedgerSnapshot, which looks like the same job: that helper
 // carries Ledger blob validation and the ADR-024 sacred-deletion backstop, and
@@ -700,7 +706,7 @@ func recordTeamPublish(ctx context.Context, teamPath string, relPaths, names []s
 	// bare `git commit` would carry that into the team's history under a message
 	// about a skill, authored by them and pushed by the daemon. `--` keeps a path
 	// that happens to look like a revision from being read as one.
-	message := "add team skill: " + strings.Join(names, ", ")
+	message := teamPublishCommitMessage(names)
 	args := append([]string{"commit", "-m", message, "--"}, relPaths...)
 	if _, err := gitutil.RunGit(ctx, teamPath, args...); err != nil {
 		return fmt.Errorf("record the published skills in the Team Context: %w", err)

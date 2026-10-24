@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/sageox/ox/internal/config"
@@ -35,8 +36,8 @@ func TestExecuteSyncConvergence_PersistsFailedOutcome(t *testing.T) {
 		Outcomes: []teamconverge.Outcome{{
 			Kind: teamconverge.KindSkill, Name: "deploy", SourcePath: "agents/skills/deploy",
 			SourceCommit: "abc123", Origin: teamconverge.Origin{Kind: teamconverge.OriginLoose},
-			State: teamconverge.StateUnsupported, Required: true,
-			Detail: "this repository has no native skill target",
+			State: teamconverge.StateConflict, Required: true,
+			Detail: "projected skill conflicts with existing repository content",
 		}},
 	}
 
@@ -123,7 +124,7 @@ func TestExecuteSyncConvergence_ReportsPersistenceFailures(t *testing.T) {
 
 	t.Run("failed outcome state", func(t *testing.T) {
 		report := teamconverge.Report{Outcomes: []teamconverge.Outcome{{
-			Kind: teamconverge.KindSkill, Name: "deploy", State: teamconverge.StateUnsupported, Required: true,
+			Kind: teamconverge.KindSkill, Name: "deploy", State: teamconverge.StateConflict, Required: true,
 		}}}
 		result, err := executeSyncConvergence(context.Background(), stubConverge(report, nil),
 			projectFile, team, RepositoryConvergenceSyncResult{}, teamconverge.ModeExplicit, true)
@@ -406,4 +407,64 @@ func TestConvergeAfterSessionBoundary_AppliesPendingTeamContent(t *testing.T) {
 	pending, err := teamconverge.LoadPending(repo)
 	require.NoError(t, err)
 	require.Nil(t, pending)
+}
+
+// TestRunSync_SkipsAnUnsupportedArtifactAndFinishesTheSync drives a real `ox sync`
+// convergence against a real Team Context checkout in a repository that has no
+// native skill target — the exact state of ox#1270.
+//
+// Failure prevented: one team skill the repository can never receive made the
+// whole sync exit non-zero ("team context convergence failed: this repository has
+// no native skill target"), so a healthy Ledger and Team Context sync read as
+// "sync is broken" and scripts that gate on the exit code stopped there. The skip
+// must be named once, the rest must converge, and the exit must be clean.
+func TestRunSync_SkipsAnUnsupportedArtifactAndFinishesTheSync(t *testing.T) {
+	repo := t.TempDir()
+	gitInitRepo(t, repo) // deliberately no skills lockfile: no native skill target
+	team := t.TempDir()
+	gitInitRepo(t, team)
+	for rel, body := range map[string]string{
+		"agents/skills/publish-design-mockups/SKILL.md": "---\nname: publish-design-mockups\ndescription: Publish the mockups.\n---\n\nPublish them.\n",
+		"agents/rules/review.md":                        "---\nname: review\ndescription: Review rules\n---\n\nReview carefully.\n",
+	} {
+		path := filepath.Join(team, filepath.FromSlash(rel))
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+		require.NoError(t, os.WriteFile(path, []byte(body), 0o644))
+	}
+	gitOutput(t, team, "add", "-A")
+	gitOutput(t, team, "commit", "-q", "-m", "team context")
+	wireTeamContext(t, repo, team)
+	t.Chdir(repo)
+
+	ledgerSynced := false
+	cmd, output := newSyncRuntimeTestCommand(t)
+	stubSyncRuntime(t, nil,
+		func(_ context.Context, _ bool, result *SyncResult) error {
+			ledgerSynced = true
+			result.Transport.Ledger = &SyncLedgerResult{Status: "synced"}
+			return nil
+		},
+		nil,
+		func(_ context.Context, _ bool, result *SyncResult) error {
+			result.Transport.TeamContexts = append(result.Transport.TeamContexts, TeamContextSyncResult{
+				TeamID: "team_publish_test", TeamName: "Publish Test Team", Path: team, Status: "synced",
+			})
+			return nil
+		},
+		runSyncConvergence, // the real convergence, not a stub
+	)
+
+	err := runSync(cmd, nil)
+	require.NoError(t, err, "an unsupported artifact must not fail the sync; output:\n%s", output.String())
+	require.True(t, ledgerSynced, "the Ledger leg must run")
+	text := output.String()
+	require.Contains(t, text, "Convergence: converged")
+	require.Contains(t, text, "rule/review: indexed", "the rest of convergence must still be delivered")
+	require.Contains(t, text, "Skipped 1 artifact — this repository has no native skill target; run `ox init`:\n    skill/publish-design-mockups\n")
+	require.Equal(t, 1, strings.Count(text, "no native skill target"), "the skip must be warned once")
+	require.NotContains(t, text, "Error:")
+
+	pending, loadErr := teamconverge.LoadPending(repo)
+	require.NoError(t, loadErr)
+	require.Nil(t, pending, "a skip is not failed convergence work for the daemon to re-run")
 }

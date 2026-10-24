@@ -44,13 +44,19 @@ type QueryResponse struct {
 
 // QueryResult is a single search result.
 type QueryResult struct {
-	Score       float64  `json:"score"`
-	Text        string   `json:"text"`
-	DocType     string   `json:"doc_type"`
-	FilePath    string   `json:"file_path"`
-	SourceType  string   `json:"source_type"`
-	SourceID    string   `json:"source_id"`
-	CreatedAt   string   `json:"created_at,omitempty"`
+	Score      float64 `json:"score"`
+	Text       string  `json:"text"`
+	DocType    string  `json:"doc_type"`
+	FilePath   string  `json:"file_path"`
+	SourceType string  `json:"source_type"`
+	SourceID   string  `json:"source_id"`
+	CreatedAt  string  `json:"created_at,omitempty"`
+	// Title and URL are the hit's display name and citation, decoded so they
+	// survive into `ox query` output. A team skill hit (source_type "skill")
+	// carries the skill name in SourceID and Title and its console page in URL;
+	// without them the hit names nothing to open. Absent from older servers.
+	Title       string   `json:"title,omitempty"`
+	URL         string   `json:"url,omitempty"`
 	HasVisual   bool     `json:"has_visual,omitempty"`   // true if discussion has keyframe visual content
 	VisualTypes []string `json:"visual_types,omitempty"` // content types (e.g. "diagram", "code") when has_visual is true
 }
