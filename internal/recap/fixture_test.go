@@ -108,7 +108,7 @@ func (f *fx) WriteTrace(name string, events ...contexttrace.Event) {
 }
 
 // WriteTraceCache writes context-trace.jsonl into the ledger's hydration
-// cache for session `name` — the cache-first location readTrace checks.
+// cache for session `name` — the cache-first location ReadTrace checks.
 func (f *fx) WriteTraceCache(name string, events ...contexttrace.Event) {
 	f.t.Helper()
 	dir := filepath.Join(f.Ledger, ".sageox", "cache", "sessions", name)

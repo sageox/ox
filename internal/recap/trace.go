@@ -39,7 +39,7 @@ type traceScan struct {
 func scanTraces(ledgerPath string, sessions []SessionFacts) traceScan {
 	scan := traceScan{docs: map[string]*docReach{}}
 	for _, s := range sessions {
-		events, dehydrated := readTrace(ledgerPath, s.Name)
+		events, dehydrated := ReadTrace(ledgerPath, s.Name)
 		if dehydrated {
 			scan.tracesDehydrated++
 			continue
@@ -92,11 +92,11 @@ func (scan traceScan) sorted() []*docReach {
 	return out
 }
 
-// readTrace resolves a session's context-trace with cache-first, hydration-never
+// ReadTrace resolves a session's context-trace with cache-first, hydration-never
 // semantics. Returns (events, dehydrated). `dehydrated` is true when the trace
 // exists only as an LFS stub not present locally — counted, never fetched (a
 // recap is offline and fast by contract).
-func readTrace(ledgerPath, sessionName string) (events []contexttrace.Event, dehydrated bool) {
+func ReadTrace(ledgerPath, sessionName string) (events []contexttrace.Event, dehydrated bool) {
 	// 1. ledger cache holds hydrated bytes (recordings land here pre-upload)
 	cachePath := filepath.Join(ledgerPath, ".sageox", "cache", "sessions", sessionName, contexttrace.FileName)
 	if info, err := os.Stat(cachePath); err == nil && info.Size() > 0 {
