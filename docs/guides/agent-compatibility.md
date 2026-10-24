@@ -77,6 +77,15 @@ reconciles the project-selected native targets, including updates, missing
 skills, and retired ox-owned files, while preserving user-authored additions
 and modified retired files.
 
+Run `/ox-cli-usage` (Claude Code slash command, or pick it in Codex's skill
+picker) to see what ox did in the current session: the ox calls your AI
+coworker made, the team context ox injected and from where, the decisions,
+rules, murmurs and sessions it surfaced, and which of those the coworker
+reports using. `/ox-cli-usage me` rolls up your recent sessions in this repo;
+`/ox-cli-usage team` shows team-wide totals only, never per-person reads. The
+skill is a thin relay over `ox usage --json`, so other AI coworkers get the same
+report by running that command.
+
 ### Codex
 ```bash
 ox init
