@@ -354,16 +354,6 @@ func saveEnrichedPlan(gitRoot string, in plan.Input, result plan.Result, authore
 	return savePlanArtifacts(gitRoot, in, result, nil, "", options...)
 }
 
-// savePlanWithProvenance is the shared capture path: it stamps the plan with
-// provenance (session/agent/repo) + deterministic collaboration signals, writes
-// it to the ledger (read-merge preserving lifecycle), records the reverse link
-// on the live recording, and durably commits + pushes the plan dir. Returns the
-// saved directory, or "" on any failure (capture is best-effort and never
-// aborts the command the agent is waiting on).
-func savePlanWithProvenance(gitRoot string, in plan.Input, result plan.Result, html []byte) string {
-	return savePlanArtifacts(gitRoot, in, result, html, "")
-}
-
 // planLFSClient builds an LFS client for the project's ledger, or nil when one
 // can't be resolved (not logged in, offline, no configured remote). A nil client
 // makes plan.UploadHTML upload nothing: a large plan.html then stays plain and
@@ -443,7 +433,12 @@ func withCompanions(c []plan.CompanionFile) saveOpt {
 	return func(o *planSaveOpts) { o.companions = c }
 }
 
-// savePlanArtifacts is savePlanWithProvenance with an explicit primary artifact
+// savePlanArtifacts is the shared capture path: it stamps the plan with
+// provenance (session/agent/repo) + deterministic collaboration signals, writes
+// it to the ledger (read-merge preserving lifecycle), records the reverse link
+// on the live recording, and durably commits + pushes the plan dir. Returns the
+// saved directory, or "" on any failure (capture is best-effort and never
+// aborts the command the agent is waiting on). primary is the artifact
 // kind: "" = markdown-primary (html, if any, is a generated render), plan.
 // PrimaryHTML = the html IS the authored plan of record and in.Raw is the
 // DERIVED markdown (ExtractMarkdown). An HTML-primary page may declare its own
