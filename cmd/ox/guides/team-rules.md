@@ -163,9 +163,12 @@ Without the key, SageOx infers it: a skill whose body runs `` `ox <verb>` `` (or
 coding agents. `ox skills publish` warns when it makes that inference, so you can make it
 explicit. A block list (`requires:` followed by `  - shell` lines) is read too.
 
-When your Claude organization already delivers a skill, ox stops copying it into
-`.claude/skills` so Claude Code does not list it twice. Codex, Cursor and every other
-agent keep ox's copy. `ox skills status` shows which source each skill comes from.
+When Claude Code on your machine already has a skill from your Claude organization's
+plugin, ox stops copying it into `.claude/skills` so Claude Code does not list it twice.
+A coworker whose Claude Code is signed in elsewhere (another account, an API key,
+Bedrock or Vertex) keeps ox's copy. Codex, Cursor and every other agent always keep it.
+`ox skills status` shows which source each skill comes from, and
+`ox config set skills.claude_org_dedupe off` makes ox always copy.
 
 ### One source, one delivery path
 

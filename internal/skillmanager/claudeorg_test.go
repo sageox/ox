@@ -20,10 +20,14 @@ import (
 // team's Claude organization already delivers it, and the dedupe must never
 // cost a coworker a skill.
 //
-// These tests set XDG_CACHE_HOME (the org sync record is machine state), so
-// none of them run in parallel.
+// These tests set XDG_CACHE_HOME (the org sync record is machine state) and
+// point Claude Code's config dir at a fixture, so none of them run in
+// parallel.
 
-const orgSyncTeamID = "team_wiring_test" // stageTeamWiredProject's team
+const (
+	orgSyncTeamID   = "team_wiring_test" // stageTeamWiredProject's team
+	orgSyncTeamSlug = "wiring-test-team"
+)
 
 func claudeTarget() adapterprotocol.SkillTarget {
 	return adapterprotocol.SkillTarget{
@@ -33,19 +37,40 @@ func claudeTarget() adapterprotocol.SkillTarget {
 	}
 }
 
-// isolateOrgSync gives the test its own cache, so a record written by the
-// developer's real daemon can never reach a fixture.
+// isolateOrgSync gives the test its own cache, Claude Code config dir and ox
+// user config, so a record written by the developer's real daemon, their real
+// ~/.claude, or their own skills.claude_org_dedupe can never reach a fixture.
 func isolateOrgSync(t *testing.T) {
 	t.Helper()
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	t.Setenv("CLAUDE_CODE_PLUGIN_CACHE_DIR", "")
+	t.Setenv("OX_USER_CONFIG", filepath.Join(t.TempDir(), "config.yaml"))
 }
 
 // recordOrgSync writes the record the daemon writes after GET /api/v1/cli/repos.
 func recordOrgSync(t *testing.T, repo string, at time.Time, synced ...string) {
 	t.Helper()
 	require.NoError(t, teamskills.RecordClaudeOrgSync(endpoint.GetForProject(repo), []teamskills.ClaudeOrgTeam{{
-		TeamID: orgSyncTeamID, TeamSlug: "wiring-test-team", SyncedSkills: synced,
+		TeamID: orgSyncTeamID, TeamSlug: orgSyncTeamSlug, SyncedSkills: synced,
 	}}, at))
+}
+
+// stageLocalOrgPlugin makes this machine's Claude Code (the fixture config dir
+// isolateOrgSync set) signed in to an account whose org plugin carries skills.
+func stageLocalOrgPlugin(t *testing.T, skillNames ...string) {
+	t.Helper()
+	dir := os.Getenv("CLAUDE_CONFIG_DIR")
+	require.NotEmpty(t, dir, "call isolateOrgSync first")
+	stageClaudeHome(t, dir, filepath.Join(dir, ".claude.json"), orgSyncTeamSlug, skillNames...)
+}
+
+// orgDelivers is the connected case end to end: the server reports the
+// skills, and this coworker's Claude Code has synced the plugin carrying them.
+func orgDelivers(t *testing.T, repo string, at time.Time, synced ...string) {
+	t.Helper()
+	recordOrgSync(t, repo, at, synced...)
+	stageLocalOrgPlugin(t, synced...)
 }
 
 // writeTeamManifest writes a team skill with an exact SKILL.md, for tests where
@@ -132,7 +157,7 @@ func pathsUnder(actions []FileAction, prefix string) []string {
 func TestClaudeOrgDedupe_DeliveredSkillIsNotCopiedForClaudeCode(t *testing.T) {
 	isolateOrgSync(t)
 	repo, _ := stageOrgSyncRepo(t)
-	recordOrgSync(t, repo, time.Now(), "grill-me")
+	orgDelivers(t, repo, time.Now(), "grill-me")
 
 	plan := reconcileTargets(t, repo, bothTargets())
 
@@ -162,7 +187,7 @@ func TestClaudeOrgDedupe_RetiresTheCopyAlreadyInClaudeCode(t *testing.T) {
 	agentBefore, err := os.ReadFile(agentsCopy(repo, "grill-me"))
 	require.NoError(t, err)
 
-	recordOrgSync(t, repo, time.Now(), "grill-me")
+	orgDelivers(t, repo, time.Now(), "grill-me")
 	plan := reconcileTargets(t, repo, bothTargets())
 
 	require.Equal(t, []string{".claude/skills/grill-me-team/SKILL.md"}, pathsUnder(plan.Removes, ".claude/"),
@@ -188,7 +213,7 @@ func TestClaudeOrgDedupe_RetiresWithoutLocalState(t *testing.T) {
 	reconcileTargets(t, repo, bothTargets())
 	require.NoError(t, os.Remove(StatePath(repo)))
 
-	recordOrgSync(t, repo, time.Now(), "grill-me")
+	orgDelivers(t, repo, time.Now(), "grill-me")
 	reconcileTargets(t, repo, bothTargets())
 
 	require.NoFileExists(t, claudeCopy(repo, "grill-me"), "a cache wipe made the duplicate permanent")
@@ -225,7 +250,7 @@ func TestClaudeOrgDedupe_BlindTeamSourceNeverRetires(t *testing.T) {
 			reconcileTargets(t, repo, bothTargets())
 			require.FileExists(t, claudeCopy(repo, "grill-me"))
 
-			recordOrgSync(t, repo, time.Now(), "grill-me")
+			orgDelivers(t, repo, time.Now(), "grill-me")
 			tt.blind(t, repo, team)
 			plan := reconcileTargets(t, repo, bothTargets())
 
@@ -279,7 +304,7 @@ func TestClaudeOrgDedupe_StaleListNamingAMissingSkillChangesNothing(t *testing.T
 
 	repo, _ := stageOrgSyncRepo(t)
 	reconcileTargets(t, repo, bothTargets())
-	recordOrgSync(t, repo, time.Now(), "ghost", "grill-me-old")
+	orgDelivers(t, repo, time.Now(), "ghost", "grill-me-old")
 	plan := reconcileTargets(t, repo, bothTargets())
 
 	require.Empty(t, plan.Removes, "a name that matches nothing retired something")
@@ -295,7 +320,7 @@ func TestClaudeOrgDedupe_StaleListNamingAMissingSkillChangesNothing(t *testing.T
 func TestClaudeOrgDedupe_SkillDeletedFromTheTeamIsRetiredNormally(t *testing.T) {
 	isolateOrgSync(t)
 	repo, team := stageOrgSyncRepo(t)
-	recordOrgSync(t, repo, time.Now(), "grill-me")
+	orgDelivers(t, repo, time.Now(), "grill-me")
 	reconcileTargets(t, repo, bothTargets())
 	require.FileExists(t, agentsCopy(repo, "grill-me"))
 
@@ -357,7 +382,7 @@ func TestClaudeOrgDedupe_ListLaggingTheCheckoutKeepsOxsCopy(t *testing.T) {
 			isolateOrgSync(t)
 			repo, team := stageOrgSyncRepo(t)
 			writeTeamManifest(t, team, "grill-me", tt.manifest, tt.extra)
-			recordOrgSync(t, repo, time.Now(), "grill-me")
+			orgDelivers(t, repo, time.Now(), "grill-me")
 
 			plan := reconcileTargets(t, repo, bothTargets())
 
@@ -384,7 +409,7 @@ func TestClaudeOrgDedupe_ListLaggingTheCheckoutKeepsOxsCopy(t *testing.T) {
 func TestClaudeOrgDedupe_CaseVariantInTheListDefersNothing(t *testing.T) {
 	isolateOrgSync(t)
 	repo, _ := stageOrgSyncRepo(t)
-	recordOrgSync(t, repo, time.Now(), "Grill-Me", "GRILL-ME", "grill-me.")
+	orgDelivers(t, repo, time.Now(), "Grill-Me", "GRILL-ME", "grill-me.")
 	reconcileTargets(t, repo, bothTargets())
 	require.FileExists(t, claudeCopy(repo, "grill-me"))
 }
@@ -396,11 +421,11 @@ func TestClaudeOrgDedupe_CaseVariantInTheListDefersNothing(t *testing.T) {
 func TestClaudeOrgDedupe_StaleRecordStopsDeferring(t *testing.T) {
 	isolateOrgSync(t)
 	repo, _ := stageOrgSyncRepo(t)
-	recordOrgSync(t, repo, time.Now(), "grill-me")
+	orgDelivers(t, repo, time.Now(), "grill-me")
 	reconcileTargets(t, repo, bothTargets())
 	require.NoFileExists(t, claudeCopy(repo, "grill-me"))
 
-	recordOrgSync(t, repo, time.Now().Add(-teamskills.ClaudeOrgSyncMaxAge-time.Hour), "grill-me")
+	orgDelivers(t, repo, time.Now().Add(-teamskills.ClaudeOrgSyncMaxAge-time.Hour), "grill-me")
 	reconcileTargets(t, repo, bothTargets())
 	require.FileExists(t, claudeCopy(repo, "grill-me"), "a day-old record kept a skill out of Claude Code")
 }
@@ -418,7 +443,7 @@ func TestClaudeOrgDedupe_NonClaudeTargetsAreUnaffected(t *testing.T) {
 	want := reconcileTargets(t, baseline, agentsOnly)
 
 	repo, _ := stageOrgSyncRepo(t)
-	recordOrgSync(t, repo, time.Now(), "grill-me", "notes")
+	orgDelivers(t, repo, time.Now(), "grill-me", "notes")
 	got := reconcileTargets(t, repo, agentsOnly)
 
 	require.Equal(t, want.WrittenPaths(), got.WrittenPaths())
@@ -441,7 +466,7 @@ func TestClaudeOrgDedupe_NonClaudeTargetsAreUnaffected(t *testing.T) {
 func TestClaudeOrgDedupe_PrimeFastPathTracksTheList(t *testing.T) {
 	isolateOrgSync(t)
 	repo, _ := stageOrgSyncRepo(t)
-	recordOrgSync(t, repo, time.Now(), "grill-me")
+	orgDelivers(t, repo, time.Now(), "grill-me")
 	reconcileTargets(t, repo, bothTargets())
 
 	recorded, _, _ := InstalledSource(repo)
@@ -450,7 +475,7 @@ func TestClaudeOrgDedupe_PrimeFastPathTracksTheList(t *testing.T) {
 	require.Equal(t, expected, recorded, "prime would re-plan on every session start")
 	require.Contains(t, expected, "+claude-org:")
 
-	recordOrgSync(t, repo, time.Now(), "grill-me", "notes")
+	orgDelivers(t, repo, time.Now(), "grill-me", "notes")
 	moved, err := ExpectedRevision(repo)
 	require.NoError(t, err)
 	require.NotEqual(t, recorded, moved, "a new org-delivered skill would not be deduplicated until an unrelated team commit")
@@ -459,4 +484,83 @@ func TestClaudeOrgDedupe_PrimeFastPathTracksTheList(t *testing.T) {
 	require.NoFileExists(t, claudeCopy(repo, "notes"))
 	recorded, _, _ = InstalledSource(repo)
 	require.Equal(t, moved, recorded)
+}
+
+// --- E. Only this machine's Claude Code decides (bead 13.3) ----------------
+
+// TestClaudeOrgDedupe_CoworkerWithoutThePluginKeepsOxsCopies is the bead's
+// acceptance test. The server's list is team-wide, so it is true for this
+// coworker's team while their own Claude Code never loads the org plugin:
+// signed in to another account, not signed in, the plugin turned off, or a
+// sync that has not reached this machine yet. ox must keep its copy in every
+// one, and the recorded revision must read as a repo with no org sync.
+// Failure prevented: a contractor on their own Claude plan loses every
+// portable team skill, with nothing anywhere replacing them.
+func TestClaudeOrgDedupe_CoworkerWithoutThePluginKeepsOxsCopies(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		stage func(t *testing.T, repo string)
+	}{
+		{"Claude Code was never set up here", func(t *testing.T, _ string) {}},
+		{"signed in to a different Claude account", func(t *testing.T, _ string) {
+			stageLocalOrgPlugin(t, "grill-me")
+			dir := os.Getenv("CLAUDE_CONFIG_DIR")
+			writeClaudeSignIn(t, filepath.Join(dir, ".claude.json"), fixtureClaudeOrg, otherClaudeAccount)
+		}},
+		{"plugin turned off for this repository", func(t *testing.T, repo string) {
+			stageLocalOrgPlugin(t, "grill-me")
+			writeJSONFile(t, filepath.Join(repo, ".claude", "settings.local.json"),
+				`{"enabledPlugins":{"`+orgSyncTeamSlug+`@synced":false}}`)
+		}},
+		{"plugin here has not received the skill yet", func(t *testing.T, _ string) {
+			stageLocalOrgPlugin(t, "notes")
+		}},
+		{"coworker turned the dedupe off", func(t *testing.T, _ string) {
+			stageLocalOrgPlugin(t, "grill-me")
+			require.NoError(t, os.WriteFile(os.Getenv("OX_USER_CONFIG"), []byte("skills:\n  claude_org_dedupe: false\n"), 0o600))
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			isolateOrgSync(t)
+			repo, team := stageOrgSyncRepo(t)
+			recordOrgSync(t, repo, time.Now(), "grill-me")
+			tt.stage(t, repo)
+
+			plan := reconcileTargets(t, repo, bothTargets())
+
+			require.FileExists(t, claudeCopy(repo, "grill-me"), "the coworker's Claude Code has the skill from nowhere")
+			require.FileExists(t, agentsCopy(repo, "grill-me"))
+			require.False(t, decisionFor(t, plan, "grill-me").ClaudeOrgDelivered)
+			base, err := skills.Digest()
+			require.NoError(t, err)
+			expected, err := ExpectedRevision(repo)
+			require.NoError(t, err)
+			require.Equal(t, base+"+team:"+teamRevision(team), expected,
+				"the revision claims a deferral this machine does not make")
+			recorded, _, _ := InstalledSource(repo)
+			require.Equal(t, expected, recorded, "prime would re-plan on every session start")
+		})
+	}
+}
+
+// TestClaudeOrgDedupe_CopyReturnsWhenThePluginLeavesThisMachine: a coworker
+// whose Claude Code had the plugin signs in somewhere else. The next session
+// start must notice (ExpectedRevision moves) and bring ox's copy back.
+// Failure prevented: the skill stays missing until an unrelated team commit
+// happens to force a re-plan.
+func TestClaudeOrgDedupe_CopyReturnsWhenThePluginLeavesThisMachine(t *testing.T) {
+	isolateOrgSync(t)
+	repo, _ := stageOrgSyncRepo(t)
+	orgDelivers(t, repo, time.Now(), "grill-me")
+	reconcileTargets(t, repo, bothTargets())
+	require.NoFileExists(t, claudeCopy(repo, "grill-me"), "fixture: the org copy never took over")
+	recorded, _, _ := InstalledSource(repo)
+
+	writeClaudeSignIn(t, filepath.Join(os.Getenv("CLAUDE_CONFIG_DIR"), ".claude.json"), fixtureClaudeOrg, otherClaudeAccount)
+	moved, err := ExpectedRevision(repo)
+	require.NoError(t, err)
+	require.NotEqual(t, recorded, moved, "prime's fast path would keep the stale plan")
+
+	reconcileTargets(t, repo, bothTargets())
+	require.FileExists(t, claudeCopy(repo, "grill-me"), "ox did not restore its copy after the plugin left")
 }

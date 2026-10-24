@@ -23,6 +23,9 @@ const ClaudeProjectTargetKey = "claude-project"
 // repoRoot's team delivers. A repository with no team context gets the zero
 // value. The error is for diagnostics only; planning treats it as "no org
 // sync", which copies every skill as ox always has.
+//
+// This is the server's team-wide record. Whether ox defers on THIS machine
+// also depends on ClaudeOrgPluginHere.
 func ClaudeOrgSyncForRepo(repoRoot string) (teamskills.ClaudeOrgSync, error) {
 	if repoRoot == "" {
 		return teamskills.ClaudeOrgSync{}, nil
@@ -36,6 +39,11 @@ func ClaudeOrgSyncForRepo(repoRoot string) (teamskills.ClaudeOrgSync, error) {
 
 // claudeOrgSyncFor is ClaudeOrgSyncForRepo for the planner, which already
 // resolved the team context and must not fail a reconcile over a cache.
+//
+// Unlike ClaudeOrgSyncForRepo it returns only what ox may defer: the record
+// narrowed to the skills this machine's Claude Code actually holds
+// (ClaudeOrgPluginHere). Digest and ExpectedRevision both come through here,
+// so the prime fast path re-plans when the local plugin gains or loses one.
 func claudeOrgSyncFor(repoRoot, teamID string) teamskills.ClaudeOrgSync {
 	if teamID == "" {
 		return teamskills.ClaudeOrgSync{}
@@ -44,7 +52,16 @@ func claudeOrgSyncFor(repoRoot, teamID string) teamskills.ClaudeOrgSync {
 	if err != nil {
 		slog.Debug("skills: claude org sync record unreadable; copying every team skill", "error", err)
 	}
-	return orgSync
+	if !orgSync.Active() {
+		return orgSync
+	}
+	plugin := ClaudeOrgPluginHere(repoRoot, orgSync)
+	deferred := DeferOnlyWhatClaudeCodeHolds(orgSync, plugin)
+	if len(deferred.Skills) < len(orgSync.Skills) {
+		slog.Debug("skills: claude org plugin does not cover every listed skill here; ox copies the rest for Claude Code",
+			"team_slug", orgSync.TeamSlug, "listed", len(orgSync.Skills), "deferred", len(deferred.Skills), "reason", plugin.Why)
+	}
+	return deferred
 }
 
 // claudeOrgCannotCarry explains why the org plugin cannot be the copy Claude

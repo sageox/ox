@@ -150,10 +150,41 @@ func recordClaudeOrg(t *testing.T, repo string, at time.Time, synced ...string) 
 	}}, at))
 }
 
+// isolateClaudeOrg gives the test its own org sync cache, Claude Code config
+// dir and ox user config, so the developer's real daemon record, ~/.claude
+// and skills.claude_org_dedupe never reach a fixture.
+func isolateClaudeOrg(t *testing.T) {
+	t.Helper()
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	t.Setenv("CLAUDE_CODE_PLUGIN_CACHE_DIR", "")
+	t.Setenv("OX_USER_CONFIG", filepath.Join(t.TempDir(), "config.yaml"))
+}
+
+// stageClaudeCodeOrgPlugin makes this machine's Claude Code signed in to a
+// claude.ai account whose synced approve-test-team plugin carries skillNames,
+// in the layout Claude Code writes (see internal/skillmanager/claudeplugin.go).
+func stageClaudeCodeOrgPlugin(t *testing.T, skillNames ...string) {
+	t.Helper()
+	const org, account, slug = "0f8b7a6e-1111-4222-8333-944455556666", "a1b2c3d4-5555-4666-8777-988899990000", "approve-test-team"
+	dir := os.Getenv("CLAUDE_CONFIG_DIR")
+	require.NotEmpty(t, dir, "call isolateClaudeOrg first")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".claude.json"),
+		[]byte(`{"oauthAccount":{"organizationUuid":"`+org+`","accountUuid":"`+account+`"}}`), 0o600))
+	bucket := filepath.Join(dir, "plugins", "synced", org+"_"+account)
+	require.NoError(t, os.MkdirAll(filepath.Join(bucket, slug), 0o755))
+	for _, name := range skillNames {
+		skillDir := filepath.Join(bucket, slug, "skills", name)
+		require.NoError(t, os.MkdirAll(skillDir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(skillDir, skills.SkillFileName), []byte("---\nname: "+name+"\n---\nbody\n"), 0o644))
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(bucket, slug+".meta.json"), []byte(`{"marketplace_name":"sageox-`+slug+`"}`), 0o644))
+}
+
 // TestSkillsStatus_NoOrgSyncLooksExactlyAsBefore: with no record (old server,
 // or nobody connected an org) there is no new section and no new JSON key.
 func TestSkillsStatus_NoOrgSyncLooksExactlyAsBefore(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	isolateClaudeOrg(t)
 	repo, _ := stageApprovalRepo(t, "grill-me", nil)
 
 	out := collectSkillsStatus(repo)
@@ -172,12 +203,13 @@ func TestSkillsStatus_NoOrgSyncLooksExactlyAsBefore(t *testing.T) {
 // so and how to clear it, the reconcile clears it, and status then says the org
 // is the source — without calling the deferred skill "pending" forever.
 func TestSkillsStatus_ReportsWhereClaudeCodeGetsEachSkill(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	isolateClaudeOrg(t)
 	repo, team := stageApprovalRepo(t, "grill-me", nil)
 	writeTeamSkillFiles(t, team, "notes", nil)
 	_, err := reconcileExactSelectedSkills(repo)
 	require.NoError(t, err)
 	recordClaudeOrg(t, repo, time.Now(), "grill-me")
+	stageClaudeCodeOrgPlugin(t, "grill-me")
 
 	before := collectSkillsStatus(repo)
 	require.NotNil(t, before.ClaudeOrg)
@@ -191,7 +223,9 @@ func TestSkillsStatus_ReportsWhereClaudeCodeGetsEachSkill(t *testing.T) {
 
 	out := collectSkillsStatus(repo)
 	require.Equal(t, &claudeOrgStatus{
-		Connected: true, TeamSlug: "approve-test-team", Synced: 1, OxCopies: 1, Withheld: 0,
+		Connected: true, PluginHere: true,
+		ClaudeCode: "Claude Code here has the approve-test-team plugin from your Claude organization · ox skips the 1 skill it carries",
+		TeamSlug:   "approve-test-team", Synced: 1, OxCopies: 1, Withheld: 0,
 		Duplicates: []string{}, LastReported: out.ClaudeOrg.LastReported,
 	}, out.ClaudeOrg)
 	require.NotEmpty(t, out.ClaudeOrg.LastReported)
@@ -213,6 +247,7 @@ func TestSkillsStatus_ReportsWhereClaudeCodeGetsEachSkill(t *testing.T) {
 	renderSkillsStatus(&human, out)
 	text := human.String()
 	require.Contains(t, text, "claude org sync connected · 1 skill arrives as approve-test-team")
+	require.Contains(t, text, "claude code  Claude Code here has the approve-test-team plugin")
 	require.Contains(t, text, "ox copies    1 skill")
 	require.Contains(t, text, "duplicates   none")
 
@@ -231,9 +266,10 @@ func TestSkillsStatus_ReportsWhereClaudeCodeGetsEachSkill(t *testing.T) {
 // it copies everything again — and the coworker must be told why Claude Code
 // may now list skills twice, rather than see a silent regression.
 func TestSkillsStatus_StaleOrgRecordSaysWhy(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	isolateClaudeOrg(t)
 	repo, _ := stageApprovalRepo(t, "grill-me", nil)
 	recordClaudeOrg(t, repo, time.Now().Add(-48*time.Hour), "grill-me")
+	stageClaudeCodeOrgPlugin(t, "grill-me")
 
 	out := collectSkillsStatus(repo)
 	require.NotNil(t, out.ClaudeOrg)
@@ -249,7 +285,7 @@ func TestSkillsStatus_StaleOrgRecordSaysWhy(t *testing.T) {
 // TestSkillsStatus_CorruptOrgRecordIsAProblem: an unreadable record must not
 // read as "no org" — the coworker would never learn why the dedupe stopped.
 func TestSkillsStatus_CorruptOrgRecordIsAProblem(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	isolateClaudeOrg(t)
 	repo, _ := stageApprovalRepo(t, "grill-me", nil)
 	recordClaudeOrg(t, repo, time.Now(), "grill-me")
 	file := filepathOfOrgRecord(repo)
@@ -268,7 +304,7 @@ func filepathOfOrgRecord(repo string) string {
 // a coworker who sees fewer -team skills in .claude/skills learns why, and says
 // nothing new when there is no org sync.
 func TestCheckClaudeSkills_ReportsClaudeOrgSources(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	isolateClaudeOrg(t)
 	repo, team := stageApprovalRepo(t, "grill-me", nil)
 	writeTeamSkillFiles(t, team, "notes", nil)
 	_, err := reconcileExactSelectedSkills(repo)
@@ -279,6 +315,7 @@ func TestCheckClaudeSkills_ReportsClaudeOrgSources(t *testing.T) {
 	require.NotContains(t, plain.message, "claude org")
 
 	recordClaudeOrg(t, repo, time.Now(), "grill-me")
+	stageClaudeCodeOrgPlugin(t, "grill-me")
 	fixed := checkClaudeSkills(true)
 	require.True(t, fixed.passed, "%+v", fixed)
 	require.Contains(t, fixed.message, "claude org sync connected · 1 skill arrives as approve-test-team · ox copies 1 skill")
@@ -286,4 +323,51 @@ func TestCheckClaudeSkills_ReportsClaudeOrgSources(t *testing.T) {
 	again := checkClaudeSkills(false)
 	require.True(t, again.passed, "%+v", again)
 	require.Contains(t, again.message, "ox copies 1 skill")
+}
+
+// TestSkillsStatus_NoPluginHereSaysOxKeepsCopying: the org delivers grill-me,
+// but this coworker's Claude Code does not have the plugin (bead 13.3). Status
+// and doctor must each say, in one line, that ox still copies every team skill
+// and why — and must not report duplicates that Claude Code is not showing.
+// Failure prevented: the coworker reads "1 skill arrives" and goes looking
+// for a plugin that will never appear here, or deletes ox's copy by hand.
+func TestSkillsStatus_NoPluginHereSaysOxKeepsCopying(t *testing.T) {
+	isolateClaudeOrg(t)
+	repo, _ := stageApprovalRepo(t, "grill-me", nil)
+	recordClaudeOrg(t, repo, time.Now(), "grill-me")
+	_, err := reconcileExactSelectedSkills(repo)
+	require.NoError(t, err)
+
+	out := collectSkillsStatus(repo)
+	require.NotNil(t, out.ClaudeOrg)
+	require.True(t, out.ClaudeOrg.Connected, "the server's report is current; only this machine lacks the plugin")
+	require.False(t, out.ClaudeOrg.PluginHere)
+	require.Equal(t, "ox copies every team skill: Claude Code is not signed in to a claude.ai account here", out.ClaudeOrg.ClaudeCode)
+	require.Empty(t, out.ClaudeOrg.Duplicates, "nothing is listed twice when Claude Code has no org plugin")
+	require.Empty(t, out.Problems)
+	for _, row := range out.TeamSkills {
+		if row.Name == "grill-me" {
+			require.False(t, row.ClaudeOrg)
+			require.Equal(t, skillInstalled, row.State)
+		}
+	}
+	require.FileExists(t, filepath.Join(installedSkillDir(repo, "grill-me"), skills.SkillFileName))
+
+	var human strings.Builder
+	renderSkillsStatus(&human, out)
+	require.Contains(t, human.String(), "claude code  ox copies every team skill: Claude Code is not signed in to a claude.ai account here")
+
+	wire, err := json.Marshal(out)
+	require.NoError(t, err)
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal(wire, &payload))
+	org, ok := payload["claude_org"].(map[string]any)
+	require.True(t, ok, "no claude_org object in JSON: %s", wire)
+	require.Equal(t, false, org["plugin_here"])
+	require.Equal(t, out.ClaudeOrg.ClaudeCode, org["claude_code"])
+
+	doctor := checkClaudeSkills(false)
+	require.True(t, doctor.passed, "%+v", doctor)
+	require.Contains(t, doctor.message, " · claude org sync connected · ox copies every team skill: Claude Code is not signed in to a claude.ai account here")
+	require.NotContains(t, doctor.message, "arrives as", "doctor claims the org delivers skills Claude Code here never receives")
 }

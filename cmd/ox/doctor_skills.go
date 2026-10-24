@@ -70,10 +70,11 @@ func checkClaudeSkills(fix bool) checkResult {
 		claudeOrgDoctorSummary(gitRoot, plan))
 }
 
-// claudeOrgDoctorSummary is the clause doctor appends while Claude Code gets
-// some team skills from the team's Claude organization instead of from ox, so
-// a coworker who sees fewer `-team` skills in .claude/skills learns why. ""
-// whenever nothing about Claude Code's sources has changed.
+// claudeOrgDoctorSummary is the clause doctor appends while the team's Claude
+// organization delivers skills, so a coworker learns why .claude/skills has
+// fewer `-team` skills — or, when Claude Code here does not have the org
+// plugin, why it still has all of them. "" whenever nothing about Claude
+// Code's sources has changed.
 func claudeOrgDoctorSummary(gitRoot string, plan *skillmanager.ReconcilePlan) string {
 	if claudeSkillRoot(gitRoot) == "" {
 		return ""
@@ -81,6 +82,10 @@ func claudeOrgDoctorSummary(gitRoot string, plan *skillmanager.ReconcilePlan) st
 	orgSync, err := skillmanager.ClaudeOrgSyncForRepo(gitRoot)
 	if err != nil || !orgSync.Active() {
 		return ""
+	}
+	deferred, line := claudeCodeSkillSource(true, orgSync, skillmanager.ClaudeOrgPluginHere(gitRoot, orgSync))
+	if deferred == 0 {
+		return " · claude org sync connected · " + line
 	}
 	copies := 0
 	for _, d := range plan.TeamSkills {
