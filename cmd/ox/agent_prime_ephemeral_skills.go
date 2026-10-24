@@ -70,6 +70,18 @@ func materializeTeamSkillsAndRules(teamCtxDir string, resp *api.TeamContextConte
 }
 
 func materializeServedSkills(root *os.Root, teamCtxDir string, served []api.TeamContextSkill, truncated bool) error {
+	// The snapshot marker is what lets the next prime skip reconciliation. Drop
+	// it before touching the live skills and rewrite it only after everything
+	// landed, so a write or sweep that fails partway forces a full re-plan
+	// instead of leaving a partial tree under the old revision.
+	marker := filepath.FromSlash(skillmanager.HTTPSnapshotFile)
+	if _, err := root.Lstat(marker); err == nil {
+		// Only an existing marker can mislead the next prime; a missing one (or
+		// a .sageox that is not a directory) has nothing to invalidate.
+		if err := root.Remove(marker); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("invalidate skill snapshot: %w", err)
+		}
+	}
 	clearStaleSkillStages(root)
 	keep := make(map[string]bool, len(served))
 	written := 0

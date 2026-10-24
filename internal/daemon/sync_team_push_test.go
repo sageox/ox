@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -234,4 +235,37 @@ func TestShouldPushTeamPublishes_RealEmptyMessageCommitBlocks(t *testing.T) {
 	blocker, ok := ShouldPushTeamPublishes(out)
 	require.False(t, ok, "an empty-message commit rode along with a publish push")
 	require.Equal(t, "(a commit with an empty message)", blocker)
+}
+
+// A commit that lands after the caller's publish-only check, but before the
+// push, must still stop the push: the check is repeated under the repository
+// lock PushWithRetry holds through the push.
+// Failure prevented: a coworker's commit made in that window rode a publish out.
+func TestValidateTeamPublishPush_RefusesACommitThatLandsAfterTheCheck(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
+	ctx := context.Background()
+	bare := t.TempDir()
+	gitCmd(t, bare, "init", "--bare", "-q")
+	clone := t.TempDir()
+	gitCmd(t, clone, "clone", "-q", bare, ".")
+	commitLocal(t, clone, "README.md", "init")
+	gitCmd(t, clone, "push", "-q", "-u", "origin", "HEAD")
+	commitLocal(t, clone, "agents/skills/deploy/SKILL.md", TeamPublishCommitPrefix+"deploy")
+
+	already, err := ValidateTeamPublishPush(ctx, clone)
+	require.NoError(t, err)
+	require.False(t, already, "a lone publish commit is ox's to push")
+
+	commitLocal(t, clone, "docs/draft.md", "my private draft")
+	before := strings.TrimSpace(gitCmd(t, bare, "rev-parse", "HEAD"))
+	err = gitutil.PushWithRetry(ctx, clone, gitutil.PushOpts{ValidatePush: ValidateTeamPublishPush, MaxRetries: 1})
+	require.ErrorIs(t, err, ErrForeignCommitAhead)
+	require.Equal(t, before, strings.TrimSpace(gitCmd(t, bare, "rev-parse", "HEAD")), "the foreign commit reached the remote")
+
+	gitCmd(t, clone, "push", "-q")
+	already, err = ValidateTeamPublishPush(ctx, clone)
+	require.NoError(t, err)
+	require.True(t, already, "nothing ahead means a concurrent sync already pushed it")
 }

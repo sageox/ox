@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/sageox/ox/internal/gitserver"
@@ -54,6 +55,30 @@ func ShouldPushTeamPublishes(logOutput string) (blockingSubject string, ok bool)
 	return "", true
 }
 
+// ErrForeignCommitAhead means a commit other than a skill publish is ahead of
+// the remote, so a publish push must not run.
+var ErrForeignCommitAhead = errors.New("a commit other than a skill publish is ahead of the remote")
+
+// ValidateTeamPublishPush is the PushOpts.ValidatePush for both publish push
+// legs. It repeats ShouldPushTeamPublishes under the repository lock that
+// PushWithRetry holds through the push, so a commit made after the caller's own
+// check, or during a retry's rebase, can never ride a publish out.
+func ValidateTeamPublishPush(ctx context.Context, repoPath string) (alreadyPublished bool, err error) {
+	out, err := gitutil.RunGit(ctx, repoPath, TeamPublishLogArgs...)
+	if err != nil {
+		return false, fmt.Errorf("list unpushed commits: %w", err)
+	}
+	blocker, ok := ShouldPushTeamPublishes(out)
+	switch {
+	case ok:
+		return false, nil
+	case blocker != "":
+		return false, fmt.Errorf("%w: %q", ErrForeignCommitAhead, blocker)
+	default:
+		return true, nil // a concurrent sync already pushed it
+	}
+}
+
 // pushTeamPublishCommits is the daemon's leg of `ox skills publish`: it pushes a
 // publish commit the CLI could not push itself (offline, an expired credential,
 // a remote that moved underneath it). Without it the commit sat one ahead
@@ -89,6 +114,7 @@ func (s *SyncScheduler) pushTeamPublishCommits(ctx context.Context, teamPath str
 		ImmutablePaths:    true,
 		Logger:            s.logger,
 		SuspendWhenWedged: true,
+		ValidatePush:      ValidateTeamPublishPush,
 		PrePush: func(repoPath string) error {
 			if ep != "" {
 				return gitserver.RefreshRemoteCredentials(repoPath, ep)

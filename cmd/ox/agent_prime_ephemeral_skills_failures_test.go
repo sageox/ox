@@ -309,7 +309,6 @@ func TestMaterializeTeamSkills_AFailedSwapKeepsThePreviousVersion(t *testing.T) 
 				require.NoError(t, materializeTeamSkillsAndRules(dir, &api.TeamContextContentResponse{Skills: tt.seed}))
 			}
 			marker := filepath.Join(dir, filepath.FromSlash(skillmanager.HTTPSnapshotFile))
-			before, _ := os.ReadFile(marker)
 			chmodForTest(t, filepath.Join(dir, filepath.FromSlash(tt.lock)), tt.mode)
 
 			err := materializeTeamSkillsAndRules(dir, &api.TeamContextContentResponse{Skills: tt.resp})
@@ -317,8 +316,7 @@ func TestMaterializeTeamSkills_AFailedSwapKeepsThePreviousVersion(t *testing.T) 
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.wantErr)
 			requireNoSkillStages(t, dir)
-			after, _ := os.ReadFile(marker)
-			assert.Equal(t, string(before), string(after), "a failed pass must not record its skill set as the current one")
+			assert.NoFileExists(t, marker, "a failed pass must leave no snapshot, so the next prime reconciles instead of trusting a partial tree")
 			if tt.check != nil {
 				tt.check(t, dir)
 			}
@@ -380,4 +378,23 @@ func TestTryHTTPTeamContextFallback_WarnsWhenTeamContextIsOnlyPartlyWritten(t *t
 	assert.Contains(t, logs.String(), "team context only partly written")
 	assert.Contains(t, logs.String(), "team_id=team_abc")
 	assert.Contains(t, logs.String(), `impact="prime may read a partial team context from disk"`)
+}
+
+// A prime whose skill write fails partway must not leave the previous snapshot
+// marker behind: the marker is what lets the next prime skip reconciliation, so
+// a stale one would freeze a partial skill tree in place.
+func TestMaterializeTeamSkills_AFailedWriteInvalidatesTheSnapshot(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	marker := filepath.Join(dir, filepath.FromSlash(skillmanager.HTTPSnapshotFile))
+	require.NoError(t, materializeTeamSkillsAndRules(dir, &api.TeamContextContentResponse{Skills: []api.TeamContextSkill{proseSkill()}}))
+	require.FileExists(t, marker, "fixture: a successful prime records its snapshot")
+
+	broken := proseSkill()
+	broken.Files = append(broken.Files,
+		api.TeamContextSkillFile{Path: "references", Content: "a file"},
+		api.TeamContextSkillFile{Path: "references/runbook.md", Content: "nested"})
+	err := materializeTeamSkillsAndRules(dir, &api.TeamContextContentResponse{Skills: []api.TeamContextSkill{broken}})
+	require.Error(t, err)
+	require.NoFileExists(t, marker, "a failed prime kept the old snapshot, so the next prime would skip reconciliation")
 }

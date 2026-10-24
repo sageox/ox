@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -73,7 +74,14 @@ func pushTeamPublish(repoRoot, teamPath string) teamPublishPush {
 	opts := teamContextPushOpts(endpoint.GetForProject(repoRoot))
 	opts.MaxRetries = teamPublishPushAttempts
 	opts.OpTimeout = teamPublishPushOpTimeout
+	opts.ValidatePush = daemon.ValidateTeamPublishPush
 	if err := gitutil.PushWithRetry(context.Background(), teamPath, opts); err != nil {
+		if errors.Is(err, daemon.ErrForeignCommitAhead) {
+			// Re-checked under the push lock: a commit landed after the check
+			// above. The daemon refuses it too, so no retry is promised.
+			return teamPublishPush{reason: fmt.Sprintf(
+				"another unpushed commit landed ahead of the publish (%s), and ox pushes only its own publish commits", err)}
+		}
 		slog.Warn("team skill publish push failed", "team_context", teamPath, "error", err)
 		reason := strings.Join(strings.Fields(err.Error()), " ")
 		// Only the daemon retries a failed publish push; with it disabled,
