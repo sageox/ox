@@ -353,6 +353,9 @@ type UserConfig struct {
 	// Pointer so an absent block is distinguishable from explicit zero-values.
 	Plan *PlanConfig `yaml:"plan,omitempty"`
 
+	// Recap holds the user-level `recap.*` settings (ADR-027).
+	Recap *RecapConfig `yaml:"recap,omitempty"`
+
 	// PRVisuals holds the user-level `pr_visuals.*` settings for rich GitHub
 	// pull-request visuals. Pointer preserves inheritance from repo/team.
 	PRVisuals *PRVisualsConfig `yaml:"pr_visuals,omitempty"`
@@ -471,6 +474,35 @@ func (c *UserConfig) IsStatuslineEnabled() bool {
 		return true
 	}
 	return *c.StatuslineEnabled
+}
+
+// RecapConfig holds the user-level `recap.*` settings.
+type RecapConfig struct {
+	// TraceConsultations is ADR-027's opt-out: when false, ox writes no
+	// record of what this coworker's AI coworker read or which ox calls it
+	// made (`consulted` and `invoked` context-trace events). nil = on.
+	TraceConsultations *bool `yaml:"trace_consultations,omitempty"`
+}
+
+// IsTraceConsultationsEnabled reports whether ox records this coworker's
+// consultations and ox calls into the session trace (default: true).
+func (c *UserConfig) IsTraceConsultationsEnabled() bool {
+	if c == nil || c.Recap == nil || c.Recap.TraceConsultations == nil {
+		return true
+	}
+	return *c.Recap.TraceConsultations
+}
+
+// TraceConsultationsEnabled resolves the `recap.trace_consultations` setting
+// from the user config. An unreadable config file resolves to OFF: this is a
+// privacy opt-out, and skipping a trace write is harmless while writing after
+// a coworker opted out is not.
+func TraceConsultationsEnabled() bool {
+	cfg, err := LoadUserConfig()
+	if err != nil {
+		return false
+	}
+	return cfg.IsTraceConsultationsEnabled()
 }
 
 // HasSeenSessionTerms returns true if the user has seen the session recording notice.

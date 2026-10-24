@@ -22,6 +22,13 @@ func tagSessionConsults(projectRoot, sessionPath, rawPath string) {
 		}
 	}()
 
+	// ADR-027 opt-out: off means nothing about this coworker's reads is
+	// written, so nothing about them reaches the team.
+	if !config.TraceConsultationsEnabled() {
+		slog.Debug("consult tagging skipped", "reason", "recap.trace_consultations off")
+		return
+	}
+
 	roots := consultscan.Roots{}
 	if ctx, err := config.LoadProjectContext(projectRoot); err == nil && ctx != nil {
 		roots.Ledger = ctx.DefaultLedgerPath()

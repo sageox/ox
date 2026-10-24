@@ -22,6 +22,7 @@ func TestGetSetting_KnownKeys(t *testing.T) {
 		{"telemetry", false, "Privacy"},
 		{"tips", false, "Display"},
 		{"statusline", false, "Display"},
+		{"recap.trace_consultations", false, "Privacy"},
 		{"session_publishing", false, "Sessions"},
 		{"context_git.auto_commit", false, "Sessions"},
 		{"context_git.auto_push", false, "Sessions"},
@@ -251,7 +252,7 @@ func TestResolveConfigValue_WithFakeProjectRoot(t *testing.T) {
 func TestResolveConfigValue_AllKnownKeys(t *testing.T) {
 	t.Parallel()
 
-	keys := []string{"session_recording", "telemetry", "tips", "statusline", "session_publishing", "context_git.auto_commit", "context_git.auto_push", "view_format", "agent_worker"}
+	keys := []string{"session_recording", "telemetry", "tips", "statusline", "recap.trace_consultations", "session_publishing", "context_git.auto_commit", "context_git.auto_push", "view_format", "agent_worker"}
 	for _, key := range keys {
 		t.Run(key, func(t *testing.T) {
 			t.Parallel()

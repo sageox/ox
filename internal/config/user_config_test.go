@@ -759,3 +759,42 @@ func TestIsStatuslineEnabled(t *testing.T) {
 		})
 	}
 }
+
+// TestIsTraceConsultationsEnabled reads recap.trace_consultations from a real
+// config file. Failure prevented: ADR-027's opt-out is ignored, or a coworker
+// who never set it silently stops getting consultation receipts.
+func TestIsTraceConsultationsEnabled(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{"no config file", "", true},
+		{"recap block absent", "tips_enabled: false\n", true},
+		{"key absent", "recap: {}\n", true},
+		{"off", "recap:\n  trace_consultations: false\n", false},
+		{"on", "recap:\n  trace_consultations: true\n", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if tc.content != "" {
+				require.NoError(t, os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(tc.content), 0o600))
+			}
+			cfg, err := LoadUserConfigFrom(dir)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, cfg.IsTraceConsultationsEnabled())
+		})
+	}
+}
+
+// TestTraceConsultationsEnabled_UnreadableConfigIsOff checks the fail-safe
+// direction of the privacy opt-out. Failure prevented: a corrupt config file
+// that held "off" is read as the default and the coworker's reads sync anyway.
+func TestTraceConsultationsEnabled_UnreadableConfigIsOff(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	t.Setenv(EnvUserConfig, path)
+	assert.True(t, TraceConsultationsEnabled(), "absent file is the default")
+
+	require.NoError(t, os.WriteFile(path, []byte("recap: [not, a, map\n"), 0o600))
+	assert.False(t, TraceConsultationsEnabled())
+}
