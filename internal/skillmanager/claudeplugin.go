@@ -394,6 +394,16 @@ func readDirCapped(dir string) ([]os.DirEntry, error) {
 		return nil, err
 	}
 	defer func() { _ = f.Close() }()
+	// Checked explicitly: listing a file fails with ENOTDIR on Unix but maps to
+	// "path not found" on Windows, which would read as an empty bucket rather
+	// than one ox could not read.
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("%s is not a directory", dir)
+	}
 	entries, err := f.ReadDir(maxClaudeDirEntries + 1)
 	if err != nil && !errors.Is(err, io.EOF) {
 		return nil, err
