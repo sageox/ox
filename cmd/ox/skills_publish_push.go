@@ -56,7 +56,7 @@ func teamPublishCommitMessage(names []string) string {
 func pushTeamPublish(repoRoot, teamPath string) teamPublishPush {
 	logCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	subjects, err := gitutil.RunGit(logCtx, teamPath, "log", "--format=%s", "@{upstream}..HEAD")
+	subjects, err := gitutil.RunGit(logCtx, teamPath, daemon.TeamPublishLogArgs...)
 	if err != nil {
 		return teamPublishPush{reason: "the Team Context branch tracks no remote branch ox can push to"}
 	}

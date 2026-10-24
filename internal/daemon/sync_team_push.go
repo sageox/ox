@@ -16,9 +16,14 @@ import (
 // a commit ox may publish.
 const TeamPublishCommitPrefix = "add team skill: "
 
+// TeamPublishLogArgs lists the unpushed commits' subjects, one NUL-terminated
+// record per commit. A newline-separated %s cannot tell a commit whose message
+// is empty from a blank separator, and such a commit must block a push like any
+// other commit that is not a publish.
+var TeamPublishLogArgs = []string{"log", "--format=%s%x00", "@{upstream}..HEAD"}
+
 // ShouldPushTeamPublishes decides whether ox may push a Team Context's unpushed
-// commits, given their newline-separated subjects (`git log --format=%s
-// @{upstream}..HEAD`).
+// commits, given `git log` output in TeamPublishLogArgs' format.
 //
 // `git push` moves the whole branch, so ox pushes only when EVERY unpushed
 // commit is a publish commit. Anything else ahead of the remote is not ox's to
@@ -27,24 +32,26 @@ const TeamPublishCommitPrefix = "add team skill: "
 // (ox#1286). The same restriction daemon-git.md requires of every daemon push.
 //
 // Returns (blockingSubject, false) when another commit is ahead, so the caller
-// can name it; ("", false) when nothing is unpushed.
+// can name it; ("", false) when nothing is unpushed or the output carries no
+// records at all.
 func ShouldPushTeamPublishes(logOutput string) (blockingSubject string, ok bool) {
-	trimmed := strings.TrimSpace(logOutput)
-	if trimmed == "" {
+	records := strings.Split(logOutput, "\x00")
+	// Whatever follows the last NUL is git's line terminator, not a commit.
+	records = records[:len(records)-1]
+	if len(records) == 0 {
 		return "", false
 	}
-	sawPublish := false
-	for _, subject := range strings.Split(trimmed, "\n") {
-		subject = strings.TrimSpace(subject)
-		if subject == "" {
+	for _, record := range records {
+		subject := strings.TrimSpace(record) // drops the newline git writes between records
+		if strings.HasPrefix(subject, TeamPublishCommitPrefix) {
 			continue
 		}
-		if !strings.HasPrefix(subject, TeamPublishCommitPrefix) {
-			return subject, false
+		if subject == "" {
+			return "(a commit with an empty message)", false
 		}
-		sawPublish = true
+		return subject, false
 	}
-	return "", sawPublish
+	return "", true
 }
 
 // pushTeamPublishCommits is the daemon's leg of `ox skills publish`: it pushes a
@@ -63,7 +70,7 @@ func (s *SyncScheduler) pushTeamPublishCommits(ctx context.Context, teamPath str
 		s.logger.Debug("skipping team publish push: push wedged", "path", teamPath, "until", until)
 		return
 	}
-	out, err := s.git.RunGit(ctx, teamPath, "log", "--format=%s", "@{upstream}..HEAD")
+	out, err := s.git.RunGit(ctx, teamPath, TeamPublishLogArgs...)
 	if err != nil || strings.TrimSpace(out) == "" {
 		return
 	}

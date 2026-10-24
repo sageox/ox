@@ -24,15 +24,19 @@ func TestShouldPushTeamPublishes(t *testing.T) {
 		wantBlocker string
 	}{
 		{name: "nothing unpushed", subjects: "", wantOK: false},
-		{name: "one publish", subjects: "add team skill: deploy\n", wantOK: true},
-		{name: "several publishes", subjects: "add team skill: a, b\nadd team skill: c\n", wantOK: true},
-		{name: "a coworker's own commit underneath", subjects: "add team skill: deploy\nfix the onboarding doc\n",
+		{name: "output without records is not a push", subjects: "add team skill: deploy\n", wantOK: false},
+		{name: "one publish", subjects: "add team skill: deploy\x00\n", wantOK: true},
+		{name: "several publishes", subjects: "add team skill: a, b\x00\nadd team skill: c\x00\n", wantOK: true},
+		{name: "a coworker's own commit underneath", subjects: "add team skill: deploy\x00\nfix the onboarding doc\x00\n",
 			wantBlocker: "fix the onboarding doc"},
 		// ox#1286: a daemon housekeeping commit must never ride a publish out.
-		{name: "daemon housekeeping commit", subjects: "chore: add .sageox/.gitignore to exclude daemon cache files\nadd team skill: deploy",
+		{name: "daemon housekeeping commit", subjects: "chore: add .sageox/.gitignore to exclude daemon cache files\x00\nadd team skill: deploy\x00\n",
 			wantBlocker: "chore: add .sageox/.gitignore to exclude daemon cache files"},
-		{name: "prefix must be the subject start", subjects: "revert add team skill: deploy", wantBlocker: "revert add team skill: deploy"},
-		{name: "blank lines between subjects are not commits", subjects: "add team skill: a\n\n   \nadd team skill: b\n", wantOK: true},
+		{name: "prefix must be the subject start", subjects: "revert add team skill: deploy\x00\n", wantBlocker: "revert add team skill: deploy"},
+		// An empty-message commit is a record with an empty subject, not a
+		// separator: it blocks the push like any other foreign commit.
+		{name: "empty-message commit blocks", subjects: "add team skill: a\x00\n\x00\nadd team skill: b\x00\n",
+			wantBlocker: "(a commit with an empty message)"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -203,4 +207,31 @@ func TestPushTeamPublishCommits_SkipsAWedgedTeamContext(t *testing.T) {
 	require.Len(t, skipped, 1)
 	assert.Equal(t, clone, attrsOf(skipped[0])["path"])
 	assert.Empty(t, h.byMessage("team publish push failed (will retry next sync)"))
+}
+
+// The real git output for an empty-message commit ahead of a publish must block
+// the push: the record format is what keeps that commit visible.
+// Failure prevented: a newline-separated %s rendered the empty-message commit as
+// a blank line, which the check skipped, so the daemon would push it out.
+func TestShouldPushTeamPublishes_RealEmptyMessageCommitBlocks(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
+	bare := t.TempDir()
+	gitCmd(t, bare, "init", "--bare", "-q")
+	clone := t.TempDir()
+	gitCmd(t, clone, "clone", "-q", bare, ".")
+	commitLocal(t, clone, "README.md", "init")
+	gitCmd(t, clone, "push", "-q", "-u", "origin", "HEAD")
+
+	require.NoError(t, os.WriteFile(filepath.Join(clone, "draft.md"), []byte("draft\n"), 0o644))
+	gitCmd(t, clone, "add", "draft.md")
+	gitCmd(t, clone, "commit", "-q", "--allow-empty-message", "-m", "")
+	commitLocal(t, clone, "agents/skills/deploy/SKILL.md", TeamPublishCommitPrefix+"deploy")
+
+	out, err := gitutil.RunGit(context.Background(), clone, TeamPublishLogArgs...)
+	require.NoError(t, err)
+	blocker, ok := ShouldPushTeamPublishes(out)
+	require.False(t, ok, "an empty-message commit rode along with a publish push")
+	require.Equal(t, "(a commit with an empty message)", blocker)
 }
