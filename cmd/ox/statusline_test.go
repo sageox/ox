@@ -33,6 +33,10 @@ type statuslineFixture struct {
 	userConfig string
 }
 
+// key is the state key the real hook and `ox statusline` agree on for this
+// fixture's harness session.
+func (f *statuslineFixture) key() string { return oxactivity.StateKey(f.agentID, f.sessionID) }
+
 func newStatuslineFixture(t *testing.T) *statuslineFixture {
 	t.Helper()
 	isolateSessionMarkerDir(t)
@@ -145,7 +149,7 @@ func TestStatusline_ActionFreshness(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			f := newStatuslineFixture(t)
 			if tt.state != nil {
-				require.NoError(t, oxactivity.SaveState(f.root, f.agentID, *tt.state))
+				require.NoError(t, oxactivity.SaveState(f.root, f.key(), *tt.state))
 			}
 			assert.Equal(t, tt.want, f.run(t, testStatuslineOptions(time.Now())))
 		})
@@ -267,7 +271,7 @@ func TestStatusline_TeammateMurmurs(t *testing.T) {
 func TestStatusline_NewerWhisperWins(t *testing.T) {
 	now := time.Now()
 	f := newStatuslineFixture(t)
-	require.NoError(t, oxactivity.SaveState(f.root, f.agentID, oxactivity.State{
+	require.NoError(t, oxactivity.SaveState(f.root, f.key(), oxactivity.State{
 		LastWhisperFrom: "ryan", LastWhisperTopic: "wip", LastWhisperContent: "from the hook",
 		LastWhisperAt: now.Add(-20 * time.Minute),
 	}))
@@ -275,7 +279,7 @@ func TestStatusline_NewerWhisperWins(t *testing.T) {
 	assert.Equal(t, "● ox  whisper from avery [wip] from the file 2m\n", f.run(t, testStatuslineOptions(now)))
 
 	g := newStatuslineFixture(t)
-	require.NoError(t, oxactivity.SaveState(g.root, g.agentID, oxactivity.State{
+	require.NoError(t, oxactivity.SaveState(g.root, g.key(), oxactivity.State{
 		LastWhisperFrom: "ryan", LastWhisperTopic: "wip", LastWhisperContent: "from the hook",
 		LastWhisperAt: now.Add(-time.Minute),
 	}))
@@ -311,7 +315,7 @@ func TestStatusline_MurmurReadIsCachedAndConsumesNothing(t *testing.T) {
 // or turning ox off also blanks the coworker's own status line.
 func TestStatusline_OffPrintsOnlyChained(t *testing.T) {
 	f := newStatuslineFixture(t)
-	require.NoError(t, oxactivity.SaveState(f.root, f.agentID, oxactivity.State{LastAction: "posted murmur", LastActionAt: time.Now()}))
+	require.NoError(t, oxactivity.SaveState(f.root, f.key(), oxactivity.State{LastAction: "posted murmur", LastActionAt: time.Now()}))
 	require.NoError(t, SetConfigValue("statusline", "off", ConfigLevelUser, ""))
 
 	assert.Equal(t, "", f.run(t, testStatuslineOptions(time.Now())), "off with no chained command prints nothing")
@@ -336,7 +340,7 @@ func TestStatusline_OutsideSageoxProject(t *testing.T) {
 func TestStatusline_GarbageInputStillShowsMark(t *testing.T) {
 	f := newStatuslineFixture(t)
 	t.Chdir(f.root)
-	statePath := oxactivity.StatePath(f.root, f.agentID)
+	statePath := oxactivity.StatePath(f.root, f.key())
 	require.NoError(t, os.MkdirAll(filepath.Dir(statePath), 0o755))
 	require.NoError(t, os.WriteFile(statePath, []byte("{not json"), 0o600))
 	require.NoError(t, os.WriteFile(statuslineMurmurCachePath(f.root), []byte("garbage"), 0o600))
@@ -353,19 +357,20 @@ func TestStatusline_GarbageInputStillShowsMark(t *testing.T) {
 // --- D. Chaining the coworker's own status line ---
 
 // TestStatusline_ChainsUserCommand runs the coworker's user-level statusLine
-// (hidden by ox's project setting) and appends ox on its last line. Failure
-// prevented: installing ox wipes out a coworker's custom status bar.
+// (hidden by ox's project setting) and puts it on its own line beneath ox.
+// Failure prevented: installing ox wipes out, or squeezes, a coworker's
+// custom status bar.
 func TestStatusline_ChainsUserCommand(t *testing.T) {
 	tests := []struct {
 		name    string
 		command string
 		want    string
 	}{
-		{"single line", "printf 'main ✓'", "main ✓  ● ox\n"},
-		{"trailing newline", "echo 'main ✓'", "main ✓  ● ox\n"},
-		{"multi-line puts ox on the last line", "printf 'line one\\nline two\\n'", "line one\nline two  ● ox\n"},
-		{"receives the same stdin", `sed -n 's/.*"session_id":"\([^"]*\)".*/sid=\1/p'`, "sid=SESSION  ● ox\n"},
-		{"failing command keeps its output", "printf 'partial'; exit 3", "partial  ● ox\n"},
+		{"single line", "printf 'main ✓'", "● ox\nmain ✓\n"},
+		{"trailing newline", "echo 'main ✓'", "● ox\nmain ✓\n"},
+		{"multi-line keeps every line", "printf 'line one\\nline two\\n'", "● ox\nline one\nline two\n"},
+		{"receives the same stdin", `sed -n 's/.*"session_id":"\([^"]*\)".*/sid=\1/p'`, "● ox\nsid=SESSION\n"},
+		{"failing command keeps its output", "printf 'partial'; exit 3", "● ox\npartial\n"},
 		{"ox's own command is not chained", "ox statusline", "● ox\n"},
 	}
 	for _, tt := range tests {
@@ -411,7 +416,7 @@ func TestStatusline_ChainRecursionGuard(t *testing.T) {
 func TestStatusline_NoColorIsByteExact(t *testing.T) {
 	now := time.Now()
 	f := newStatuslineFixture(t)
-	require.NoError(t, oxactivity.SaveState(f.root, f.agentID, oxactivity.State{
+	require.NoError(t, oxactivity.SaveState(f.root, f.key(), oxactivity.State{
 		LastAction: "loaded team context", LastActionAt: now.Add(-time.Minute),
 		LastWhisperFrom: "160305533-ryan", LastWhisperTopic: "wip", LastWhisperContent: "auth \x1b[31mred\x1b[0m",
 		LastWhisperAt: now.Add(-time.Minute),
@@ -428,21 +433,50 @@ func TestStatusline_NoColorIsByteExact(t *testing.T) {
 	assert.Equal(t, plain, ansi.Strip(colored), "color only adds escape sequences")
 }
 
-// TestStatusline_FitsColumns keeps the chained line plus ox within COLUMNS.
-// Failure prevented: ox pushes the coworker's own line off the bar.
+// TestStatusline_PerSessionState shows each harness session only its own ox
+// activity, even when both sessions share one ox agent ID in one repo.
+// Failure prevented: "checked murmurs" from another Claude Code window (or a
+// finished session) appearing on this window's bar.
+func TestStatusline_PerSessionState(t *testing.T) {
+	now := time.Now()
+	f := newStatuslineFixture(t)
+	other := oxactivity.StateKey(f.agentID, "some-other-window")
+	require.NoError(t, oxactivity.SaveState(f.root, other, oxactivity.State{LastAction: "pulled plan", LastActionAt: now}))
+	require.NoError(t, oxactivity.SaveState(f.root, f.agentID, oxactivity.State{LastAction: "loaded team context", LastActionAt: now}))
+
+	assert.Equal(t, "● ox\n", f.run(t, testStatuslineOptions(now)), "neither another window's nor the agent-wide state shows here")
+
+	require.NoError(t, oxactivity.SaveState(f.root, f.key(), oxactivity.State{LastAction: "checked murmurs", LastActionAt: now}))
+	assert.Equal(t, "● ox  checked murmurs\n", f.run(t, testStatuslineOptions(now)))
+}
+
+// TestStatusline_FitsColumns keeps ox's own line within COLUMNS and leaves
+// the chained line, below it, untouched. Failure prevented: ox's line wraps.
 func TestStatusline_FitsColumns(t *testing.T) {
 	now := time.Now()
 	f := newStatuslineFixture(t)
 	f.setUserStatusline(t, "printf 'main ✓ 3 files'")
-	require.NoError(t, oxactivity.SaveState(f.root, f.agentID, oxactivity.State{
+	require.NoError(t, oxactivity.SaveState(f.root, f.key(), oxactivity.State{
 		LastAction: "posted murmur", LastActionAt: now,
 		LastWhisperFrom: "ryan", LastWhisperContent: strings.Repeat("long whisper ", 20), LastWhisperAt: now,
 	}))
 	opts := testStatuslineOptions(now)
 	opts.width = 60
-	got := strings.TrimSuffix(f.run(t, opts), "\n")
-	assert.True(t, strings.HasPrefix(got, "main ✓ 3 files  ● ox  posted murmur"), got)
-	assert.LessOrEqual(t, ansi.StringWidth(got), 60)
+	lines := strings.Split(strings.TrimSuffix(f.run(t, opts), "\n"), "\n")
+	require.Len(t, lines, 2)
+	assert.True(t, strings.HasPrefix(lines[0], "● ox  posted murmur"), lines[0])
+	assert.LessOrEqual(t, ansi.StringWidth(lines[0]), 60)
+	assert.Equal(t, "main ✓ 3 files", lines[1])
+}
+
+// TestComposeStatusline_IdleKeepsMarks shows "● ox  ● rec" when nothing has
+// happened. Failure prevented: the bar going blank between ox calls, which
+// reads as ox having switched off.
+func TestComposeStatusline_IdleKeepsMarks(t *testing.T) {
+	idle := oxStatusline{recording: true}
+	assert.Equal(t, "● ox  ● rec\n", composeStatusline("", idle, true, statuslineOptions{}))
+	assert.Equal(t, "● ox  ● rec\nme@host ~/x\n", composeStatusline("me@host ~/x\n", idle, true, statuslineOptions{}))
+	assert.Equal(t, "● ox\n", composeStatusline("", oxStatusline{}, true, statuslineOptions{}))
 }
 
 // TestComposeStatusline_RecordingMark appends the dim recording mark only when
@@ -480,7 +514,7 @@ func TestIsStatuslineFastPath(t *testing.T) {
 func TestStatusline_LatencyBudget(t *testing.T) {
 	now := time.Now()
 	f := newStatuslineFixture(t)
-	require.NoError(t, oxactivity.SaveState(f.root, f.agentID, oxactivity.State{LastAction: "posted murmur", LastActionAt: now}))
+	require.NoError(t, oxactivity.SaveState(f.root, f.key(), oxactivity.State{LastAction: "posted murmur", LastActionAt: now}))
 	for i := range 200 {
 		f.writeMurmur(t, f.ledgerDir, ledger.MurmurFile{
 			ID: fmt.Sprintf("m%03d", i), AgentID: "OxTm09", PrincipalID: "ryan", Topic: "wip",

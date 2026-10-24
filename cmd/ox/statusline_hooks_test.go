@@ -27,8 +27,12 @@ func bashInput(t *testing.T, command string) *agentx.HookInput {
 	t.Helper()
 	raw, err := json.Marshal(map[string]string{"command": command})
 	require.NoError(t, err)
-	return &agentx.HookInput{ToolName: "Bash", ToolInput: raw}
+	return &agentx.HookInput{SessionID: hookSessionID, ToolName: "Bash", ToolInput: raw}
 }
+
+// hookSessionID is the harness session every hook input in these tests comes
+// from; state is keyed by it (oxactivity.StateKey), not by the agent alone.
+const hookSessionID = "claude-session-hooks"
 
 // TestHandleAfterTool_RecordsOxActivityForStatusline drives the real
 // PostToolUse handler. Failure prevented: the status line never learns what
@@ -61,12 +65,14 @@ func TestHandleAfterTool_RecordsOxActivityForStatusline(t *testing.T) {
 				Input:       tt.input,
 			}))
 
-			state := oxactivity.LoadState(root, agentID)
+			key := oxactivity.StateKey(agentID, hookSessionID)
+			state := oxactivity.LoadState(root, key)
 			if tt.wantNil {
 				assert.Equal(t, oxactivity.State{}, state, "nothing coworker-visible happened")
-				assert.NoFileExists(t, oxactivity.StatePath(root, agentID))
+				assert.NoFileExists(t, oxactivity.StatePath(root, key))
 				return
 			}
+			assert.Equal(t, oxactivity.State{}, oxactivity.LoadState(root, agentID), "state is per harness session, never agent-wide")
 			assert.Equal(t, tt.want, state.LastAction)
 			assert.False(t, state.LastActionAt.Before(before), "the action is stamped now")
 		})
@@ -80,17 +86,18 @@ func TestHandleAfterTool_RecordsOxActivityForStatusline(t *testing.T) {
 func TestRecordStatuslineAction_RespectsOffAndKeepsWhisper(t *testing.T) {
 	root := newStatuslineHookProject(t)
 	const agentID = "OxHk02"
+	key := oxactivity.StateKey(agentID, hookSessionID)
 	whisperAt := time.Now().Add(-time.Minute).UTC()
-	require.NoError(t, oxactivity.SaveState(root, agentID, oxactivity.State{LastWhisperFrom: "ryan", LastWhisperAt: whisperAt}))
+	require.NoError(t, oxactivity.SaveState(root, key, oxactivity.State{LastWhisperFrom: "ryan", LastWhisperAt: whisperAt}))
 
 	recordStatuslineAction(root, agentID, bashInput(t, "ox murmur list"))
-	state := oxactivity.LoadState(root, agentID)
+	state := oxactivity.LoadState(root, key)
 	assert.Equal(t, "checked murmurs", state.LastAction)
 	assert.Equal(t, "ryan", state.LastWhisperFrom)
 
 	require.NoError(t, SetConfigValue("statusline", "off", ConfigLevelUser, ""))
 	recordStatuslineAction(root, agentID, bashInput(t, `ox query "x"`))
-	assert.Equal(t, "checked murmurs", oxactivity.LoadState(root, agentID).LastAction, "off means no writes")
+	assert.Equal(t, "checked murmurs", oxactivity.LoadState(root, key).LastAction, "off means no writes")
 }
 
 // TestRecordStatuslineWhisper keeps the newest delivered teammate murmur.

@@ -85,7 +85,7 @@ func TestState_InvalidAgentID(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 
-	for _, id := range []string{"", "../../x", "Ox/../a", "OxA1b2.json", "abc", "OxA1b2c"} {
+	for _, id := range []string{"", "../../x", "Ox/../a", "OxA1b2.", "OxA1b2.a/b", "OxA1b2..x", "abc", "OxA1b2c"} {
 		assert.Empty(t, StatePath(root, id), id)
 		err := SaveState(root, id, State{LastAction: "x"})
 		require.ErrorIs(t, err, ErrInvalidAgentID, id)
@@ -94,6 +94,58 @@ func TestState_InvalidAgentID(t *testing.T) {
 	entries, err := os.ReadDir(root)
 	require.NoError(t, err)
 	assert.Empty(t, entries, "invalid IDs must not create anything")
+}
+
+// TestStateKey scopes state to a harness session and keeps every key a safe
+// file name. Failure prevented: one window's activity shown in another, or a
+// session ID escaping the cache directory.
+func TestStateKey(t *testing.T) {
+	t.Parallel()
+	assert.Equal(t, "OxA1b2", StateKey("OxA1b2", ""))
+	assert.Equal(t, "OxA1b2", StateKey("OxA1b2", "  "))
+	assert.Equal(t, "OxA1b2.6f1c2e3d-9a8b-4c5d-8e7f-000000000001", StateKey("OxA1b2", "6f1c2e3d-9a8b-4c5d-8e7f-000000000001"))
+
+	hashed := StateKey("OxA1b2", "../escape/../../x")
+	assert.Regexp(t, `^OxA1b2\.[0-9a-f]{16}$`, hashed)
+	assert.Equal(t, hashed, StateKey("OxA1b2", "../escape/../../x"), "deterministic")
+
+	root := t.TempDir()
+	for _, key := range []string{StateKey("OxA1b2", "s1"), hashed} {
+		p := StatePath(root, key)
+		require.NotEmpty(t, p)
+		assert.Equal(t, filepath.Join(root, ".sageox", "cache", "statusline"), filepath.Dir(p))
+	}
+	require.NoError(t, SaveState(root, StateKey("OxA1b2", "s1"), State{LastAction: "a"}))
+	require.NoError(t, SaveState(root, StateKey("OxA1b2", "s2"), State{LastAction: "b"}))
+	assert.Equal(t, "a", LoadState(root, StateKey("OxA1b2", "s1")).LastAction)
+	assert.Equal(t, "b", LoadState(root, StateKey("OxA1b2", "s2")).LastAction)
+	assert.Equal(t, State{}, LoadState(root, "OxA1b2"), "agent-wide key does not see session state")
+}
+
+// TestSaveState_PrunesStaleSessions removes files idle past StateRetention
+// and keeps the rest. Failure prevented: one file per Claude Code session
+// accumulating forever in the cache.
+func TestSaveState_PrunesStaleSessions(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	old := StateKey("OxA1b2", "old")
+	fresh := StateKey("OxA1b2", "fresh")
+	require.NoError(t, SaveState(root, old, State{LastAction: "x"}))
+	require.NoError(t, SaveState(root, fresh, State{LastAction: "y"}))
+	require.NoError(t, SaveState(root, "OxA1b2", State{LastAction: "w"}))
+	other := filepath.Join(filepath.Dir(StatePath(root, old)), "murmurs.json")
+	require.NoError(t, os.WriteFile(other, []byte("{}"), 0o600))
+	stale := time.Now().Add(-StateRetention - time.Hour)
+	for _, p := range []string{StatePath(root, old), StatePath(root, "OxA1b2"), other} {
+		require.NoError(t, os.Chtimes(p, stale, stale))
+	}
+
+	require.NoError(t, SaveState(root, StateKey("OxA1b2", "new"), State{LastAction: "z"}))
+	assert.NoFileExists(t, StatePath(root, old))
+	assert.FileExists(t, StatePath(root, "OxA1b2"), "agent-wide state is not a session file")
+	assert.FileExists(t, other, "only session state files are pruned")
+	assert.FileExists(t, StatePath(root, fresh))
+	assert.FileExists(t, StatePath(root, StateKey("OxA1b2", "new")))
 }
 
 // Failure prevented: SaveState reports success when it could not write.
