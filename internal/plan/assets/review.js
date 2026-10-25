@@ -770,6 +770,7 @@
   // src/pointer.ts
   var SKIP = ".rev-glyph, script, style, noscript, template";
   var STEP = 50;
+  var REHASH_EVERY = 250;
   var kids = (el) => Array.prototype.filter.call(el.children, (c) => !c.matches(SKIP));
   var nonSpace = (s) => s.replace(/\s+/g, "").length;
   var frac = (d, size) => size >= 1 ? Math.round(Math.min(1, Math.max(0, d / size)) * 1e3) / 1e3 : 0.5;
@@ -812,14 +813,28 @@
   function pointerLayer(selector, exclude, moved, located) {
     let started = false;
     let index = null;
+    let stale = false, hashed = 0;
+    let rehash;
     function idx() {
-      if (index) return index;
-      const of = /* @__PURE__ */ new Map(), by = /* @__PURE__ */ Object.create(null);
-      markables(selector, exclude).forEach(({ el, anchor }) => {
-        of.set(el, anchor);
-        (by[anchor] = by[anchor] || []).push(el);
-      });
-      return index = { of, by };
+      const wait = hashed + REHASH_EVERY - Date.now();
+      if (index && stale && wait > 0) {
+        if (rehash === void 0) rehash = setTimeout(() => {
+          rehash = void 0;
+          relayout();
+        }, wait);
+        return index;
+      }
+      if (!index || stale) {
+        const of = /* @__PURE__ */ new Map(), by = /* @__PURE__ */ Object.create(null);
+        markables(selector, exclude).forEach(({ el, anchor }) => {
+          of.set(el, anchor);
+          (by[anchor] = by[anchor] || []).push(el);
+        });
+        index = { of, by };
+        stale = false;
+        hashed = Date.now();
+      }
+      return index;
     }
     let point = null;
     let sent = "null";
@@ -948,6 +963,15 @@
         share();
       }
     });
+    window.addEventListener("pagehide", () => {
+      point = null;
+      clearTimeout(timer);
+      timer = void 0;
+      if (sent !== "null") {
+        sent = "null";
+        moved(null);
+      }
+    });
     document.addEventListener("scroll", relayout, { capture: true, passive: true });
     window.addEventListener("resize", relayout);
     document.addEventListener("toggle", relayout, true);
@@ -957,7 +981,7 @@
       for (const r of records) {
         const el = r.target.nodeType === 1 ? r.target : r.target.parentElement;
         if (el && el.closest(exclude + ", .rev-ink")) continue;
-        index = null;
+        stale = true;
         relayout();
         return;
       }

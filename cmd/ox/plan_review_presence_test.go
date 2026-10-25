@@ -13,6 +13,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -571,12 +572,27 @@ func TestNewPresenceBridge_OnlyForASavedPlanAndASignedInUser(t *testing.T) {
 	if tok, err := b.token(context.Background(), true); err != nil || tok != "tok-devon" {
 		t.Fatalf("the bridge joins with the user's own login: %q %v", tok, err)
 	}
-	// a login that expired and cannot refresh declines presence, as signed out
-	if err := auth.SaveTokenForEndpoint(base, &auth.StoredToken{AccessToken: "tok-old", ExpiresAt: time.Now().Add(-time.Hour)}); err != nil {
+	// an expired login: a refresh lost on the network is retried soon, one the
+	// auth server rejects (a revoked login) waits like a declined join
+	if err := auth.SaveTokenForEndpoint(base, &auth.StoredToken{AccessToken: "tok-old", RefreshToken: "rt-old", ExpiresAt: time.Now().Add(-time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := newPresenceBridge(gitRoot, saved).token(context.Background(), true); !errors.Is(err, errPresenceRefused) {
-		t.Fatalf("an expired login is declined, not retried as an outage: %v", err)
+	var reject atomic.Bool
+	fake.mux.HandleFunc("/oauth2/token", func(w http.ResponseWriter, r *http.Request) {
+		if reject.Load() {
+			http.Error(w, `{"error":"invalid_grant"}`, http.StatusBadRequest)
+			return
+		}
+		conn, _, _ := w.(http.Hijacker).Hijack() // the network drops the connection
+		_ = conn.Close()
+	})
+	expired := newPresenceBridge(gitRoot, saved)
+	if _, err := expired.token(context.Background(), true); err == nil || errors.Is(err, errPresenceRefused) {
+		t.Fatalf("a refresh lost on the network must be retried soon, not declined: %v", err)
+	}
+	reject.Store(true)
+	if _, err := expired.token(context.Background(), true); !errors.Is(err, errPresenceRefused) {
+		t.Fatalf("a login the auth server rejects is declined, not retried as an outage: %v", err)
 	}
 
 	// the no-login server answers its pages exactly as before: no request

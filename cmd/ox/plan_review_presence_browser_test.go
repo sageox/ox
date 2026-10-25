@@ -317,6 +317,17 @@ func TestBrowser_LocalAndFramedReviewersSeeEachOthersPointers(t *testing.T) {
 	pointAt(t, local, localSpot(t, local, "word"))
 	waitCursor(t, ctx, "Devon", "Devon's one cursor after he reloads", func() spot { return framedSpot(t, ctx, "word") })
 
+	// the plan reloads in Avery's frame: its old document says her pointer
+	// left as it goes, since the reloaded one cannot reach her controls
+	pointIntoFrame(t, ctx, "word")
+	waitCursor(t, local, "Avery", "Avery's pointer before her frame reloads", func() spot { return localSpot(t, local, "word") })
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`document.getElementById('doc').src = '/doc?again'`, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if !waitJS(local, `![...document.querySelectorAll('.rev-cursor')].some((c) => c.textContent === 'Avery')`, 5*time.Second) {
+		t.Fatal("a reloaded frame must not leave its reviewer's last pointer on teammates' pages")
+	}
+
 	// the review server goes away: the page stops showing who was here
 	stopReview()
 	if !waitJS(local, `document.querySelector('.rev-here').hidden&&!document.querySelector('.rev-cursor')`, 8*time.Second) {
@@ -427,5 +438,48 @@ func TestBrowser_PointerMovesNeverOverlap(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 	if got := evalString(t, ctx, `JSON.stringify(window.moves)+' '+window.most`); got != "[null,0.2] 1" {
 		t.Fatalf("moves sent, then the most ever in flight: %s; want [null,0.2] 1", got)
+	}
+}
+
+// TestBrowser_ChangingPlanIsNotRehashedEveryFrame serves a plan whose own
+// script rewrites a clock every 16 ms while a teammate's pointer is on it.
+// Failure prevented: every change hashes every anchor in the plan again, once
+// a frame, so a review page with a teammate present stalls on a plan with a
+// live widget.
+func TestBrowser_ChangingPlanIsNotRehashedEveryFrame(t *testing.T) {
+	ctx := frameBrowser(t)
+	gitRoot := newPlanStatusTestRepo(t)
+	// window.hashes counts the anchor index being built: each build lists the markable elements
+	ticking := strings.Replace(presencePlan, "<title>Presence</title>", `<title>Presence</title><script>window.hashes=0;`+
+		`var qsa=Document.prototype.querySelectorAll;Document.prototype.querySelectorAll=function(s){if(s===window.OX_REVIEW_SELECTOR)window.hashes++;return qsa.call(this,s)};`+
+		`setInterval(function(){var c=document.getElementById('clock');if(c)c.textContent=String(Date.now())},16)</script>`, 1)
+	ticking = strings.Replace(ticking, "<p>Ship behind a flag.</p>", `<p>Ship behind a flag at <span id="clock">0</span>.</p>`, 1)
+	dir, planID, _ := saveAuthoredPresencePlan(t, gitRoot, ticking)
+	f, base := newFakePresence(t, planID, map[string]fakePerson{"tok-devon": {"Devon", "u-devon"}, "tok-avery": {"Avery", "u-avery"}})
+	devon, _ := servePresenceReview(t, gitRoot, "presence", dir, planID, base, "tok-devon")
+	if err := chromedp.Run(ctx, chromedp.Navigate(devon+"/"), chromedp.WaitVisible(".rev-bar", chromedp.ByQuery)); err != nil {
+		t.Fatal(err)
+	}
+	revision := evalString(t, ctx, `document.body.getAttribute('data-review-revision')`)
+	avery, _ := sseStream(t, base+"/api/v1/plans/"+f.plan+"/presence?revision="+revision, "tok-avery")
+	self, _ := nextEvent(t, avery, "Avery's welcome", func(e sseEvent) bool { return e.name == "welcome" }).data["self"].(string)
+	req, _ := http.NewRequest(http.MethodPost, base+"/api/v1/plans/"+f.plan+"/presence/"+self, strings.NewReader(`{"at":{"anchor":"h1234abcd","x":0.5,"y":0.5}}`))
+	req.Header.Set("Authorization", "Bearer tok-avery")
+	if resp, err := http.DefaultClient.Do(req); err != nil || resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("Avery's move: %v %v", resp, err)
+	}
+	if !waitJS(ctx, `document.querySelector('.rev-peer[title="Avery is here"]')`, 8*time.Second) {
+		t.Fatal("Avery must be here, so the page places her pointer")
+	}
+	time.Sleep(300 * time.Millisecond)
+	var before, after int
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`window.hashes`, &before), chromedp.Sleep(time.Second), chromedp.Evaluate(`window.hashes`, &after)); err != nil {
+		t.Fatal(err)
+	}
+	if after == before {
+		t.Fatal("the clock must keep the plan changing, or this test measures nothing")
+	}
+	if after-before > 6 {
+		t.Fatalf("a plan rewriting itself every 16 ms had its anchors hashed %d times in a second; want a few at most", after-before)
 	}
 }

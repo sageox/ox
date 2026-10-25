@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -151,6 +152,13 @@ func newPresenceBridge(gitRoot, planDir string) *presenceBridge {
 			defer mu.Unlock()
 			if fresh || held == nil || (!held.ExpiresAt.IsZero() && held.IsExpired(300)) {
 				t, err := auth.EnsureValidTokenForEndpointContext(ctx, ep, 300)
+				// a refresh that could not reach the server is retried soon;
+				// one the server answered (a revoked login) waits like a
+				// declined join
+				var offline net.Error
+				if errors.As(err, &offline) {
+					return "", fmt.Errorf("refresh the login: %w", err)
+				}
 				if err != nil {
 					return "", fmt.Errorf("%w: %w", errPresenceRefused, err)
 				}

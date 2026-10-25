@@ -20,6 +20,7 @@ export interface PointerLayer {
 // that never renders. anchorText leaves out the same.
 const SKIP = '.rev-glyph, script, style, noscript, template';
 const STEP = 50; // ms between captures of a moving pointer
+const REHASH_EVERY = 250; // ms: the most often a plan that keeps changing has its anchors hashed again
 
 const kids = (el: Element): Element[] => Array.prototype.filter.call(el.children, (c: Element) => !c.matches(SKIP)) as Element[];
 const nonSpace = (s: string) => s.replace(/\s+/g, '').length;
@@ -76,13 +77,26 @@ function follow(host: Element, path: number[]): Element | null {
  */
 export function pointerLayer(selector: string, exclude: string, moved: (at: PointerAt | null) => void, located: (points: Located[]) => void): PointerLayer {
   let started = false;
-  // what can be pointed at, by element and by anchor, until the plan changes
+  // what can be pointed at, by element and by anchor. A plan that keeps
+  // changing (a ticking clock) is hashed again at most every REHASH_EVERY ms,
+  // not every frame; once it settles, its last change is placed too.
   let index: { of: Map<Element, string>; by: Record<string, Element[]> } | null = null;
+  let stale = false, hashed = 0;
+  let rehash: ReturnType<typeof setTimeout> | undefined;
   function idx() {
-    if (index) return index;
-    const of = new Map<Element, string>(), by: Record<string, Element[]> = Object.create(null);
-    markables(selector, exclude).forEach(({ el, anchor }) => { of.set(el, anchor); (by[anchor] = by[anchor] || []).push(el); });
-    return (index = { of, by });
+    const wait = hashed + REHASH_EVERY - Date.now();
+    if (index && stale && wait > 0) {
+      if (rehash === undefined) rehash = setTimeout(() => { rehash = undefined; relayout(); }, wait);
+      return index;
+    }
+    if (!index || stale) {
+      const of = new Map<Element, string>(), by: Record<string, Element[]> = Object.create(null);
+      markables(selector, exclude).forEach(({ el, anchor }) => { of.set(el, anchor); (by[anchor] = by[anchor] || []).push(el); });
+      index = { of, by };
+      stale = false;
+      hashed = Date.now();
+    }
+    return index;
   }
 
   // --- sharing: the content under this reviewer's pointer ---
@@ -203,6 +217,14 @@ export function pointerLayer(selector: string, exclude: string, moved: (at: Poin
   // the pointer left the window, or the frame
   document.addEventListener('pointerout', (e) => { if (!e.relatedTarget) { point = null; share(); } }, true);
   document.addEventListener('visibilitychange', () => { if (document.hidden) { point = null; share(); } });
+  // the document is going away, a reload or a navigation: nothing it sends
+  // afterwards is heard, so its pointer leaves the plan now, not on a timer
+  window.addEventListener('pagehide', () => {
+    point = null;
+    clearTimeout(timer);
+    timer = undefined;
+    if (sent !== 'null') { sent = 'null'; moved(null); }
+  });
   document.addEventListener('scroll', relayout, { capture: true, passive: true });
   window.addEventListener('resize', relayout);
   document.addEventListener('toggle', relayout, true);
@@ -214,7 +236,7 @@ export function pointerLayer(selector: string, exclude: string, moved: (at: Poin
     for (const r of records) {
       const el = r.target.nodeType === 1 ? (r.target as Element) : r.target.parentElement;
       if (el && el.closest(exclude + ', .rev-ink')) continue;
-      index = null;
+      stale = true;
       relayout();
       return;
     }

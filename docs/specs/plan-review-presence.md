@@ -50,7 +50,8 @@ A pointer that cannot be placed reliably is not drawn: no element has its
 anchor or its path leads nowhere, the anchor occurs a different number of
 times than it did for the sender, the content is collapsed (a closed
 `<details>`, an unchecked tab), not rendered or clipped, or the point is off
-screen.
+screen. A plan that keeps changing, such as one with a ticking clock, has its
+anchors hashed again at most every 250 ms, not on every change.
 
 `pkg/planreview/testdata/presence/pointers.json` holds the cases every reader
 applies: the package's `pointerAt`, the `ox plan review` bridge (section 5),
@@ -73,7 +74,9 @@ The host draws each cursor and its name over the frame's box, clipped to it.
 A plan's own script can read `locate` and `located`, so it can learn that some
 reviewer points at some content, never who. It can also answer `located`
 itself and misplace a cursor within its own frame, or forge `pointer`, which
-the host checks and sends no faster than any other pointer. The messages are
+the host checks and sends no faster than any other pointer. A document that
+goes away, by a reload or a navigation, reports its pointer gone as it
+unloads, since nothing it sends afterwards is heard. The messages are
 additive to protocol 3: a document or host from before 0.8.0 drops them, and
 presence does not appear.
 
@@ -195,7 +198,9 @@ the user signed in with `ox login`:
 - With no login for the project's endpoint, or no `pln_` id (a plan saved
   before ids existed), the server makes no presence request at all, and the
   page carries none of it. A declined join is asked again only after five
-  minutes; reading, drafts, submission and Approve never wait on presence.
+  minutes, and so is one whose login the auth server rejects; a login refresh
+  lost on the network is retried like any transient failure. Reading, drafts,
+  submission and Approve never wait on presence.
 
 ## 6. Revisions across hosts
 
@@ -211,7 +216,7 @@ on one markdown plan see each other's pointers.
 
 | Test | Proves |
 |---|---|
-| `TestBrowser_LocalAndFramedReviewersSeeEachOthersPointers` | A local page (1280 px) and a framed host (an offset frame in a 1000 px window) see each other's named pointer on the same word, through a scroll; a pointer in a section collapsed on the other side is drawn only once it is opened there; the framed plan hears no name or connection id; a reload leaves one cursor, not a ghost; with its server gone, the page shows no one |
+| `TestBrowser_LocalAndFramedReviewersSeeEachOthersPointers` | A local page (1280 px) and a framed host (an offset frame in a 1000 px window) see each other's named pointer on the same word, through a scroll; a pointer in a section collapsed on the other side is drawn only once it is opened there; the framed plan hears no name or connection id; a reload leaves one cursor, not a ghost; a reloaded frame leaves no stale pointer; with its server gone, the page shows no one |
 | `TestBrowser_PointerOnAnotherRevisionIsNeverDrawn` | Two local pages on one plan, on different revisions, list each other as on another revision and never draw each other's pointer |
 | `TestReviewLoop_PresenceRelaysTheRoomBothWays` | The server relays joins, moves and leaves between a page and a hosted viewer, under the service's names; a second tab leaves alone; live reloads share the stream |
 | `TestReviewLoop_PresenceMovesAreCheckedAndScoped` | `/presence` refuses a missing token, a name, extra fields, out-of-range values, a key with no open stream, and oversized bodies |
@@ -219,9 +224,10 @@ on one markdown plan see each other's pointers.
 | `TestPresenceBridge_ReconnectingPageReplacesItsConnection` | A page reconnecting under its key leaves the room once, not twice |
 | `TestPresenceBridge_JoinsWithTheCurrentLogin` | A rejoin uses the login on disk, so signing in anew takes effect |
 | `TestBrowser_PointerMovesNeverOverlap` | The controls send one move at a time, then the latest |
+| `TestBrowser_ChangingPlanIsNotRehashedEveryFrame` | A plan rewriting itself every 16 ms is hashed a few times a second, not every frame |
 | `TestPlanReview_ReportsHowTheSessionEnded` | A review session ends, and exits, with the reviewer's tab still open |
 | `TestPresenceBridge_RetriesOnlyWhatMayRecover` | Declined joins are not retried soon; transient failures are; a silent stream is dropped and joined again |
-| `TestNewPresenceBridge_OnlyForASavedPlanAndASignedInUser` | No login or no `pln_` id: no bridge and no request |
+| `TestNewPresenceBridge_OnlyForASavedPlanAndASignedInUser` | No login or no `pln_` id: no bridge and no request; a refresh lost on the network is retried soon, a rejected login waits |
 | `TestPresenceAt_SharedCases`, `protocol.test.mjs` | The Go bridge and the package apply the same pointer rules |
 
 `fakePresence` in `cmd/ox/plan_review_presence_test.go` is a section 4
