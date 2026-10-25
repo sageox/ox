@@ -43,6 +43,36 @@ export function markables(selector: string, exclude: string): Markable[] {
   return out;
 }
 
+const rectOf = (r: DOMRect): Box => [r1(r.left + scrollX), r1(r.top + scrollY), r1(r.width), r1(r.height)];
+
+/**
+ * shownBox is el's document box, or null when the reader cannot see it: not
+ * rendered, invisible, inside a closed <details>, empty, or scrolled out of
+ * an ancestor that clips. A closed <details> hides its content with
+ * content-visibility in current Chrome, which still lays it out, so only
+ * checkVisibility (or the <details> walk where that is missing) tells.
+ */
+export function shownBox(el: Element): Box | null {
+  const e = el as Element & { checkVisibility?: (o: object) => boolean };
+  if (e.checkVisibility ? !e.checkVisibility({ visibilityProperty: true }) : (!el.getClientRects().length || getComputedStyle(el).visibility === 'hidden' || inClosedDetails(el))) return null;
+  const r = el.getBoundingClientRect();
+  if (r.width < 1 || r.height < 1) return null;
+  for (let a = el.parentElement; a && a !== document.body && a !== document.documentElement; a = a.parentElement) {
+    const cs = getComputedStyle(a);
+    if (cs.overflowX === 'visible' && cs.overflowY === 'visible') continue;
+    const ar = a.getBoundingClientRect();
+    if (r.right <= ar.left || r.left >= ar.right || r.bottom <= ar.top || r.top >= ar.bottom) return null;
+  }
+  return rectOf(r);
+}
+function inClosedDetails(el: Element): boolean {
+  for (let d = el.parentElement && el.parentElement.closest('details:not([open])'); d; d = d.parentElement && d.parentElement.closest('details:not([open])')) {
+    const sum = d.querySelector(':scope > summary');
+    if (!sum || !sum.contains(el)) return true;
+  }
+  return false;
+}
+
 /**
  * drawLayer adds the ink layer to the document. A drawing encloses what
  * markables(selector, exclude) lists. capture hears each stroke's capture,
@@ -110,32 +140,6 @@ export function drawLayer(selector: string, exclude: string, capture: (c: Captur
     const m: Record<string, Markable[]> = Object.create(null);
     all.forEach((c) => { (m[c.anchor] = m[c.anchor] || []).push(c); });
     return m;
-  }
-  const rectOf = (r: DOMRect): Box => [r1(r.left + scrollX), r1(r.top + scrollY), r1(r.width), r1(r.height)];
-  // shownBox is el's document box, or null when the reader cannot see it: not
-  // rendered, invisible, inside a closed <details>, empty, or scrolled out of
-  // an ancestor that clips. A closed <details> hides its content with
-  // content-visibility in current Chrome, which still lays it out, so only
-  // checkVisibility (or the <details> walk where that is missing) tells.
-  function shownBox(el: Element): Box | null {
-    const e = el as Element & { checkVisibility?: (o: object) => boolean };
-    if (e.checkVisibility ? !e.checkVisibility({ visibilityProperty: true }) : (!el.getClientRects().length || getComputedStyle(el).visibility === 'hidden' || inClosedDetails(el))) return null;
-    const r = el.getBoundingClientRect();
-    if (r.width < 1 || r.height < 1) return null;
-    for (let a = el.parentElement; a && a !== document.body && a !== document.documentElement; a = a.parentElement) {
-      const cs = getComputedStyle(a);
-      if (cs.overflowX === 'visible' && cs.overflowY === 'visible') continue;
-      const ar = a.getBoundingClientRect();
-      if (r.right <= ar.left || r.left >= ar.right || r.bottom <= ar.top || r.top >= ar.bottom) return null;
-    }
-    return rectOf(r);
-  }
-  function inClosedDetails(el: Element): boolean {
-    for (let d = el.parentElement && el.parentElement.closest('details:not([open])'); d; d = d.parentElement && d.parentElement.closest('details:not([open])')) {
-      const sum = d.querySelector(':scope > summary');
-      if (!sum || !sum.contains(el)) return true;
-    }
-    return false;
   }
 
   // --- capture: geometry plus the bounded context a later reader needs ---
