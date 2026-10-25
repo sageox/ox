@@ -828,19 +828,28 @@ func resolveInstance(agentID string) (*agentinstance.Instance, error) {
 
 	var searched []string
 	expired := false
+	var readErr error
 	for _, s := range stores {
 		inst, err := s.Get(agentID)
 		if err == nil {
 			return inst, nil
 		}
 		searched = append(searched, s.Path())
-		expired = expired || errors.Is(err, agentinstance.ErrInstanceExpired)
+		switch {
+		case errors.Is(err, agentinstance.ErrInstanceExpired):
+			expired = true
+		case !errors.Is(err, agentinstance.ErrInstanceNotFound) && readErr == nil:
+			readErr = err // a store that could not be read cannot rule the instance out
+		}
 	}
 
 	// The first line of each format is the telemetry detail: keep "instance
-	// not found: %s" stable, and count expiry on its own.
+	// not found: %s" stable, and count expiry and unreadable stores on their own.
+	if readErr != nil {
+		return nil, fmt.Errorf("failed to read instance store: %w", readErr)
+	}
 	if expired {
-		return nil, errkind.Errorf(errkind.Other, "instance expired: %s\nAn instance lasts 24 hours after 'ox agent prime' creates it\nRun 'ox agent prime' to create a new instance", agentID)
+		return nil, errkind.Errorf(errkind.Other, "instance expired: %s\nAn instance expires 24 hours after 'ox agent prime' creates it once its AI coworker's process has exited\nRun 'ox agent prime' to create a new instance", agentID)
 	}
 	return nil, errkind.Errorf(errkind.Other, "instance not found: %s\nSearched: %s\nRun 'ox agent prime' to create a new instance", agentID, strings.Join(searched, ", "))
 }

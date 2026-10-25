@@ -184,3 +184,20 @@ func TestResolveInstanceReportsExpiry(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "instance expired: OxOld1")
 }
+
+// A store that cannot be read says nothing about whether the instance exists.
+// Failure prevented: an I/O error on the shared store is reported as "instance
+// not found", and the coworker re-primes into a new agent ID while its live
+// recording is left behind.
+func TestResolveInstanceReportsAnUnreadableStore(t *testing.T) {
+	mainRoot, worktree := newWorktreeRepo(t)
+	t.Chdir(worktree)
+
+	// a directory where the store file belongs: Open succeeds, reading fails
+	require.NoError(t, os.MkdirAll(agentinstance.StorePath(mainRoot, getUserSlug()), 0o755))
+
+	_, err := resolveInstance("OxAbcd")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "failed to read instance store")
+	require.NotContains(t, err.Error(), "instance not found")
+}

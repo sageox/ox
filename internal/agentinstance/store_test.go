@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -281,6 +282,64 @@ func TestInstanceIsExpired(t *testing.T) {
 			inst := &Instance{ExpiresAt: tt.expiresAt}
 			if got := inst.IsExpired(); got != tt.expected {
 				t.Errorf("IsExpired() = %v, want %v", got, tt.expected)
+			}
+		})
+	}
+}
+
+// TestLiveAgentOutlivesExpiresAt: an AI coworker's session can run for days
+// (a desktop app session, resumed overnight), and its agent ID stays in its
+// context and environment the whole time. Past ExpiresAt, an instance whose
+// agent process is still running must keep resolving; only an instance whose
+// process is gone (or was never recorded) expires.
+// Failure prevented: after 24 hours every `ox agent <id> …` call, including the
+// `session stop` that uploads the recording, fails with "instance not found".
+func TestLiveAgentOutlivesExpiresAt(t *testing.T) {
+	exited := exec.Command("true")
+	if err := exited.Run(); err != nil {
+		t.Skipf("cannot start a short-lived process: %v", err)
+	}
+	past := time.Now().Add(-time.Hour)
+	tests := []struct {
+		name      string
+		parentPID int
+		resolves  bool
+	}{
+		{"agent process still running", os.Getpid(), true},
+		{"agent process exited", exited.Process.Pid, false},
+		{"agent process never recorded", 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newTestStore(t)
+			inst := &Instance{
+				AgentID: "OxLong1", ServerSessionID: "oxsid_long",
+				CreatedAt: past.Add(-24 * time.Hour), ExpiresAt: past, ParentPID: tt.parentPID,
+			}
+			if err := store.Add(inst); err != nil {
+				t.Fatalf("add: %v", err)
+			}
+			if got := inst.IsExpired(); got == tt.resolves {
+				t.Errorf("IsExpired() = %v, want %v", got, !tt.resolves)
+			}
+
+			_, err := store.Get("OxLong1")
+			if tt.resolves && err != nil {
+				t.Fatalf("Get(live agent past ExpiresAt) = %v, want the instance", err)
+			}
+			if !tt.resolves && !errors.Is(err, ErrInstanceExpired) {
+				t.Fatalf("Get(exited agent past ExpiresAt) = %v, want ErrInstanceExpired", err)
+			}
+
+			if _, err := store.Prune(); err != nil {
+				t.Fatalf("prune: %v", err)
+			}
+			listed, err := store.List()
+			if err != nil {
+				t.Fatalf("list: %v", err)
+			}
+			if got := len(listed) == 1; got != tt.resolves {
+				t.Errorf("after prune, listed %d instances; want the instance kept = %v", len(listed), tt.resolves)
 			}
 		})
 	}

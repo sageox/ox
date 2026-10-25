@@ -124,7 +124,8 @@ func checkConflictingAgentEnvVars() checkResult {
 }
 
 // checkInstanceStale detects agent instances that have not had recent activity.
-// An instance is considered stale if it was created more than 24 hours ago and has not expired.
+// An instance is considered stale if it was created more than 24 hours ago, has
+// not expired, and its agent process is gone.
 // This helps identify abandoned instances that may be consuming resources.
 func checkInstanceStale(fix bool) checkResult {
 	gitRoot := findGitRoot()
@@ -188,8 +189,9 @@ func checkInstanceStale(fix bool) checkResult {
 			// an instance is stale if:
 			// 1. It was created more than 24 hours ago
 			// 2. It has not expired yet (expired instances are already pruned)
+			// 3. Its agent process is gone (a live agent's instance never expires)
 			instanceAge := now.Sub(inst.CreatedAt)
-			if instanceAge > staleInstanceThreshold {
+			if instanceAge > staleInstanceThreshold && !inst.IsProcessAlive() {
 				staleInstanceInfos = append(staleInstanceInfos, staleInstanceInfo{
 					agentID:   inst.AgentID,
 					userSlug:  userSlug,

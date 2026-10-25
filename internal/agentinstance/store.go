@@ -74,9 +74,17 @@ type Instance struct {
 	PrimeCallCount int `json:"prime_call_count,omitempty"` // number of times prime was called
 }
 
-// IsExpired checks if the instance has expired
+// IsExpired reports whether the instance is past ExpiresAt and its agent
+// process is gone. ExpiresAt bounds how long an abandoned instance lingers; it
+// must not end a live agent's identity, which stays in its context and
+// environment for as long as the agent runs. A desktop session lasting more
+// than a day otherwise could not stop its own recording.
 func (i *Instance) IsExpired() bool {
-	return time.Now().After(i.ExpiresAt)
+	return i.isExpiredAt(time.Now())
+}
+
+func (i *Instance) isExpiredAt(now time.Time) bool {
+	return now.After(i.ExpiresAt) && !i.IsProcessAlive()
 }
 
 // IsProcessAlive checks if the parent agent process is still running.
@@ -354,17 +362,19 @@ func (s *Store) expiredAt(agentID string) (time.Time, bool) {
 	}
 	defer f.Close()
 
-	var expiresAt time.Time
-	found := false
+	var last *Instance
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		var inst Instance
 		if err := json.Unmarshal(scanner.Bytes(), &inst); err != nil || inst.AgentID != agentID {
 			continue
 		}
-		expiresAt, found = inst.ExpiresAt, true // last write wins, as in readInstancesNoLock
+		last = &inst // last write wins, as in readInstancesNoLock
 	}
-	return expiresAt, found && time.Now().After(expiresAt)
+	if last == nil || !last.isExpiredAt(time.Now()) {
+		return time.Time{}, false
+	}
+	return last.ExpiresAt, true
 }
 
 // List returns all active (non-expired) instances
@@ -480,7 +490,7 @@ func (s *Store) readInstancesNoLock() ([]*Instance, int, int, error) {
 			continue
 		}
 
-		if now.After(inst.ExpiresAt) {
+		if inst.isExpiredAt(now) {
 			continue
 		}
 
