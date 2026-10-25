@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -116,6 +117,19 @@ func TestInstanceStoreRoot(t *testing.T) {
 	gitOK(t, uninitMain, "worktree", "add", uninitWorktree, "-b", "wt")
 	require.NoError(t, config.SaveProjectConfig(uninitWorktree, &config.ProjectConfig{RepoID: "repo_worktree_only"}))
 
+	// `git clone --separate-git-dir` keeps the git dir outside the checkout,
+	// so the common dir no longer names the main worktree
+	sepParent := resolvePathForCompare(t.TempDir())
+	sepMain := filepath.Join(sepParent, "repo")
+	gitOK(t, sepParent, "init", "-q", "--separate-git-dir", filepath.Join(sepParent, "repo.git"), sepMain)
+	gitOK(t, sepMain, "config", "user.name", "Dev")
+	gitOK(t, sepMain, "config", "user.email", "dev@example.com")
+	require.NoError(t, config.SaveProjectConfig(sepMain, &config.ProjectConfig{RepoID: "repo_separate_git_dir"}))
+	gitOK(t, sepMain, "add", ".sageox")
+	gitOK(t, sepMain, "commit", "-q", "-m", "initialize SageOx")
+	sepWorktree := filepath.Join(sepMain, ".claude", "worktrees", "wt")
+	gitOK(t, sepMain, "worktree", "add", sepWorktree, "-b", "wt")
+
 	notARepo := resolvePathForCompare(t.TempDir())
 
 	for _, tc := range []struct {
@@ -126,6 +140,7 @@ func TestInstanceStoreRoot(t *testing.T) {
 		{"main checkout keeps its own store", mainRoot, mainRoot},
 		{"linked worktree shares the main checkout's store", worktree, mainRoot},
 		{"main checkout not initialized: worktree keeps its own store", uninitWorktree, uninitWorktree},
+		{"separate git dir: worktree keeps its own store", sepWorktree, sepWorktree},
 		{"not a git repository", notARepo, notARepo},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -200,4 +215,43 @@ func TestResolveInstanceReportsAnUnreadableStore(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "failed to read instance store")
 	require.NotContains(t, err.Error(), "instance not found")
+}
+
+// `ox doctor` run from a linked worktree reads the instance store every
+// worktree shares, and never counts a running AI coworker's instance as
+// stale, however old it is.
+// Failure prevented: doctor reports "no instances" from the worktree that is
+// actually in use, or tells the coworker of a multi-day session that its own
+// live instance is abandoned.
+func TestDoctorStaleInstances_SharedStoreAndLiveAgents(t *testing.T) {
+	mainRoot, worktree := newWorktreeRepo(t)
+	t.Chdir(worktree)
+
+	exited := exec.Command("true")
+	if err := exited.Run(); err != nil {
+		t.Skipf("cannot start a short-lived process: %v", err)
+	}
+	store, err := agentinstance.NewStoreForUser(mainRoot, getUserSlug())
+	require.NoError(t, err)
+	old := time.Now().Add(-48 * time.Hour)
+	for _, inst := range []*agentinstance.Instance{
+		// a two-day session whose coworker is still running, past ExpiresAt
+		{AgentID: "OxLive", ServerSessionID: "oxsid_live", CreatedAt: old, ExpiresAt: time.Now().Add(-time.Hour), ParentPID: os.Getpid()},
+		// an old instance whose coworker exited
+		{AgentID: "OxGone", ServerSessionID: "oxsid_gone", CreatedAt: old, ExpiresAt: time.Now().Add(time.Hour), ParentPID: exited.Process.Pid},
+	} {
+		require.NoError(t, store.Add(inst))
+	}
+
+	result := checkInstanceStale(false)
+	require.True(t, result.warning, "the exited coworker's instance is stale: %+v", result)
+	require.Contains(t, result.message, "1 stale")
+	require.Contains(t, result.message, "OxGone")
+	require.NotContains(t, result.message, "OxLive", "a running coworker's instance is never stale")
+
+	// --fix prunes only what has expired, so the running coworker still resolves
+	checkInstanceStale(true)
+	inst, err := resolveInstance("OxLive")
+	require.NoError(t, err, "doctor --fix must not prune a running coworker's instance")
+	require.Equal(t, "OxLive", inst.AgentID)
 }
