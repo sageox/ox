@@ -24,12 +24,16 @@ import (
 // contract: the rebase clears, the moved branch keeps the writer's commit, the
 // autostash comes back, and the Ledger syncs afterward.
 
-// installMidRebaseWriter adds a pre-rebase hook that lands up to limit commits
-// on main, one per rebase, the way CommitLedgerSnapshot does: a private index,
-// commit-tree, and a compare-and-swap update-ref. git resolves orig-head before
-// the hook runs, so the branch moves after the rebase pinned it. Commit n adds
-// sessions/raced-<n>/summary.json.
-func installMidRebaseWriter(t *testing.T, repo string, limit int) {
+// installMidRebaseWriter adds a hookName hook that lands up to limit commits on
+// main, one per run, the way a Ledger writer does: a private index,
+// commit-tree, and a compare-and-swap update-ref. Commit n adds
+// sessions/raced-<n>/summary.json. Two hooks reach the two race points:
+//
+//   - pre-rebase runs after git pinned orig-head, so main moves mid-replay;
+//   - post-commit runs when `rebase --continue` commits a resolved step (not
+//     during a pull that halts on its first conflict), so main moves while
+//     conflicts are being resolved.
+func installMidRebaseWriter(t *testing.T, repo, hookName string, limit int) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("windows: the injected writer is a POSIX shell hook")
@@ -51,7 +55,7 @@ rm -f "$GIT_INDEX_FILE"
 commit=$(git commit-tree "$tree" -p "$tip" -m "summary: raced-$n")
 git update-ref refs/heads/main "$commit" "$tip"
 `, limit)
-	path := filepath.Join(repo, ".git", "hooks", "pre-rebase")
+	path := filepath.Join(repo, ".git", "hooks", hookName)
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
 	require.NoError(t, os.WriteFile(path, []byte(hook), 0o755))
 }
@@ -74,7 +78,7 @@ func racedRebase(t *testing.T, f *ledgerFixture, halted bool) string {
 		f.commitAll(f.local, "local session")
 	}
 	f.write(f.local, "notes.txt", "uncommitted edit")
-	installMidRebaseWriter(t, f.local, 1)
+	installMidRebaseWriter(t, f.local, "pre-rebase", 1)
 
 	out, ok := f.gitAllowFail(f.local, "pull", "--rebase", "--autostash")
 	require.False(t, ok, "the pull must lose the race:\n%s", out)
@@ -186,4 +190,30 @@ func TestResolveRebase_RefusesRebaseWhoseBranchMoved(t *testing.T) {
 	require.ErrorIs(t, err, ErrRebaseBranchMoved)
 	assert.True(t, IsRebaseInProgress(f.local), "the resolver must not clear the rebase itself")
 	assert.Equal(t, raced, f.git(f.local, "rev-parse", "refs/heads/main"))
+}
+
+// TestResolveRebase_RefusesBranchMovedDuringContinue: the branch can also move
+// after a pass starts, when `--continue` commits a resolved step. The empty-step
+// advance must hand that back too instead of trying --skip. Failure prevented:
+// a moved branch surfacing as a generic resolve failure, which the daemon
+// treats as a conflict instead of restarting the pull.
+func TestResolveRebase_RefusesBranchMovedDuringContinue(t *testing.T) {
+	t.Parallel()
+	f := newLedgerFixture(t)
+	f.diverge("sessions/s1/meta.json", `{"s":"local"}`, `{"s":"cloud"}`)
+	installMidRebaseWriter(t, f.local, "post-commit", 1)
+	f.gitAllowFail(f.local, "pull", "--rebase", "--autostash")
+	require.True(t, IsRebaseInProgress(f.local))
+	require.False(t, RebaseBranchMoved(context.Background(), f.local), "the halted pull must not have moved main yet")
+
+	err := ResolveRebaseAcceptTheirs(context.Background(), f.local, []string{"sessions/"})
+	require.ErrorIs(t, err, ErrRebaseBranchMoved)
+
+	raced := f.git(f.local, "rev-parse", "refs/heads/main")
+	require.NoError(t, AuditAndAbort(context.Background(), f.local, AuditOpRebase, "test", quietLogger()))
+	_, onMain := f.gitAllowFail(f.local, "merge-base", "--is-ancestor", raced, "refs/heads/main")
+	assert.True(t, onMain, "main must keep the commit landed mid-resolution")
+	_, err = f.reconcile([]string{"sessions/"})
+	require.NoError(t, err)
+	f.assertMakesProgress()
 }

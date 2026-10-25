@@ -365,8 +365,9 @@ func pushSummaryToLedger(filePath, sessionDir string) *pushSummaryOutput {
 	// pulls do, so this commit queues behind a sync rebase instead of moving
 	// main under it (sageox/ox#1541). Under the lock a rebase in progress is a
 	// wedge, and staging into it would mark its conflicts resolved.
-	var addOutput, commitOutput []byte
+	var addOutput []byte
 	var addErr, commitErr error
+	var committed bool
 	lockErr := gitutil.WithRepoLock(context.Background(), ledgerPath, func() error {
 		if gitutil.IsRebaseInProgress(ledgerPath) {
 			return errors.New("repo in broken rebase state (run 'ox doctor --fix')")
@@ -377,7 +378,9 @@ func pushSummaryToLedger(filePath, sessionDir string) *pushSummaryOutput {
 		if addErr != nil {
 			return nil
 		}
-		commitOutput, commitErr = exec.Command("git", "-C", ledgerPath, "commit", "--no-verify", "-m", commitMsg).CombinedOutput()
+		// validated snapshot, not a bare commit: the lock keeps the index still,
+		// but entries staged before it would otherwise ride along unchecked
+		committed, commitErr = commitLedgerSnapshot(context.Background(), ledgerPath, commitMsg)
 		return nil
 	})
 	if lockErr != nil {
@@ -394,23 +397,24 @@ func pushSummaryToLedger(filePath, sessionDir string) *pushSummaryOutput {
 			Error:   fmt.Sprintf("git add: %s: %v", strings.TrimSpace(string(addOutput)), addErr),
 		}
 	}
-	if err := commitErr; err != nil {
-		outStr := string(commitOutput)
-		if strings.Contains(outStr, "nothing to commit") {
-			clearNeedsSummaryMarkerForSession(sessionName)
-			return &pushSummaryOutput{
-				Success:      true,
-				Type:         "push_summary",
-				SummaryPath:  summaryDst,
-				Message:      "summary already committed",
-				Disposition:  string(session.QualityUpload),
-				QualityScore: summaryParsed.QualityScore,
-			}
-		}
+	if commitErr != nil {
+		// an unmerged index reads "unresolved conflict", which wrapCommitError
+		// turns into the `ox doctor --fix` guidance
 		return &pushSummaryOutput{
 			Success: false,
 			Type:    "push_summary",
-			Error:   wrapCommitError(outStr, err),
+			Error:   wrapCommitError(commitErr.Error(), errors.New("ledger snapshot commit failed")),
+		}
+	}
+	if !committed {
+		clearNeedsSummaryMarkerForSession(sessionName)
+		return &pushSummaryOutput{
+			Success:      true,
+			Type:         "push_summary",
+			SummaryPath:  summaryDst,
+			Message:      "summary already committed",
+			Disposition:  string(session.QualityUpload),
+			QualityScore: summaryParsed.QualityScore,
 		}
 	}
 

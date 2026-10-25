@@ -87,39 +87,101 @@ type pushSummaryError struct{ msg string }
 
 func (e *pushSummaryError) Error() string { return e.msg }
 
-// TestCommitAndPushLedger_QueuesBehindRepoLock: while a sync holds the repo
-// lock, a session upload must wait rather than commit. A writer that skips the
-// lock commits within milliseconds, so the watch window only bounds the check.
-// Failure prevented: the upload moving main under a live sync rebase, which
-// makes git refuse to finish it.
-func TestCommitAndPushLedger_QueuesBehindRepoLock(t *testing.T) {
-	barePath, clonePath := createBareAndClone(t)
-	isolatePushEnv(t, clonePath)
-	sessionName := "2026-01-01T00-00-testuser-OxLck1"
-	writeSessionFiles(t, clonePath, sessionName)
-	headBefore := runGit(t, clonePath, "rev-parse", "HEAD")
+// TestLedgerWriters_QueueBehindRepoLock: while a sync holds the repo lock,
+// every ox writer that moves a Ledger branch must wait rather than commit. A
+// writer that skips the lock commits within milliseconds, so the watch window
+// only bounds the check. Failure prevented: the commit moving main under a
+// live sync rebase, which makes git refuse to finish it, and landing inside a
+// recovery's re-anchor-to-abort window, where the abort rewinds past it.
+func TestLedgerWriters_QueueBehindRepoLock(t *testing.T) {
+	committedSession := func(t *testing.T, clonePath, name string) {
+		writeSessionFiles(t, clonePath, name)
+		runGit(t, clonePath, "add", "-A")
+		runGit(t, clonePath, "commit", "--no-verify", "-m", "seed session")
+		runGit(t, clonePath, "push")
+	}
+	writers := []struct {
+		name    string
+		prepare func(t *testing.T, clonePath, name string) func() error
+	}{
+		{"session upload", func(t *testing.T, clonePath, name string) func() error {
+			writeSessionFiles(t, clonePath, name)
+			return func() error { return commitAndPushLedger(clonePath, name) }
+		}},
+		{"session delete", func(t *testing.T, clonePath, name string) func() error {
+			committedSession(t, clonePath, name)
+			return func() error {
+				return deleteSessionFromLedger(clonePath, name, filepath.Join(clonePath, "sessions", name))
+			}
+		}},
+		{"session remove", func(t *testing.T, clonePath, name string) func() error {
+			committedSession(t, clonePath, name)
+			return func() error {
+				_, err := batchDeleteSessionsFromLedger(clonePath, []string{name})
+				return err
+			}
+		}},
+		{"session-ID backfill", func(t *testing.T, clonePath, name string) func() error {
+			committedSession(t, clonePath, name)
+			meta := filepath.Join(clonePath, "sessions", name, "meta.json")
+			require.NoError(t, os.WriteFile(meta, []byte(`{"session_name":"`+name+`","session_id":"ses_test"}`), 0o644))
+			return func() error { return commitAndPushSessionIDBackfill(clonePath, []string{name}) }
+		}},
+	}
+	for _, w := range writers {
+		t.Run(w.name, func(t *testing.T) {
+			_, clonePath := createBareAndClone(t)
+			isolatePushEnv(t, clonePath)
+			write := w.prepare(t, clonePath, "2026-01-01T00-00-testuser-OxLck1")
+			headBefore := runGit(t, clonePath, "rev-parse", "HEAD")
 
-	held, release := make(chan struct{}), make(chan struct{})
-	syncDone := make(chan error, 1)
-	go func() {
-		syncDone <- gitutil.WithRepoLock(context.Background(), clonePath, func() error {
-			close(held)
-			<-release
-			return nil
+			held, release := make(chan struct{}), make(chan struct{})
+			syncDone := make(chan error, 1)
+			go func() {
+				syncDone <- gitutil.WithRepoLock(context.Background(), clonePath, func() error {
+					close(held)
+					<-release
+					return nil
+				})
+			}()
+			<-held
+			writeDone := make(chan error, 1)
+			go func() { writeDone <- write() }()
+
+			assert.Never(t, func() bool {
+				head, err := runGitCombined(clonePath, "rev-parse", "HEAD")
+				return err == nil && head != headBefore
+			}, 500*time.Millisecond, 25*time.Millisecond, "the writer must not commit while a sync holds the repo lock")
+			close(release)
+			require.NoError(t, <-syncDone)
+			require.NoError(t, <-writeDone)
+			assert.NotEqual(t, headBefore, runGit(t, clonePath, "rev-parse", "HEAD"), "the queued write must still land once the lock is free")
 		})
-	}()
-	<-held
-	uploadDone := make(chan error, 1)
-	go func() { uploadDone <- commitAndPushLedger(clonePath, sessionName) }()
+	}
+}
 
-	assert.Never(t, func() bool {
-		head, err := runGitCombined(clonePath, "rev-parse", "HEAD")
-		return err == nil && head != headBefore
-	}, 500*time.Millisecond, 25*time.Millisecond, "the upload must not commit while a sync holds the repo lock")
-	close(release)
-	require.NoError(t, <-syncDone)
-	require.NoError(t, <-uploadDone)
+// TestPushSummary_LeavesUnrelatedStagedEntriesStaged: the summary commit goes
+// through the validated Ledger snapshot, which never publishes data/plans.
+// Failure prevented: a bare `git commit` sweeping a coworker's staged plan
+// edit, unvalidated, into the session's summary commit (#1442).
+func TestPushSummary_LeavesUnrelatedStagedEntriesStaged(t *testing.T) {
+	_, clonePath := createBareAndClone(t)
+	isolatePushEnv(t, clonePath)
+	sessionName := "2026-01-01T00-00-testuser-OxSnp1"
+	sessionDir := writeSessionFiles(t, clonePath, sessionName)
+	const plan = "data/plans/pln_test/plan.md"
+	require.NoError(t, os.MkdirAll(filepath.Join(clonePath, filepath.Dir(plan)), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(clonePath, plan), []byte("# draft plan\n"), 0o644))
+	runGit(t, clonePath, "add", plan)
+	summary := filepath.Join(t.TempDir(), "raw-summary.json")
+	require.NoError(t, os.WriteFile(summary, []byte(`{"title":"Fix ledger sync","summary":"Recovered the ledger sync after a lost rebase race.","outcome":"success"}`), 0o644))
 
-	_, err := os.Stat(filepath.Join(cloneBare(t, barePath), "sessions", sessionName, "meta.json"))
-	assert.NoError(t, err, "the queued upload must still publish once the lock is free")
+	out := pushSummaryToLedger(summary, sessionDir)
+
+	require.True(t, out.Success, out.Error)
+	_, err := runGitCombined(clonePath, "cat-file", "-e", "HEAD:sessions/"+sessionName+"/summary.json")
+	assert.NoError(t, err, "the summary must be committed")
+	_, err = runGitCombined(clonePath, "cat-file", "-e", "HEAD:"+plan)
+	assert.Error(t, err, "the staged plan must not ride along in the summary commit")
+	assert.Contains(t, runGit(t, clonePath, "diff", "--cached", "--name-only"), plan, "the plan edit must stay staged")
 }

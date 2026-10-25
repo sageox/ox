@@ -286,6 +286,11 @@ func resolveOneRebaseStep(ctx context.Context, repoPath string, safePrefixes []s
 // says the step is empty. It deliberately never skips blindly: `--skip` DROPS
 // the current commit, so guessing here would silently discard a real session.
 func advanceNonConflictRebaseStep(ctx context.Context, repoPath string) (done bool, err error) {
+	// a branch moved during this pass's --continue reads as an empty step, and
+	// --skip cannot finish it either
+	if RebaseBranchMoved(ctx, repoPath) {
+		return false, ErrRebaseBranchMoved
+	}
 	contOut, contErr := runRebaseStep(ctx, repoPath, "--continue")
 	if !IsRebaseInProgress(repoPath) {
 		return true, nil

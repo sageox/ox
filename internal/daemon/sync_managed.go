@@ -873,7 +873,11 @@ func (s *SyncScheduler) fetchAndPullLocked(ctx context.Context, opts ManagedRepo
 		pullOutput    []byte
 		pullErr       error
 		ahead         int
+		resolveRan    bool
+		resolveErr    error
 	)
+	autoPaths := manifest.AutoResolvePaths(opts.ResolveRules)
+	denyPaths := manifest.AutoResolveDenyPaths(opts.ResolveRules)
 	for attempt := 1; attempt <= maxFetchPullAttempts; attempt++ {
 		// git fetch
 		fetchCtx, fetchSpan := perf.Start(ctx, "git_fetch")
@@ -1016,6 +1020,21 @@ func (s *SyncScheduler) fetchAndPullLocked(ctx context.Context, opts ManagedRepo
 				"repo", repoName, "attempt", attempt)
 			continue
 		}
+		// Tier 2, auto-resolving conflicts in safe paths, runs inside the
+		// loop: a branch that moves while conflicts are resolved restarts the
+		// pull the same way as one that moved during the replay.
+		resolveRan = len(autoPaths) > 0 && gitutil.IsRebaseInProgress(path)
+		resolveErr = nil
+		if resolveRan {
+			resolveErr = gitutil.ResolveRebaseAcceptTheirs(ctx, path, autoPaths, denyPaths)
+			if errors.Is(resolveErr, gitutil.ErrRebaseBranchMoved) {
+				abortErr := abortMovedRebase(ctx, path, repoName, logger)
+				if abortErr == nil && attempt < maxFetchPullAttempts {
+					continue
+				}
+				return branchMovedResult(ManagedRepoPullResult{FetchHeadTime: fetchHeadTime, Diverged: diverged}, abortErr, pullErr, repoName)
+			}
+		}
 		break
 	}
 
@@ -1029,19 +1048,12 @@ func (s *SyncScheduler) fetchAndPullLocked(ctx context.Context, opts ManagedRepo
 		err := pullErr
 		logger.Warn("pull failed", "error", err, "output", detail, "repo", repoName)
 
-		// Try auto-resolving conflicts in safe paths before giving up
-		autoPaths := manifest.AutoResolvePaths(opts.ResolveRules)
-		denyPaths := manifest.AutoResolveDenyPaths(opts.ResolveRules)
-		if len(autoPaths) > 0 && gitutil.IsRebaseInProgress(path) {
-			resolveErr := gitutil.ResolveRebaseAcceptTheirs(ctx, path, autoPaths, denyPaths)
+		// The loop already tried auto-resolving conflicts in safe paths
+		if resolveRan {
 			if resolveErr == nil {
 				logger.Info("auto-resolved rebase conflicts", "repo", repoName, "strategy", "accept-theirs")
 				result.AutoResolved = true
 				return result
-			}
-			if errors.Is(resolveErr, gitutil.ErrRebaseBranchMoved) {
-				// moved while conflicts were being resolved; not a conflict
-				return branchMovedResult(result, abortMovedRebase(ctx, path, repoName, logger), err, repoName)
 			}
 			logger.Warn("auto-resolve failed, attempting LLM tier", "repo", repoName, "error", resolveErr)
 

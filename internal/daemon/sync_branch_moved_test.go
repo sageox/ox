@@ -24,12 +24,16 @@ import (
 // pull pipeline against a real remote, with the other writer injected at the
 // exact race point.
 
-// installMidRebaseWriter adds a pre-rebase hook that lands up to limit commits
-// on main, one per rebase, the way a Ledger writer does: a private index,
-// commit-tree, and a compare-and-swap update-ref. git resolves orig-head before
-// the hook runs, so the branch moves after the rebase pinned it. Commit n adds
-// sessions/raced-<n>/summary.json.
-func installMidRebaseWriter(t *testing.T, repo string, limit int) {
+// installMidRebaseWriter adds a hookName hook that lands up to limit commits on
+// main, one per run, the way a Ledger writer does: a private index,
+// commit-tree, and a compare-and-swap update-ref. Commit n adds
+// sessions/raced-<n>/summary.json. Two hooks reach the two race points:
+//
+//   - pre-rebase runs after git pinned orig-head, so main moves mid-replay;
+//   - post-commit runs when `rebase --continue` commits a resolved step (not
+//     during a pull that halts on its first conflict), so main moves while
+//     conflicts are being resolved.
+func installMidRebaseWriter(t *testing.T, repo, hookName string, limit int) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("windows: the injected writer is a POSIX shell hook")
@@ -51,7 +55,7 @@ rm -f "$GIT_INDEX_FILE"
 commit=$(git commit-tree "$tree" -p "$tip" -m "summary: raced-$n")
 git update-ref refs/heads/main "$commit" "$tip"
 `, limit)
-	path := filepath.Join(repo, ".git", "hooks", "pre-rebase")
+	path := filepath.Join(repo, ".git", "hooks", hookName)
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
 	require.NoError(t, os.WriteFile(path, []byte(hook), 0o755))
 }
@@ -85,7 +89,7 @@ func racedLedgerClone(t *testing.T, writes int) string {
 	gitInDir(t, writer, "push", "origin", "main")
 
 	write(local, "notes.txt", "uncommitted edit")
-	installMidRebaseWriter(t, local, writes)
+	installMidRebaseWriter(t, local, "pre-rebase", writes)
 	return local
 }
 
@@ -157,4 +161,28 @@ func TestPullManagedRepo_BranchMovedEveryAttempt_FailsCleanly(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "2\n", string(writes), "the pull must try exactly twice")
 	assertRacedCommitsKept(t, local, 2)
+}
+
+// TestPullManagedRepo_BranchMovedDuringConflictResolution: the pull halts on a
+// sessions/ conflict, and the other writer lands while the resolver commits
+// the fix. Failure prevented: that race skipping the in-cycle restart and
+// costing a failed sync cycle (and a backoff step) for a conflict the
+// production rules resolve on their own.
+func TestPullManagedRepo_BranchMovedDuringConflictResolution(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git pull against a bare remote")
+	}
+	local := makeSessionMetaConflictClone(t)
+	installMidRebaseWriter(t, local, "post-commit", 1)
+
+	result := pullRacedLedger(t, local)
+
+	require.NoError(t, result.Err, "a race during conflict resolution must restart the pull in the same cycle")
+	assert.Nil(t, result.Issue)
+	assert.True(t, result.AutoResolved, "the restarted pull must resolve the conflict itself")
+	assert.False(t, gitutil.IsRebaseInProgress(local))
+	out, err := runGitOut(t, local, "cat-file", "-e", "main:sessions/raced-1/summary.json")
+	assert.NoError(t, err, "main must keep the commit landed mid-resolution: %s", out)
+	out, err = runGitOut(t, local, "merge-base", "--is-ancestor", "origin/main", "main")
+	assert.NoError(t, err, "the restarted pull must land the remote's commits: %s", out)
 }

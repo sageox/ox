@@ -214,13 +214,17 @@ func commitAndPushSessionIDBackfill(ledgerPath string, sessionNames []string) er
 	for _, name := range sessionNames {
 		metaPaths = append(metaPaths, path.Join("sessions", name, "meta.json"))
 	}
-	addArgs := append([]string{"-C", ledgerPath, "add", "--sparse", "--"}, metaPaths...)
-	if output, err := exec.Command("git", addArgs...).CombinedOutput(); err != nil {
-		return fmt.Errorf("git add: %s: %w", string(output), err)
-	}
-
+	// CommitLedgerSnapshot requires the repo lock from the add through the
+	// commit; pushLedger takes it again itself (sageox/ox#1541)
 	commitMsg := fmt.Sprintf("session: backfill stable session_id for %d legacy session(s)", len(sessionNames))
-	if _, err := gitutil.CommitLedgerSnapshot(context.Background(), ledgerPath, commitMsg, metaPaths...); err != nil {
+	if err := gitutil.WithRepoLock(context.Background(), ledgerPath, func() error {
+		addArgs := append([]string{"-C", ledgerPath, "add", "--sparse", "--"}, metaPaths...)
+		if output, err := exec.Command("git", addArgs...).CombinedOutput(); err != nil {
+			return fmt.Errorf("git add: %s: %w", string(output), err)
+		}
+		_, err := gitutil.CommitLedgerSnapshot(context.Background(), ledgerPath, commitMsg, metaPaths...)
+		return err
+	}); err != nil {
 		return err
 	}
 

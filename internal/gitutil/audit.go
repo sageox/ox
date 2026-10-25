@@ -28,7 +28,10 @@ const (
 // success=true. On failure: op=<op>_abort_failed, repo, error.
 //
 // A rebase abort never rewinds a branch another writer moved mid-rebase; see
-// reanchorMovedRebase.
+// reanchorMovedRebase. git's abort resets the branch without a compare-and-
+// swap, so the caller MUST hold WithRepoLock(repoPath) from before this call
+// through its return: that is what keeps every ox writer from moving the
+// branch between the re-anchor and the reset.
 //
 // Returns nil if the abort succeeded, or the abort error otherwise. Logger
 // MUST be non-nil. Reason is a free-form string describing why the abort

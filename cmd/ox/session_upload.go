@@ -547,8 +547,13 @@ func pushLedger(ctx context.Context, ledgerPath string) error {
 	// refresh / merge-attribute healing so failures from those don't get
 	// confused with a secret-gate refusal; runs BEFORE PushWithRetry so we
 	// never send bytes containing detected credentials.
+	// The gate can amend the commit it redacts, which moves the branch, so it
+	// runs under the repo lock (sageox/ox#1541). PushWithRetry takes the same
+	// non-reentrant lock itself, so it stays outside.
 	gateCtx, gateSpan := perf.Start(ctx, "secret_gate")
-	if err := runPrePushSecretGate(gateCtx, ledgerPath); err != nil {
+	if err := gitutil.WithRepoLock(gateCtx, ledgerPath, func() error {
+		return runPrePushSecretGate(gateCtx, ledgerPath)
+	}); err != nil {
 		perf.RecordError(gateSpan, err)
 		gateSpan.End()
 		perf.RecordError(span, err)

@@ -534,8 +534,11 @@ func runRedactHistoryWorkflow(opts redactHistoryOptions) error {
 	}
 
 	// Stage + amend in a single holding commit. The operator can review
-	// the amended diff before running `ox session push`.
-	if err := stageAndAmendRedactedFiles(opts.LedgerPath, byPath); err != nil {
+	// the amended diff before running `ox session push`. The amend moves the
+	// branch, so it runs under the repo lock (sageox/ox#1541).
+	if err := gitutil.WithRepoLock(context.Background(), opts.LedgerPath, func() error {
+		return stageAndAmendRedactedFiles(opts.LedgerPath, byPath)
+	}); err != nil {
 		return fmt.Errorf("stage/amend: %w", err)
 	}
 

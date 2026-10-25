@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/sageox/ox/internal/cli"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/session"
 	"github.com/spf13/cobra"
 )
@@ -341,30 +342,37 @@ func removedLocationLabel(local, ledger bool) string {
 // Uses pushLedger() for push with pull --rebase retry on conflict.
 func batchDeleteSessionsFromLedger(ledgerPath string, sessionNames []string) (int, error) {
 	var staged int
-	var lastStaged string
-	for _, name := range sessionNames {
-		gitRm := exec.Command("git", "rm", "-r", "--force", filepath.Join("sessions", name))
-		gitRm.Dir = ledgerPath
-		if out, err := gitRm.CombinedOutput(); err != nil {
-			slog.Warn("git_rm_session", "session", name, "err", fmt.Sprintf("%s: %v", string(out), err))
-			continue
+	// rm + commit under the repo lock, so the commit cannot move the branch
+	// under a daemon sync rebase (sageox/ox#1541); pushLedger takes it itself
+	if err := gitutil.WithRepoLock(context.Background(), ledgerPath, func() error {
+		var lastStaged string
+		for _, name := range sessionNames {
+			gitRm := exec.Command("git", "rm", "-r", "--force", filepath.Join("sessions", name))
+			gitRm.Dir = ledgerPath
+			if out, err := gitRm.CombinedOutput(); err != nil {
+				slog.Warn("git_rm_session", "session", name, "err", fmt.Sprintf("%s: %v", string(out), err))
+				continue
+			}
+			staged++
+			lastStaged = name
 		}
-		staged++
-		lastStaged = name
-	}
 
-	if staged == 0 {
-		return 0, fmt.Errorf("no sessions could be staged for removal")
-	}
+		if staged == 0 {
+			return fmt.Errorf("no sessions could be staged for removal")
+		}
 
-	// single commit for all removals
-	commitMsg := fmt.Sprintf("session: delete %d session(s)", staged)
-	if staged == 1 {
-		commitMsg = fmt.Sprintf("session: delete %s", lastStaged)
-	}
-	gitCommit := exec.Command("git", "-C", ledgerPath, "commit", "--no-verify", "-m", commitMsg)
-	if out, err := gitCommit.CombinedOutput(); err != nil {
-		return 0, fmt.Errorf("git commit: %s: %w", string(out), err)
+		// single commit for all removals
+		commitMsg := fmt.Sprintf("session: delete %d session(s)", staged)
+		if staged == 1 {
+			commitMsg = fmt.Sprintf("session: delete %s", lastStaged)
+		}
+		gitCommit := exec.Command("git", "-C", ledgerPath, "commit", "--no-verify", "-m", commitMsg)
+		if out, err := gitCommit.CombinedOutput(); err != nil {
+			return fmt.Errorf("git commit: %s: %w", string(out), err)
+		}
+		return nil
+	}); err != nil {
+		return 0, err
 	}
 
 	// push with retry (pull --rebase --autostash on conflict)

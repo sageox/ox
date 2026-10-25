@@ -165,19 +165,23 @@ func runAgentSessionDelete(inst *agentinstance.Instance, cmd *cobra.Command, arg
 // deleteSessionFromLedger removes the session folder from the ledger git repo,
 // commits the removal, and pushes. NEVER uses --force push.
 func deleteSessionFromLedger(ledgerPath, sessionName, sessionDir string) error {
-	// git rm -r the session folder
-	gitRm := exec.Command("git", "rm", "-r", "--force", filepath.Join("sessions", sessionName))
-	gitRm.Dir = ledgerPath
-	if out, err := gitRm.CombinedOutput(); err != nil {
-		return fmt.Errorf("git rm: %s: %w", string(out), err)
-	}
-
-	// commit
+	// rm + commit under the repo lock, so the commit cannot move the branch
+	// under a daemon sync rebase (sageox/ox#1541); the push takes it itself
 	commitMsg := fmt.Sprintf("session: delete %s", sessionName)
-	gitCommit := exec.Command("git", "commit", "-m", commitMsg)
-	gitCommit.Dir = ledgerPath
-	if out, err := gitCommit.CombinedOutput(); err != nil {
-		return fmt.Errorf("git commit: %s: %w", string(out), err)
+	if err := gitutil.WithRepoLock(context.Background(), ledgerPath, func() error {
+		gitRm := exec.Command("git", "rm", "-r", "--force", filepath.Join("sessions", sessionName))
+		gitRm.Dir = ledgerPath
+		if out, err := gitRm.CombinedOutput(); err != nil {
+			return fmt.Errorf("git rm: %s: %w", string(out), err)
+		}
+		gitCommit := exec.Command("git", "commit", "-m", commitMsg)
+		gitCommit.Dir = ledgerPath
+		if out, err := gitCommit.CombinedOutput(); err != nil {
+			return fmt.Errorf("git commit: %s: %w", string(out), err)
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 
 	// push with retry — no --force: ledger history must never be rewritten

@@ -52,13 +52,19 @@ func runMurmurDelete(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if _, err := gitutil.RunGit(ctx, targetDir, "rm", "-f", relPath); err != nil {
-		return fmt.Errorf("git rm: %w", err)
-	}
-
+	// under the repo lock, so the commit cannot move the branch under a
+	// daemon sync rebase (sageox/ox#1541)
 	commitMsg := fmt.Sprintf("murmur: delete %s", murmurID)
-	if _, err := gitutil.RunGit(ctx, targetDir, "commit", "-m", commitMsg); err != nil {
-		return fmt.Errorf("git commit: %w", err)
+	if err := gitutil.WithRepoLock(ctx, targetDir, func() error {
+		if _, err := gitutil.RunGit(ctx, targetDir, "rm", "-f", relPath); err != nil {
+			return fmt.Errorf("git rm: %w", err)
+		}
+		if _, err := gitutil.RunGit(ctx, targetDir, "commit", "-m", commitMsg); err != nil {
+			return fmt.Errorf("git commit: %w", err)
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 
 	fmt.Fprintf(cmd.OutOrStdout(), "Murmur deleted: %s\n", murmurID)
