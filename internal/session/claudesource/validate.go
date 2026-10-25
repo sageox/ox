@@ -106,6 +106,13 @@ func validate(path, repoRoot, sessionID string, offset int64, requireInitialIden
 	}
 
 	seenCwd, seenID := false, false
+	// Claude Code writes a resumed or forked conversation to a new file named
+	// for its new session ID, and opens it with a copy of the conversation it
+	// continues, whose records keep the earlier session's ID. Another ID is
+	// therefore allowed only in that leading block: once a record carries the
+	// file's own ID, a different one means the file mixes sessions. A scan from
+	// an offset cannot see where the block ended, so it allows none.
+	inherited, sawInherited := offset == 0, false
 	checkedCwd := make(map[string]cwdVerdict)
 	// ownershipErr is proof the source is foreign and ends the scan. A cwd that
 	// cannot be checked only defers: the scan goes on, because a later turn may
@@ -138,12 +145,15 @@ func validate(path, repoRoot, sessionID string, offset int64, requireInitialIden
 				return nil, nil
 			}
 		}
-		if id != "" {
-			if id != fileID {
-				ownershipErr = fmt.Errorf("%w: session ID changed", ErrUntrustedSource)
-				return nil, nil
-			}
-			seenID = true
+		switch {
+		case id == "":
+		case id == fileID:
+			inherited, seenID = false, true
+		case inherited:
+			sawInherited = true
+		default:
+			ownershipErr = fmt.Errorf("%w: session ID changed", ErrUntrustedSource)
+			return nil, nil
 		}
 		if cwd != "" {
 			verdict, checked := checkedCwd[cwd]
@@ -179,6 +189,11 @@ func validate(path, repoRoot, sessionID string, offset int64, requireInitialIden
 	}
 	if deferredErr != nil {
 		return deferredErr
+	}
+	if sawInherited && !seenID {
+		// a copy with nothing after it may be the start of a resumed session,
+		// or another session's file under this name: wait for a turn of its own
+		return fmt.Errorf("claude source holds only the conversation it continues")
 	}
 	if requireInitialIdentity && (!seenCwd || (sessionID != "" && !seenID)) {
 		return fmt.Errorf("claude source has invalid or missing repository metadata")
