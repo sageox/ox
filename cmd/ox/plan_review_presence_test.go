@@ -479,6 +479,25 @@ func TestPresenceBridge_RejoinSendsOnlyTheCurrentPointer(t *testing.T) {
 	}
 }
 
+// TestPresenceBridge_ReconnectingPageReplacesItsConnection opens a page's
+// event stream twice under one key, as a browser does when it reconnects
+// before the server has noticed the old stream is gone.
+// Failure prevented: the old stream's room connection lingers beside the new
+// one, and teammates see the reviewer twice.
+func TestPresenceBridge_ReconnectingPageReplacesItsConnection(t *testing.T) {
+	fake, base := newFakePresence(t, presenceTestPlan, map[string]fakePerson{"tok-devon": {"Devon", "u-devon"}})
+	review, _ := presenceReview(t, base, "tok-devon")
+	first, _ := pageEvents(t, review.URL, "page-devon-1")
+	nextEvent(t, first, "the first welcome", presenceOf("welcome"))
+	second, _ := pageEvents(t, review.URL, "page-devon-1")
+	nextEvent(t, second, "the reconnected welcome", presenceOf("welcome"))
+	waitFor(t, "the page's old connection to leave", func() bool {
+		fake.mu.Lock()
+		defer fake.mu.Unlock()
+		return len(fake.conns) == 1
+	})
+}
+
 // TestPresenceBridge_RetriesOnlyWhatMayRecover covers the ways a join goes
 // nowhere: the service declines it, fails for now, or its stream goes silent
 // without closing.

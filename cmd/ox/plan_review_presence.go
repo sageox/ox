@@ -193,7 +193,12 @@ func (b *presenceBridge) open(ctx context.Context, key, revision string, emit fu
 	ctx, cancel := context.WithCancel(ctx)
 	t := &presenceTab{b: b, key: key, revision: revision, emit: emit, cancel: cancel, wake: make(chan struct{}, 1), at: json.RawMessage("null")}
 	b.mu.Lock()
-	b.tabs[key] = t // a reconnecting page replaces its old connection
+	// a page reconnecting under its key replaces its old connection, which
+	// leaves the room now, not when the server notices its stream is gone
+	if old := b.tabs[key]; old != nil {
+		old.cancel()
+	}
+	b.tabs[key] = t
 	b.mu.Unlock()
 	t.done.Add(2)
 	go func() { defer t.done.Done(); t.run(ctx) }()
