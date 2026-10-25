@@ -120,7 +120,8 @@ func parsePresencePeer(raw []byte) (presencePeer, bool) {
 type presenceBridge struct {
 	base   string // the SageOx endpoint the user signed in to
 	planID string
-	token  func(ctx context.Context) (string, error)
+	// token is the user's access token; fresh reads the login again
+	token func(ctx context.Context, fresh bool) (string, error)
 
 	mu   sync.Mutex
 	tabs map[string]*presenceTab // by the key each page names itself with
@@ -143,11 +144,12 @@ func newPresenceBridge(gitRoot, planDir string) *presenceBridge {
 	return &presenceBridge{
 		base:   strings.TrimSuffix(ep, "/"),
 		planID: id,
-		// The token is read again only as it nears expiry: moves are frequent.
-		token: func(ctx context.Context) (string, error) {
+		// A join reads the login again, so signing in anew takes effect at the
+		// next one; a move, far more frequent, reuses it until it nears expiry.
+		token: func(ctx context.Context, fresh bool) (string, error) {
 			mu.Lock()
 			defer mu.Unlock()
-			if held == nil || (!held.ExpiresAt.IsZero() && held.IsExpired(300)) {
+			if fresh || held == nil || (!held.ExpiresAt.IsZero() && held.IsExpired(300)) {
 				t, err := auth.EnsureValidTokenForEndpointContext(ctx, ep, 300)
 				if err != nil {
 					return "", fmt.Errorf("%w: %w", errPresenceRefused, err)
@@ -267,7 +269,7 @@ func (t *presenceTab) run(ctx context.Context) {
 // session joins the room once and relays its events until the stream ends.
 // joined reports whether the service welcomed this connection.
 func (t *presenceTab) session(ctx context.Context) (joined bool, err error) {
-	tok, err := t.b.token(ctx)
+	tok, err := t.b.token(ctx, true)
 	if err != nil {
 		return false, err
 	}
@@ -373,7 +375,7 @@ func (t *presenceTab) send(ctx context.Context) {
 }
 
 func (b *presenceBridge) post(ctx context.Context, conn string, at json.RawMessage) error {
-	tok, err := b.token(ctx)
+	tok, err := b.token(ctx, false)
 	if err != nil {
 		return err
 	}

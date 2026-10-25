@@ -262,7 +262,7 @@ const presence = {
     es.addEventListener('leave', (e) => on({ type: 'leave', id: JSON.parse(e.data).id }));
     es.onerror = () => on({ type: 'lost' }); // EventSource reconnects by itself
     return {
-      move(at) { if (self) send(`${room}/${self}`, { at }); }, // with the reviewer's credentials
+      move(at) { if (self) return send(`${room}/${self}`, { at }); }, // with the reviewer's credentials
       leave() { es.close(); },
     };
   },
@@ -271,7 +271,8 @@ const presence = {
 
 The controls send the pointer at most every 200 ms, only its latest place,
 and never store it: after a reconnect they send where it is now, not where it
-went. `docs/specs/plan-review-presence.md` in the ox repository is the
+went. Return the request's promise from `move`, and the next waits for it, so
+pointers cannot arrive out of order. `docs/specs/plan-review-presence.md` in the ox repository is the
 service's contract and the placement rules.
 
 A committed item can carry `resolutionNote`, the author's note on its latest

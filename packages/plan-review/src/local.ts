@@ -138,7 +138,7 @@ const ACCOUNT = 'local';
         // a pointer that cannot reach the server is dropped: the stream's
         // own error already says the server is gone
         move(at) {
-          fetch(base + '/presence', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Review-Token': token }, body: JSON.stringify({ key, at }) }).catch(() => {});
+          return fetch(base + '/presence', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Review-Token': token }, body: JSON.stringify({ key, at }) }).catch(() => {});
         },
         leave() { /* the stream's end leaves the room */ },
       };

@@ -48,8 +48,12 @@ export interface PresenceTransport {
 }
 
 export interface PresenceLink {
-  /** Where this reviewer's pointer rests now, or null. Only the latest matters: drop any not yet sent. */
-  move(at: PointerAt | null): void;
+  /**
+   * Where this reviewer's pointer rests now, or null. Only the latest
+   * matters: drop any not yet sent. A promise returned holds the next move
+   * until it settles, so moves never overlap and cannot arrive out of order.
+   */
+  move(at: PointerAt | null): void | Promise<unknown>;
   /** Leave the room. */
   leave(): void;
 }
@@ -110,7 +114,7 @@ export function startPresence(port: HostPort, transport: PresenceTransport, revi
   const cursors = new Map<string, HTMLElement>();
   let listed = ''; // who the chips show, as JSON
 
-  let mine: PointerAt | null = null, sent = 'null', last = 0;
+  let mine: PointerAt | null = null, sent = 'null', last = 0, moving = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const link = transport.join(revision, on);
 
@@ -165,11 +169,12 @@ export function startPresence(port: HostPort, transport: PresenceTransport, revi
   }
   function flush() {
     timer = undefined;
-    const s = JSON.stringify(mine);
-    if (!live || gone || s === sent) return;
+    const at = mine, s = JSON.stringify(at);
+    if (!live || gone || moving || s === sent) return;
     sent = s;
     last = Date.now();
-    link.move(mine);
+    moving = true;
+    Promise.resolve().then(() => link.move(at)).catch(() => {}).then(() => { moving = false; send(false); });
   }
 
   // update lists who is here and asks the document to place every pointer on
@@ -225,7 +230,12 @@ export function startPresence(port: HostPort, transport: PresenceTransport, revi
   // draw puts a cursor, with its name, where the document placed each
   // pointer, offset by the frame's box and clipped to it.
   function draw() {
-    const b = frame ? frame.getBoundingClientRect() : { left: 0, top: 0, right: innerWidth, bottom: innerHeight };
+    let b = { left: 0, top: 0, right: innerWidth, bottom: innerHeight };
+    if (frame) {
+      // the framed document's viewport: the frame's box inside its border
+      const r = frame.getBoundingClientRect(), left = r.left + frame.clientLeft, top = r.top + frame.clientTop;
+      b = { left, top, right: left + frame.clientWidth, bottom: top + frame.clientHeight };
+    }
     const clip = { left: Math.max(b.left, 0), top: Math.max(b.top, 0), right: Math.min(b.right, innerWidth), bottom: Math.min(b.bottom, innerHeight) };
     const drawn = new Set<string>();
     placed.forEach((p) => {

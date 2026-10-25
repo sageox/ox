@@ -184,9 +184,20 @@ func runPlanReview(cmd *cobra.Command, slug string, noServe bool, idleTimeout ti
 
 	start := time.Now()
 	presence := newPresenceBridge(gitRoot, info.Dir)
-	srv := &http.Server{Handler: liveReviewHandlerWithActivity(gitRoot, slug, info.Dir, base, token, bc, rounds, approved, activity, presence)}
+	// Shutdown waits for every open request, and a page's /events stream stays
+	// open until its tab closes: end the streams first, which also takes the
+	// pages out of the presence room. Review writes run without their request's
+	// cancellation, so ending a request never cuts one short.
+	streams, endStreams := context.WithCancel(context.Background())
+	srv := &http.Server{
+		Handler:     liveReviewHandlerWithActivity(gitRoot, slug, info.Dir, base, token, bc, rounds, approved, activity, presence),
+		BaseContext: func(net.Listener) context.Context { return streams },
+	}
 	go func() { _ = srv.Serve(ln) }()
-	defer func() { _ = srv.Shutdown(context.Background()) }()
+	defer func() {
+		endStreams()
+		_ = srv.Shutdown(context.Background())
+	}()
 
 	// Watch the ledger plan dir so an agent's external `ox plan render` /
 	// `feedback resolve` writes push a live reload to the browser.

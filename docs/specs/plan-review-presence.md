@@ -89,7 +89,7 @@ interface PresenceTransport {
   join(revision: string, on: (e: PresenceEvent) => void): PresenceLink;
 }
 interface PresenceLink {
-  move(at: PointerAt | null): void; // only the latest matters: drop any not yet sent
+  move(at: PointerAt | null): void | Promise<unknown>; // only the latest matters; a promise holds the next move until it settles
   leave(): void;
 }
 type PresenceEvent =
@@ -107,8 +107,10 @@ again. The controls own the rest:
 - **Revision.** A pointer is placed only for a peer showing the same
   `revision`. A peer on another revision is listed as such ("Avery on another
   revision"), and their pointer is never drawn on this one.
-- **Rate.** This reviewer's pointer is sent at most every 200 ms, coalesced
-  to its latest place; the cursor glides between places over the same 200 ms.
+- **Rate and order.** This reviewer's pointer is sent at most every 200 ms,
+  one move at a time, coalesced to its latest place, so a slow move is never
+  overtaken by an older one. The cursor glides between places over the same
+  200 ms.
 - **Transient.** Nothing is stored: no outbox, no `localStorage`, no Ledger
   record. On `lost` every peer is forgotten; on `welcome` the controls send
   where the pointer is now, never the moves made while disconnected.
@@ -147,9 +149,9 @@ SageOx API base the CLI already uses.
 | `peer` | a Peer: `{"id", "name", "user", "revision", "at"}`, on every join and move |
 | `leave` | `{"id": "<connection id>"}`, when a stream closes or the service expires it |
 
-`name` is the account's display name and `user` a stable key for the account,
-both from the token the connection joined with, never from anything a client
-sends. `id`, `user` and `revision` are at most 128 characters, `name` at most
+`name` is the account's display name, never empty (the service supplies one
+for an account without), and `user` a stable key for the account, both from
+the token the connection joined with, never from anything a client sends. `id`, `user` and `revision` are at most 128 characters, `name` at most
 200, an event's data at most 256 KiB. A client ignores events about its own
 `self`.
 
@@ -186,8 +188,10 @@ the user signed in with `ox login`:
   event log. The page names its revision and a key, never a plan, room, path
   or identity; `/presence` refuses unknown fields and malformed pointers.
 - A page whose stream closes leaves the room, and a page whose server is
-  gone stops showing anyone until it is back. A pointer move writes nothing,
-  reloads nothing, and does not keep an idle review loop open.
+  gone stops showing anyone until it is back. When the review loop ends
+  (Approve, idle, Ctrl-C), the server closes the pages' streams, so they leave
+  the room and the command exits even with a tab open. A pointer move writes
+  nothing, reloads nothing, and does not keep an idle review loop open.
 - With no login for the project's endpoint, or no `pln_` id (a plan saved
   before ids existed), the server makes no presence request at all, and the
   page carries none of it. A declined join is asked again only after five
@@ -210,9 +214,12 @@ on one markdown plan see each other's pointers.
 | `TestBrowser_LocalAndFramedReviewersSeeEachOthersPointers` | A local page (1280 px) and a framed host (an offset frame in a 1000 px window) see each other's named pointer on the same word, through a scroll; a pointer in a section collapsed on the other side is drawn only once it is opened there; the framed plan hears no name or connection id; a reload leaves one cursor, not a ghost; with its server gone, the page shows no one |
 | `TestBrowser_PointerOnAnotherRevisionIsNeverDrawn` | Two local pages on one plan, on different revisions, list each other as on another revision and never draw each other's pointer |
 | `TestReviewLoop_PresenceRelaysTheRoomBothWays` | The server relays joins, moves and leaves between a page and a hosted viewer, under the service's names; a second tab leaves alone; live reloads share the stream |
-| `TestReviewLoop_PresenceMovesAreCheckedAndScoped` | `/presence` refuses a missing token, a name, extra fields, out-of-range values, another page's key, and oversized bodies |
+| `TestReviewLoop_PresenceMovesAreCheckedAndScoped` | `/presence` refuses a missing token, a name, extra fields, out-of-range values, a key with no open stream, and oversized bodies |
 | `TestPresenceBridge_RejoinSendsOnlyTheCurrentPointer` | A dropped connection says `lost`, rejoins, and sends only the current pointer |
 | `TestPresenceBridge_ReconnectingPageReplacesItsConnection` | A page reconnecting under its key leaves the room once, not twice |
+| `TestPresenceBridge_JoinsWithTheCurrentLogin` | A rejoin uses the login on disk, so signing in anew takes effect |
+| `TestBrowser_PointerMovesNeverOverlap` | The controls send one move at a time, then the latest |
+| `TestPlanReview_ReportsHowTheSessionEnded` | A review session ends, and exits, with the reviewer's tab still open |
 | `TestPresenceBridge_RetriesOnlyWhatMayRecover` | Declined joins are not retried soon; transient failures are; a silent stream is dropped and joined again |
 | `TestNewPresenceBridge_OnlyForASavedPlanAndASignedInUser` | No login or no `pln_` id: no bridge and no request |
 | `TestPresenceAt_SharedCases`, `protocol.test.mjs` | The Go bridge and the package apply the same pointer rules |

@@ -102,8 +102,8 @@ func (f *fakePresence) join(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	f.joins++
 	refuse := f.refuse
-	f.mu.Unlock()
 	who, ok := f.people[fakeBearer(r)]
+	f.mu.Unlock()
 	switch {
 	case refuse != 0:
 		http.Error(w, "refused", refuse)
@@ -258,7 +258,7 @@ func presenceOf(typ string) func(sseEvent) bool {
 func presenceReview(t *testing.T, base, token string) (*httptest.Server, *broadcaster) {
 	t.Helper()
 	b := &presenceBridge{base: base, planID: presenceTestPlan, tabs: map[string]*presenceTab{},
-		token: func(context.Context) (string, error) { return token, nil }}
+		token: func(context.Context, bool) (string, error) { return token, nil }}
 	bc := newBroadcaster()
 	h := liveReviewHandlerWithActivity("", "p", t.TempDir(), "http://x", "secret", bc, make(chan int, 8), make(chan struct{}, 1), nil, b)
 	srv := httptest.NewServer(h)
@@ -389,7 +389,7 @@ func TestReviewLoop_PresenceMovesAreCheckedAndScoped(t *testing.T) {
 		"a name of its own": {"secret", `{"key":"page-devon-1","at":` + good + `,"name":"Mallory"}`, http.StatusBadRequest},
 		"a field in at":     {"secret", `{"key":"page-devon-1","at":{"anchor":"h1234abcd","x":0.5,"y":0.5,"note":"hi"}}`, http.StatusBadRequest},
 		"off the element":   {"secret", `{"key":"page-devon-1","at":{"anchor":"h1234abcd","x":2,"y":0.5}}`, http.StatusBadRequest},
-		"another page":      {"secret", `{"key":"page-avery-9","at":` + good + `}`, http.StatusNotFound},
+		"no open stream":    {"secret", `{"key":"page-avery-9","at":` + good + `}`, http.StatusNotFound},
 		"too large":         {"secret", `{"key":"page-devon-1","at":` + good + `,"pad":"` + strings.Repeat("x", 5000) + `"}`, http.StatusBadRequest},
 	} {
 		if got := reviewPOST(t, review.URL+"/presence", c.token, c.body); got != c.want {
@@ -568,14 +568,14 @@ func TestNewPresenceBridge_OnlyForASavedPlanAndASignedInUser(t *testing.T) {
 	if b == nil || b.planID != presenceTestPlan {
 		t.Fatalf("a signed-in reviewer of a saved plan joins its room: %+v", b)
 	}
-	if tok, err := b.token(context.Background()); err != nil || tok != "tok-devon" {
+	if tok, err := b.token(context.Background(), true); err != nil || tok != "tok-devon" {
 		t.Fatalf("the bridge joins with the user's own login: %q %v", tok, err)
 	}
 	// a login that expired and cannot refresh declines presence, as signed out
 	if err := auth.SaveTokenForEndpoint(base, &auth.StoredToken{AccessToken: "tok-old", ExpiresAt: time.Now().Add(-time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := newPresenceBridge(gitRoot, saved).token(context.Background()); !errors.Is(err, errPresenceRefused) {
+	if _, err := newPresenceBridge(gitRoot, saved).token(context.Background(), true); !errors.Is(err, errPresenceRefused) {
 		t.Fatalf("an expired login is declined, not retried as an outage: %v", err)
 	}
 
@@ -593,6 +593,43 @@ func TestNewPresenceBridge_OnlyForASavedPlanAndASignedInUser(t *testing.T) {
 	if joins, _ := fake.count(); joins != 0 {
 		t.Fatalf("no bridge, no request to the service: %d joins", joins)
 	}
+}
+
+// TestPresenceBridge_JoinsWithTheCurrentLogin signs the user in anew, which
+// revokes the old token, while a page is in the room, then drops the page's
+// connection.
+// Failure prevented: the bridge keeps rejoining with the login it started
+// with, which the service now refuses, so a reviewer who signed in again stays
+// out of the room for hours.
+func TestPresenceBridge_JoinsWithTheCurrentLogin(t *testing.T) {
+	setPresenceTimings(t, 20*time.Millisecond, 20*time.Millisecond, time.Hour)
+	fake, base := newFakePresence(t, presenceTestPlan, map[string]fakePerson{"tok-old": {"Devon", "u-devon"}})
+	t.Setenv("SAGEOX_TOKEN", "")
+	t.Setenv("SAGEOX_ENDPOINT", base)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	saved := t.TempDir()
+	if err := plan.AppendEvent(context.Background(), saved, plan.Event{Kind: plan.EventCreated, PlanID: presenceTestPlan, Timestamp: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	login := func(tok string) {
+		if err := auth.SaveTokenForEndpoint(base, &auth.StoredToken{AccessToken: tok, ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	login("tok-old")
+	review := httptest.NewServer(liveReviewHandlerWithActivity("", "p", saved, "http://x", "secret", newBroadcaster(),
+		make(chan int, 1), make(chan struct{}, 1), nil, newPresenceBridge(t.TempDir(), saved)))
+	t.Cleanup(review.Close)
+	page, _ := pageEvents(t, review.URL, "page-devon-1")
+	first := nextEvent(t, page, "the first welcome", presenceOf("welcome")).data["self"].(string)
+
+	fake.mu.Lock()
+	fake.people = map[string]fakePerson{"tok-new": {"Devon", "u-devon"}}
+	fake.mu.Unlock()
+	login("tok-new")
+	fake.drop(first)
+	nextEvent(t, page, "the page told it lost the room", presenceOf("lost"))
+	nextEvent(t, page, "a welcome with the new login", presenceOf("welcome"))
 }
 
 // --- D. The wire ---

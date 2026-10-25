@@ -80,8 +80,11 @@ func TestPlanReview_ReportsHowTheSessionEnded(t *testing.T) {
 	})
 	assert.Equal(t, map[string]any{"review_outcome": "approved", "rounds": 1, "items": 2, "highlights": 1}, approved)
 
+	// the reviewer's tab is still open when the session idles out: its live
+	// stream must not hold the command open
 	assert.Equal(t, map[string]any{"review_outcome": "idle", "rounds": 0, "items": 0, "highlights": 0},
-		review(false, 300*time.Millisecond, nil), "a session nobody used reports no rounds")
+		review(false, 2*time.Second, func(base, token string) { sseStream(t, base+"/events?t="+token, "") }),
+		"a session nobody used reports no rounds")
 
 	// a server for this plan already answers on its address
 	st, ok := plan.LoadReviewServerState(gitRoot, dirName)

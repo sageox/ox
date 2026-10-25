@@ -224,6 +224,7 @@ export function pointerLayer(selector: string, exclude: string, moved: (at: Poin
     locate(points) {
       wanted = points;
       if (frame) cancelAnimationFrame(frame);
+      told = ''; // always answered, so the host knows which placements are current
       answer();
     },
     start() {

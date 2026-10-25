@@ -966,6 +966,7 @@
       locate(points) {
         wanted = points;
         if (frame) cancelAnimationFrame(frame);
+        told = "";
         answer();
       },
       start() {
@@ -1428,7 +1429,7 @@
     document.body.appendChild(layer);
     const cursors = /* @__PURE__ */ new Map();
     let listed = "";
-    let mine = null, sent = "null", last = 0;
+    let mine = null, sent = "null", last = 0, moving = false;
     let timer;
     const link = transport.join(revision, on);
     function on(e) {
@@ -1478,11 +1479,16 @@
     }
     function flush() {
       timer = void 0;
-      const s = JSON.stringify(mine);
-      if (!live || gone || s === sent) return;
+      const at = mine, s = JSON.stringify(at);
+      if (!live || gone || moving || s === sent) return;
       sent = s;
       last = Date.now();
-      link.move(mine);
+      moving = true;
+      Promise.resolve().then(() => link.move(at)).catch(() => {
+      }).then(() => {
+        moving = false;
+        send(false);
+      });
     }
     function update() {
       if (gone) return;
@@ -1537,7 +1543,11 @@
       }
     }
     function draw() {
-      const b = frame ? frame.getBoundingClientRect() : { left: 0, top: 0, right: innerWidth, bottom: innerHeight };
+      let b = { left: 0, top: 0, right: innerWidth, bottom: innerHeight };
+      if (frame) {
+        const r = frame.getBoundingClientRect(), left = r.left + frame.clientLeft, top = r.top + frame.clientTop;
+        b = { left, top, right: left + frame.clientWidth, bottom: top + frame.clientHeight };
+      }
       const clip2 = { left: Math.max(b.left, 0), top: Math.max(b.top, 0), right: Math.min(b.right, innerWidth), bottom: Math.min(b.bottom, innerHeight) };
       const drawn = /* @__PURE__ */ new Set();
       placed.forEach((p) => {
@@ -2969,7 +2979,7 @@
           // a pointer that cannot reach the server is dropped: the stream's
           // own error already says the server is gone
           move(at) {
-            fetch(base + "/presence", { method: "POST", headers: { "Content-Type": "application/json", "X-Review-Token": token }, body: JSON.stringify({ key, at }) }).catch(() => {
+            return fetch(base + "/presence", { method: "POST", headers: { "Content-Type": "application/json", "X-Review-Token": token }, body: JSON.stringify({ key, at }) }).catch(() => {
             });
           },
           leave() {

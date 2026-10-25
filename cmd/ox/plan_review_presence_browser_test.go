@@ -65,7 +65,7 @@ func presenceHost(t *testing.T, f *fakePresence, doc []byte, revision, token, re
 	}
 	room := "/api/v1/plans/" + f.plan + "/presence"
 	host := `<!doctype html><html><head><link rel="stylesheet" href="/host.css"><style>body{margin:0}` +
-		`#doc{position:fixed;left:200px;top:60px;width:760px;height:800px;border:0}</style></head><body>` +
+		`#doc{position:fixed;left:200px;top:60px;width:760px;height:800px;border:12px solid #333}</style></head><body>` +
 		`<iframe id="doc" sandbox="allow-scripts"></iframe><script type="module">import { connectFrame, mountHostControls } from '/index.js';` +
 		`const frame = document.getElementById('doc'); window.heard = [];` +
 		`window.addEventListener('message', (e) => { const d = e.data || {}; if (d.probe) window.probe = d.probe; if (d.heard) window.heard.push(d.heard); if (d.input) window.input = true; });` +
@@ -110,7 +110,7 @@ func servePresenceReview(t *testing.T, gitRoot, slug, dir, planID, base, token s
 	t.Helper()
 	srv := httptest.NewUnstartedServer(nil)
 	b := &presenceBridge{base: base, planID: planID, tabs: map[string]*presenceTab{},
-		token: func(context.Context) (string, error) { return token, nil }}
+		token: func(context.Context, bool) (string, error) { return token, nil }}
 	srv.Config.Handler = liveReviewHandlerWithActivity(gitRoot, slug, dir, "http://"+srv.Listener.Addr().String(), "secret",
 		newBroadcaster(), make(chan int, 8), make(chan struct{}, 1), nil, b)
 	srv.Start()
@@ -189,15 +189,16 @@ func localSpot(t *testing.T, ctx context.Context, part string) spot {
 }
 
 // framedSpot is where a part of the framed plan is, in the host page's
-// viewport: the probe's frame coordinates shifted by the frame's box.
+// viewport: the probe's frame coordinates shifted by the frame's box inside
+// its border.
 func framedSpot(t *testing.T, ctx context.Context, part string) spot {
 	t.Helper()
 	if !waitJS(ctx, `window.probe&&window.probe.`+part, 5*time.Second) {
 		t.Fatalf("the framed plan never reported where %s is", part)
 	}
 	var s spot
-	js := `(()=>{const f=document.getElementById('doc').getBoundingClientRect(),p=window.probe.` + part + `;` +
-		`return {X:f.left+p.x,Y:f.top+p.y,Left:f.left+p.left,Top:f.top+p.top,Right:f.left+p.right,Bottom:f.top+p.bottom}})()`
+	js := `(()=>{const d=document.getElementById('doc'),f=d.getBoundingClientRect(),l=f.left+d.clientLeft,t=f.top+d.clientTop,p=window.probe.` + part + `;` +
+		`return {X:l+p.x,Y:t+p.y,Left:l+p.left,Top:t+p.top,Right:l+p.right,Bottom:t+p.bottom}})()`
 	if err := chromedp.Run(ctx, chromedp.Evaluate(js, &s)); err != nil {
 		t.Fatal(err)
 	}
@@ -373,5 +374,58 @@ func TestBrowser_PointerOnAnotherRevisionIsNeverDrawn(t *testing.T) {
 	}
 	if _, moves := f.count(); len(moves) < 2 {
 		t.Fatalf("both pointers must still reach the room, so a test of their absence means something: %v", moves)
+	}
+}
+
+// TestBrowser_PointerMovesNeverOverlap mounts the review controls with a
+// presence transport whose moves the test settles by hand.
+// Failure prevented: a slow move is overtaken by a newer one, so the service
+// can keep an older pointer, such as a place the reviewer has left, as the
+// latest.
+func TestBrowser_PointerMovesNeverOverlap(t *testing.T) {
+	ctx := frameBrowser(t)
+	index, err := os.ReadFile(filepath.Join(packageDir, "..", "..", "packages", "plan-review", "dist", "index.js"))
+	if err != nil {
+		t.Skip("no packages/plan-review/dist — run `make plan-review` first")
+	}
+	page := `<!doctype html><html><body><script type="module">import { mountHostControls } from '/index.js';` +
+		`let fn; const port = { send() {}, listen(f) { fn = f; } };` +
+		`window.moves = []; window.busy = 0; window.most = 0; window.settle = [];` +
+		`const presence = { join(revision, on) { window.on = on; return { move(at) { window.moves.push(at && at.x);` +
+		` window.most = Math.max(window.most, ++window.busy); return new Promise((done) => window.settle.push(() => { window.busy--; done(); })); }, leave() {} }; } };` +
+		`mountHostControls(port, { account: 'a', plan: 'p', slug: 'p', committed: [], reviewer: 'Avery', revision: 'sha256:` + strings.Repeat("0", 64) + `', presence });` +
+		`window.point = (x) => fn({ type: 'pointer', at: { anchor: 'h1234abcd', x, y: 0.5 } });` +
+		`window.on({ type: 'welcome', self: 'me', peers: [] });</script></body></html>`
+	mux := http.NewServeMux()
+	mux.HandleFunc("/{$}", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(page)) })
+	mux.HandleFunc("/index.js", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/javascript")
+		_, _ = w.Write(index)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	if err := chromedp.Run(ctx, chromedp.Navigate(srv.URL+"/")); err != nil {
+		t.Fatal(err)
+	}
+	// a welcome sends where the pointer is now: nowhere, and that move stays unsettled
+	if !waitJS(ctx, `window.moves && window.moves.length === 1`, 5*time.Second) {
+		t.Fatalf("the welcome must send the pointer: %s", evalString(t, ctx, `JSON.stringify(window.moves)`))
+	}
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`window.point(0.1); window.point(0.2)`, nil)); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(500 * time.Millisecond) // well past the 200 ms between sends
+	if got := evalString(t, ctx, `JSON.stringify(window.moves)`); got != "[null]" {
+		t.Fatalf("no move may start while one is unsettled: %s", got)
+	}
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`window.settle.shift()()`, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if !waitJS(ctx, `window.moves.length === 2`, 5*time.Second) {
+		t.Fatal("the latest pointer must follow once the move before it settles")
+	}
+	time.Sleep(300 * time.Millisecond)
+	if got := evalString(t, ctx, `JSON.stringify(window.moves)+' '+window.most`); got != "[null,0.2] 1" {
+		t.Fatalf("moves sent, then the most ever in flight: %s; want [null,0.2] 1", got)
 	}
 }
