@@ -390,7 +390,7 @@ func TestReviewLoop_PresenceMovesAreCheckedAndScoped(t *testing.T) {
 		"a field in at":     {"secret", `{"key":"page-devon-1","at":{"anchor":"h1234abcd","x":0.5,"y":0.5,"note":"hi"}}`, http.StatusBadRequest},
 		"off the element":   {"secret", `{"key":"page-devon-1","at":{"anchor":"h1234abcd","x":2,"y":0.5}}`, http.StatusBadRequest},
 		"no open stream":    {"secret", `{"key":"page-avery-9","at":` + good + `}`, http.StatusNotFound},
-		"too large":         {"secret", `{"key":"page-devon-1","at":` + good + `,"pad":"` + strings.Repeat("x", 5000) + `"}`, http.StatusBadRequest},
+		"too large":         {"secret", `{"key":"` + strings.Repeat("x", 5000) + `","at":` + good + `}`, http.StatusBadRequest},
 	} {
 		if got := reviewPOST(t, review.URL+"/presence", c.token, c.body); got != c.want {
 			t.Errorf("%s: HTTP %d, want %d", name, got, c.want)
